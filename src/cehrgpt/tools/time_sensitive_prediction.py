@@ -1,25 +1,27 @@
-import argparse
 import datetime
 import os
 import math
 import uuid
+from tqdm import tqdm
 from enum import Enum
 from typing import Union, List, Dict, Any
 from dataclasses import dataclass, asdict
 from collections import Counter
-from tqdm import tqdm
 
 import pandas as pd
 import numpy as np
 import torch
 from transformers import GenerationConfig
-from transformers.utils import is_flash_attn_2_available
+from transformers.utils import logging, is_flash_attn_2_available
 from datasets import load_from_disk
 
-from ..models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from ..models.tokenization_hf_cehrgpt import CehrGptTokenizer, END_TOKEN
 from ..models.hf_cehrgpt import CEHRGPT2LMHeadModel
-from ..generation.generate_batch_hf_gpt_sequence import SamplingStrategy
+from ..cehrgpt_args import create_inference_base_arg_parser, SamplingStrategy
+from ..gpt_utils import is_visit_start, is_visit_end, is_att_token, extract_time_interval_in_days
 from cehrbert_data.decorators.patient_event_decorator import time_month_token
+
+LOG = logging.get_logger("transformers")
 
 VISIT_CONCEPT_IDS = [
     '9202', '9203', '581477', '9201', '5083', '262', '38004250', '0', '8883', '38004238', '38004251',
@@ -57,11 +59,13 @@ def is_artificial_token(token) -> bool:
         return True
     if token in DISCHARGE_CONCEPT_IDS:
         return True
-    if token in ["VS", "VE"]:
+    if is_visit_start(token):
         return True
-    if token.startswith("D"):
+    if is_visit_end(token):
         return True
-    if token == "LT":
+    if is_att_token(token):
+        return True
+    if token == END_TOKEN:
         return True
     return False
 
@@ -80,22 +84,6 @@ def convert_to_concept_probabilities(concept_ids: List[str]) -> List[ConceptProb
         concept_probabilities.append(
             ConceptProbability(concept=concept, probability=probability, num_of_simulations=count))
     return concept_probabilities
-
-
-def convert_att_to_time_interval(att_token: str) -> int:
-    att_date_delta = None
-    if att_token[0] == 'D':
-        att_date_delta = int(att_token[1:])
-    elif att_token[0] == 'W':
-        att_date_delta = int(att_token[1:]) * 7
-    elif att_token[0] == 'M':
-        att_date_delta = int(att_token[1:]) * 30
-    elif att_token == 'LT':
-        att_date_delta = 365 * 3
-    # else:
-    # raise ValueError(f"Can't parse the att token {att_token}")
-    # TODO: add logging here
-    return att_date_delta
 
 
 class TimeSensitivePredictionModel:
@@ -162,6 +150,36 @@ class TimeSensitivePredictionModel:
         self.generation_config.max_new_tokens = old_max_new_tokens
         return simulated_sequences
 
+    def predict_time_to_next_visit(self, partial_history: Union[np.ndarray, list]) -> TimeToEvent:
+        sequences = self.simulate(
+            partial_history=partial_history,
+            max_new_tokens=1
+        )
+        return self.extract_time_to_next_visit(partial_history, sequences)
+
+    def predict_next_visit_type(
+            self,
+            partial_history: Union[np.ndarray, list]
+    ) -> List[ConceptProbability]:
+        sequences = self.simulate(
+            partial_history=partial_history,
+            max_new_tokens=3
+        )
+        return self.extract_next_visit_type(partial_history, sequences)
+
+    def predict_events(
+            self,
+            partial_history: Union[np.ndarray, list],
+            only_next_visit: bool = True
+    ) -> List[ConceptProbability]:
+
+        patient_history_length = len(partial_history)
+        sequences = self.simulate(
+            partial_history=partial_history,
+            max_new_tokens=self.model.config.n_positions - patient_history_length
+        )
+        return self.extract_events(partial_history, sequences, only_next_visit)
+
     @staticmethod
     def extract_time_to_next_visit(
             partial_history: Union[np.ndarray, List[str]],
@@ -174,9 +192,8 @@ class TimeSensitivePredictionModel:
         for simulated_seq in simulated_seqs:
             # Finding the first artificial time tokens
             for next_token in simulated_seq[seq_length:]:
-                time_interval = convert_att_to_time_interval(next_token)
-                if time_interval:
-                    all_valid_time_intervals.append(time_interval)
+                if is_att_token(next_token):
+                    all_valid_time_intervals.append(extract_time_interval_in_days(next_token))
                     break
         time_buckets = [time_month_token(_) for _ in all_valid_time_intervals]
         time_bucket_counter = Counter(time_buckets)
@@ -198,13 +215,6 @@ class TimeSensitivePredictionModel:
             time_interval_probability_table=sorted_probability_table
         )
 
-    def predict_time_to_next_visit(self, partial_history: Union[np.ndarray, list]) -> TimeToEvent:
-        sequences = self.simulate(
-            partial_history=partial_history,
-            max_new_tokens=1
-        )
-        return self.extract_time_to_next_visit(partial_history, sequences)
-
     @staticmethod
     def extract_next_visit_type(
             partial_history: Union[np.ndarray, list],
@@ -217,16 +227,6 @@ class TimeSensitivePredictionModel:
                     next_visit_type_tokens.append(next_token)
                     break
         return convert_to_concept_probabilities(next_visit_type_tokens)
-
-    def predict_next_visit_type(
-            self,
-            partial_history: Union[np.ndarray, list]
-    ) -> List[ConceptProbability]:
-        sequences = self.simulate(
-            partial_history=partial_history,
-            max_new_tokens=3
-        )
-        return self.extract_next_visit_type(partial_history, sequences)
 
     @staticmethod
     def extract_events(
@@ -244,19 +244,6 @@ class TimeSensitivePredictionModel:
                     all_concepts.append(next_token)
         return convert_to_concept_probabilities(all_concepts)
 
-    def predict_events(
-            self,
-            partial_history: Union[np.ndarray, list],
-            only_next_visit: bool = True
-    ) -> List[ConceptProbability]:
-
-        patient_history_length = len(partial_history)
-        sequences = self.simulate(
-            partial_history=partial_history,
-            max_new_tokens=self.model.config.n_positions - patient_history_length
-        )
-        return self.extract_events(partial_history, sequences, only_next_visit)
-
     @staticmethod
     def get_generation_config(
             tokenizer: CehrGptTokenizer,
@@ -264,12 +251,16 @@ class TimeSensitivePredictionModel:
             num_return_sequences: int,
             top_p: float = 1.0,
             top_k: int = 300,
-            temperature: float = 1.0
+            temperature: float = 1.0,
+            repetition_penalty: float = 1.0,
+            epsilon_cutoff: float = 0.0
     ) -> GenerationConfig:
         return GenerationConfig(
             max_length=max_length,
             num_return_sequences=num_return_sequences,
             temperature=temperature,
+            repetition_penalty=repetition_penalty,
+            epsilon_cutoff=epsilon_cutoff,
             top_p=top_p,
             top_k=top_k,
             bos_token_id=tokenizer.end_token_id,
@@ -338,20 +329,27 @@ def main(
     os.makedirs(next_visit_type_prediction_folder_name, exist_ok=True)
     os.makedirs(code_predictions_output_folder_name, exist_ok=True)
 
-    print(f'{datetime.datetime.now()}: Loading tokenizer at {args.model_folder}')
-    print(f'{datetime.datetime.now()}: Loading model at {args.model_folder}')
-    print(f'{datetime.datetime.now()}: Write time sensitive predictions '
-          f'to {time_sensitive_prediction_output_folder_name}')
-    print(f'{datetime.datetime.now()}: Top P {args.top_p}')
-    print(f'{datetime.datetime.now()}: Top K {args.top_k}')
-    print(f'{datetime.datetime.now()}: Loading dataset_folder at {args.dataset_folder}')
+    LOG.info(f'Loading tokenizer at {args.model_folder}')
+    LOG.info(f'Loading model at {args.model_folder}')
+    LOG.info(f'Loading dataset_folder at {args.dataset_folder}')
+    LOG.info(f'Write time sensitive predictions to {time_sensitive_prediction_output_folder_name}')
+    LOG.info(f'Context window {args.context_window}')
+    LOG.info(f'Temperature {args.temperature}')
+    LOG.info(f'Repetition Penalty {args.repetition_penalty}')
+    LOG.info(f'Sampling Strategy {args.sampling_strategy}')
+    LOG.info(f'Epsilon cutoff {args.epsilon_cutoff}')
+    LOG.info(f'Top P {args.top_p}')
+    LOG.info(f'Top K {args.top_k}')
 
     generation_config = TimeSensitivePredictionModel.get_generation_config(
         tokenizer=cehrgpt_tokenizer,
         max_length=cehrgpt_model.config.n_positions,
         num_return_sequences=args.num_return_sequences,
         top_p=args.top_p,
-        top_k=args.top_k
+        top_k=args.top_k,
+        temperature=args.temperature,
+        repetition_penalty=args.repetition_penalty,
+        epsilon_cutoff=args.epsilon_cutoff
     )
     ts_pred_model = TimeSensitivePredictionModel(
         tokenizer=cehrgpt_tokenizer,
@@ -368,29 +366,25 @@ def main(
     if 'test' not in dataset:
         raise ValueError(f"The dataset does not contain a test split at {args.dataset_folder}")
 
-    test_dataset = dataset['test']
-
     def filter_func(examples):
         return [cehrgpt_model.config.n_positions >= _ >= 20 for _ in examples['num_of_concepts']]
 
-    test_dataset = test_dataset.filter(
+    test_dataset = dataset['test'].filter(
         filter_func,
         batched=True,
         batch_size=1000
     )
 
-    person_id = 0
     tte_visit_output = []
     next_visit_prediction_output = []
     code_prediction_output = []
     for record in tqdm(test_dataset, total=len(test_dataset)):
         seq = record["concept_ids"]
         seq_length = len(seq)
-        person_id += 1
         visit_counter = 0
         for index, concept_id in enumerate(seq):
 
-            if concept_id == "VE":
+            if is_visit_end(concept_id):
                 # increment the visit number by one
                 visit_counter += 1
 
@@ -403,13 +397,12 @@ def main(
                     simulated_seqs = ts_pred_model.simulate(partial_history, max_new_tokens)
 
                     # Extract the predictions for time to the next visit
-                    time_to_next_visit_label = convert_att_to_time_interval(seq[index + 1])
-                    if time_to_next_visit_label:
+                    if is_att_token(seq[index + 1]):
                         tte = ts_pred_model.extract_time_to_next_visit(partial_history, simulated_seqs)
                         tte_visit_output.append({
-                            "person_id": person_id,
+                            "person_id": record['person_id'],
                             "visit_counter": visit_counter,
-                            "time_to_next_visit_label": time_to_next_visit_label,
+                            "time_to_next_visit_label": extract_time_interval_in_days(seq[index + 1]),
                             "time_to_next_visit_average": tte.average_time,
                             "time_to_next_visit_std": tte.standard_deviation,
                             "time_to_next_visit_most_likely": tte.most_likely_time,
@@ -417,7 +410,7 @@ def main(
                             "time_to_next_visit_simulations": tte.num_of_simulations
                         })
 
-                    if index + 3 < seq_length and seq[index + 2] == "VS":
+                    if index + 3 < seq_length and is_visit_start(seq[index + 2]):
                         visit_type_label = seq[index + 3]
                         # Extract the predictions for the next visit type
                         visit_concept_probs = ts_pred_model.extract_next_visit_type(partial_history, simulated_seqs)
@@ -427,7 +420,7 @@ def main(
                             reverse=True
                         )
                         next_visit_prediction_output.append({
-                            'person_id': person_id,
+                            'person_id': record['person_id'],
                             'visit_counter': visit_counter,
                             'visit_type_label': visit_type_label,
                             'next_visit_type': visit_type_label,
@@ -451,7 +444,7 @@ def main(
                     )
 
                     code_prediction_output.append({
-                        "person_id": person_id,
+                        "person_id": record['person_id'],
                         "visit_counter": visit_counter,
                         "code_labels": future_event_labels,
                         "code_predictions": future_event_predictions
@@ -461,7 +454,7 @@ def main(
                     break
 
             if len(tte_visit_output) >= args.buffer_size:
-                print(f'{datetime.datetime.now()}: Flushing time to visit predictions to disk')
+                LOG.info(f'{datetime.datetime.now()}: Flushing time to visit predictions to disk')
                 pd.DataFrame(
                     tte_visit_output,
                     columns=[
@@ -473,7 +466,7 @@ def main(
                 tte_visit_output.clear()
 
             if len(next_visit_prediction_output) >= args.buffer_size:
-                print(f'{datetime.datetime.now()}: Flushing next visit type predictions to disk')
+                LOG.info(f'{datetime.datetime.now()}: Flushing next visit type predictions to disk')
                 pd.DataFrame(
                     next_visit_prediction_output,
                     columns=[
@@ -487,7 +480,7 @@ def main(
                 next_visit_prediction_output.clear()
 
             if len(code_prediction_output) >= args.buffer_size:
-                print(f'{datetime.datetime.now()}: Flushing code predictions to disk')
+                LOG.info(f'{datetime.datetime.now()}: Flushing code predictions to disk')
                 pd.DataFrame(
                     code_prediction_output,
                     columns=[
@@ -500,7 +493,7 @@ def main(
                 code_prediction_output.clear()
 
     if len(tte_visit_output) > 0:
-        print(f'{datetime.datetime.now()}: Flushing time to visit predictions to disk at Final Batch')
+        LOG.info(f'{datetime.datetime.now()}: Flushing time to visit predictions to disk at Final Batch')
         pd.DataFrame(
             tte_visit_output,
             columns=[
@@ -511,7 +504,7 @@ def main(
         ).to_parquet(os.path.join(time_sensitive_prediction_output_folder_name, f'{uuid.uuid4()}-last.parquet'))
 
     if len(next_visit_prediction_output) > 0:
-        print(f'{datetime.datetime.now()}: Flushing next visit type predictions to disk at Final Batch')
+        LOG.info(f'{datetime.datetime.now()}: Flushing next visit type predictions to disk at Final Batch')
         pd.DataFrame(
             next_visit_prediction_output,
             columns=[
@@ -524,7 +517,7 @@ def main(
         ).to_parquet(os.path.join(next_visit_type_prediction_folder_name, f'{uuid.uuid4()}-last.parquet'))
 
     if len(code_prediction_output) > 0:
-        print(f'{datetime.datetime.now()}: Flushing code predictions to disk at Final Batch')
+        LOG.info(f'{datetime.datetime.now()}: Flushing code predictions to disk at Final Batch')
         pd.DataFrame(
             code_prediction_output,
             columns=[
@@ -536,81 +529,24 @@ def main(
         ).to_parquet(os.path.join(code_predictions_output_folder_name, f'{uuid.uuid4()}-last.parquet'))
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Arguments for time sensitive predictions')
-    parser.add_argument(
+def create_arg_parser():
+    base_arg_parser = create_inference_base_arg_parser(description='Arguments for time sensitive prediction')
+    base_arg_parser.add_argument(
         '--dataset_folder',
         dest='dataset_folder',
         action='store',
         help='The path for your dataset',
         required=True
     )
-    parser.add_argument(
-        '--tokenizer_folder',
-        dest='tokenizer_folder',
-        action='store',
-        help='The path for your model_folder',
-        required=True
-    )
-    parser.add_argument(
-        '--model_folder',
-        dest='model_folder',
-        action='store',
-        help='The path for your model_folder',
-        required=True
-    )
-    parser.add_argument(
-        '--output_folder',
-        dest='output_folder',
-        action='store',
-        help='The path for your generated data',
-        required=True
-    )
-    parser.add_argument(
-        '--sampling_strategy',
-        dest='sampling_strategy',
-        action='store',
-        choices=[TopPStrategy.__name__, TopKStrategy.__name__, TopMixStrategy.__name__],
-        help='Pick the sampling strategy between top_k and top_p',
-        required=True
-    )
-    parser.add_argument(
+    base_arg_parser.add_argument(
         '--num_return_sequences',
         dest='num_return_sequences',
         action='store',
         type=int,
         required=True
     )
-    parser.add_argument(
-        '--batch_size',
-        dest='batch_size',
-        action='store',
-        type=int,
-        required=True
-    )
-    parser.add_argument(
-        '--buffer_size',
-        dest='buffer_size',
-        action='store',
-        type=int,
-        required=True
-    )
-    parser.add_argument(
-        '--top_k',
-        dest='top_k',
-        action='store',
-        default=100,
-        type=int,
-        help='The number of top concepts to sample',
-        required=False
-    )
-    parser.add_argument(
-        '--top_p',
-        dest='top_p',
-        action='store',
-        default=1.0,
-        type=float,
-        help='The accumulative probability of top concepts to sample',
-        required=False
-    )
-    main(parser.parse_args())
+    return base_arg_parser
+
+
+if __name__ == "__main__":
+    main(create_arg_parser().parse_args())

@@ -8,10 +8,10 @@ inpatient_att_pattern = re.compile(r"(?:VS-|i-)D(\d+)(?:-VE)?")
 
 class RandomSampleCache:
     def __init__(
-        self,
-        data_indices: Sequence[int],
-        cache_size: int,
-        sample_weights: Sequence[float] = None,
+            self,
+            data_indices: Sequence[int],
+            cache_size: int,
+            sample_weights: Sequence[float] = None,
     ):
         self._data_indices = data_indices
         self._sample_weights = sample_weights
@@ -72,7 +72,7 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
         # Remove the number of demographic tokens
         random_end_index = random_starting_index
         for i in reversed(
-            list(range(random_starting_index, random_starting_index + max_seq_len - 4))
+                list(range(random_starting_index, random_starting_index + max_seq_len - 4))
         ):
             current_token = concept_ids[i]
             if current_token == "VE":
@@ -85,8 +85,12 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
         return 0, max_seq_len - 1, []
 
 
-def is_visit_start(token: str):
-    return token in ["VS", "[VS]"]
+def is_visit_end(token: str) -> bool:
+    return token in ['VE', '[VE]']
+
+
+def is_visit_start(token: str) -> bool:
+    return token in ['VS', '[VS]']
 
 
 def is_visit_end(token: str):
@@ -107,7 +111,7 @@ def is_att_token(token: str):
     elif token[:3] == "VS-":  # VS-D7-VE
         return True
     elif token[:2] == "i-" and not token.startswith(
-        "i-H"
+            "i-H"
     ):  # i-D7 and exclude hour tokens
         return True
     return False
@@ -149,7 +153,7 @@ def extract_time_interval_in_days(token: str):
 
 
 def convert_time_interval_to_time_tuple(
-    time_interval: int, is_inpatient: bool
+        time_interval: int, is_inpatient: bool
 ) -> Tuple[str, str, str]:
     assert time_interval >= 0, "the time interval must equal and greater than zero"
     year = time_interval // 365

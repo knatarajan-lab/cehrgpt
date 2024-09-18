@@ -1,41 +1,36 @@
-import argparse
 import datetime
 import os
 import random
 import uuid
-from enum import Enum
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 import pandas as pd
 import torch
-from transformers import GenerationConfig
-from transformers.utils import is_flash_attn_2_available
 
+from src.cehrgpt.cehrgpt_args import create_inference_base_arg_parser, SamplingStrategy
+from transformers import GenerationConfig
+from transformers.utils import is_flash_attn_2_available, logging
 from ..models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from ..models.tokenization_hf_cehrgpt import NA, CehrGptTokenizer
 
-
-class SamplingStrategy(Enum):
-    TopKStrategy = "TopKStrategy"
-    TopPStrategy = "TopPStrategy"
-    TopMixStrategy = "TopMixStrategy"
+LOG = logging.get_logger("transformers")
 
 
 def generate_single_batch(
-    model,
-    tokenizer,
-    batch_size,
-    demographic_info,
-    max_new_tokens=512,
-    mini_num_of_concepts=1,
-    top_p=0.95,
-    top_k=50,
-    temperature=1.0,
-    repetition_penalty=1.0,
-    num_beams=1,
-    num_beam_groups=1,
-    epsilon_cutoff=0.0,
-    device: Any = "cpu",
+        model,
+        tokenizer,
+        batch_size,
+        demographic_info,
+        max_new_tokens=512,
+        mini_num_of_concepts=1,
+        top_p=0.95,
+        top_k=50,
+        temperature=1.0,
+        repetition_penalty=1.0,
+        num_beams=1,
+        num_beam_groups=1,
+        epsilon_cutoff=0.0,
+        device: Any = "cpu",
 ) -> Dict[str, Any]:
     random_prompts = random.sample(demographic_info, batch_size)
 
@@ -178,23 +173,22 @@ def main(args):
     if not os.path.exists(output_folder_name):
         os.makedirs(output_folder_name)
 
-    # atexit.register(strategy._extended._collective_ops._pool.close)  # type: ignore
-    # atexit.register(strategy._extended._cross_device_ops._pool.close) # type: ignore
-    # atexit.register(strategy._extended._host_cross_device_ops._pool.close) #type: ignore
-    print(f"{datetime.datetime.now()}: Loading tokenizer at {args.model_folder}")
-    print(f"{datetime.datetime.now()}: Loading model at {args.model_folder}")
-    print(f"{datetime.datetime.now()}: Write sequences to {output_folder_name}")
-    print(f"{datetime.datetime.now()}: Context window {args.context_window}")
-    print(f"{datetime.datetime.now()}: Temperature {args.temperature}")
-    print(f"{datetime.datetime.now()}: Repetition Penalty {args.repetition_penalty}")
-    print(f"{datetime.datetime.now()}: Sampling Strategy {args.sampling_strategy}")
-    print(f"{datetime.datetime.now()}: Num beam {args.num_beams}")
-    print(f"{datetime.datetime.now()}: Num beam groups {args.num_beam_groups}")
-    print(f"{datetime.datetime.now()}: Epsilon cutoff {args.epsilon_cutoff}")
-    print(f"{datetime.datetime.now()}: Top P {args.top_p}")
-    print(f"{datetime.datetime.now()}: Top K {args.top_k}")
-    print(
-        f"{datetime.datetime.now()}: Loading demographic_info at {args.demographic_data_path}"
+    LOG.info(f'Loading tokenizer at {args.model_folder}')
+    LOG.info(f'Loading model at {args.model_folder}')
+    LOG.info(f'Write sequences to {output_folder_name}')
+    LOG.info(f'Context window {args.context_window}')
+    LOG.info(f'Temperature {args.temperature}')
+    LOG.info(f'Repetition Penalty {args.repetition_penalty}')
+    LOG.info(f'Sampling Strategy {args.sampling_strategy}')
+    LOG.info(f'Num beam {args.num_beams}')
+    LOG.info(f'Num beam groups {args.num_beam_groups}')
+    LOG.info(f'Epsilon cutoff {args.epsilon_cutoff}')
+    LOG.info(f'Top P {args.top_p}')
+    LOG.info(f'Top K {args.top_k}')
+    LOG.info(f'Loading demographic_info at {args.demographic_data_path}')
+
+    data = pd.read_parquet(
+        args.demographic_data_path
     )
 
     data = pd.read_parquet(args.demographic_data_path)
@@ -228,9 +222,9 @@ def main(args):
         torch.cuda.empty_cache()
 
         for seq, value_indicator, value in zip(
-            batch_sequences["sequences"],
-            batch_sequences["value_indicators"],
-            batch_sequences["values"],
+                batch_sequences["sequences"],
+                batch_sequences["value_indicators"],
+                batch_sequences["values"],
         ):
             normalized_values, units = normalize_value(
                 seq, value_indicator, value, cehrgpt_tokenizer
@@ -274,146 +268,26 @@ def main(args):
         ).to_parquet(os.path.join(output_folder_name, f"{uuid.uuid4()}-last.parquet"))
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Arguments for generating patient sequences"
-    )
-
-    parser.add_argument(
-        "--tokenizer_folder",
-        dest="tokenizer_folder",
-        action="store",
-        help="The path for your model_folder",
-        required=True,
-    )
-    parser.add_argument(
-        "--model_folder",
-        dest="model_folder",
-        action="store",
-        help="The path for your model_folder",
-        required=True,
-    )
-    parser.add_argument(
-        "--output_folder",
-        dest="output_folder",
-        action="store",
-        help="The path for your generated data",
-        required=True,
-    )
-    parser.add_argument(
-        "--num_of_patients",
-        dest="num_of_patients",
-        action="store",
+def create_arg_parser():
+    base_arg_parser = create_inference_base_arg_parser(description='Arguments for generating patient sequences')
+    base_arg_parser.add_argument(
+        '--num_of_patients',
+        dest='num_of_patients',
+        action='store',
         type=int,
         help="The number of patients that will be generated",
         required=True,
     )
-    parser.add_argument(
-        "--batch_size",
-        dest="batch_size",
-        action="store",
-        type=int,
-        help="batch_size",
-        required=True,
+
+    base_arg_parser.add_argument(
+        '--demographic_data_path',
+        dest='demographic_data_path',
+        action='store',
+        help='The path for your concept_path',
+        required=True
     )
-    parser.add_argument(
-        "--buffer_size",
-        dest="buffer_size",
-        action="store",
-        type=int,
-        default=100,
-        help="buffer_size",
-        required=False,
-    )
-    parser.add_argument(
-        "--context_window",
-        dest="context_window",
-        action="store",
-        type=int,
-        help="The context window of the gpt model",
-        required=True,
-    )
-    parser.add_argument(
-        "--min_num_of_concepts",
-        dest="min_num_of_concepts",
-        action="store",
-        type=int,
-        default=1,
-        required=False,
-    )
-    parser.add_argument(
-        "--sampling_strategy",
-        dest="sampling_strategy",
-        action="store",
-        choices=[e.value for e in SamplingStrategy],
-        help="Pick the sampling strategy from the three options top_k, top_p and top_mix",
-        required=True,
-    )
-    parser.add_argument(
-        "--top_k",
-        dest="top_k",
-        action="store",
-        default=100,
-        type=int,
-        help="The number of top concepts to sample",
-        required=False,
-    )
-    parser.add_argument(
-        "--top_p",
-        dest="top_p",
-        action="store",
-        default=1.0,
-        type=float,
-        help="The accumulative probability of top concepts to sample",
-        required=False,
-    )
-    parser.add_argument(
-        "--demographic_data_path",
-        dest="demographic_data_path",
-        action="store",
-        help="The path for your concept_path",
-        required=True,
-    )
-    parser.add_argument(
-        "--temperature",
-        dest="temperature",
-        action="store",
-        default=1.0,
-        type=float,
-        help="The temperature parameter for softmax",
-        required=False,
-    )
-    parser.add_argument(
-        "--repetition_penalty",
-        dest="repetition_penalty",
-        action="store",
-        default=1.0,
-        type=float,
-        help="The repetition penalty during decoding",
-        required=False,
-    )
-    parser.add_argument(
-        "--num_beams",
-        dest="num_beams",
-        action="store",
-        default=1,
-        type=int,
-        required=False,
-    )
-    parser.add_argument(
-        "--num_beam_groups",
-        dest="num_beam_groups",
-        action="store",
-        default=1,
-        type=int,
-        required=False,
-    )
-    parser.add_argument(
-        "--epsilon_cutoff",
-        dest="epsilon_cutoff",
-        action="store",
-        default=0.0,
-        type=float,
-        required=False,
-    )
-    main(parser.parse_args())
+    return base_arg_parser
+
+
+if __name__ == "__main__":
+    main(create_arg_parser().parse_args())
