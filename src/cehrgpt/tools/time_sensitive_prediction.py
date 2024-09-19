@@ -41,6 +41,7 @@ class PredictionStrategy(Enum):
 @dataclass
 class TimeToEvent:
     average_time: float
+    median_time: float
     standard_deviation: float
     most_likely_time: int
     num_of_simulations: int
@@ -209,6 +210,7 @@ class TimeSensitivePredictionModel:
 
         return TimeToEvent(
             average_time=np.mean(all_valid_time_intervals),
+            median_time=np.median(all_valid_time_intervals),
             standard_deviation=np.std(all_valid_time_intervals),
             most_likely_time=most_common_item,
             num_of_simulations=len(all_valid_time_intervals),
@@ -369,8 +371,7 @@ def main(
     )
 
     dataset = load_parquet_as_dataset(
-        args.dataset_folder,
-        split="test"
+        args.dataset_folder
     )
 
     def filter_func(examples):
@@ -411,6 +412,7 @@ def main(
                             "visit_counter": visit_counter,
                             "time_to_next_visit_label": extract_time_interval_in_days(seq[index + 1]),
                             "time_to_next_visit_average": tte.average_time,
+                            "time_to_next_visit_median": tte.median_time,
                             "time_to_next_visit_std": tte.standard_deviation,
                             "time_to_next_visit_most_likely": tte.most_likely_time,
                             "time_interval_probability_table": tte.time_interval_probability_table,
@@ -466,8 +468,8 @@ def main(
                     tte_visit_output,
                     columns=[
                         "person_id", "visit_counter", "time_to_next_visit_label", "time_to_next_visit_average",
-                        "time_to_next_visit_std", "time_to_next_visit_most_likely", "time_interval_probability_table",
-                        "time_to_next_visit_simulations"
+                        "time_to_next_visit_median", "time_to_next_visit_std", "time_to_next_visit_most_likely",
+                        "time_interval_probability_table", "time_to_next_visit_simulations"
                     ]
                 ).to_parquet(os.path.join(time_sensitive_prediction_output_folder_name, f'{uuid.uuid4()}.parquet'))
                 tte_visit_output.clear()
