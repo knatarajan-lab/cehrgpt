@@ -13,13 +13,13 @@ import numpy as np
 import torch
 from transformers import GenerationConfig
 from transformers.utils import logging, is_flash_attn_2_available
-from datasets import load_from_disk
 
 from ..models.tokenization_hf_cehrgpt import CehrGptTokenizer, END_TOKEN
 from ..models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from ..cehrgpt_args import create_inference_base_arg_parser, SamplingStrategy
 from ..gpt_utils import is_visit_start, is_visit_end, is_att_token, extract_time_interval_in_days
 from cehrbert_data.decorators.patient_event_decorator import time_month_token
+from cehrbert.runners.runner_util import load_parquet_as_dataset
 
 LOG = logging.get_logger("transformers")
 
@@ -307,6 +307,15 @@ def main(
             'sampling_strategy has to be one of the following three options [TopKStrategy, TopPStrategy, TopMixStrategy]'
         )
 
+    if args.temperature != 1.0:
+        folder_name = f'{folder_name}_temp_{int(args.temperature * 1000)}'
+
+    if args.repetition_penalty != 1.0:
+        folder_name = f'{folder_name}_repetition_penalty_{int(args.repetition_penalty * 1000)}'
+
+    if args.epsilon_cutoff > 0.0:
+        folder_name = f'{folder_name}_epsilon_cutoff_{int(args.epsilon_cutoff * 100000)}'
+
     time_sensitive_prediction_output_folder_name = os.path.join(
         args.output_folder,
         folder_name,
@@ -359,17 +368,15 @@ def main(
         device=device
     )
 
-    dataset = load_from_disk(
-        args.dataset_folder
+    dataset = load_parquet_as_dataset(
+        args.dataset_folder,
+        split="test"
     )
 
-    if 'test' not in dataset:
-        raise ValueError(f"The dataset does not contain a test split at {args.dataset_folder}")
-
     def filter_func(examples):
-        return [cehrgpt_model.config.n_positions >= _ >= 20 for _ in examples['num_of_concepts']]
+        return [cehrgpt_model.config.n_positions >= _ >= args.min_num_of_concepts for _ in examples['num_of_concepts']]
 
-    test_dataset = dataset['test'].filter(
+    test_dataset = dataset.filter(
         filter_func,
         batched=True,
         batch_size=1000
