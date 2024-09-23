@@ -1,8 +1,7 @@
 import math
 from collections import Counter
 from dataclasses import dataclass
-from typing import List, Dict, Any, Union
-from collections import defaultdict
+from typing import List, Dict, Any, Union, Tuple, Optional
 
 import numpy as np
 import torch
@@ -22,16 +21,13 @@ class TimeToEvent:
     standard_deviation: float
     most_likely_time: int
     num_of_simulations: int
+    time_intervals: List[int]
+    outcome_events: List[str]
     time_interval_probability_table: List[Dict[str, Any]]
 
 
-@dataclass
-class ConceptTimeToEvent:
-    concept: str
-    time_to_events: TimeToEvent
-
-
-def create_time_to_event(time_intervals: List[int]) -> TimeToEvent:
+def create_time_to_event(time_event_tuples: List[Tuple[str, int]]) -> TimeToEvent:
+    outcome_events, time_intervals = zip(*time_event_tuples)
     time_buckets = [time_month_token(_) for _ in time_intervals]
     time_bucket_counter = Counter(time_buckets)
     most_common_item = time_bucket_counter.most_common(1)[0][0]
@@ -44,6 +40,8 @@ def create_time_to_event(time_intervals: List[int]) -> TimeToEvent:
         sorted(probability_table.items(), key=lambda x: x[1], reverse=True)
     ]
     return TimeToEvent(
+        time_intervals=time_intervals,
+        outcome_events=outcome_events,
         average_time=np.mean(time_intervals),
         median_time=np.median(time_intervals),
         standard_deviation=np.std(time_intervals),
@@ -125,7 +123,7 @@ class TimeToEventModel:
             partial_history: Union[np.ndarray, list],
             n_future_visits: int = 1,
             future_visit_offset: int = 0
-    ) -> List[ConceptTimeToEvent]:
+    ) -> Optional[TimeToEvent]:
 
         patient_history_length = len(partial_history)
         simulated_seqs = self.simulate(
@@ -133,7 +131,7 @@ class TimeToEventModel:
             max_new_tokens=self.model.config.n_positions - patient_history_length
         )
 
-        events = defaultdict(list)
+        time_event_tuples = []
         for seq in simulated_seqs:
             visit_counter = 0
             time_delta = 0
@@ -144,13 +142,10 @@ class TimeToEventModel:
                 if is_att_token(next_token):
                     time_delta += extract_time_interval_in_days(next_token)
                 elif visit_counter >= future_visit_offset and self.is_outcome_event(next_token):
-                    events[next_token].append(time_delta)
+                    time_event_tuples.append((next_token, time_delta))
 
         # Count the occurrences of each time tokens for each concept
-        return [
-            ConceptTimeToEvent(concept_id, create_time_to_event(time_intervals))
-            for concept_id, time_intervals in events.items()
-        ]
+        return create_time_to_event(time_event_tuples) if len(time_event_tuples) > 0 else None
 
     @staticmethod
     def get_generation_config(

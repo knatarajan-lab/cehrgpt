@@ -1,10 +1,11 @@
 import datetime
 import os
+import uuid
 
 import yaml
 from tqdm import tqdm
-from dataclasses import dataclass
-from typing import List
+from dataclasses import dataclass, asdict
+from typing import List, Dict, Any
 import pandas as pd
 import torch
 
@@ -63,6 +64,7 @@ def main(
     outcome_events = task_config.outcome_events
 
     prediction_output_folder_name = os.path.join(
+        args.output_folder,
         folder_name,
         task_name
     )
@@ -110,31 +112,46 @@ def main(
         batched=True,
         batch_size=1000
     )
-
+    tte_outputs = []
     for record in tqdm(test_dataset, total=len(test_dataset)):
         partial_history = record["concept_ids"]
+        index_date = record["index_date"]
         label = record["label"]
         time_to_event = record["time_to_event"] if "time_to_event" in record else None
-        concept_time_to_events = ts_pred_model.predict_time_to_events(
+        concept_time_to_event = ts_pred_model.predict_time_to_events(
             partial_history,
             task_config.n_future_visits,
             task_config.future_visit_offset
         )
         visit_counter = sum([int(is_visit_end(_)) for _ in partial_history])
-        tte_output = [{
+        tte_outputs.append({
             "person_id": record["person_id"],
+            "index_date": index_date,
             "visit_counter": visit_counter,
             "label": label,
             "time_to_event": time_to_event,
-            "predictions": concept_time_to_events
-        }]
+            "prediction": asdict(concept_time_to_event) if concept_time_to_event else None
+        })
+        flush_to_disk_if_full(tte_outputs, prediction_output_folder_name, args.buffer_size)
+
+    # Final flush
+    flush_to_disk_if_full(tte_outputs, prediction_output_folder_name, args.buffer_size)
+
+def flush_to_disk_if_full(
+        tte_outputs: List[Dict[str, Any]],
+        prediction_output_folder_name,
+        buffer_size: int
+) -> None:
+    if len(tte_outputs) >= buffer_size:
         LOG.info(f'{datetime.datetime.now()}: Flushing time to visit predictions to disk')
+        output_parquet_file = os.path.join(prediction_output_folder_name, f'{uuid.uuid4()}.parquet')
         pd.DataFrame(
-            tte_output,
+            tte_outputs,
             columns=[
-                "person_id", "visit_counter", "label", "time_to_event", "predictions"
+                "person_id", "index_date", "visit_counter", "label", "time_to_event", "prediction"
             ]
-        ).to_parquet(os.path.join(prediction_output_folder_name, f'{record["person_id"]}.parquet'))
+        ).to_parquet(output_parquet_file)
+        tte_outputs.clear()
 
 
 def create_arg_parser():
