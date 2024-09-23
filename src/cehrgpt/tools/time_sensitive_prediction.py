@@ -20,7 +20,7 @@ from ..cehrgpt_args import create_inference_base_arg_parser, SamplingStrategy
 from ..gpt_utils import (
     is_visit_start, is_visit_end, is_att_token, is_artificial_token, extract_time_interval_in_days
 )
-from ..gpt_utils import VISIT_CONCEPT_IDS
+from src.cehrgpt.models.special_tokens import VISIT_CONCEPT_IDS
 from cehrbert_data.decorators.patient_event_decorator import time_month_token
 from cehrbert.runners.runner_util import load_parquet_as_dataset
 

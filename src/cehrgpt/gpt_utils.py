@@ -4,17 +4,9 @@ from datetime import date, timedelta
 from typing import Sequence, Tuple
 
 from src.cehrgpt.cehrgpt_args import SamplingStrategy
-from src.cehrgpt.models.tokenization_hf_cehrgpt import END_TOKEN
+from src.cehrgpt.models.special_tokens import END_TOKEN, VISIT_CONCEPT_IDS, DISCHARGE_CONCEPT_IDS
 
 INPATIENT_ATT_PATTERN = re.compile(r'(?:VS-|i-)D(\d+)(?:-VE)?')
-
-VISIT_CONCEPT_IDS = [
-    '9202', '9203', '581477', '9201', '5083', '262', '38004250', '0', '8883', '38004238', '38004251',
-    '38004222', '38004268', '38004228', '32693', '8971', '38004269', '38004193', '32036', '8782'
-]
-DISCHARGE_CONCEPT_IDS = [
-
-]
 
 
 class RandomSampleCache:

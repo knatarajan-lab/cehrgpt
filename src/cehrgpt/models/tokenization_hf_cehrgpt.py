@@ -29,13 +29,9 @@ from cehrgpt.gpt_utils import (
     is_att_token,
     is_inpatient_att_token,
 )
+from src.cehrgpt.models.special_tokens import START_TOKEN, END_TOKEN, PAD_TOKEN, OUT_OF_VOCABULARY_TOKEN
 
 NA = "N/A"
-START_TOKEN = "[START]"
-END_TOKEN = "[END]"
-PAD_TOKEN = "[PAD]"
-OUT_OF_VOCABULARY_TOKEN = "[OOV]"
-
 TOKENIZER_FILE_NAME = "cehrgpt_tokenizer.json"
 TIME_TOKENIZER_FILE_NAME = "cehrgpt_time_tokenizer.json"
 TOKEN_TO_SUB_TIME_TOKEN_MAPPING_FILE_NAME = "token_to_sub_time_token_mapping.json"
