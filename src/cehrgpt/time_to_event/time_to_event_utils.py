@@ -1,38 +1,8 @@
 from typing import List, Dict, Any, Tuple
 from collections import defaultdict
 import numpy as np
-from cehrgpt.gpt_utils import is_att_token
 
-from src.cehrgpt.gpt_utils import is_visit_start, is_visit_end, is_att_token
-from src.cehrgpt.models.tokenization_hf_cehrgpt import END_TOKEN
-
-VISIT_CONCEPT_IDS = [
-    '9202', '9203', '581477', '9201', '5083', '262', '38004250', '0', '8883', '38004238', '38004251',
-    '38004222', '38004268', '38004228', '32693', '8971', '38004269', '38004193', '32036', '8782'
-]
-DISCHARGE_CONCEPT_IDS = [
-
-]
-
-
-def is_clinical_event(token: str) -> bool:
-    return token.isnumeric()
-
-
-def is_artificial_token(token: str) -> bool:
-    if token in VISIT_CONCEPT_IDS:
-        return True
-    if token in DISCHARGE_CONCEPT_IDS:
-        return True
-    if is_visit_start(token):
-        return True
-    if is_visit_end(token):
-        return True
-    if is_att_token(token):
-        return True
-    if token == END_TOKEN:
-        return True
-    return False
+from ..gpt_utils import is_att_token
 
 
 def convert_month_token_to_upperbound_days(month_token: str, time_bucket_size: int = 90) -> str:

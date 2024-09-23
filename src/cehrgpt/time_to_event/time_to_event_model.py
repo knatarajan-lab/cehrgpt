@@ -8,9 +8,9 @@ import numpy as np
 import torch
 from transformers import GenerationConfig
 
-from src.cehrgpt.gpt_utils import is_visit_end, is_att_token, extract_time_interval_in_days
-from src.cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
-from src.cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from ..gpt_utils import is_visit_end, is_att_token, extract_time_interval_in_days
+from ..models.hf_cehrgpt import CEHRGPT2LMHeadModel
+from ..models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 from cehrbert_data.decorators.patient_event_decorator import time_month_token
 

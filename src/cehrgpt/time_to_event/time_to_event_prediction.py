@@ -10,11 +10,11 @@ import torch
 
 from transformers.utils import logging, is_flash_attn_2_available
 
-from ..time_to_event.time_to_event_model import TimeToEventModel
+from .time_to_event_model import TimeToEventModel
 from ..models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from ..models.hf_cehrgpt import CEHRGPT2LMHeadModel
-from ..cehrgpt_args import create_inference_base_arg_parser, SamplingStrategy
-from ..gpt_utils import is_visit_end
+from ..cehrgpt_args import create_inference_base_arg_parser
+from ..gpt_utils import is_visit_end, get_cehrgpt_output_folder
 from cehrbert.runners.runner_util import load_parquet_as_dataset
 
 LOG = logging.get_logger("transformers")
@@ -56,27 +56,7 @@ def main(
     cehrgpt_model.generation_config.eos_token_id = cehrgpt_tokenizer.end_token_id
     cehrgpt_model.generation_config.bos_token_id = cehrgpt_tokenizer.end_token_id
 
-    if args.sampling_strategy == SamplingStrategy.TopKStrategy.value:
-        folder_name = f'top_k{args.top_k}'
-        args.top_p = 1.0
-    elif args.sampling_strategy == SamplingStrategy.TopPStrategy.value:
-        folder_name = f'top_p{int(args.top_p * 1000)}'
-        args.top_k = cehrgpt_tokenizer.vocab_size
-    elif args.sampling_strategy == SamplingStrategy.TopMixStrategy.value:
-        folder_name = f'top_mix_p{int(args.top_p * 1000)}_k{args.top_k}'
-    else:
-        raise RuntimeError(
-            'sampling_strategy has to be one of the following three options [TopKStrategy, TopPStrategy, TopMixStrategy]'
-        )
-
-    if args.temperature != 1.0:
-        folder_name = f'{folder_name}_temp_{int(args.temperature * 1000)}'
-
-    if args.repetition_penalty != 1.0:
-        folder_name = f'{folder_name}_repetition_penalty_{int(args.repetition_penalty * 1000)}'
-
-    if args.epsilon_cutoff > 0.0:
-        folder_name = f'{folder_name}_epsilon_cutoff_{int(args.epsilon_cutoff * 100000)}'
+    folder_name = get_cehrgpt_output_folder(args, cehrgpt_tokenizer)
 
     task_config = load_task_config_from_yaml(args.task_config)
     task_name = task_config.task_name

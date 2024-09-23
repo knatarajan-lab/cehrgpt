@@ -14,24 +14,17 @@ import torch
 from transformers import GenerationConfig
 from transformers.utils import logging, is_flash_attn_2_available
 
-from ..models.tokenization_hf_cehrgpt import CehrGptTokenizer, END_TOKEN
+from ..models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from ..models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from ..cehrgpt_args import create_inference_base_arg_parser, SamplingStrategy
-from ..gpt_utils import is_visit_start, is_visit_end, is_att_token, extract_time_interval_in_days
+from ..gpt_utils import (
+    is_visit_start, is_visit_end, is_att_token, is_artificial_token, extract_time_interval_in_days
+)
+from ..gpt_utils import VISIT_CONCEPT_IDS
 from cehrbert_data.decorators.patient_event_decorator import time_month_token
 from cehrbert.runners.runner_util import load_parquet_as_dataset
 
 LOG = logging.get_logger("transformers")
-
-VISIT_CONCEPT_IDS = [
-    '9202', '9203', '581477', '9201', '5083', '262', '38004250', '0', '8883', '38004238', '38004251',
-    '38004222', '38004268', '38004228', '32693', '8971', '38004269', '38004193', '32036', '8782'
-]
-
-# TODO: fill this in
-DISCHARGE_CONCEPT_IDS = [
-
-]
 
 
 class PredictionStrategy(Enum):
@@ -53,22 +46,6 @@ class ConceptProbability:
     concept: str
     probability: float
     num_of_simulations: int
-
-
-def is_artificial_token(token) -> bool:
-    if token in VISIT_CONCEPT_IDS:
-        return True
-    if token in DISCHARGE_CONCEPT_IDS:
-        return True
-    if is_visit_start(token):
-        return True
-    if is_visit_end(token):
-        return True
-    if is_att_token(token):
-        return True
-    if token == END_TOKEN:
-        return True
-    return False
 
 
 def convert_to_concept_probabilities(concept_ids: List[str]) -> List[ConceptProbability]:

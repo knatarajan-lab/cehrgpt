@@ -3,7 +3,18 @@ import re
 from datetime import date, timedelta
 from typing import Sequence, Tuple
 
-inpatient_att_pattern = re.compile(r"(?:VS-|i-)D(\d+)(?:-VE)?")
+from src.cehrgpt.cehrgpt_args import SamplingStrategy
+from src.cehrgpt.models.tokenization_hf_cehrgpt import END_TOKEN
+
+INPATIENT_ATT_PATTERN = re.compile(r'(?:VS-|i-)D(\d+)(?:-VE)?')
+
+VISIT_CONCEPT_IDS = [
+    '9202', '9203', '581477', '9201', '5083', '262', '38004250', '0', '8883', '38004238', '38004251',
+    '38004222', '38004268', '38004228', '32693', '8971', '38004269', '38004193', '32036', '8782'
+]
+DISCHARGE_CONCEPT_IDS = [
+
+]
 
 
 class RandomSampleCache:
@@ -85,16 +96,42 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
         return 0, max_seq_len - 1, []
 
 
-def is_visit_end(token: str) -> bool:
-    return token in ['VE', '[VE]']
+def get_cehrgpt_output_folder(args, cehrgpt_tokenizer):
+    if args.sampling_strategy == SamplingStrategy.TopKStrategy.value:
+        folder_name = f'top_k{args.top_k}'
+        args.top_p = 1.0
+    elif args.sampling_strategy == SamplingStrategy.TopPStrategy.value:
+        folder_name = f'top_p{int(args.top_p * 1000)}'
+        args.top_k = cehrgpt_tokenizer.vocab_size
+    elif args.sampling_strategy == SamplingStrategy.TopMixStrategy.value:
+        folder_name = f'top_mix_p{int(args.top_p * 1000)}_k{args.top_k}'
+    else:
+        raise RuntimeError(
+            'sampling_strategy has to be one of the following three options [TopKStrategy, TopPStrategy, TopMixStrategy]'
+        )
+    if args.temperature != 1.0:
+        folder_name = f'{folder_name}_temp_{int(args.temperature * 1000)}'
+    if args.repetition_penalty != 1.0:
+        folder_name = f'{folder_name}_repetition_penalty_{int(args.repetition_penalty * 1000)}'
+    if args.num_beams > 1:
+        folder_name = f'{folder_name}_num_beams_{int(args.num_beams)}'
+    if args.num_beam_groups > 1:
+        folder_name = f'{folder_name}_num_beam_groups_{int(args.num_beam_groups)}'
+    if args.epsilon_cutoff > 0.0:
+        folder_name = f'{folder_name}_epsilon_cutoff_{int(args.epsilon_cutoff * 100000)}'
+    return folder_name
+
+
+def is_clinical_event(token: str) -> bool:
+    return token.isnumeric()
 
 
 def is_visit_start(token: str) -> bool:
     return token in ['VS', '[VS]']
 
 
-def is_visit_end(token: str):
-    return token in ["VE", "[VE]"]
+def is_visit_end(token: str) -> bool:
+    return token in ['VE', '[VE]']
 
 
 def is_att_token(token: str):
@@ -113,6 +150,22 @@ def is_att_token(token: str):
     elif token[:2] == "i-" and not token.startswith(
             "i-H"
     ):  # i-D7 and exclude hour tokens
+        return True
+    return False
+
+
+def is_artificial_token(token: str) -> bool:
+    if token in VISIT_CONCEPT_IDS:
+        return True
+    if token in DISCHARGE_CONCEPT_IDS:
+        return True
+    if is_visit_start(token):
+        return True
+    if is_visit_end(token):
+        return True
+    if is_att_token(token):
+        return True
+    if token == END_TOKEN:
         return True
     return False
 

@@ -12,6 +12,7 @@ from transformers import GenerationConfig
 from transformers.utils import is_flash_attn_2_available, logging
 from ..models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from ..models.tokenization_hf_cehrgpt import NA, CehrGptTokenizer
+from ..gpt_utils import get_cehrgpt_output_folder
 
 LOG = logging.get_logger("transformers")
 
@@ -134,38 +135,7 @@ def main(args):
     cehrgpt_model.generation_config.eos_token_id = cehrgpt_tokenizer.end_token_id
     cehrgpt_model.generation_config.bos_token_id = cehrgpt_tokenizer.end_token_id
 
-    if args.sampling_strategy == SamplingStrategy.TopKStrategy.value:
-        folder_name = f"top_k{args.top_k}"
-        args.top_p = 1.0
-    elif args.sampling_strategy == SamplingStrategy.TopPStrategy.value:
-        folder_name = f"top_p{int(args.top_p * 1000)}"
-        args.top_k = cehrgpt_tokenizer.vocab_size
-    elif args.sampling_strategy == SamplingStrategy.TopMixStrategy.value:
-        folder_name = f"top_mix_p{int(args.top_p * 1000)}_k{args.top_k}"
-    else:
-        raise RuntimeError(
-            "sampling_strategy has to be one of the following three options [TopKStrategy, TopPStrategy, TopMixStrategy]"
-        )
-
-    if args.temperature != 1.0:
-        folder_name = f"{folder_name}_temp_{int(args.temperature * 1000)}"
-
-    if args.repetition_penalty != 1.0:
-        folder_name = (
-            f"{folder_name}_repetition_penalty_{int(args.repetition_penalty * 1000)}"
-        )
-
-    if args.num_beams > 1:
-        folder_name = f"{folder_name}_num_beams_{int(args.num_beams)}"
-
-    if args.num_beam_groups > 1:
-        folder_name = f"{folder_name}_num_beam_groups_{int(args.num_beam_groups)}"
-
-    if args.epsilon_cutoff > 0.0:
-        folder_name = (
-            f"{folder_name}_epsilon_cutoff_{int(args.epsilon_cutoff * 100000)}"
-        )
-
+    folder_name = get_cehrgpt_output_folder(args, cehrgpt_tokenizer)
     output_folder_name = os.path.join(
         args.output_folder, folder_name, "generated_sequences"
     )
