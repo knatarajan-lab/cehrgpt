@@ -144,7 +144,7 @@ class TimeToEventModel:
                 if is_att_token(next_token):
                     time_delta += extract_time_interval_in_days(next_token)
                 elif visit_counter >= future_visit_offset and self.is_outcome_event(next_token):
-                    events[next_token].append(next_token)
+                    events[next_token].append(time_delta)
 
         # Count the occurrences of each time tokens for each concept
         return [
