@@ -1,0 +1,8 @@
+task_name: "next_visit_type_prediction"
+outcome_events: [
+  '9202', '9203', '581477', '9201', '5083', '262', '38004250', '8883', '38004238', '38004251',
+  '38004222', '38004268', '38004228', '32693', '8971', '38004269', '38004193', '32036', '8782'
+]
+include_descendants: false
+n_future_visits: 1
+future_visit_offset: 0
