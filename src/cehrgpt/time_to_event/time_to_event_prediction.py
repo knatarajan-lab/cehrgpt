@@ -2,6 +2,7 @@ import datetime
 import os
 import uuid
 from pathlib import Path
+import shutil
 
 import yaml
 from datasets import Dataset
@@ -70,7 +71,9 @@ def main(
         folder_name,
         task_name
     )
+    temp_folder = os.path.join(args.output_folder, folder_name, "temp")
     os.makedirs(prediction_output_folder_name, exist_ok=True)
+    os.makedirs(temp_folder, exist_ok=True)
 
     LOG.info(f'Loading tokenizer at {args.model_folder}')
     LOG.info(f'Loading model at {args.model_folder}')
@@ -117,11 +120,12 @@ def main(
 
     # Filter out the records for which the predictions have been generated previously
     test_dataset = filter_out_existing_results(test_dataset, prediction_output_folder_name)
-
     tte_outputs = []
     for record in tqdm(test_dataset, total=len(test_dataset)):
+        sample_identifier = f"{record['person_id']}_{record['index_date'].strftime('%Y_%m_%d')}"
+        if acquire_lock_or_skip_if_already_exist(output_folder=temp_folder, sample_id=sample_identifier):
+            continue
         partial_history = record["concept_ids"]
-        index_date = record["index_date"]
         label = record["label"]
         time_to_event = record["time_to_event"] if "time_to_event" in record else None
         concept_time_to_event = ts_pred_model.predict_time_to_events(
@@ -132,16 +136,58 @@ def main(
         visit_counter = sum([int(is_visit_end(_)) for _ in partial_history])
         tte_outputs.append({
             "person_id": record["person_id"],
-            "index_date": index_date,
+            "index_date": record["index_date"],
             "visit_counter": visit_counter,
             "label": label,
             "time_to_event": time_to_event,
             "prediction": asdict(concept_time_to_event) if concept_time_to_event else None
         })
+        delete_lock_create_processed_flag(output_folder=temp_folder, sample_id=sample_identifier)
         flush_to_disk_if_full(tte_outputs, prediction_output_folder_name, args.buffer_size)
 
     # Final flush
     flush_to_disk_if_full(tte_outputs, prediction_output_folder_name, args.buffer_size)
+    # Remove the temp folder
+    shutil.rmtree(temp_folder)
+
+
+def delete_lock_create_processed_flag(output_folder: str, sample_id: str):
+    processed_flag_file = os.path.join(output_folder, f'{sample_id}.done')
+    # Obtain the lock for this example by creating an empty lock file
+    try:
+        # Using 'x' mode for exclusive creation; fails if the file already exists
+        with open(processed_flag_file, 'x'):
+            pass  # The file is created; nothing is written to it
+    except FileExistsError as e:
+        raise FileExistsError(f"The processed flag file {processed_flag_file} already exists.") from e
+
+    lock_file = os.path.join(output_folder, f'{sample_id}.lock')
+    # Clean up the lock file
+    # Safely attempt to delete the lock file
+    try:
+        os.remove(lock_file)
+    except OSError as e:
+        raise OSError(f"Can not remove the lock file at {lock_file}") from e
+
+
+def acquire_lock_or_skip_if_already_exist(output_folder: str, sample_id: str):
+    lock_file = os.path.join(output_folder, f'{sample_id}.lock')
+    if os.path.exists(lock_file):
+        LOG.info(f'Other process acquired the lock --> %s. Skipping...', sample_id)
+        return True
+    processed_flag_file = os.path.join(output_folder, f'{sample_id}.done')
+    if os.path.exists(processed_flag_file):
+        LOG.info(f'The sample has been processed --> %s. Skipping...', sample_id)
+        return True
+
+    # Obtain the lock for this example by creating an empty lock file
+    try:
+        # Using 'x' mode for exclusive creation; fails if the file already exists
+        with open(lock_file, 'x'):
+            pass  # The file is created; nothing is written to it
+    except FileExistsError as e:
+        raise FileExistsError(f"The lock file {lock_file} already exists.") from e
+    return False
 
 
 def filter_out_existing_results(test_dataset: Dataset, prediction_output_folder_name: str):
