@@ -15,6 +15,7 @@ from transformers.generation.stopping_criteria import (
     StoppingCriteriaList,
     validate_stopping_criteria,
 )
+from transformers.generation.streamers import BaseStreamer
 from transformers.models.gpt2.modeling_gpt2 import GPT2Attention, GPT2Block
 from transformers.pytorch_utils import Conv1D
 from transformers.utils import is_flash_attn_2_available, logging
