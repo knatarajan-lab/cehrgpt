@@ -18,7 +18,7 @@ from .time_to_event_model import TimeToEventModel
 from ..models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from ..models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from ..cehrgpt_args import create_inference_base_arg_parser
-from ..gpt_utils import is_visit_start, is_visit_end, get_cehrgpt_output_folder
+from ..gpt_utils import is_visit_start, is_visit_end, get_cehrgpt_output_folder, collect_demographic_prompts_at_visits
 from cehrbert.runners.runner_util import load_parquet_as_dataset
 
 LOG = logging.get_logger("transformers")
@@ -129,6 +129,7 @@ def main(
         sample_identifier = f"{record['person_id']}_{record['index_date'].strftime('%Y_%m_%d')}"
         if acquire_lock_or_skip_if_already_exist(output_folder=temp_folder, sample_id=sample_identifier):
             continue
+
         partial_history = record["concept_ids"]
         label = record["label"]
         time_to_event = record["time_to_event"] if "time_to_event" in record else None
@@ -137,11 +138,17 @@ def main(
         if generation_config.max_length <= seq_length + generation_config.max_new_tokens:
             start_index = seq_length - (generation_config.max_length - generation_config.max_new_tokens)
             # Make sure the first token starts on VS
-            for i, token in enumerate(partial_history[start_index:]):
-                if is_visit_start(token):
-                    start_index += i
+            default_demographic_prompt = []
+            demographic_prompts = collect_demographic_prompts_at_visits(partial_history[:4], partial_history)
+            for prompt_index, demographic_prompt_tuple in demographic_prompts:
+                # We find the earliest visit that could fit in the context window.
+                # We also need to take the demographic prompt into account
+                if prompt_index >= start_index + 4:
+                    start_index = prompt_index
+                    start_year, start_age, start_gender, start_race = demographic_prompt_tuple
+                    default_demographic_prompt = [f'year:{start_year}', f'age:{start_age}', start_gender, start_race]
                     break
-            partial_history = partial_history[start_index:]
+            partial_history = default_demographic_prompt + partial_history[start_index:]
 
         concept_time_to_event = ts_pred_model.predict_time_to_events(
             partial_history,
@@ -202,8 +209,9 @@ def acquire_lock_or_skip_if_already_exist(output_folder: str, sample_id: str):
         # Using 'x' mode for exclusive creation; fails if the file already exists
         with open(lock_file, 'x'):
             pass  # The file is created; nothing is written to it
-    except FileExistsError as e:
-        raise FileExistsError(f"The lock file {lock_file} already exists.") from e
+    except FileExistsError:
+        LOG.info(f'Other process acquired the lock --> %s. Skipping...', sample_id)
+        return True
     return False
 
 

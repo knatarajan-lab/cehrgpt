@@ -1,7 +1,7 @@
 import random
 import re
 from datetime import date, timedelta
-from typing import Sequence, Tuple
+from typing import Sequence, Tuple, List
 
 from src.cehrgpt.cehrgpt_args import SamplingStrategy
 from src.cehrgpt.models.special_tokens import END_TOKEN, VISIT_CONCEPT_IDS, DISCHARGE_CONCEPT_IDS
@@ -41,7 +41,28 @@ class RandomSampleCache:
         return self._cache.pop()
 
 
-def random_slice_gpt_sequence(concept_ids, max_seq_len):
+def collect_demographic_prompts_at_visits(demographic_prompt: List[str], patient_history: List[str]):
+    demographic_prompts_at_visits = []
+    start_year, start_age, start_gender, start_race = demographic_prompt
+    start_year = int(start_year.split(':')[1])
+    start_age = int(start_age.split(':')[1])
+    data_cursor = date(int(start_year), 1, 1)
+    birth_date = date(start_year - start_age, 1, 1)
+    for i, current_token in enumerate(patient_history):
+        if is_visit_start(current_token):
+            demographic_prompts_at_visits.append(
+                (i, (data_cursor.year, data_cursor.year - birth_date.year, start_gender, start_race))
+            )
+        elif is_att_token(current_token):
+            att_date_delta = extract_time_interval_in_days(current_token)
+            data_cursor = data_cursor + timedelta(days=att_date_delta)
+    return demographic_prompts_at_visits
+
+
+def random_slice_gpt_sequence(
+        concept_ids,
+        max_seq_len
+):
     seq_length = len(concept_ids)
     starting_points = []
     [start_year, start_age, start_gender, start_race] = [_ for _ in concept_ids[0:4]]
