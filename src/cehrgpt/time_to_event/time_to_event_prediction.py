@@ -112,7 +112,7 @@ def main(
     )
 
     def filter_func(examples):
-        return [cehrgpt_model.config.n_positions >= _ >= args.min_num_of_concepts for _ in examples['num_of_concepts']]
+        return [_ >= args.min_num_of_concepts for _ in examples['num_of_concepts']]
 
     test_dataset = dataset.filter(
         filter_func,
