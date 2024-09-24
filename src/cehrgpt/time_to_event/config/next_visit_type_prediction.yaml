@@ -4,5 +4,5 @@ outcome_events: [
   '38004222', '38004268', '38004228', '32693', '8971', '38004269', '38004193', '32036', '8782'
 ]
 include_descendants: false
-n_future_visits: 1
-future_visit_offset: 0
+future_visit_start: 0
+future_visit_end: 1

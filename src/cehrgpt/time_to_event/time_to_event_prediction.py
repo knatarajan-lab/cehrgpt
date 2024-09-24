@@ -29,8 +29,10 @@ class TaskConfig:
     task_name: str
     outcome_events: List[str]
     include_descendants: bool = False
-    n_future_visits: int = 1
-    future_visit_offset: int = 0
+    future_visit_start: int = 0
+    future_visit_end: int = -1
+    prediction_window_start: int = 0
+    prediction_window_end: int = 365
     max_new_tokens: int = 128
 
 
@@ -143,8 +145,10 @@ def main(
 
         concept_time_to_event = ts_pred_model.predict_time_to_events(
             partial_history,
-            task_config.n_future_visits,
-            task_config.future_visit_offset
+            task_config.future_visit_start,
+            task_config.future_visit_end,
+            task_config.prediction_window_start,
+            task_config.prediction_window_end,
         )
         visit_counter = sum([int(is_visit_end(_)) for _ in partial_history])
         tte_outputs.append({

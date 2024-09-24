@@ -112,8 +112,10 @@ class TimeToEventModel:
     def predict_time_to_events(
             self,
             partial_history: Union[np.ndarray, list],
-            n_future_visits: int = 1,
-            future_visit_offset: int = 0
+            future_visit_start: int = 0,
+            future_visit_end: int = -1,
+            prediction_window_start: int = 0,
+            prediction_window_end: int = 365
     ) -> Optional[TimeToEvent]:
 
         patient_history_length = len(partial_history)
@@ -125,11 +127,14 @@ class TimeToEventModel:
             time_delta = 0
             for next_token in seq[patient_history_length:]:
                 visit_counter += int(is_visit_end(next_token))
-                if visit_counter > n_future_visits != -1:
+                if visit_counter > future_visit_end != -1 or time_delta > prediction_window_end != -1:
                     break
                 if is_att_token(next_token):
                     time_delta += extract_time_interval_in_days(next_token)
-                elif visit_counter >= future_visit_offset and self.is_outcome_event(next_token):
+                elif (
+                        visit_counter >= future_visit_start and
+                        time_delta >= prediction_window_start
+                ) and self.is_outcome_event(next_token):
                     time_event_tuples.append((next_token, time_delta))
 
         # Count the occurrences of each time tokens for each concept
