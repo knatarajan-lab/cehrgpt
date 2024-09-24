@@ -1,46 +1,55 @@
 import json
-from tqdm import tqdm
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.special import expit as sigmoid
-
 import torch
-from torch.utils.data import DataLoader
-from datasets import load_from_disk, DatasetDict
-from transformers.utils import logging, is_flash_attn_2_available
-from transformers import TrainingArguments, Trainer, set_seed, EarlyStoppingCallback
-from peft import LoraConfig, get_peft_model, PeftModel
-
-from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
-from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
-from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
-from cehrgpt.models.hf_cehrgpt import (
-    CEHRGPTPreTrainedModel, CehrGptForClassification
+from cehrbert.data_generators.hf_data_generator.meds_utils import (
+    create_dataset_from_meds_reader,
 )
-from cehrbert.data_generators.hf_data_generator.meds_utils import create_dataset_from_meds_reader
 from cehrbert.runners.hf_cehrbert_finetune_runner import compute_metrics
-from cehrbert.runners.runner_util import (
-    get_last_hf_checkpoint, load_parquet_as_dataset, generate_prepared_ds_path,
-    parse_runner_args, get_meds_extension_path
+from cehrbert.runners.hf_runner_argument_dataclass import (
+    FineTuneModelType,
+    ModelArguments,
 )
-from cehrbert.runners.hf_runner_argument_dataclass import FineTuneModelType, ModelArguments
+from cehrbert.runners.runner_util import (
+    generate_prepared_ds_path,
+    get_last_hf_checkpoint,
+    get_meds_extension_path,
+    load_parquet_as_dataset,
+    parse_runner_args,
+)
+from datasets import DatasetDict, load_from_disk
+from peft import LoraConfig, PeftModel, get_peft_model
+from scipy.special import expit as sigmoid
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from transformers import EarlyStoppingCallback, Trainer, TrainingArguments, set_seed
+from transformers.utils import is_flash_attn_2_available, logging
+
+from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
+from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
+from cehrgpt.models.hf_cehrgpt import CehrGptForClassification, CEHRGPTPreTrainedModel
+from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 LOG = logging.get_logger("transformers")
 
 
 def load_pretrained_tokenizer(
-        model_args,
+    model_args,
 ) -> CehrGptTokenizer:
     try:
         return CehrGptTokenizer.from_pretrained(model_args.tokenizer_name_or_path)
     except Exception:
-        raise ValueError(f"Can not load the pretrained tokenizer from {model_args.tokenizer_name_or_path}")
+        raise ValueError(
+            f"Can not load the pretrained tokenizer from {model_args.tokenizer_name_or_path}"
+        )
 
 
-def load_finetuned_model(model_args: ModelArguments, model_name_or_path: str) -> CEHRGPTPreTrainedModel:
+def load_finetuned_model(
+    model_args: ModelArguments, model_name_or_path: str
+) -> CEHRGPTPreTrainedModel:
     if model_args.finetune_model_type == FineTuneModelType.POOLING.value:
         finetune_model_cls = CehrGptForClassification
     else:
@@ -48,10 +57,14 @@ def load_finetuned_model(model_args: ModelArguments, model_name_or_path: str) ->
             f"finetune_model_type can be one of the following types {FineTuneModelType.POOLING.value}"
         )
 
-    attn_implementation = "flash_attention_2" if is_flash_attn_2_available() else "eager"
+    attn_implementation = (
+        "flash_attention_2" if is_flash_attn_2_available() else "eager"
+    )
     # Try to create a new model based on the base model
     try:
-        return finetune_model_cls.from_pretrained(model_name_or_path, attn_implementation=attn_implementation)
+        return finetune_model_cls.from_pretrained(
+            model_name_or_path, attn_implementation=attn_implementation
+        )
     except ValueError:
         raise ValueError(f"Can not load the finetuned model from {model_name_or_path}")
 
@@ -60,7 +73,9 @@ def main():
     data_args, model_args, training_args = parse_runner_args()
 
     tokenizer = load_pretrained_tokenizer(model_args)
-    prepared_ds_path = generate_prepared_ds_path(data_args, model_args, data_folder=data_args.cohort_folder)
+    prepared_ds_path = generate_prepared_ds_path(
+        data_args, model_args, data_folder=data_args.cohort_folder
+    )
     if any(prepared_ds_path.glob("*")):
         LOG.info(f"Loading prepared dataset from disk at {prepared_ds_path}...")
         processed_dataset = load_from_disk(str(prepared_ds_path))
@@ -74,19 +89,27 @@ def main():
                 dataset_prepared_path=data_args.dataset_prepared_path,
             )
             try:
-                LOG.info(f"Trying to load the MEDS extension from disk at {meds_extension_path}...")
+                LOG.info(
+                    f"Trying to load the MEDS extension from disk at {meds_extension_path}..."
+                )
                 dataset = load_from_disk(meds_extension_path)
                 if data_args.streaming:
                     if isinstance(dataset, DatasetDict):
                         dataset = {
-                            k: v.to_iterable_dataset(num_shards=training_args.dataloader_num_workers)
+                            k: v.to_iterable_dataset(
+                                num_shards=training_args.dataloader_num_workers
+                            )
                             for k, v in dataset.items()
                         }
                     else:
-                        dataset = dataset.to_iterable_dataset(num_shards=training_args.dataloader_num_workers)
+                        dataset = dataset.to_iterable_dataset(
+                            num_shards=training_args.dataloader_num_workers
+                        )
             except Exception as e:
                 LOG.exception(e)
-                dataset = create_dataset_from_meds_reader(data_args, is_pretraining=False)
+                dataset = create_dataset_from_meds_reader(
+                    data_args, is_pretraining=False
+                )
                 if not data_args.streaming:
                     dataset.save_to_disk(meds_extension_path)
             train_set = dataset["train"]
@@ -104,7 +127,9 @@ def main():
                 dataset = dataset.sort("index_date")
                 # Determine the split index
                 total_size = len(dataset)
-                train_end = int((1 - data_args.validation_split_percentage) * total_size)
+                train_end = int(
+                    (1 - data_args.validation_split_percentage) * total_size
+                )
                 # Perform the chronological split, use the historical data for training and future data
                 # for validation/testing
                 train_set = dataset.select(range(0, train_end))
@@ -119,18 +144,26 @@ def main():
             elif data_args.split_by_patient:
                 LOG.info(f"Using the split_by_patient strategy")
                 unique_patient_ids = np.unique(dataset["person_id"])
-                LOG.info(f"There are {len(unique_patient_ids)} num of patients in total")
+                LOG.info(
+                    f"There are {len(unique_patient_ids)} num of patients in total"
+                )
                 np.random.seed(training_args.seed)
                 np.random.shuffle(unique_patient_ids)
 
-                train_end = int(len(unique_patient_ids) * (1 - data_args.validation_split_percentage))
+                train_end = int(
+                    len(unique_patient_ids)
+                    * (1 - data_args.validation_split_percentage)
+                )
                 train_patient_ids = set(unique_patient_ids[:train_end])
                 if not test_set:
                     # Calculate split indices
                     validation_end = (
-                            int(len(
-                                unique_patient_ids) * data_args.validation_split_percentage * data_args.test_eval_ratio)
-                            + train_end
+                        int(
+                            len(unique_patient_ids)
+                            * data_args.validation_split_percentage
+                            * data_args.test_eval_ratio
+                        )
+                        + train_end
                     )
 
                     # Split patient IDs
@@ -207,7 +240,9 @@ def main():
                     test_set = test_valid["test"]
 
         # Organize them into a single DatasetDict
-        final_splits = DatasetDict({"train": train_set, "validation": validation_set, "test": test_set})
+        final_splits = DatasetDict(
+            {"train": train_set, "validation": validation_set, "test": test_set}
+        )
         processed_dataset = create_cehrgpt_finetuning_dataset(
             dataset=final_splits, cehrgpt_tokenizer=tokenizer, data_args=data_args
         )
@@ -216,7 +251,7 @@ def main():
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
-    processed_dataset.set_format('pt')
+    processed_dataset.set_format("pt")
 
     if training_args.do_predict:
         model = load_finetuned_model(model_args, model_args.model_name_or_path)
@@ -237,11 +272,13 @@ def main():
                     target_modules=model_args.target_modules,
                     lora_dropout=model_args.lora_dropout,
                     bias="none",
-                    modules_to_save=["classifier", "age_batch_norm", "dense_layer"]
+                    modules_to_save=["classifier", "age_batch_norm", "dense_layer"],
                 )
                 model = get_peft_model(model, config)
             else:
-                raise ValueError(f'The LORA adapter is not supported for {model_args.finetune_model_type}')
+                raise ValueError(
+                    f"The LORA adapter is not supported for {model_args.finetune_model_type}"
+                )
 
         # We suppress the additional learning objectives in fine-tuning
         collator = CehrGptDataCollator(
@@ -249,16 +286,16 @@ def main():
             max_length=model.config.max_position_embeddings,
             pretraining=False,
             include_ttv_prediction=False,
-            use_sub_time_tokenization=False
+            use_sub_time_tokenization=False,
         )
 
         trainer = Trainer(
             model=model,
             data_collator=collator,
-            train_dataset=processed_dataset['train'],
-            eval_dataset=processed_dataset['validation'],
+            train_dataset=processed_dataset["train"],
+            eval_dataset=processed_dataset["validation"],
             callbacks=[EarlyStoppingCallback()],
-            args=training_args
+            args=training_args,
         )
 
         checkpoint = get_last_hf_checkpoint(training_args)
@@ -282,7 +319,11 @@ def main():
             do_predict(test_dataloader, model_args, training_args)
 
 
-def do_predict(test_dataloader: DataLoader, model_args: ModelArguments, training_args: TrainingArguments):
+def do_predict(
+    test_dataloader: DataLoader,
+    model_args: ModelArguments,
+    training_args: TrainingArguments,
+):
     """
     Performs inference on the test dataset using a fine-tuned model, saves predictions and evaluation metrics.
 
@@ -319,7 +360,10 @@ def do_predict(test_dataloader: DataLoader, model_args: ModelArguments, training
         for index, batch in enumerate(tqdm(test_dataloader, desc="Predicting")):
             person_ids = batch.pop("person_id").numpy().squeeze().astype(int)
             index_dates = (
-                map(datetime.fromtimestamp, batch.pop("index_date").numpy().squeeze().tolist())
+                map(
+                    datetime.fromtimestamp,
+                    batch.pop("index_date").numpy().squeeze().tolist(),
+                )
                 if "index_date" in batch
                 else None
             )
@@ -344,12 +388,15 @@ def do_predict(test_dataloader: DataLoader, model_args: ModelArguments, training
             )
             test_prediction_pd.to_parquet(test_prediction_folder / f"{index}.parquet")
 
-    LOG.info("Computing metrics using the test set predictions at %s", test_prediction_folder)
+    LOG.info(
+        "Computing metrics using the test set predictions at %s", test_prediction_folder
+    )
     # Load all predictions
     test_prediction_pd = pd.read_parquet(test_prediction_folder)
     # Compute metrics and save results
     metrics = compute_metrics(
-        references=test_prediction_pd.boolean_value, probs=test_prediction_pd.boolean_prediction_probability
+        references=test_prediction_pd.boolean_value,
+        probs=test_prediction_pd.boolean_prediction_probability,
     )
     metrics["test_loss"] = np.mean(test_losses)
 

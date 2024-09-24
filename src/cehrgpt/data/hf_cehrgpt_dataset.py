@@ -1,25 +1,37 @@
 from typing import Union
-from datasets import Dataset, DatasetDict
-from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
-from cehrbert.data_generators.hf_data_generator.hf_dataset import FINETUNING_COLUMNS, apply_cehrbert_dataset_mapping
-from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import (
-    SortPatientSequenceMapping, HFFineTuningMapping
+
+from cehrbert.data_generators.hf_data_generator.hf_dataset import (
+    FINETUNING_COLUMNS,
+    apply_cehrbert_dataset_mapping,
 )
-from cehrgpt.data.hf_cehrgpt_dataset_mapping import HFCehrGptTokenizationMapping
+from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import (
+    HFFineTuningMapping,
+    SortPatientSequenceMapping,
+)
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
+from datasets import Dataset, DatasetDict
+
+from cehrgpt.data.hf_cehrgpt_dataset_mapping import HFCehrGptTokenizationMapping
+from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 CEHRGPT_COLUMNS = [
-    'person_id', 'concept_ids', 'concept_values', 'concept_value_masks',
-    'num_of_concepts', 'num_of_visits', 'values', 'value_indicators'
+    "person_id",
+    "concept_ids",
+    "concept_values",
+    "concept_value_masks",
+    "num_of_concepts",
+    "num_of_visits",
+    "values",
+    "value_indicators",
 ]
 
-TRANSFORMER_COLUMNS = ['input_ids']
+TRANSFORMER_COLUMNS = ["input_ids"]
 
 
 def create_cehrgpt_pretraining_dataset(
-        dataset: Union[Dataset, DatasetDict],
-        cehrgpt_tokenizer: CehrGptTokenizer,
-        data_args: DataTrainingArguments
+    dataset: Union[Dataset, DatasetDict],
+    cehrgpt_tokenizer: CehrGptTokenizer,
+    data_args: DataTrainingArguments,
 ) -> Dataset:
     required_columns = TRANSFORMER_COLUMNS + CEHRGPT_COLUMNS
     # If the data is already in meds, we don't need to sort the sequence anymore
@@ -52,9 +64,9 @@ def create_cehrgpt_pretraining_dataset(
 
 
 def create_cehrgpt_finetuning_dataset(
-        dataset: Union[Dataset, DatasetDict],
-        cehrgpt_tokenizer: CehrGptTokenizer,
-        data_args: DataTrainingArguments
+    dataset: Union[Dataset, DatasetDict],
+    cehrgpt_tokenizer: CehrGptTokenizer,
+    data_args: DataTrainingArguments,
 ) -> Dataset:
     required_columns = TRANSFORMER_COLUMNS + CEHRGPT_COLUMNS + FINETUNING_COLUMNS
 

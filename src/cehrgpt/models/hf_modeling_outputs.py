@@ -1,6 +1,7 @@
-from typing import Optional, Tuple
-import torch
 from dataclasses import dataclass
+from typing import Optional, Tuple
+
+import torch
 from transformers.modeling_outputs import ModelOutput
 
 
@@ -122,7 +123,6 @@ class CehrGptGenerateDecoderOnlyOutput(ModelOutput):
     attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     past_key_values: Optional[Tuple[Tuple[Tuple[torch.FloatTensor]]]] = None
-
 
 
 @dataclass

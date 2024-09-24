@@ -1,10 +1,12 @@
 from typing import Dict, List
+
 from transformers import PretrainedConfig
 
 
 class CEHRGPTConfig(PretrainedConfig):
     """
     Args:
+
         vocab_size (`int`, *optional*, defaults to 50257):
             Vocabulary size of the GPT-2 model. Defines the number of different tokens that can be represented by the
             `inputs_ids` passed when calling [`GPT2Model`] or [`TFGPT2Model`].
@@ -87,40 +89,40 @@ class CEHRGPTConfig(PretrainedConfig):
     }
 
     def __init__(
-            self,
-            vocab_size=50257,
-            time_token_vocab_size=50257,
-            n_positions=1024,
-            n_embd=768,
-            n_layer=12,
-            n_head=12,
-            n_inner=None,
-            activation_function="gelu_new",
-            resid_pdrop=0.1,
-            embd_pdrop=0.1,
-            attn_pdrop=0.1,
-            layer_norm_epsilon=1e-5,
-            initializer_range=0.02,
-            summary_type="cls_index",
-            summary_use_proj=True,
-            summary_activation=None,
-            summary_proj_to_labels=True,
-            summary_first_dropout=0.1,
-            scale_attn_weights=True,
-            use_cache=True,
-            bos_token_id=50256,
-            eos_token_id=50256,
-            lab_token_ids=None,
-            scale_attn_by_inverse_layer_idx=False,
-            reorder_and_upcast_attn=False,
-            exclude_position_ids=False,
-            include_values=False,
-            include_ttv_prediction=False,
-            use_sub_time_tokenization=True,
-            time_token_loss_weight=1.0,
-            time_to_visit_loss_weight=1.0,
-            token_to_time_token_mapping: Dict[int, List] = None,
-            **kwargs,
+        self,
+        vocab_size=50257,
+        time_token_vocab_size=50257,
+        n_positions=1024,
+        n_embd=768,
+        n_layer=12,
+        n_head=12,
+        n_inner=None,
+        activation_function="gelu_new",
+        resid_pdrop=0.1,
+        embd_pdrop=0.1,
+        attn_pdrop=0.1,
+        layer_norm_epsilon=1e-5,
+        initializer_range=0.02,
+        summary_type="cls_index",
+        summary_use_proj=True,
+        summary_activation=None,
+        summary_proj_to_labels=True,
+        summary_first_dropout=0.1,
+        scale_attn_weights=True,
+        use_cache=True,
+        bos_token_id=50256,
+        eos_token_id=50256,
+        lab_token_ids=None,
+        scale_attn_by_inverse_layer_idx=False,
+        reorder_and_upcast_attn=False,
+        exclude_position_ids=False,
+        include_values=False,
+        include_ttv_prediction=False,
+        use_sub_time_tokenization=True,
+        time_token_loss_weight=1.0,
+        time_to_visit_loss_weight=1.0,
+        token_to_time_token_mapping: Dict[int, List] = None,
+        **kwargs,
     ):
         if token_to_time_token_mapping is None:
             token_to_time_token_mapping = {}

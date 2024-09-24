@@ -5,39 +5,56 @@ import uuid
 from datetime import date, timedelta
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Dict, Union, Any, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
+from cehrbert.models.hf_models.tokenization_utils import load_json_file
 from tqdm import tqdm
 
-from cehrbert.models.hf_models.tokenization_utils import load_json_file
+from cehrgpt.models.tokenization_hf_cehrgpt import END_TOKEN
+
 from ..gpt_utils import (
-    is_inpatient_att_token, extract_time_interval_in_days, generate_artificial_time_tokens
+    extract_time_interval_in_days,
+    generate_artificial_time_tokens,
+    is_inpatient_att_token,
 )
 from .omop_entity import (
-    Person, VisitOccurrence, ConditionOccurrence, ProcedureOccurrence,
-    DrugExposure, Death, Measurement, OmopEntity
+    ConditionOccurrence,
+    Death,
+    DrugExposure,
+    Measurement,
+    OmopEntity,
+    Person,
+    ProcedureOccurrence,
+    VisitOccurrence,
 )
-from cehrgpt.models.tokenization_hf_cehrgpt import END_TOKEN
+
 # TODO: move these to cehrbert_data
 STOP_TOKENS = ["VE", "[VE]", END_TOKEN]
 
 CURRENT_PATH = Path(__file__).parent
 START_TOKEN_SIZE = 4
 ATT_TIME_TOKENS = generate_artificial_time_tokens()
-TABLE_LIST = ['person', 'visit_occurrence', 'condition_occurrence', 'procedure_occurrence',
-              'drug_exposure', 'death', 'measurement']
+TABLE_LIST = [
+    "person",
+    "visit_occurrence",
+    "condition_occurrence",
+    "procedure_occurrence",
+    "drug_exposure",
+    "death",
+    "measurement",
+]
 DISCHARGE_CONCEPT_LIST = [4216643, 4021968, 4146681]
 OOV_CONCEPT_MAP = {
-    1525734: 'Drug',
-    1525543: 'Drug',
-    779414: 'Drug',
-    722117: 'Drug',
-    722118: 'Drug',
-    722119: 'Drug',
-    905420: 'Drug',
-    1525543: 'Drug'
+    1525734: "Drug",
+    1525543: "Drug",
+    779414: "Drug",
+    722117: "Drug",
+    722118: "Drug",
+    722119: "Drug",
+    905420: "Drug",
+    1525543: "Drug",
 }
 
 
@@ -48,7 +65,8 @@ def create_folder_if_not_exists(output_folder, table_name):
 
 def generate_omop_concept_domain(concept_parquet) -> Dict[int, str]:
     """
-    Generate a dictionary of concept_id to domain_id
+    Generate a dictionary of concept_id to domain_id.
+
     :param concept_parquet: concept dataframe read from parquet file
     :return: dictionary of concept_id to domain_id
     """
@@ -58,34 +76,38 @@ def generate_omop_concept_domain(concept_parquet) -> Dict[int, str]:
     return domain_dict
 
 
-def generate_lab_stats_mapping(all_lab_stats: Optional[List[Dict[str, Any]]]) -> Dict[int, Dict[str, Any]]:
+def generate_lab_stats_mapping(
+    all_lab_stats: Optional[List[Dict[str, Any]]]
+) -> Dict[int, Dict[str, Any]]:
     lab_stats_mapping = {}
     if all_lab_stats is not None:
         for lab_stats in all_lab_stats:
             # TODO: the numeric check will not hold true if we concatenate
             #  the concept with the corresponding unit concept
-            if lab_stats['concept_id'].isnumeric():
-                concept_id = int(lab_stats['concept_id'])
-                count = lab_stats['concept_id']
-                if (concept_id in lab_stats_mapping) and (count > lab_stats_mapping[concept_id]['count']):
+            if lab_stats["concept_id"].isnumeric():
+                concept_id = int(lab_stats["concept_id"])
+                count = lab_stats["concept_id"]
+                if (concept_id in lab_stats_mapping) and (
+                    count > lab_stats_mapping[concept_id]["count"]
+                ):
                     lab_stats_mapping[concept_id] = {
-                        'mean': lab_stats['mean'],
-                        'std': lab_stats['std'],
-                        'count': lab_stats['count']
+                        "mean": lab_stats["mean"],
+                        "std": lab_stats["std"],
+                        "count": lab_stats["count"],
                     }
                 else:
                     lab_stats_mapping[concept_id] = {
-                        'mean': lab_stats['mean'],
-                        'std': lab_stats['std'],
-                        'count': lab_stats['count']
+                        "mean": lab_stats["mean"],
+                        "std": lab_stats["std"],
+                        "count": lab_stats["count"],
                     }
     return lab_stats_mapping
 
 
 def append_to_dict(
-        export_dict: Dict[str, Dict[int, OmopEntity]],
-        omop_entity: OmopEntity,
-        entity_id: int
+    export_dict: Dict[str, Dict[int, OmopEntity]],
+    omop_entity: OmopEntity,
+    entity_id: int,
 ):
     if omop_entity.get_table_name() not in export_dict:
         export_dict[omop_entity.get_table_name()] = {}
@@ -93,9 +115,9 @@ def append_to_dict(
 
 
 def delete_bad_sequence(
-        export_dict: Dict[str, Dict[int, OmopEntity]],
-        id_mappings: Dict[str, Dict[int, int]],
-        person_id: int
+    export_dict: Dict[str, Dict[int, OmopEntity]],
+    id_mappings: Dict[str, Dict[int, int]],
+    person_id: int,
 ):
     for table_name, id_mapping in id_mappings.items():
         omop_id_mapping = np.array(list(id_mapping.keys()))
@@ -106,12 +128,12 @@ def delete_bad_sequence(
 
 
 def export_and_clear(
-        output_folder: str,
-        export_dict: Dict[str, Dict[int, OmopEntity]],
-        export_error: Dict[str, Dict[str, str]],
-        id_mappings_dict: Dict[str, Dict[int, int]],
-        pt_seq_dict: Dict[int, str],
-        is_parquet: bool = True
+    output_folder: str,
+    export_dict: Dict[str, Dict[int, OmopEntity]],
+    export_error: Dict[str, Dict[str, str]],
+    id_mappings_dict: Dict[str, Dict[int, int]],
+    pt_seq_dict: Dict[int, str],
+    is_parquet: bool = True,
 ):
     for table_name, records_to_export in export_dict.items():
 
@@ -132,7 +154,7 @@ def export_and_clear(
                 continue
         schema = next(iter(records_to_export.items()))[1].get_schema()
         output_folder_path = Path(output_folder)
-        file_path = output_folder_path / table_name / f'{uuid.uuid4()}.parquet'
+        file_path = output_folder_path / table_name / f"{uuid.uuid4()}.parquet"
         table_df = pd.DataFrame(records_in_json, columns=schema)
 
         if is_parquet:
@@ -148,14 +170,14 @@ def _is_none(x):
 
 
 def gpt_to_omop_converter_serial(
-        const: int,
-        pat_seq_split: Union[np.ndarray, pd.Series],
-        pat_concept_values: Union[np.ndarray, pd.Series],
-        domain_map: Dict[int, str],
-        output_folder: str,
-        buffer_size: int,
-        original_person_id: bool,
-        lab_stats_mapping: Dict[int, Dict[str, float]]
+    const: int,
+    pat_seq_split: Union[np.ndarray, pd.Series],
+    pat_concept_values: Union[np.ndarray, pd.Series],
+    domain_map: Dict[int, str],
+    output_folder: str,
+    buffer_size: int,
+    original_person_id: bool,
+    lab_stats_mapping: Dict[int, Dict[str, float]],
 ):
     omop_export_dict = {}
     error_dict = {}
@@ -176,17 +198,19 @@ def gpt_to_omop_converter_serial(
 
     person_id: int = const + 1
 
-    for index, (row, full_concept_values) in tqdm(enumerate(zip(pat_seq_split, pat_concept_values)), total=pat_seq_len):
+    for index, (row, full_concept_values) in tqdm(
+        enumerate(zip(pat_seq_split, pat_concept_values)), total=pat_seq_len
+    ):
         bad_sequence = False
         # ignore start token
         if original_person_id:
             person_id = row[0]
-            if 'start' in row[1].lower():
+            if "start" in row[1].lower():
                 row = row[2:]
             else:
                 row = row[1:]
         else:
-            if 'start' in row[0].lower():
+            if "start" in row[0].lower():
                 row = row[1:]
             else:
                 row = row[0:]
@@ -208,15 +232,17 @@ def gpt_to_omop_converter_serial(
         # TODO:Need to decode if the input is tokenized
         start_tokens = row[0:START_TOKEN_SIZE]
         [start_year, start_age, start_gender, start_race] = [_ for _ in start_tokens]
-        if 'year' not in start_year.lower():
+        if "year" not in start_year.lower():
             continue
 
         try:
-            start_year = start_year.split(':')[1]
-            start_age = start_age.split(':')[1]
+            start_year = start_year.split(":")[1]
+            start_age = start_age.split(":")[1]
             birth_year = int(start_year) - int(start_age)
         except Exception as e:
-            print(f'Failed to convert {start_tokens} due to {e}, skipping to the next record')
+            print(
+                f"Failed to convert {start_tokens} due to {e}, skipping to the next record"
+            )
             continue
 
         # Skip the patients whose birth year is either before 1900 or after this year
@@ -225,8 +251,8 @@ def gpt_to_omop_converter_serial(
 
         p = Person(person_id, start_gender, birth_year, start_race)
         append_to_dict(omop_export_dict, p, person_id)
-        id_mappings_dict['person'][person_id] = person_id
-        pt_seq_dict[person_id] = ' '.join(row)
+        id_mappings_dict["person"][person_id] = person_id
+        pt_seq_dict[person_id] = " ".join(row)
         discharged_to_concept_id = 0
         data_cursor = date(int(start_year), 1, 1)
         att_date_delta = 0
@@ -237,23 +263,31 @@ def gpt_to_omop_converter_serial(
             # For bad sequences, we don't proceed further and break from the for loop
             if bad_sequence:
                 break
-            if x == 'VS':
+            if x == "VS":
                 if idx == len(tokens_generated) - 1:
                     break
-                elif tokens_generated[idx + 1] == '[DEATH]':
+                elif tokens_generated[idx + 1] == "[DEATH]":
                     # If the [DEATH] token is not placed at the end of the sequence, this is a bad sequence
                     if idx + 2 != len(tokens_generated) - 1:
                         bad_sequence = True
                         break
                     death = Death(p, data_cursor)
                     append_to_dict(omop_export_dict, death, person_id)
-                    id_mappings_dict['death'][person_id] = person_id
+                    id_mappings_dict["death"][person_id] = person_id
                 else:
                     try:
                         visit_concept_id = int(tokens_generated[idx + 1])
-                        inpatient_visit_indicator = visit_concept_id in [9201, 262, 8971, 8920]
+                        inpatient_visit_indicator = visit_concept_id in [
+                            9201,
+                            262,
+                            8971,
+                            8920,
+                        ]
                         if visit_concept_id in domain_map:
-                            if domain_map[visit_concept_id] != 'Visit' and visit_concept_id != 0:
+                            if (
+                                domain_map[visit_concept_id] != "Visit"
+                                and visit_concept_id != 0
+                            ):
                                 bad_sequence = True
                                 break
                         else:
@@ -262,29 +296,33 @@ def gpt_to_omop_converter_serial(
 
                     except (IndexError, ValueError):
                         error_dict[person_id] = {}
-                        error_dict[person_id]['row'] = ','.join(list(row))
-                        error_dict[person_id]['error'] = 'Wrong visit concept id'
+                        error_dict[person_id]["row"] = ",".join(list(row))
+                        error_dict[person_id]["error"] = "Wrong visit concept id"
                         bad_sequence = True
                         continue
-                    vo = VisitOccurrence(visit_occurrence_id, visit_concept_id, data_cursor, p)
+                    vo = VisitOccurrence(
+                        visit_occurrence_id, visit_concept_id, data_cursor, p
+                    )
                     append_to_dict(omop_export_dict, vo, visit_occurrence_id)
-                    id_mappings_dict['visit_occurrence'][visit_occurrence_id] = person_id
+                    id_mappings_dict["visit_occurrence"][
+                        visit_occurrence_id
+                    ] = person_id
                     visit_occurrence_id += 1
             elif x in ATT_TIME_TOKENS:
-                if x[0] == 'D':
+                if x[0] == "D":
                     att_date_delta = int(x[1:])
-                elif x[0] == 'W':
+                elif x[0] == "W":
                     att_date_delta = int(x[1:]) * 7
-                elif x[0] == 'M':
+                elif x[0] == "M":
                     att_date_delta = int(x[1:]) * 30
-                elif x == 'LT':
+                elif x == "LT":
                     att_date_delta = 365 * 3
                 data_cursor = data_cursor + timedelta(days=att_date_delta)
             elif inpatient_visit_indicator and is_inpatient_att_token(x):
                 # VS\-D\d+\-VE\
                 inpatient_time_span_in_days = extract_time_interval_in_days(x)
                 data_cursor = data_cursor + timedelta(days=inpatient_time_span_in_days)
-            elif x == 'VE':
+            elif x == "VE":
                 if vo is None:
                     bad_sequence = True
                     break
@@ -297,21 +335,33 @@ def gpt_to_omop_converter_serial(
                     if discharged_to_concept_id == 4216643:
                         death = Death(p, data_cursor, death_type_concept_id=32823)
                         append_to_dict(omop_export_dict, death, person_id)
-                        id_mappings_dict['death'][person_id] = person_id
+                        id_mappings_dict["death"][person_id] = person_id
                         # If death record is generated, we need to stop the sequence conversion
                         break
                 else:
                     pass
-            elif x in ['START', start_year, start_age, start_gender, start_race, '[DEATH]']:
+            elif x in [
+                "START",
+                start_year,
+                start_age,
+                start_gender,
+                start_race,
+                "[DEATH]",
+            ]:
                 # If it's a start token, skip it
                 pass
             else:
                 try:
                     concept_id = int(x)
-                    if concept_id not in domain_map and concept_id not in OOV_CONCEPT_MAP:
+                    if (
+                        concept_id not in domain_map
+                        and concept_id not in OOV_CONCEPT_MAP
+                    ):
                         error_dict[person_id] = {}
-                        error_dict[person_id]['row'] = ' '.join(row)
-                        error_dict[person_id]['error'] = f'No concept id found: {concept_id}'
+                        error_dict[person_id]["row"] = " ".join(row)
+                        error_dict[person_id][
+                            "error"
+                        ] = f"No concept id found: {concept_id}"
                         bad_sequence = True
                         continue
                     else:
@@ -329,7 +379,10 @@ def gpt_to_omop_converter_serial(
                             #     bad_sequence = True
                             #     continue
                             # we also enforce the rule where the sequence has to end on a VE token
-                            if idx + 1 < len(tokens_generated) and tokens_generated[idx + 1] != 'VE':
+                            if (
+                                idx + 1 < len(tokens_generated)
+                                and tokens_generated[idx + 1] != "VE"
+                            ):
                                 bad_sequence = True
                                 continue
 
@@ -340,41 +393,59 @@ def gpt_to_omop_converter_serial(
                         else:
                             domain = None
 
-                        if domain == 'Visit' or concept_id in DISCHARGE_CONCEPT_LIST:
+                        if domain == "Visit" or concept_id in DISCHARGE_CONCEPT_LIST:
                             discharged_to_concept_id = concept_id
-                        elif domain == 'Condition':
-                            co = ConditionOccurrence(condition_occurrence_id, x, vo, data_cursor)
-                            append_to_dict(omop_export_dict, co, condition_occurrence_id)
-                            id_mappings_dict['condition_occurrence'][
-                                condition_occurrence_id] = person_id
+                        elif domain == "Condition":
+                            co = ConditionOccurrence(
+                                condition_occurrence_id, x, vo, data_cursor
+                            )
+                            append_to_dict(
+                                omop_export_dict, co, condition_occurrence_id
+                            )
+                            id_mappings_dict["condition_occurrence"][
+                                condition_occurrence_id
+                            ] = person_id
                             condition_occurrence_id += 1
-                        elif domain == 'Procedure':
-                            po = ProcedureOccurrence(procedure_occurrence_id, x, vo, data_cursor)
-                            append_to_dict(omop_export_dict, po, procedure_occurrence_id)
-                            id_mappings_dict['procedure_occurrence'][
-                                procedure_occurrence_id] = person_id
+                        elif domain == "Procedure":
+                            po = ProcedureOccurrence(
+                                procedure_occurrence_id, x, vo, data_cursor
+                            )
+                            append_to_dict(
+                                omop_export_dict, po, procedure_occurrence_id
+                            )
+                            id_mappings_dict["procedure_occurrence"][
+                                procedure_occurrence_id
+                            ] = person_id
                             procedure_occurrence_id += 1
-                        elif domain == 'Drug':
+                        elif domain == "Drug":
                             de = DrugExposure(drug_exposure_id, x, vo, data_cursor)
                             append_to_dict(omop_export_dict, de, drug_exposure_id)
-                            id_mappings_dict['drug_exposure'][drug_exposure_id] = person_id
+                            id_mappings_dict["drug_exposure"][
+                                drug_exposure_id
+                            ] = person_id
                             drug_exposure_id += 1
-                        elif domain == 'Measurement':
-                            concept_value = concept_values[idx] if concept_values is not None else 0.0
+                        elif domain == "Measurement":
+                            concept_value = (
+                                concept_values[idx]
+                                if concept_values is not None
+                                else 0.0
+                            )
                             if concept_id in lab_stats_mapping:
                                 concept_value = (
-                                        concept_value * lab_stats_mapping[concept_id]['std'] +
-                                        lab_stats_mapping[concept_id]['mean']
+                                    concept_value * lab_stats_mapping[concept_id]["std"]
+                                    + lab_stats_mapping[concept_id]["mean"]
                                 )
-                            m = Measurement(measurement_id, x, concept_value, vo, data_cursor)
+                            m = Measurement(
+                                measurement_id, x, concept_value, vo, data_cursor
+                            )
                             append_to_dict(omop_export_dict, m, measurement_id)
-                            id_mappings_dict['measurement'][measurement_id] = person_id
+                            id_mappings_dict["measurement"][measurement_id] = person_id
                             measurement_id += 1
 
                 except ValueError:
                     error_dict[person_id] = {}
-                    error_dict[person_id]['row'] = ' '.join(row)
-                    error_dict[person_id]['error'] = f'Wrong concept id: {x}'
+                    error_dict[person_id]["row"] = " ".join(row)
+                    error_dict[person_id]["error"] = f"Wrong concept id: {x}"
                     bad_sequence = True
                     continue
         if bad_sequence:
@@ -388,40 +459,36 @@ def gpt_to_omop_converter_serial(
                 omop_export_dict,
                 export_error,
                 id_mappings_dict,
-                pt_seq_dict
+                pt_seq_dict,
             )
 
     # Final flush to the disk if there are still records in the cache
     export_and_clear(
-        output_folder,
-        omop_export_dict,
-        export_error,
-        id_mappings_dict,
-        pt_seq_dict
+        output_folder, omop_export_dict, export_error, id_mappings_dict, pt_seq_dict
     )
 
     with open(Path(output_folder) / "concept_errors.txt", "w") as f:
-        error_dict['total'] = len(error_dict)
+        error_dict["total"] = len(error_dict)
         f.write(str(error_dict))
     with open(Path(output_folder) / "export_errors.txt", "w") as f:
         total = 0
         for k, v in export_error.items():
             total += len(v)
-        export_error['total'] = total
+        export_error["total"] = total
         f.write(str(export_error))
 
 
 def gpt_to_omop_converter_parallel(
-        output_folder: str,
-        concept_pd: pd.DataFrame,
-        patient_sequences_concept_ids: pd.DataFrame,
-        buffer_size: int,
-        num_of_cores: int,
-        original_person_id: bool,
-        all_lab_stats: List[Dict[int, Any]] = None
+    output_folder: str,
+    concept_pd: pd.DataFrame,
+    patient_sequences_concept_ids: pd.DataFrame,
+    buffer_size: int,
+    num_of_cores: int,
+    original_person_id: bool,
+    all_lab_stats: List[Dict[int, Any]] = None,
 ):
-    patient_sequences = patient_sequences_concept_ids['concept_ids']
-    concept_values = patient_sequences_concept_ids['concept_values']
+    patient_sequences = patient_sequences_concept_ids["concept_ids"]
+    concept_values = patient_sequences_concept_ids["concept_values"]
     domain_map = generate_omop_concept_domain(concept_pd)
     lab_stats_mapping = generate_lab_stats_mapping(all_lab_stats)
     pool_tuples = []
@@ -431,8 +498,16 @@ def gpt_to_omop_converter_parallel(
     concept_values_list = np.array_split(concept_values, num_of_cores)
     for i in range(1, num_of_cores + 1):
         pool_tuples.append(
-            (const * i, patient_sequences_list[i - 1], concept_values_list[i - 1], domain_map,
-             output_folder, buffer_size, original_person_id, lab_stats_mapping)
+            (
+                const * i,
+                patient_sequences_list[i - 1],
+                concept_values_list[i - 1],
+                domain_map,
+                output_folder,
+                buffer_size,
+                original_person_id,
+                lab_stats_mapping,
+            )
         )
 
     with Pool(processes=num_of_cores) as p:
@@ -440,24 +515,29 @@ def gpt_to_omop_converter_parallel(
         p.close()
         p.join()
 
-    return print('Done')
+    return print("Done")
 
 
 def main(args):
     concept_pd = pd.read_parquet(args.concept_path)
-    all_lab_stats = load_json_file(args.lab_stats_path) if args.lab_stats_path is not None else None
+    all_lab_stats = (
+        load_json_file(args.lab_stats_path) if args.lab_stats_path is not None else None
+    )
 
     if args.original_person_id:
         patient_sequences_concept_ids = pd.read_parquet(
             args.patient_sequence_path,
-            columns=['person_id', 'concept_ids', 'concept_values']
+            columns=["person_id", "concept_ids", "concept_values"],
         )
-        patient_sequences_concept_ids['concept_ids'] = patient_sequences_concept_ids. \
-            apply(lambda row: np.append(row.person_id, row.concept_ids), axis=1)
-        patient_sequences_concept_ids.drop(columns=['person_id'], inplace=True)
+        patient_sequences_concept_ids["concept_ids"] = (
+            patient_sequences_concept_ids.apply(
+                lambda row: np.append(row.person_id, row.concept_ids), axis=1
+            )
+        )
+        patient_sequences_concept_ids.drop(columns=["person_id"], inplace=True)
     else:
         patient_sequences_concept_ids = pd.read_parquet(
-            args.patient_sequence_path, columns=['concept_ids', 'concept_values']
+            args.patient_sequence_path, columns=["concept_ids", "concept_values"]
         )
     gpt_to_omop_converter_parallel(
         args.output_folder,
@@ -466,61 +546,59 @@ def main(args):
         args.buffer_size,
         args.cpu_cores,
         args.original_person_id,
-        all_lab_stats
+        all_lab_stats,
     )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description='Arguments for converting patient sequences to OMOP')
-    parser.add_argument(
-        '--output_folder',
-        dest='output_folder',
-        action='store',
-        help='The path for the output_folder',
-        required=True
+        description="Arguments for converting patient sequences to OMOP"
     )
     parser.add_argument(
-        '--concept_path',
-        dest='concept_path',
-        action='store',
-        help='The path for your concept_path',
-        required=True
+        "--output_folder",
+        dest="output_folder",
+        action="store",
+        help="The path for the output_folder",
+        required=True,
     )
     parser.add_argument(
-        '--lab_stats_path',
-        dest='lab_stats_path',
-        action='store',
-        required=False
+        "--concept_path",
+        dest="concept_path",
+        action="store",
+        help="The path for your concept_path",
+        required=True,
     )
     parser.add_argument(
-        '--buffer_size',
-        dest='buffer_size',
-        action='store',
+        "--lab_stats_path", dest="lab_stats_path", action="store", required=False
+    )
+    parser.add_argument(
+        "--buffer_size",
+        dest="buffer_size",
+        action="store",
         type=int,
-        help='The size of the batch',
-        required=True
+        help="The size of the batch",
+        required=True,
     )
     parser.add_argument(
-        '--patient_sequence_path',
-        dest='patient_sequence_path',
-        action='store',
-        help='The path for your patient sequence',
-        required=True
+        "--patient_sequence_path",
+        dest="patient_sequence_path",
+        action="store",
+        help="The path for your patient sequence",
+        required=True,
     )
     parser.add_argument(
-        '--cpu_cores',
-        dest='cpu_cores',
+        "--cpu_cores",
+        dest="cpu_cores",
         type=int,
-        action='store',
-        help='The number of cpu cores to use for multiprocessing',
-        required=False
+        action="store",
+        help="The number of cpu cores to use for multiprocessing",
+        required=False,
     )
     parser.add_argument(
-        '--original_person_id',
-        dest='original_person_id',
-        action='store_true',
-        help='Whether or not to use the original person id'
+        "--original_person_id",
+        dest="original_person_id",
+        action="store_true",
+        help="Whether or not to use the original person id",
     )
 
     main(parser.parse_args())

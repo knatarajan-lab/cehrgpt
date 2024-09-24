@@ -3,15 +3,16 @@ import datetime
 import os
 import random
 import uuid
-from typing import Any, Dict
-import pandas as pd
 from enum import Enum
+from typing import Any, Dict
 
+import pandas as pd
 import torch
-from ..models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from transformers import GenerationConfig
 from transformers.utils import is_flash_attn_2_available
+
 from ..models.hf_cehrgpt import CEHRGPT2LMHeadModel
+from ..models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 
 class SamplingStrategy(Enum):
@@ -21,25 +22,22 @@ class SamplingStrategy(Enum):
 
 
 def generate_single_batch(
-        model,
-        tokenizer,
-        batch_size,
-        demographic_info,
-        max_new_tokens=512,
-        mini_num_of_concepts=1,
-        top_p=0.95,
-        top_k=50,
-        temperature=1.0,
-        repetition_penalty=1.0,
-        num_beams=1,
-        num_beam_groups=1,
-        epsilon_cutoff=0.0,
-        device: Any = 'cpu'
+    model,
+    tokenizer,
+    batch_size,
+    demographic_info,
+    max_new_tokens=512,
+    mini_num_of_concepts=1,
+    top_p=0.95,
+    top_k=50,
+    temperature=1.0,
+    repetition_penalty=1.0,
+    num_beams=1,
+    num_beam_groups=1,
+    epsilon_cutoff=0.0,
+    device: Any = "cpu",
 ) -> Dict[str, Any]:
-    random_prompts = random.sample(
-        demographic_info,
-        batch_size
-    )
+    random_prompts = random.sample(demographic_info, batch_size)
 
     with torch.no_grad():
         generation_config = GenerationConfig(
@@ -61,80 +59,95 @@ def generate_single_batch(
             renormalize_logits=True,
             num_beams=num_beams,
             num_beam_groups=num_beam_groups,
-            epsilon_cutoff=epsilon_cutoff
+            epsilon_cutoff=epsilon_cutoff,
         )
         batched_prompts = torch.tensor(random_prompts).to(device)
         results = model.generate(
-            inputs=batched_prompts,
-            generation_config=generation_config
+            inputs=batched_prompts, generation_config=generation_config
         )
 
     sequences = [tokenizer.decode(seq.cpu().numpy()) for seq in results.sequences]
     if results.sequence_val_masks is not None:
-        value_indicators = [m[:len(s)] for m, s in zip(results.sequence_val_masks.detach().cpu().numpy(), sequences)]
+        value_indicators = [
+            m[: len(s)]
+            for m, s in zip(
+                results.sequence_val_masks.detach().cpu().numpy(), sequences
+            )
+        ]
     else:
         value_indicators = [None] * len(sequences)
     if results.sequence_vals is not None:
-        values = [v[:len(s)] for v, s in zip(results.sequence_vals.detach().cpu().numpy(), sequences)]
+        values = [
+            v[: len(s)]
+            for v, s in zip(results.sequence_vals.detach().cpu().numpy(), sequences)
+        ]
     else:
         values = [None] * len(sequences)
     return {
-        'sequences': sequences,
-        'value_indicators': value_indicators,
-        'values': values
+        "sequences": sequences,
+        "value_indicators": value_indicators,
+        "values": values,
     }
 
 
-def main(
-        args
-):
+def main(args):
     if torch.cuda.is_available():
         device = torch.device("cuda")
     else:
         device = torch.device("cpu")
 
     cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer_folder)
-    cehrgpt_model = CEHRGPT2LMHeadModel.from_pretrained(
-        args.model_folder,
-        attn_implementation="flash_attention_2" if is_flash_attn_2_available() else "eager",
-        torch_dtype=torch.bfloat16 if is_flash_attn_2_available() else torch.float32
-    ).eval().to(device)
+    cehrgpt_model = (
+        CEHRGPT2LMHeadModel.from_pretrained(
+            args.model_folder,
+            attn_implementation=(
+                "flash_attention_2" if is_flash_attn_2_available() else "eager"
+            ),
+            torch_dtype=(
+                torch.bfloat16 if is_flash_attn_2_available() else torch.float32
+            ),
+        )
+        .eval()
+        .to(device)
+    )
     cehrgpt_model.generation_config.pad_token_id = cehrgpt_tokenizer.pad_token_id
     cehrgpt_model.generation_config.eos_token_id = cehrgpt_tokenizer.end_token_id
     cehrgpt_model.generation_config.bos_token_id = cehrgpt_tokenizer.end_token_id
 
     if args.sampling_strategy == SamplingStrategy.TopKStrategy.value:
-        folder_name = f'top_k{args.top_k}'
+        folder_name = f"top_k{args.top_k}"
         args.top_p = 1.0
     elif args.sampling_strategy == SamplingStrategy.TopPStrategy.value:
-        folder_name = f'top_p{int(args.top_p * 1000)}'
+        folder_name = f"top_p{int(args.top_p * 1000)}"
         args.top_k = cehrgpt_tokenizer.vocab_size
     elif args.sampling_strategy == SamplingStrategy.TopMixStrategy.value:
-        folder_name = f'top_mix_p{int(args.top_p * 1000)}_k{args.top_k}'
+        folder_name = f"top_mix_p{int(args.top_p * 1000)}_k{args.top_k}"
     else:
         raise RuntimeError(
-            'sampling_strategy has to be one of the following three options [TopKStrategy, TopPStrategy, TopMixStrategy]'
+            "sampling_strategy has to be one of the following three options [TopKStrategy, TopPStrategy, TopMixStrategy]"
         )
 
     if args.temperature != 1.0:
-        folder_name = f'{folder_name}_temp_{int(args.temperature * 1000)}'
+        folder_name = f"{folder_name}_temp_{int(args.temperature * 1000)}"
 
     if args.repetition_penalty != 1.0:
-        folder_name = f'{folder_name}_repetition_penalty_{int(args.repetition_penalty * 1000)}'
+        folder_name = (
+            f"{folder_name}_repetition_penalty_{int(args.repetition_penalty * 1000)}"
+        )
 
     if args.num_beams > 1:
-        folder_name = f'{folder_name}_num_beams_{int(args.num_beams)}'
+        folder_name = f"{folder_name}_num_beams_{int(args.num_beams)}"
 
     if args.num_beam_groups > 1:
-        folder_name = f'{folder_name}_num_beam_groups_{int(args.num_beam_groups)}'
+        folder_name = f"{folder_name}_num_beam_groups_{int(args.num_beam_groups)}"
 
     if args.epsilon_cutoff > 0.0:
-        folder_name = f'{folder_name}_epsilon_cutoff_{int(args.epsilon_cutoff * 100000)}'
+        folder_name = (
+            f"{folder_name}_epsilon_cutoff_{int(args.epsilon_cutoff * 100000)}"
+        )
 
     output_folder_name = os.path.join(
-        args.output_folder,
-        folder_name,
-        'generated_sequences'
+        args.output_folder, folder_name, "generated_sequences"
     )
 
     if not os.path.exists(output_folder_name):
@@ -143,23 +156,23 @@ def main(
     # atexit.register(strategy._extended._collective_ops._pool.close)  # type: ignore
     # atexit.register(strategy._extended._cross_device_ops._pool.close) # type: ignore
     # atexit.register(strategy._extended._host_cross_device_ops._pool.close) #type: ignore
-    print(f'{datetime.datetime.now()}: Loading tokenizer at {args.model_folder}')
-    print(f'{datetime.datetime.now()}: Loading model at {args.model_folder}')
-    print(f'{datetime.datetime.now()}: Write sequences to {output_folder_name}')
-    print(f'{datetime.datetime.now()}: Context window {args.context_window}')
-    print(f'{datetime.datetime.now()}: Temperature {args.temperature}')
-    print(f'{datetime.datetime.now()}: Repetition Penalty {args.repetition_penalty}')
-    print(f'{datetime.datetime.now()}: Sampling Strategy {args.sampling_strategy}')
-    print(f'{datetime.datetime.now()}: Num beam {args.num_beams}')
-    print(f'{datetime.datetime.now()}: Num beam groups {args.num_beam_groups}')
-    print(f'{datetime.datetime.now()}: Epsilon cutoff {args.epsilon_cutoff}')
-    print(f'{datetime.datetime.now()}: Top P {args.top_p}')
-    print(f'{datetime.datetime.now()}: Top K {args.top_k}')
-    print(f'{datetime.datetime.now()}: Loading demographic_info at {args.demographic_data_path}')
-
-    data = pd.read_parquet(
-        args.demographic_data_path
+    print(f"{datetime.datetime.now()}: Loading tokenizer at {args.model_folder}")
+    print(f"{datetime.datetime.now()}: Loading model at {args.model_folder}")
+    print(f"{datetime.datetime.now()}: Write sequences to {output_folder_name}")
+    print(f"{datetime.datetime.now()}: Context window {args.context_window}")
+    print(f"{datetime.datetime.now()}: Temperature {args.temperature}")
+    print(f"{datetime.datetime.now()}: Repetition Penalty {args.repetition_penalty}")
+    print(f"{datetime.datetime.now()}: Sampling Strategy {args.sampling_strategy}")
+    print(f"{datetime.datetime.now()}: Num beam {args.num_beams}")
+    print(f"{datetime.datetime.now()}: Num beam groups {args.num_beam_groups}")
+    print(f"{datetime.datetime.now()}: Epsilon cutoff {args.epsilon_cutoff}")
+    print(f"{datetime.datetime.now()}: Top P {args.top_p}")
+    print(f"{datetime.datetime.now()}: Top K {args.top_k}")
+    print(
+        f"{datetime.datetime.now()}: Loading demographic_info at {args.demographic_data_path}"
     )
+
+    data = pd.read_parquet(args.demographic_data_path)
     # data = data[data.num_of_concepts >= args.min_num_of_concepts]
     demographic_info = data.concept_ids.apply(lambda concept_list: concept_list[0:4])
     demographic_info = [cehrgpt_tokenizer.encode(_) for _ in demographic_info]
@@ -168,7 +181,7 @@ def main(
     sequence_to_flush = []
     current_person_id = 1
     for i in range(num_of_batches):
-        print(f'{datetime.datetime.now()}: Batch {i} started')
+        print(f"{datetime.datetime.now()}: Batch {i} started")
         batch_sequences = generate_single_batch(
             cehrgpt_model,
             cehrgpt_tokenizer,
@@ -183,181 +196,186 @@ def main(
             num_beams=args.num_beams,
             num_beam_groups=args.num_beam_groups,
             epsilon_cutoff=args.epsilon_cutoff,
-            device=device
+            device=device,
         )
 
         # Clear the cache
         torch.cuda.empty_cache()
 
         for seq, value_indicator, value in zip(
-                batch_sequences["sequences"], batch_sequences["value_indicators"], batch_sequences["values"]
+            batch_sequences["sequences"],
+            batch_sequences["value_indicators"],
+            batch_sequences["values"],
         ):
-            output = {
-                'concept_ids': seq,
-                'person_id': current_person_id
-            }
+            output = {"concept_ids": seq, "person_id": current_person_id}
             if value is not None:
-                output['concept_values'] = value
+                output["concept_values"] = value
             if value_indicator is not None:
-                output['concept_value_masks'] = value_indicator
+                output["concept_value_masks"] = value_indicator
 
             sequence_to_flush.append(output)
             current_person_id += 1
 
         if len(sequence_to_flush) >= args.buffer_size:
-            print(f'{datetime.datetime.now()}: Flushing to the Disk at Batch {i}')
+            print(f"{datetime.datetime.now()}: Flushing to the Disk at Batch {i}")
             pd.DataFrame(
                 sequence_to_flush,
-                columns=['concept_ids', 'person_id', 'concept_values', 'concept_value_masks']
-            ).to_parquet(os.path.join(output_folder_name, f'{uuid.uuid4()}.parquet'))
+                columns=[
+                    "concept_ids",
+                    "person_id",
+                    "concept_values",
+                    "concept_value_masks",
+                ],
+            ).to_parquet(os.path.join(output_folder_name, f"{uuid.uuid4()}.parquet"))
             sequence_to_flush.clear()
 
     if len(sequence_to_flush) > 0:
-        print(f'{datetime.datetime.now()}: Flushing to the Disk at Final Batch')
-        pd.DataFrame(
-            sequence_to_flush,
-            columns=['concept_ids']
-        ).to_parquet(os.path.join(output_folder_name, f'{uuid.uuid4()}-last.parquet'))
+        print(f"{datetime.datetime.now()}: Flushing to the Disk at Final Batch")
+        pd.DataFrame(sequence_to_flush, columns=["concept_ids"]).to_parquet(
+            os.path.join(output_folder_name, f"{uuid.uuid4()}-last.parquet")
+        )
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Arguments for generating patient sequences')
+    parser = argparse.ArgumentParser(
+        description="Arguments for generating patient sequences"
+    )
 
     parser.add_argument(
-        '--tokenizer_folder',
-        dest='tokenizer_folder',
-        action='store',
-        help='The path for your model_folder',
-        required=True
+        "--tokenizer_folder",
+        dest="tokenizer_folder",
+        action="store",
+        help="The path for your model_folder",
+        required=True,
     )
     parser.add_argument(
-        '--model_folder',
-        dest='model_folder',
-        action='store',
-        help='The path for your model_folder',
-        required=True
+        "--model_folder",
+        dest="model_folder",
+        action="store",
+        help="The path for your model_folder",
+        required=True,
     )
     parser.add_argument(
-        '--output_folder',
-        dest='output_folder',
-        action='store',
-        help='The path for your generated data',
-        required=True
+        "--output_folder",
+        dest="output_folder",
+        action="store",
+        help="The path for your generated data",
+        required=True,
     )
     parser.add_argument(
-        '--num_of_patients',
-        dest='num_of_patients',
-        action='store',
+        "--num_of_patients",
+        dest="num_of_patients",
+        action="store",
         type=int,
-        help='The number of patients that will be generated',
-        required=True
+        help="The number of patients that will be generated",
+        required=True,
     )
     parser.add_argument(
-        '--batch_size',
-        dest='batch_size',
-        action='store',
+        "--batch_size",
+        dest="batch_size",
+        action="store",
         type=int,
-        help='batch_size',
-        required=True
+        help="batch_size",
+        required=True,
     )
     parser.add_argument(
-        '--buffer_size',
-        dest='buffer_size',
-        action='store',
+        "--buffer_size",
+        dest="buffer_size",
+        action="store",
         type=int,
         default=100,
-        help='buffer_size',
-        required=False
+        help="buffer_size",
+        required=False,
     )
     parser.add_argument(
-        '--context_window',
-        dest='context_window',
-        action='store',
+        "--context_window",
+        dest="context_window",
+        action="store",
         type=int,
-        help='The context window of the gpt model',
-        required=True
+        help="The context window of the gpt model",
+        required=True,
     )
     parser.add_argument(
-        '--min_num_of_concepts',
-        dest='min_num_of_concepts',
-        action='store',
+        "--min_num_of_concepts",
+        dest="min_num_of_concepts",
+        action="store",
         type=int,
         default=1,
-        required=False
+        required=False,
     )
     parser.add_argument(
-        '--sampling_strategy',
-        dest='sampling_strategy',
-        action='store',
+        "--sampling_strategy",
+        dest="sampling_strategy",
+        action="store",
         choices=[e.value for e in SamplingStrategy],
-        help='Pick the sampling strategy from the three options top_k, top_p and top_mix',
-        required=True
+        help="Pick the sampling strategy from the three options top_k, top_p and top_mix",
+        required=True,
     )
     parser.add_argument(
-        '--top_k',
-        dest='top_k',
-        action='store',
+        "--top_k",
+        dest="top_k",
+        action="store",
         default=100,
         type=int,
-        help='The number of top concepts to sample',
-        required=False
+        help="The number of top concepts to sample",
+        required=False,
     )
     parser.add_argument(
-        '--top_p',
-        dest='top_p',
-        action='store',
+        "--top_p",
+        dest="top_p",
+        action="store",
         default=1.0,
         type=float,
-        help='The accumulative probability of top concepts to sample',
-        required=False
+        help="The accumulative probability of top concepts to sample",
+        required=False,
     )
     parser.add_argument(
-        '--demographic_data_path',
-        dest='demographic_data_path',
-        action='store',
-        help='The path for your concept_path',
-        required=True
+        "--demographic_data_path",
+        dest="demographic_data_path",
+        action="store",
+        help="The path for your concept_path",
+        required=True,
     )
     parser.add_argument(
-        '--temperature',
-        dest='temperature',
-        action='store',
+        "--temperature",
+        dest="temperature",
+        action="store",
         default=1.0,
         type=float,
-        help='The temperature parameter for softmax',
-        required=False
+        help="The temperature parameter for softmax",
+        required=False,
     )
     parser.add_argument(
-        '--repetition_penalty',
-        dest='repetition_penalty',
-        action='store',
+        "--repetition_penalty",
+        dest="repetition_penalty",
+        action="store",
         default=1.0,
         type=float,
-        help='The repetition penalty during decoding',
-        required=False
+        help="The repetition penalty during decoding",
+        required=False,
     )
     parser.add_argument(
-        '--num_beams',
-        dest='num_beams',
-        action='store',
+        "--num_beams",
+        dest="num_beams",
+        action="store",
         default=1,
         type=int,
-        required=False
+        required=False,
     )
     parser.add_argument(
-        '--num_beam_groups',
-        dest='num_beam_groups',
-        action='store',
+        "--num_beam_groups",
+        dest="num_beam_groups",
+        action="store",
         default=1,
         type=int,
-        required=False
+        required=False,
     )
     parser.add_argument(
-        '--epsilon_cutoff',
-        dest='epsilon_cutoff',
-        action='store',
+        "--epsilon_cutoff",
+        dest="epsilon_cutoff",
+        action="store",
         default=0.0,
         type=float,
-        required=False
+        required=False,
     )
     main(parser.parse_args())

@@ -1,29 +1,32 @@
+import math
 import warnings
-from typing import Tuple, Optional, Union, List
+from typing import List, Optional, Tuple, Union
 
 import torch
-import math
-from torch import nn
 import torch.nn.functional as f
-from transformers import PreTrainedModel
-from transformers.pytorch_utils import Conv1D
-from transformers.models.gpt2.modeling_gpt2 import GPT2Block, GPT2Attention
-from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
-from transformers.activations import gelu_new
-from transformers.utils import logging, is_flash_attn_2_available
+from torch import nn
+from torch.distributions import Gamma
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
-from torch.distributions import Gamma
-
-from transformers.generation.stopping_criteria import validate_stopping_criteria, StoppingCriteriaList
+from transformers import PreTrainedModel
+from transformers.activations import gelu_new
 from transformers.generation.logits_process import LogitsProcessorList
-
-from cehrgpt.models.hf_modeling_outputs import (
-    CehrGptOutputWithPast, CehrGptCausalLMOutput,
-    CehrGptGenerateDecoderOnlyOutput,
-    CehrGptSequenceClassifierOutput
+from transformers.generation.stopping_criteria import (
+    StoppingCriteriaList,
+    validate_stopping_criteria,
 )
+from transformers.models.gpt2.modeling_gpt2 import GPT2Attention, GPT2Block
+from transformers.pytorch_utils import Conv1D
+from transformers.utils import is_flash_attn_2_available, logging
+from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
+
 from cehrgpt.models.config import CEHRGPTConfig
+from cehrgpt.models.hf_modeling_outputs import (
+    CehrGptCausalLMOutput,
+    CehrGptGenerateDecoderOnlyOutput,
+    CehrGptOutputWithPast,
+    CehrGptSequenceClassifierOutput,
+)
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -47,20 +50,22 @@ def _get_unpad_data(attention_mask):
 
 class GPT2FlashAttention(GPT2Attention):
     """
-    GPT2FlashAttention inherits from `GPT2Attention`. The primary change is in the forward pass, where it correctly
+    GPT2FlashAttention inherits from `GPT2Attention`.
+
+    The primary change is in the forward pass, where it correctly
     calls the public API of flash attention and handles padding tokens.
     """
 
     def forward(
-            self,
-            hidden_states: Optional[Tuple[torch.FloatTensor]],
-            layer_past: Optional[Tuple[torch.Tensor]] = None,
-            attention_mask: Optional[torch.FloatTensor] = None,
-            head_mask: Optional[torch.FloatTensor] = None,
-            encoder_hidden_states: Optional[torch.Tensor] = None,
-            encoder_attention_mask: Optional[torch.FloatTensor] = None,
-            use_cache: Optional[bool] = False,
-            output_attentions: Optional[bool] = False,
+        self,
+        hidden_states: Optional[Tuple[torch.FloatTensor]],
+        layer_past: Optional[Tuple[torch.Tensor]] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        head_mask: Optional[torch.FloatTensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = False,
+        output_attentions: Optional[bool] = False,
     ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor]], ...]:
         # Prepare query, key, and value
         if encoder_hidden_states is not None:
@@ -71,7 +76,9 @@ class GPT2FlashAttention(GPT2Attention):
                 )
 
             query = self.q_attn(hidden_states)
-            key, value = self.c_attn(encoder_hidden_states).split(self.split_size, dim=2)
+            key, value = self.c_attn(encoder_hidden_states).split(
+                self.split_size, dim=2
+            )
             attention_mask = encoder_attention_mask
         else:
             query, key, value = self.c_attn(hidden_states).split(self.split_size, dim=2)
@@ -92,11 +99,19 @@ class GPT2FlashAttention(GPT2Attention):
 
         # Apply Flash Attention Forward
         if self.reorder_and_upcast_attn:
-            attn_output, attn_weights = self._upcast_and_reordered_attn(query, key, value, attention_mask, head_mask)
+            attn_output, attn_weights = self._upcast_and_reordered_attn(
+                query, key, value, attention_mask, head_mask
+            )
         else:
             # Flash Attention forward pass
             attn_output = self._flash_attention_forward(
-                query, key, value, attention_mask, query.size(-2), self.attn_dropout.p, softmax_scale=None
+                query,
+                key,
+                value,
+                attention_mask,
+                query.size(-2),
+                self.attn_dropout.p,
+                softmax_scale=None,
             )
 
         # Merge heads and project back to hidden size
@@ -111,10 +126,18 @@ class GPT2FlashAttention(GPT2Attention):
         return outputs
 
     def _flash_attention_forward(
-            self, query_states, key_states, value_states, attention_mask, query_length, dropout=0.0, softmax_scale=None
+        self,
+        query_states,
+        key_states,
+        value_states,
+        attention_mask,
+        query_length,
+        dropout=0.0,
+        softmax_scale=None,
     ):
         """
-        Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token
+        Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token.
+
         first unpad the input, then computes the attention scores and pad the final attention scores.
         Args:
             query_states (`torch.Tensor`):
@@ -144,7 +167,14 @@ class GPT2FlashAttention(GPT2Attention):
         if attention_mask is not None:
             batch_size = query_states.shape[0]
 
-            query_states, key_states, value_states, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(
+            (
+                query_states,
+                key_states,
+                value_states,
+                indices_q,
+                cu_seq_lens,
+                max_seq_lens,
+            ) = self._upad_input(
                 query_states, key_states, value_states, attention_mask, query_length
             )
 
@@ -164,28 +194,40 @@ class GPT2FlashAttention(GPT2Attention):
                 causal=True,
             )
             # (batch, seq_length, n_heads, head_dim)
-            attn_output = pad_input(attn_output_unpad, indices_q, batch_size, query_length)
+            attn_output = pad_input(
+                attn_output_unpad, indices_q, batch_size, query_length
+            )
         else:
             attn_output = flash_attn_func(
-                query_states, key_states, value_states, dropout, softmax_scale=softmax_scale, causal=self.is_causal
+                query_states,
+                key_states,
+                value_states,
+                dropout,
+                softmax_scale=softmax_scale,
+                causal=self.is_causal,
             )
         # re-order the tensor back to (batch, n_heads, seq_length, head_dim)
         return attn_output.permute(0, 2, 1, 3).contiguous().to(dtype)
 
     # Copied from transformers.models.llama.modeling_llama.LlamaFlashAttention2._upad_input
-    def _upad_input(self, query_layer, key_layer, value_layer, attention_mask, query_length):
+    def _upad_input(
+        self, query_layer, key_layer, value_layer, attention_mask, query_length
+    ):
         indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(attention_mask)
         batch_size, kv_seq_len, num_key_value_heads, head_dim = key_layer.shape
 
         key_layer = index_first_axis(
-            key_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k
+            key_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim),
+            indices_k,
         )
         value_layer = index_first_axis(
-            value_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k
+            value_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim),
+            indices_k,
         )
         if query_length == kv_seq_len:
             query_layer = index_first_axis(
-                query_layer.reshape(batch_size * kv_seq_len, self.num_heads, head_dim), indices_k
+                query_layer.reshape(batch_size * kv_seq_len, self.num_heads, head_dim),
+                indices_k,
             )
             cu_seqlens_q = cu_seqlens_k
             max_seqlen_in_batch_q = max_seqlen_in_batch_k
@@ -200,7 +242,9 @@ class GPT2FlashAttention(GPT2Attention):
         else:
             # The -q_len: slice assumes left padding.
             attention_mask = attention_mask[:, -query_length:]
-            query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = unpad_input(query_layer, attention_mask)
+            query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = unpad_input(
+                query_layer, attention_mask
+            )
 
         return (
             query_layer,
@@ -216,14 +260,10 @@ class WeibullModel(nn.Module):
     def __init__(self, input_dim):
         super(WeibullModel, self).__init__()
         self.linear1 = nn.Sequential(
-            nn.Linear(input_dim, input_dim // 2),
-            gelu_new,
-            nn.Linear(input_dim // 2, 1)
+            nn.Linear(input_dim, input_dim // 2), gelu_new, nn.Linear(input_dim // 2, 1)
         )
         self.linear2 = nn.Sequential(
-            nn.Linear(input_dim, input_dim // 2),
-            gelu_new,
-            nn.Linear(input_dim // 2, 1)
+            nn.Linear(input_dim, input_dim // 2), gelu_new, nn.Linear(input_dim // 2, 1)
         )
 
     def forward(self, x):
@@ -247,10 +287,7 @@ class ConceptValuePredictionLayer(nn.Module):
             nn.Linear(embedding_size // 2, 1),
         )
 
-    def forward(
-            self,
-            hidden_states: Optional[torch.FloatTensor]
-    ):
+    def forward(self, hidden_states: Optional[torch.FloatTensor]):
         # (batch_size, context_window, 1)
         concept_vals = self.concept_value_decoder_layer(hidden_states)
         return concept_vals
@@ -261,14 +298,16 @@ class ConceptValueTransformationLayer(nn.Module):
         super(ConceptValueTransformationLayer, self).__init__()
         self.embedding_size = embedding_size
         self.merge_value_transformation_layer = nn.Sequential(
-            nn.Linear(embedding_size + 1, embedding_size)  # +1 for the concept_values concatenation
+            nn.Linear(
+                embedding_size + 1, embedding_size
+            )  # +1 for the concept_values concatenation
         )
 
     def forward(
-            self,
-            concept_embeddings: Optional[torch.FloatTensor],
-            value_indicators: Optional[torch.BoolTensor] = None,
-            concept_values: Optional[torch.FloatTensor] = None
+        self,
+        concept_embeddings: Optional[torch.FloatTensor],
+        value_indicators: Optional[torch.BoolTensor] = None,
+        concept_values: Optional[torch.FloatTensor] = None,
     ):
         if value_indicators is None or concept_values is None:
             return concept_embeddings
@@ -277,20 +316,27 @@ class ConceptValueTransformationLayer(nn.Module):
         value_indicators = value_indicators.unsqueeze(-1)
 
         # Concatenate concept_embeddings and concept_values
-        concept_embeddings_with_val = torch.cat([concept_embeddings, concept_values], dim=-1)
+        concept_embeddings_with_val = torch.cat(
+            [concept_embeddings, concept_values], dim=-1
+        )
 
         # Transform concatenated embeddings back to embedding_size
-        transformed_embeddings = self.merge_value_transformation_layer(concept_embeddings_with_val)
+        transformed_embeddings = self.merge_value_transformation_layer(
+            concept_embeddings_with_val
+        )
 
         # Apply mask using torch.where
-        concept_embeddings = torch.where(value_indicators, transformed_embeddings, concept_embeddings)
+        concept_embeddings = torch.where(
+            value_indicators, transformed_embeddings, concept_embeddings
+        )
 
         return concept_embeddings
 
 
 class CEHRGPTPreTrainedModel(PreTrainedModel):
     """
-    An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
+    An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained.
+
     models.
     """
 
@@ -330,7 +376,13 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
         for name, p in module.named_parameters():
             if name == "c_proj.weight":
                 # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
-                p.data.normal_(mean=0.0, std=(self.config.initializer_range / math.sqrt(2 * self.config.n_layer)))
+                p.data.normal_(
+                    mean=0.0,
+                    std=(
+                        self.config.initializer_range
+                        / math.sqrt(2 * self.config.n_layer)
+                    ),
+                )
 
 
 class CEHRGPT2Model(CEHRGPTPreTrainedModel):
@@ -344,7 +396,9 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
 
         self.wte = nn.Embedding(config.vocab_size, self.embed_dim)
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
-        self.concept_value_transformation_layer = ConceptValueTransformationLayer(self.embed_dim)
+        self.concept_value_transformation_layer = ConceptValueTransformationLayer(
+            self.embed_dim
+        )
 
         self.drop = nn.Dropout(config.embd_pdrop)
         gpt_blocks = []
@@ -375,11 +429,17 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             FutureWarning,
         )
         self.device_map = (
-            get_device_map(len(self.h), range(torch.cuda.device_count())) if device_map is None else device_map
+            get_device_map(len(self.h), range(torch.cuda.device_count()))
+            if device_map is None
+            else device_map
         )
         assert_device_map(self.device_map, len(self.h))
         self.model_parallel = True
-        self.first_device = "cpu" if "cpu" in self.device_map.keys() else "cuda:" + str(min(self.device_map.keys()))
+        self.first_device = (
+            "cpu"
+            if "cpu" in self.device_map.keys()
+            else "cuda:" + str(min(self.device_map.keys()))
+        )
         self.last_device = "cuda:" + str(max(self.device_map.keys()))
         self.wte = self.wte.to(self.first_device)
         self.wpe = self.wpe.to(self.first_device)
@@ -415,31 +475,41 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
 
     def _prune_heads(self, heads_to_prune):
         """
-        Prunes heads of the model. heads_to_prune: dict of {layer_num: list of heads to prune in this layer}
+        Prunes heads of the model.
+
+        heads_to_prune: dict of {layer_num: list of heads to prune in this layer}
         """
         for layer, heads in heads_to_prune.items():
             self.h[layer].attn.prune_heads(heads)
 
     def forward(
-            self,
-            input_ids: Optional[torch.LongTensor],
-            value_indicators: Optional[torch.BoolTensor],
-            values: Optional[torch.FloatTensor],
-            past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
-            attention_mask: Optional[torch.FloatTensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            head_mask: Optional[torch.FloatTensor] = None,
-            use_cache: Optional[bool] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
-            return_dict: Optional[bool] = None,
+        self,
+        input_ids: Optional[torch.LongTensor],
+        value_indicators: Optional[torch.BoolTensor],
+        values: Optional[torch.FloatTensor],
+        past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        head_mask: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CehrGptOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
+        )
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         self.warn_if_padding_and_no_attention_mask(input_ids, attention_mask)
         input_shape = input_ids.size()
@@ -455,7 +525,12 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             past_length = past_key_values[0][0].size(-2)
 
         if position_ids is None and not self.exclude_position_ids:
-            position_ids = torch.arange(past_length, input_shape[-1] + past_length, dtype=torch.long, device=device)
+            position_ids = torch.arange(
+                past_length,
+                input_shape[-1] + past_length,
+                dtype=torch.long,
+                device=device,
+            )
             position_ids = position_ids.unsqueeze(0)
 
         # GPT2Attention mask.
@@ -464,7 +539,10 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 raise ValueError("batch_size has to be defined and > 0")
 
             # The flash attention requires the original attention_mask
-            if not getattr(self.config, "_attn_implementation", "eager") == "flash_attention_2":
+            if (
+                not getattr(self.config, "_attn_implementation", "eager")
+                == "flash_attention_2"
+            ):
                 attention_mask = attention_mask.view(batch_size, -1)
                 # We create a 3D attention mask from a 2D tensor mask.
                 # Sizes are [batch_size, 1, 1, to_seq_length]
@@ -478,7 +556,9 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 # positions we want to attend and the dtype's smallest value for masked positions.
                 # Since we are adding it to the raw scores before the softmax, this is
                 # effectively the same as removing these entirely.
-                attention_mask = attention_mask.to(dtype=self.dtype)  # fp16 compatibility
+                attention_mask = attention_mask.to(
+                    dtype=self.dtype
+                )  # fp16 compatibility
                 attention_mask = (1.0 - attention_mask) * torch.finfo(self.dtype).min
 
         # Prepare head mask if needed
@@ -493,7 +573,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             input_embeddings = self.concept_value_transformation_layer(
                 concept_embeddings=input_embeddings,
                 value_indicators=value_indicators,
-                concept_values=values
+                concept_values=values,
             )
 
         if not self.exclude_position_ids:
@@ -522,7 +602,9 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 torch.cuda.set_device(hidden_states.device)
                 # Ensure layer_past is on same device as hidden_states (might not be correct)
                 if layer_past is not None:
-                    layer_past = tuple(past_state.to(hidden_states.device) for past_state in layer_past)
+                    layer_past = tuple(
+                        past_state.to(hidden_states.device) for past_state in layer_past
+                    )
                 # Ensure that attention_mask is always on the same device as hidden_states
                 if attention_mask is not None:
                     attention_mask = attention_mask.to(hidden_states.device)
@@ -560,7 +642,9 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 presents = presents + (outputs[1],)
 
             if output_attentions:
-                all_self_attentions = all_self_attentions + (outputs[2 if use_cache else 1],)
+                all_self_attentions = all_self_attentions + (
+                    outputs[2 if use_cache else 1],
+                )
 
             # Model Parallel: If it's the last layer for that device, put things on the next device
             if self.model_parallel:
@@ -578,7 +662,12 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         if not return_dict:
             return tuple(
                 v
-                for v in [hidden_states, presents, all_hidden_states, all_self_attentions]
+                for v in [
+                    hidden_states,
+                    presents,
+                    all_hidden_states,
+                    all_self_attentions,
+                ]
                 if v is not None
             )
 
@@ -586,7 +675,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             last_hidden_state=hidden_states,
             past_key_values=presents,
             hidden_states=all_hidden_states,
-            attentions=all_self_attentions
+            attentions=all_self_attentions,
         )
 
 
@@ -597,13 +686,17 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         super().__init__(config)
         self.cehrgpt = CEHRGPT2Model(config)
         if self.config.include_values:
-            self.concept_value_decoder_layer = ConceptValuePredictionLayer(config.n_embd)
+            self.concept_value_decoder_layer = ConceptValuePredictionLayer(
+                config.n_embd
+            )
 
         if self.config.include_ttv_prediction:
             self.tte_head = WeibullModel(config.n_embd)
 
         if self.config.use_sub_time_tokenization:
-            self.time_token_lm_head = nn.Linear(config.n_embd // 3, config.time_token_vocab_size, bias=False)
+            self.time_token_lm_head = nn.Linear(
+                config.n_embd // 3, config.time_token_vocab_size, bias=False
+            )
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
@@ -631,7 +724,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         self.cehrgpt.parallelize(self.device_map)
         self.lm_head = self.lm_head.to(self.cehrgpt.first_device)
         if self.config.include_values:
-            self.concept_value_decoder_layer = self.concept_value_decoder_layer.to(self.cehrgpt.first_device)
+            self.concept_value_decoder_layer = self.concept_value_decoder_layer.to(
+                self.cehrgpt.first_device
+            )
         if self.config.include_ttv_prediction:
             self.tte_head = self.tte_head.to(self.cehrgpt.first_device)
         self.model_parallel = True
@@ -645,7 +740,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         self.cehrgpt = self.cehrgpt.to("cpu")
         self.lm_head = self.lm_head.to("cpu")
         if self.config.include_values:
-            self.concept_value_decoder_layer = self.concept_value_decoder_layer.to("cpu")
+            self.concept_value_decoder_layer = self.concept_value_decoder_layer.to(
+                "cpu"
+            )
         if self.config.include_ttv_prediction:
             self.tte_head = self.tte_head.to("cpu")
         self.model_parallel = False
@@ -657,7 +754,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
     def set_output_embeddings(self, new_embeddings):
         self.lm_head = new_embeddings
 
-    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs):
+    def prepare_inputs_for_generation(
+        self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs
+    ):
 
         # Omit tokens covered by past_key_values
         if past_key_values:
@@ -680,7 +779,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 1)
             if past_key_values:
-                position_ids = position_ids[:, -input_ids.shape[1]:]
+                position_ids = position_ids[:, -input_ids.shape[1] :]
         else:
             position_ids = None
 
@@ -691,8 +790,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             model_inputs = {"input_ids": input_ids}
 
         if self.cehrgpt.include_values:
-            value_indicators = kwargs.get("value_indicators", torch.zeros_like(input_ids).to(torch.bool))
-            values = kwargs.get("values", torch.zeros_like(input_ids, dtype=torch.float32))
+            value_indicators = kwargs.get(
+                "value_indicators", torch.zeros_like(input_ids).to(torch.bool)
+            )
+            values = kwargs.get(
+                "values", torch.zeros_like(input_ids, dtype=torch.float32)
+            )
 
             # Omit tokens covered by past_key_values
             if past_key_values:
@@ -707,10 +810,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 values = values[:, remove_prefix_length:]
 
             model_inputs.update(
-                {
-                    "value_indicators": value_indicators,
-                    "values": values
-                }
+                {"value_indicators": value_indicators, "values": values}
             )
 
         model_inputs.update(
@@ -718,31 +818,31 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 "past_key_values": past_key_values,
                 "use_cache": kwargs.get("use_cache"),
                 "position_ids": position_ids,
-                "attention_mask": attention_mask
+                "attention_mask": attention_mask,
             }
         )
 
         return model_inputs
 
     def forward(
-            self,
-            input_ids: Optional[torch.LongTensor] = None,
-            value_indicators: Optional[torch.BoolTensor] = None,
-            values: Optional[torch.FloatTensor] = None,
-            past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
-            attention_mask: Optional[torch.FloatTensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            head_mask: Optional[torch.FloatTensor] = None,
-            labels: Optional[torch.LongTensor] = None,
-            true_value_indicators: Optional[torch.BoolTensor] = None,
-            true_values: Optional[torch.FloatTensor] = None,
-            time_to_visits: Optional[torch.FloatTensor] = None,
-            time_token_indicators: Optional[torch.BoolTensor] = None,
-            sub_time_tokens: Optional[torch.LongTensor] = None,
-            use_cache: Optional[bool] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
-            return_dict: Optional[bool] = None,
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        value_indicators: Optional[torch.BoolTensor] = None,
+        values: Optional[torch.FloatTensor] = None,
+        past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        head_mask: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        true_value_indicators: Optional[torch.BoolTensor] = None,
+        true_values: Optional[torch.FloatTensor] = None,
+        time_to_visits: Optional[torch.FloatTensor] = None,
+        time_token_indicators: Optional[torch.BoolTensor] = None,
+        sub_time_tokens: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CehrGptCausalLMOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -750,7 +850,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             `labels = input_ids` Indices are selected in `[-100, 0, ..., config.vocab_size]` All labels set to `-100`
             are ignored (masked), the loss is only computed for labels in `[0, ..., config.vocab_size]`
         """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         transformer_outputs = self.cehrgpt(
             input_ids,
@@ -788,25 +890,37 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             shift_labels = labels[..., 1:].contiguous()
             # Flatten the tokens
             loss_fct = CrossEntropyLoss()
-            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            loss = loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+            )
 
             # We add another loss term when use_sub_time_tokenization is enabled, we need to recover the sub time token
             # predictions for year/month/token
             if self.config.use_sub_time_tokenization:
                 # Split the last dimensions into three parts
                 time_loss_fct = CrossEntropyLoss(reduction="none")
-                time_token_logits = self.time_token_lm_head(torch.unflatten(hidden_states, 2, (3, -1)))
-                shifted_time_token_logits = time_token_logits[..., :-1, :, :].contiguous()
-                shifted_time_token_indicators = time_token_indicators[..., 1:].contiguous().to(lm_logits.device)
-                shifted_time_token_labels = sub_time_tokens[:, 1:, ...].contiguous().to(lm_logits.device)
+                time_token_logits = self.time_token_lm_head(
+                    torch.unflatten(hidden_states, 2, (3, -1))
+                )
+                shifted_time_token_logits = time_token_logits[
+                    ..., :-1, :, :
+                ].contiguous()
+                shifted_time_token_indicators = (
+                    time_token_indicators[..., 1:].contiguous().to(lm_logits.device)
+                )
+                shifted_time_token_labels = (
+                    sub_time_tokens[:, 1:, ...].contiguous().to(lm_logits.device)
+                )
                 time_token_loss = time_loss_fct(
-                    shifted_time_token_logits.view(-1, self.config.time_token_vocab_size),
-                    shifted_time_token_labels.view(-1)
+                    shifted_time_token_logits.view(
+                        -1, self.config.time_token_vocab_size
+                    ),
+                    shifted_time_token_labels.view(-1),
                 )
 
-                time_token_loss = (
-                        time_token_loss.view(-1, 3) * shifted_time_token_indicators.view(-1, 1).to(torch.float32)
-                )
+                time_token_loss = time_token_loss.view(
+                    -1, 3
+                ) * shifted_time_token_indicators.view(-1, 1).to(torch.float32)
                 time_token_loss = time_token_loss.sum(-1)
                 loss += torch.mean(time_token_loss) * self.config.time_token_loss_weight
 
@@ -827,9 +941,17 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             shift_value_preds = value_preds.squeeze(-1)[..., :-1].contiguous()
             shift_value_indicators = true_value_indicators[..., :-1].contiguous()
             shift_next_values = true_values[..., 1:].contiguous()
-            num_items = torch.sum(shift_value_indicators.to(torch.float32), dim=-1) + 1e-6
-            masked_mse = torch.sum((shift_next_values - shift_value_preds) ** 2 * shift_value_indicators,
-                                   dim=-1) / num_items
+            num_items = (
+                torch.sum(shift_value_indicators.to(torch.float32), dim=-1) + 1e-6
+            )
+            masked_mse = (
+                torch.sum(
+                    (shift_next_values - shift_value_preds) ** 2
+                    * shift_value_indicators,
+                    dim=-1,
+                )
+                / num_items
+            )
             loss += torch.mean(masked_mse)
 
         if not return_dict:
@@ -842,64 +964,102 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             next_values=value_preds,
             past_key_values=transformer_outputs.past_key_values,
             hidden_states=transformer_outputs.hidden_states,
-            attentions=transformer_outputs.attentions
+            attentions=transformer_outputs.attentions,
         )
 
     @staticmethod
     def _reorder_cache(
-            past_key_values: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor
+        past_key_values: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor
     ) -> Tuple[Tuple[torch.Tensor]]:
         """
-        This function is used to re-order the `past_key_values` cache if [`~PreTrainedModel.beam_search`] or
+        This function is used to re-order the `past_key_values` cache if [`~PreTrainedModel.beam_search`] or.
+
         [`~PreTrainedModel.beam_sample`] is called. This is required to match `past_key_values` with the correct
         beam_idx at every generation step.
         """
         return tuple(
-            tuple(past_state.index_select(0, beam_idx.to(past_state.device)) for past_state in layer_past)
+            tuple(
+                past_state.index_select(0, beam_idx.to(past_state.device))
+                for past_state in layer_past
+            )
             for layer_past in past_key_values
         )
 
     def _sample(
-            self,
-            input_ids: torch.LongTensor,
-            logits_processor: Optional[LogitsProcessorList] = None,
-            stopping_criteria: Optional[StoppingCriteriaList] = None,
-            logits_warper: Optional[LogitsProcessorList] = None,
-            max_length: Optional[int] = None,
-            pad_token_id: Optional[int] = None,
-            eos_token_id: Optional[Union[int, List[int]]] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
-            output_scores: Optional[bool] = None,
-            output_logits: Optional[bool] = None,
-            return_dict_in_generate: Optional[bool] = None,
-            synced_gpus: bool = False,
-            streamer: Optional["BaseStreamer"] = None,
-            **model_kwargs,
+        self,
+        input_ids: torch.LongTensor,
+        logits_processor: Optional[LogitsProcessorList] = None,
+        stopping_criteria: Optional[StoppingCriteriaList] = None,
+        logits_warper: Optional[LogitsProcessorList] = None,
+        max_length: Optional[int] = None,
+        pad_token_id: Optional[int] = None,
+        eos_token_id: Optional[Union[int, List[int]]] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        output_scores: Optional[bool] = None,
+        output_logits: Optional[bool] = None,
+        return_dict_in_generate: Optional[bool] = None,
+        synced_gpus: bool = False,
+        streamer: Optional["BaseStreamer"] = None,
+        **model_kwargs,
     ) -> Union[CehrGptGenerateDecoderOnlyOutput, torch.LongTensor]:
         # init values
-        logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
-        stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
+        logits_processor = (
+            logits_processor if logits_processor is not None else LogitsProcessorList()
+        )
+        stopping_criteria = (
+            stopping_criteria
+            if stopping_criteria is not None
+            else StoppingCriteriaList()
+        )
         if max_length is not None:
             warnings.warn(
                 "`max_length` is deprecated in this function, use"
                 " `stopping_criteria=StoppingCriteriaList([MaxLengthCriteria(max_length=max_length)])` instead.",
                 UserWarning,
             )
-            stopping_criteria = validate_stopping_criteria(stopping_criteria, max_length)
-        logits_warper = logits_warper if logits_warper is not None else LogitsProcessorList()
-        pad_token_id = pad_token_id if pad_token_id is not None else self.generation_config.pad_token_id
-        eos_token_id = eos_token_id if eos_token_id is not None else self.generation_config.eos_token_id
+            stopping_criteria = validate_stopping_criteria(
+                stopping_criteria, max_length
+            )
+        logits_warper = (
+            logits_warper if logits_warper is not None else LogitsProcessorList()
+        )
+        pad_token_id = (
+            pad_token_id
+            if pad_token_id is not None
+            else self.generation_config.pad_token_id
+        )
+        eos_token_id = (
+            eos_token_id
+            if eos_token_id is not None
+            else self.generation_config.eos_token_id
+        )
         if isinstance(eos_token_id, int):
             eos_token_id = [eos_token_id]
-        eos_token_id_tensor = torch.tensor(eos_token_id).to(input_ids.device) if eos_token_id is not None else None
-        output_scores = output_scores if output_scores is not None else self.generation_config.output_scores
-        output_logits = output_logits if output_logits is not None else self.generation_config.output_logits
+        eos_token_id_tensor = (
+            torch.tensor(eos_token_id).to(input_ids.device)
+            if eos_token_id is not None
+            else None
+        )
+        output_scores = (
+            output_scores
+            if output_scores is not None
+            else self.generation_config.output_scores
+        )
+        output_logits = (
+            output_logits
+            if output_logits is not None
+            else self.generation_config.output_logits
+        )
         output_attentions = (
-            output_attentions if output_attentions is not None else self.generation_config.output_attentions
+            output_attentions
+            if output_attentions is not None
+            else self.generation_config.output_attentions
         )
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.generation_config.output_hidden_states
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.generation_config.output_hidden_states
         )
         return_dict_in_generate = (
             return_dict_in_generate
@@ -910,25 +1070,36 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # init attention / hidden states / scores tuples
         scores = () if (return_dict_in_generate and output_scores) else None
         raw_logits = () if (return_dict_in_generate and output_logits) else None
-        decoder_attentions = () if (return_dict_in_generate and output_attentions) else None
-        cross_attentions = () if (return_dict_in_generate and output_attentions) else None
-        decoder_hidden_states = () if (return_dict_in_generate and output_hidden_states) else None
+        decoder_attentions = (
+            () if (return_dict_in_generate and output_attentions) else None
+        )
+        cross_attentions = (
+            () if (return_dict_in_generate and output_attentions) else None
+        )
+        decoder_hidden_states = (
+            () if (return_dict_in_generate and output_hidden_states) else None
+        )
 
         # keep track of which sequences are already finished
         batch_size, cur_len = input_ids.shape
         if "inputs_embeds" in model_kwargs:
             cur_len = model_kwargs["inputs_embeds"].shape[1]
         this_peer_finished = False
-        unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
+        unfinished_sequences = torch.ones(
+            batch_size, dtype=torch.long, device=input_ids.device
+        )
         model_kwargs["cache_position"] = torch.arange(cur_len, device=input_ids.device)
         lab_token_ids = torch.tensor(
-            [] if self.config.lab_token_ids is None else self.config.lab_token_ids, dtype=torch.int32
+            [] if self.config.lab_token_ids is None else self.config.lab_token_ids,
+            dtype=torch.int32,
         )
         value_indicators = torch.zeros_like(input_ids).to(torch.bool)
         values = torch.zeros_like(input_ids, dtype=torch.float32)
-        model_kwargs['value_indicators'] = value_indicators
-        model_kwargs['values'] = values
-        while self._has_unfinished_sequences(this_peer_finished, synced_gpus, device=input_ids.device):
+        model_kwargs["value_indicators"] = value_indicators
+        model_kwargs["values"] = values
+        while self._has_unfinished_sequences(
+            this_peer_finished, synced_gpus, device=input_ids.device
+        ):
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
@@ -957,7 +1128,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     raw_logits += (next_token_logits,)
                 if output_attentions:
                     decoder_attentions += (
-                        (outputs.decoder_attentions,) if self.config.is_encoder_decoder else (outputs.attentions,)
+                        (outputs.decoder_attentions,)
+                        if self.config.is_encoder_decoder
+                        else (outputs.attentions,)
                     )
                     if self.config.is_encoder_decoder:
                         cross_attentions += (outputs.cross_attentions,)
@@ -976,16 +1149,19 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # finished sentences should have their next token be a padding token
             if eos_token_id is not None:
                 if pad_token_id is None:
-                    raise ValueError("If `eos_token_id` is defined, make sure that `pad_token_id` is defined.")
-                next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
+                    raise ValueError(
+                        "If `eos_token_id` is defined, make sure that `pad_token_id` is defined."
+                    )
+                next_tokens = next_tokens * unfinished_sequences + pad_token_id * (
+                    1 - unfinished_sequences
+                )
 
             # update generated ids, model inputs, and length for next step
             input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
 
             if self.cehrgpt.include_values:
                 next_value_indicators = torch.isin(
-                    next_tokens,
-                    lab_token_ids.to(next_tokens.device)
+                    next_tokens, lab_token_ids.to(next_tokens.device)
                 )
                 next_values = outputs.next_values[:, -1]
 
@@ -995,12 +1171,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 )
 
                 # update values
-                values = torch.cat(
-                    [values, next_values], dim=-1
-                )
+                values = torch.cat([values, next_values], dim=-1)
 
-                model_kwargs['value_indicators'] = value_indicators
-                model_kwargs['values'] = values
+                model_kwargs["value_indicators"] = value_indicators
+                model_kwargs["values"] = values
 
             if streamer is not None:
                 streamer.put(next_tokens.cpu())
@@ -1013,10 +1187,14 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # if eos_token was found in one sentence, set sentence to finished
             if eos_token_id_tensor is not None:
                 unfinished_sequences = unfinished_sequences.mul(
-                    next_tokens.tile(eos_token_id_tensor.shape[0], 1).ne(eos_token_id_tensor.unsqueeze(1)).prod(dim=0)
+                    next_tokens.tile(eos_token_id_tensor.shape[0], 1)
+                    .ne(eos_token_id_tensor.unsqueeze(1))
+                    .prod(dim=0)
                 )
 
-            unfinished_sequences = unfinished_sequences & ~stopping_criteria(input_ids, scores)
+            unfinished_sequences = unfinished_sequences & ~stopping_criteria(
+                input_ids, scores
+            )
             this_peer_finished = unfinished_sequences.max() == 0
 
         if streamer is not None:
@@ -1024,8 +1202,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         return CehrGptGenerateDecoderOnlyOutput(
             sequences=input_ids,
-            sequence_val_masks=value_indicators.to(torch.bool) if self.cehrgpt.include_values else None,
-            sequence_vals=values.to(torch.float32) if self.cehrgpt.include_values else None,
+            sequence_val_masks=(
+                value_indicators.to(torch.bool) if self.cehrgpt.include_values else None
+            ),
+            sequence_vals=(
+                values.to(torch.float32) if self.cehrgpt.include_values else None
+            ),
             scores=scores,
             logits=raw_logits,
             attentions=decoder_attentions,
@@ -1056,20 +1238,20 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
         self.post_init()
 
     def forward(
-            self,
-            input_ids: Optional[torch.LongTensor],
-            age_at_index: torch.FloatTensor,
-            classifier_label: Optional[torch.FloatTensor],
-            value_indicators: Optional[torch.BoolTensor] = None,
-            values: Optional[torch.FloatTensor] = None,
-            past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
-            attention_mask: Optional[torch.FloatTensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            head_mask: Optional[torch.FloatTensor] = None,
-            use_cache: Optional[bool] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
-            return_dict: Optional[bool] = None
+        self,
+        input_ids: Optional[torch.LongTensor],
+        age_at_index: torch.FloatTensor,
+        classifier_label: Optional[torch.FloatTensor],
+        value_indicators: Optional[torch.BoolTensor] = None,
+        values: Optional[torch.FloatTensor] = None,
+        past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        head_mask: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
     ) -> CehrGptSequenceClassifierOutput:
         normalized_age = self.age_batch_norm(age_at_index)
 
@@ -1084,7 +1266,7 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict
+            return_dict=return_dict,
         )
 
         # In fine-tuning, the sequences are left-padded, so we use the last element as the pooler
@@ -1105,7 +1287,7 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
             loss=loss,
             logits=logits,
             hidden_states=cehrgpt_output.last_hidden_state,
-            attentions=cehrgpt_output.attentions
+            attentions=cehrgpt_output.attentions,
         )
 
     def parallelize(self, device_map=None):
