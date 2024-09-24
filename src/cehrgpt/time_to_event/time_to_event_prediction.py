@@ -17,8 +17,9 @@ from transformers.utils import logging, is_flash_attn_2_available
 from .time_to_event_model import TimeToEventModel
 from ..models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from ..models.hf_cehrgpt import CEHRGPT2LMHeadModel
+from ..models.special_tokens import START_TOKEN
 from ..cehrgpt_args import create_inference_base_arg_parser
-from ..gpt_utils import is_visit_start, is_visit_end, get_cehrgpt_output_folder, collect_demographic_prompts_at_visits
+from ..gpt_utils import is_visit_start, is_visit_end, get_cehrgpt_output_folder
 from cehrbert.runners.runner_util import load_parquet_as_dataset
 
 LOG = logging.get_logger("transformers")
@@ -129,26 +130,20 @@ def main(
         sample_identifier = f"{record['person_id']}_{record['index_date'].strftime('%Y_%m_%d')}"
         if acquire_lock_or_skip_if_already_exist(output_folder=temp_folder, sample_id=sample_identifier):
             continue
-
         partial_history = record["concept_ids"]
         label = record["label"]
         time_to_event = record["time_to_event"] if "time_to_event" in record else None
-
+        partial_history = [START_TOKEN] + partial_history
         seq_length = len(partial_history)
         if generation_config.max_length <= seq_length + generation_config.max_new_tokens:
-            start_index = seq_length - (generation_config.max_length - generation_config.max_new_tokens)
+            # Plus one for the start token
+            start_index = seq_length - (generation_config.max_length - generation_config.max_new_tokens) + 1
             # Make sure the first token starts on VS
-            default_demographic_prompt = []
-            demographic_prompts = collect_demographic_prompts_at_visits(partial_history[:4], partial_history)
-            for prompt_index, demographic_prompt_tuple in demographic_prompts:
-                # We find the earliest visit that could fit in the context window.
-                # We also need to take the demographic prompt into account
-                if prompt_index >= start_index + 4:
-                    start_index = prompt_index
-                    start_year, start_age, start_gender, start_race = demographic_prompt_tuple
-                    default_demographic_prompt = [f'year:{start_year}', f'age:{start_age}', start_gender, start_race]
+            for i, token in enumerate(partial_history[start_index:]):
+                if is_visit_start(token):
+                    start_index += i
                     break
-            partial_history = default_demographic_prompt + partial_history[start_index:]
+            partial_history = [START_TOKEN] + partial_history[start_index:]
 
         concept_time_to_event = ts_pred_model.predict_time_to_events(
             partial_history,
