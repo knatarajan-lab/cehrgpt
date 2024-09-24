@@ -1,8 +1,10 @@
 import datetime
 import os
 import uuid
+from pathlib import Path
 
 import yaml
+from datasets import Dataset
 from tqdm import tqdm
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Any
@@ -112,6 +114,10 @@ def main(
         batched=True,
         batch_size=1000
     )
+
+    # Filter out the records for which the predictions have been generated previously
+    test_dataset = filter_out_existing_results(test_dataset, prediction_output_folder_name)
+
     tte_outputs = []
     for record in tqdm(test_dataset, total=len(test_dataset)):
         partial_history = record["concept_ids"]
@@ -136,6 +142,28 @@ def main(
 
     # Final flush
     flush_to_disk_if_full(tte_outputs, prediction_output_folder_name, args.buffer_size)
+
+
+def filter_out_existing_results(test_dataset: Dataset, prediction_output_folder_name: str):
+    if any(Path(prediction_output_folder_name).glob("*parquet")):
+        cohort_members = set()
+        results_dataframe = pd.read_parquet(prediction_output_folder_name)[["person_id", "index_date"]]
+        for row in results_dataframe.itertuples():
+            cohort_members.add((row.person_id, row.index_date.strftime("%Y-%m-%d")))
+
+        def filter_func(batched):
+            return [
+                (person_id, index_date.strftime("%Y-%m-%d")) not in cohort_members
+                for person_id, index_date in zip(batched["person_id"], batched["index_date"])
+            ]
+
+        test_dataset = test_dataset.filter(
+            filter_func,
+            batched=True,
+            batch_size=1000
+        )
+    return test_dataset
+
 
 def flush_to_disk_if_full(
         tte_outputs: List[Dict[str, Any]],

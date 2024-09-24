@@ -88,7 +88,7 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
         return 0, max_seq_len - 1, []
 
 
-def get_cehrgpt_output_folder(args, cehrgpt_tokenizer):
+def get_cehrgpt_output_folder(args, cehrgpt_tokenizer) -> str:
     if args.sampling_strategy == SamplingStrategy.TopKStrategy.value:
         folder_name = f'top_k{args.top_k}'
         args.top_p = 1.0
