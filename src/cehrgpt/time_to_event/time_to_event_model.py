@@ -26,7 +26,7 @@ class TimeToEvent:
     time_interval_probability_table: List[Dict[str, Any]]
 
 
-def create_time_to_event(time_event_tuples: List[Tuple[str, int]]) -> TimeToEvent:
+def create_time_to_event(time_event_tuples: List[Tuple[str, int]], num_of_simulations: int) -> TimeToEvent:
     outcome_events, time_intervals = zip(*time_event_tuples)
     time_buckets = [time_month_token(_) for _ in time_intervals]
     time_bucket_counter = Counter(time_buckets)
@@ -46,7 +46,7 @@ def create_time_to_event(time_event_tuples: List[Tuple[str, int]]) -> TimeToEven
         median_time=np.median(time_intervals),
         standard_deviation=np.std(time_intervals),
         most_likely_time=most_common_item,
-        num_of_simulations=len(time_intervals),
+        num_of_simulations=num_of_simulations,
         time_interval_probability_table=sorted_probability_table
     )
 
@@ -145,7 +145,7 @@ class TimeToEventModel:
                     time_event_tuples.append((next_token, time_delta))
 
         # Count the occurrences of each time tokens for each concept
-        return create_time_to_event(time_event_tuples) if len(time_event_tuples) > 0 else None
+        return create_time_to_event(time_event_tuples, len(simulated_seqs)) if len(time_event_tuples) > 0 else None
 
     @staticmethod
     def get_generation_config(
