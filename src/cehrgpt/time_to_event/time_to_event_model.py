@@ -74,8 +74,7 @@ class TimeToEventModel:
 
     def simulate(
             self,
-            partial_history: Union[np.ndarray, List[str]],
-            max_new_tokens: int = 0
+            partial_history: Union[np.ndarray, List[str]]
     ) -> List[List[str]]:
 
         sequence_is_demographics = len(partial_history) == 4 and partial_history[0].startswith("year")
@@ -86,11 +85,6 @@ class TimeToEventModel:
                 "There are only two types of sequences allowed. 1) the sequence only contains "
                 "demographics; 2) the sequence ends on VE;"
             )
-
-        seq_length = len(partial_history)
-        if self.generation_config.max_length <= seq_length + self.generation_config.max_new_tokens:
-            start_index = seq_length - (self.generation_config.max_length - self.generation_config.max_new_tokens)
-            partial_history = partial_history[start_index:]
 
         token_ids = self.tokenizer.encode(partial_history)
         prompt = torch.tensor(token_ids).unsqueeze(0).to(self.device)
@@ -123,10 +117,7 @@ class TimeToEventModel:
     ) -> Optional[TimeToEvent]:
 
         patient_history_length = len(partial_history)
-        simulated_seqs = self.simulate(
-            partial_history=partial_history,
-            max_new_tokens=self.model.config.n_positions - patient_history_length
-        )
+        simulated_seqs = self.simulate(partial_history)
 
         time_event_tuples = []
         for seq in simulated_seqs:

@@ -130,6 +130,12 @@ def main(
         partial_history = record["concept_ids"]
         label = record["label"]
         time_to_event = record["time_to_event"] if "time_to_event" in record else None
+
+        seq_length = len(partial_history)
+        if generation_config.max_length <= seq_length + generation_config.max_new_tokens:
+            start_index = seq_length - (generation_config.max_length - generation_config.max_new_tokens)
+            partial_history = partial_history[start_index:]
+
         concept_time_to_event = ts_pred_model.predict_time_to_events(
             partial_history,
             task_config.n_future_visits,
