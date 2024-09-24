@@ -88,12 +88,10 @@ class TimeToEventModel:
             )
 
         seq_length = len(partial_history)
-        old_max_new_tokens = self.generation_config.max_new_tokens
+        if self.generation_config.max_length <= seq_length + self.generation_config.max_new_tokens:
+            start_index = seq_length - (self.generation_config.max_length - self.generation_config.max_new_tokens)
+            partial_history = partial_history[start_index:]
 
-        # Set this to max sequence
-        self.generation_config.max_new_tokens = (
-            self.model.config.n_positions - seq_length if max_new_tokens == 0 else max_new_tokens
-        )
         token_ids = self.tokenizer.encode(partial_history)
         prompt = torch.tensor(token_ids).unsqueeze(0).to(self.device)
 
@@ -115,7 +113,6 @@ class TimeToEventModel:
             simulated_sequences.extend([self.tokenizer.decode(seq.cpu().numpy()) for seq in results.sequences])
 
         self.generation_config.num_return_sequences = old_num_return_sequences
-        self.generation_config.max_new_tokens = old_max_new_tokens
         return simulated_sequences
 
     def predict_time_to_events(
@@ -156,10 +153,12 @@ class TimeToEventModel:
             top_k: int = 300,
             temperature: float = 1.0,
             repetition_penalty: float = 1.0,
-            epsilon_cutoff: float = 0.0
+            epsilon_cutoff: float = 0.0,
+            max_new_tokens: int = 128
     ) -> GenerationConfig:
         return GenerationConfig(
             max_length=max_length,
+            max_new_tokens=max_new_tokens,
             num_return_sequences=num_return_sequences,
             temperature=temperature,
             repetition_penalty=repetition_penalty,

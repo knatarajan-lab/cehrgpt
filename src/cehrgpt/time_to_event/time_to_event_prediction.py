@@ -31,6 +31,7 @@ class TaskConfig:
     include_descendants: bool = False
     n_future_visits: int = 1
     future_visit_offset: int = 0
+    max_new_tokens: int = 128
 
 
 def load_task_config_from_yaml(task_config_yaml_file_path: str) -> TaskConfig:
@@ -95,7 +96,8 @@ def main(
         top_k=args.top_k,
         temperature=args.temperature,
         repetition_penalty=args.repetition_penalty,
-        epsilon_cutoff=args.epsilon_cutoff
+        epsilon_cutoff=args.epsilon_cutoff,
+        max_new_tokens=task_config.max_new_tokens
     )
     ts_pred_model = TimeToEventModel(
         tokenizer=cehrgpt_tokenizer,
