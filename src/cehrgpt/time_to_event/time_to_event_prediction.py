@@ -18,7 +18,7 @@ from .time_to_event_model import TimeToEventModel
 from ..models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from ..models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from ..cehrgpt_args import create_inference_base_arg_parser
-from ..gpt_utils import is_visit_end, get_cehrgpt_output_folder
+from ..gpt_utils import is_visit_start, is_visit_end, get_cehrgpt_output_folder
 from cehrbert.runners.runner_util import load_parquet_as_dataset
 
 LOG = logging.get_logger("transformers")
@@ -134,6 +134,11 @@ def main(
         seq_length = len(partial_history)
         if generation_config.max_length <= seq_length + generation_config.max_new_tokens:
             start_index = seq_length - (generation_config.max_length - generation_config.max_new_tokens)
+            # Make sure the first token starts on VS
+            for i, token in enumerate(partial_history[start_index:]):
+                if is_visit_start(token):
+                    start_index += i
+                    break
             partial_history = partial_history[start_index:]
 
         concept_time_to_event = ts_pred_model.predict_time_to_events(
