@@ -6,10 +6,11 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 import pandas as pd
 import torch
-
-from src.cehrgpt.cehrgpt_args import create_inference_base_arg_parser, SamplingStrategy
 from transformers import GenerationConfig
 from transformers.utils import is_flash_attn_2_available, logging
+
+from src.cehrgpt.cehrgpt_args import create_inference_base_arg_parser
+
 from ..models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from ..models.tokenization_hf_cehrgpt import NA, CehrGptTokenizer
 from ..gpt_utils import get_cehrgpt_output_folder
@@ -18,20 +19,20 @@ LOG = logging.get_logger("transformers")
 
 
 def generate_single_batch(
-        model,
-        tokenizer,
-        batch_size,
-        demographic_info,
-        max_new_tokens=512,
-        mini_num_of_concepts=1,
-        top_p=0.95,
-        top_k=50,
-        temperature=1.0,
-        repetition_penalty=1.0,
-        num_beams=1,
-        num_beam_groups=1,
-        epsilon_cutoff=0.0,
-        device: Any = "cpu",
+    model,
+    tokenizer,
+    batch_size,
+    demographic_info,
+    max_new_tokens=512,
+    mini_num_of_concepts=1,
+    top_p=0.95,
+    top_k=50,
+    temperature=1.0,
+    repetition_penalty=1.0,
+    num_beams=1,
+    num_beam_groups=1,
+    epsilon_cutoff=0.0,
+    device: Any = "cpu",
 ) -> Dict[str, Any]:
     random_prompts = random.sample(demographic_info, batch_size)
 
@@ -143,23 +144,21 @@ def main(args):
     if not os.path.exists(output_folder_name):
         os.makedirs(output_folder_name)
 
-    LOG.info(f'Loading tokenizer at {args.model_folder}')
-    LOG.info(f'Loading model at {args.model_folder}')
-    LOG.info(f'Write sequences to {output_folder_name}')
-    LOG.info(f'Context window {args.context_window}')
-    LOG.info(f'Temperature {args.temperature}')
-    LOG.info(f'Repetition Penalty {args.repetition_penalty}')
-    LOG.info(f'Sampling Strategy {args.sampling_strategy}')
-    LOG.info(f'Num beam {args.num_beams}')
-    LOG.info(f'Num beam groups {args.num_beam_groups}')
-    LOG.info(f'Epsilon cutoff {args.epsilon_cutoff}')
-    LOG.info(f'Top P {args.top_p}')
-    LOG.info(f'Top K {args.top_k}')
-    LOG.info(f'Loading demographic_info at {args.demographic_data_path}')
+    LOG.info(f"Loading tokenizer at {args.model_folder}")
+    LOG.info(f"Loading model at {args.model_folder}")
+    LOG.info(f"Write sequences to {output_folder_name}")
+    LOG.info(f"Context window {args.context_window}")
+    LOG.info(f"Temperature {args.temperature}")
+    LOG.info(f"Repetition Penalty {args.repetition_penalty}")
+    LOG.info(f"Sampling Strategy {args.sampling_strategy}")
+    LOG.info(f"Num beam {args.num_beams}")
+    LOG.info(f"Num beam groups {args.num_beam_groups}")
+    LOG.info(f"Epsilon cutoff {args.epsilon_cutoff}")
+    LOG.info(f"Top P {args.top_p}")
+    LOG.info(f"Top K {args.top_k}")
+    LOG.info(f"Loading demographic_info at {args.demographic_data_path}")
 
-    data = pd.read_parquet(
-        args.demographic_data_path
-    )
+    data = pd.read_parquet(args.demographic_data_path)
 
     data = pd.read_parquet(args.demographic_data_path)
     # data = data[data.num_of_concepts >= args.min_num_of_concepts]
@@ -192,9 +191,9 @@ def main(args):
         torch.cuda.empty_cache()
 
         for seq, value_indicator, value in zip(
-                batch_sequences["sequences"],
-                batch_sequences["value_indicators"],
-                batch_sequences["values"],
+            batch_sequences["sequences"],
+            batch_sequences["value_indicators"],
+            batch_sequences["values"],
         ):
             normalized_values, units = normalize_value(
                 seq, value_indicator, value, cehrgpt_tokenizer
@@ -239,22 +238,24 @@ def main(args):
 
 
 def create_arg_parser():
-    base_arg_parser = create_inference_base_arg_parser(description='Arguments for generating patient sequences')
+    base_arg_parser = create_inference_base_arg_parser(
+        description="Arguments for generating patient sequences"
+    )
     base_arg_parser.add_argument(
-        '--num_of_patients',
-        dest='num_of_patients',
-        action='store',
+        "--num_of_patients",
+        dest="num_of_patients",
+        action="store",
         type=int,
         help="The number of patients that will be generated",
         required=True,
     )
 
     base_arg_parser.add_argument(
-        '--demographic_data_path',
-        dest='demographic_data_path',
-        action='store',
-        help='The path for your concept_path',
-        required=True
+        "--demographic_data_path",
+        dest="demographic_data_path",
+        action="store",
+        help="The path for your concept_path",
+        required=True,
     )
     return base_arg_parser
 

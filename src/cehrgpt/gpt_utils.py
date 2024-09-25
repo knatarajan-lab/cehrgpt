@@ -1,20 +1,24 @@
 import random
 import re
 from datetime import date, timedelta
-from typing import Sequence, Tuple, List
+from typing import List, Sequence, Tuple
 
 from src.cehrgpt.cehrgpt_args import SamplingStrategy
-from src.cehrgpt.models.special_tokens import END_TOKEN, VISIT_CONCEPT_IDS, DISCHARGE_CONCEPT_IDS
+from src.cehrgpt.models.special_tokens import (
+    DISCHARGE_CONCEPT_IDS,
+    END_TOKEN,
+    VISIT_CONCEPT_IDS,
+)
 
-INPATIENT_ATT_PATTERN = re.compile(r'(?:VS-|i-)D(\d+)(?:-VE)?')
+INPATIENT_ATT_PATTERN = re.compile(r"(?:VS-|i-)D(\d+)(?:-VE)?")
 
 
 class RandomSampleCache:
     def __init__(
-            self,
-            data_indices: Sequence[int],
-            cache_size: int,
-            sample_weights: Sequence[float] = None,
+        self,
+        data_indices: Sequence[int],
+        cache_size: int,
+        sample_weights: Sequence[float] = None,
     ):
         self._data_indices = data_indices
         self._sample_weights = sample_weights
@@ -41,17 +45,27 @@ class RandomSampleCache:
         return self._cache.pop()
 
 
-def collect_demographic_prompts_at_visits(demographic_prompt: List[str], patient_history: List[str]):
+def collect_demographic_prompts_at_visits(
+    demographic_prompt: List[str], patient_history: List[str]
+):
     demographic_prompts_at_visits = []
     start_year, start_age, start_gender, start_race = demographic_prompt
-    start_year = int(start_year.split(':')[1])
-    start_age = int(start_age.split(':')[1])
+    start_year = int(start_year.split(":")[1])
+    start_age = int(start_age.split(":")[1])
     data_cursor = date(int(start_year), 1, 1)
     birth_date = date(start_year - start_age, 1, 1)
     for i, current_token in enumerate(patient_history):
         if is_visit_start(current_token):
             demographic_prompts_at_visits.append(
-                (i, (data_cursor.year, data_cursor.year - birth_date.year, start_gender, start_race))
+                (
+                    i,
+                    (
+                        data_cursor.year,
+                        data_cursor.year - birth_date.year,
+                        start_gender,
+                        start_race,
+                    ),
+                )
             )
         elif is_att_token(current_token):
             att_date_delta = extract_time_interval_in_days(current_token)
@@ -59,10 +73,7 @@ def collect_demographic_prompts_at_visits(demographic_prompt: List[str], patient
     return demographic_prompts_at_visits
 
 
-def random_slice_gpt_sequence(
-        concept_ids,
-        max_seq_len
-):
+def random_slice_gpt_sequence(concept_ids, max_seq_len):
     seq_length = len(concept_ids)
     starting_points = []
     [start_year, start_age, start_gender, start_race] = [_ for _ in concept_ids[0:4]]
@@ -96,7 +107,7 @@ def random_slice_gpt_sequence(
         # Remove the number of demographic tokens
         random_end_index = random_starting_index
         for i in reversed(
-                list(range(random_starting_index, random_starting_index + max_seq_len - 4))
+            list(range(random_starting_index, random_starting_index + max_seq_len - 4))
         ):
             current_token = concept_ids[i]
             if current_token == "VE":
@@ -111,27 +122,31 @@ def random_slice_gpt_sequence(
 
 def get_cehrgpt_output_folder(args, cehrgpt_tokenizer) -> str:
     if args.sampling_strategy == SamplingStrategy.TopKStrategy.value:
-        folder_name = f'top_k{args.top_k}'
+        folder_name = f"top_k{args.top_k}"
         args.top_p = 1.0
     elif args.sampling_strategy == SamplingStrategy.TopPStrategy.value:
-        folder_name = f'top_p{int(args.top_p * 1000)}'
+        folder_name = f"top_p{int(args.top_p * 1000)}"
         args.top_k = cehrgpt_tokenizer.vocab_size
     elif args.sampling_strategy == SamplingStrategy.TopMixStrategy.value:
-        folder_name = f'top_mix_p{int(args.top_p * 1000)}_k{args.top_k}'
+        folder_name = f"top_mix_p{int(args.top_p * 1000)}_k{args.top_k}"
     else:
         raise RuntimeError(
-            'sampling_strategy has to be one of the following three options [TopKStrategy, TopPStrategy, TopMixStrategy]'
+            "sampling_strategy has to be one of the following three options [TopKStrategy, TopPStrategy, TopMixStrategy]"
         )
     if args.temperature != 1.0:
-        folder_name = f'{folder_name}_temp_{int(args.temperature * 1000)}'
+        folder_name = f"{folder_name}_temp_{int(args.temperature * 1000)}"
     if args.repetition_penalty != 1.0:
-        folder_name = f'{folder_name}_repetition_penalty_{int(args.repetition_penalty * 1000)}'
+        folder_name = (
+            f"{folder_name}_repetition_penalty_{int(args.repetition_penalty * 1000)}"
+        )
     if args.num_beams > 1:
-        folder_name = f'{folder_name}_num_beams_{int(args.num_beams)}'
+        folder_name = f"{folder_name}_num_beams_{int(args.num_beams)}"
     if args.num_beam_groups > 1:
-        folder_name = f'{folder_name}_num_beam_groups_{int(args.num_beam_groups)}'
+        folder_name = f"{folder_name}_num_beam_groups_{int(args.num_beam_groups)}"
     if args.epsilon_cutoff > 0.0:
-        folder_name = f'{folder_name}_epsilon_cutoff_{int(args.epsilon_cutoff * 100000)}'
+        folder_name = (
+            f"{folder_name}_epsilon_cutoff_{int(args.epsilon_cutoff * 100000)}"
+        )
     return folder_name
 
 
@@ -140,11 +155,11 @@ def is_clinical_event(token: str) -> bool:
 
 
 def is_visit_start(token: str) -> bool:
-    return token in ['VS', '[VS]']
+    return token in ["VS", "[VS]"]
 
 
 def is_visit_end(token: str) -> bool:
-    return token in ['VE', '[VE]']
+    return token in ["VE", "[VE]"]
 
 
 def is_att_token(token: str):
@@ -161,7 +176,7 @@ def is_att_token(token: str):
     elif token[:3] == "VS-":  # VS-D7-VE
         return True
     elif token[:2] == "i-" and not token.startswith(
-            "i-H"
+        "i-H"
     ):  # i-D7 and exclude hour tokens
         return True
     return False
@@ -219,7 +234,7 @@ def extract_time_interval_in_days(token: str):
 
 
 def convert_time_interval_to_time_tuple(
-        time_interval: int, is_inpatient: bool
+    time_interval: int, is_inpatient: bool
 ) -> Tuple[str, str, str]:
     assert time_interval >= 0, "the time interval must equal and greater than zero"
     year = time_interval // 365
