@@ -29,7 +29,12 @@ from cehrgpt.gpt_utils import (
     is_att_token,
     is_inpatient_att_token,
 )
-from src.cehrgpt.models.special_tokens import START_TOKEN, END_TOKEN, PAD_TOKEN, OUT_OF_VOCABULARY_TOKEN
+from cehrgpt.models.special_tokens import (
+    END_TOKEN,
+    OUT_OF_VOCABULARY_TOKEN,
+    PAD_TOKEN,
+    START_TOKEN,
+)
 
 NA = "N/A"
 TOKENIZER_FILE_NAME = "cehrgpt_tokenizer.json"

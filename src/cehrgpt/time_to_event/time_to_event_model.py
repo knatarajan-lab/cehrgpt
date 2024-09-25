@@ -1,17 +1,16 @@
 import math
 from collections import Counter
 from dataclasses import dataclass
-from typing import List, Dict, Any, Union, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
+from cehrbert_data.decorators.patient_event_decorator import time_month_token
 from transformers import GenerationConfig
 
-from ..gpt_utils import is_visit_end, is_att_token, extract_time_interval_in_days
-from ..models.hf_cehrgpt import CEHRGPT2LMHeadModel
-from ..models.tokenization_hf_cehrgpt import CehrGptTokenizer
-
-from cehrbert_data.decorators.patient_event_decorator import time_month_token
+from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token, is_visit_end
+from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
+from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 
 @dataclass
@@ -26,18 +25,21 @@ class TimeToEvent:
     time_interval_probability_table: List[Dict[str, Any]]
 
 
-def create_time_to_event(time_event_tuples: List[Tuple[str, int]], num_of_simulations: int) -> TimeToEvent:
+def create_time_to_event(
+    time_event_tuples: List[Tuple[str, int]], num_of_simulations: int
+) -> TimeToEvent:
     outcome_events, time_intervals = zip(*time_event_tuples)
     time_buckets = [time_month_token(_) for _ in time_intervals]
     time_bucket_counter = Counter(time_buckets)
     most_common_item = time_bucket_counter.most_common(1)[0][0]
     total_count = sum(time_bucket_counter.values())
     # Generate the probability table
-    probability_table = {item: count / total_count for item, count in time_bucket_counter.items()}
+    probability_table = {
+        item: count / total_count for item, count in time_bucket_counter.items()
+    }
     sorted_probability_table = [
         {"time_interval": k, "probability": v}
-        for k, v in
-        sorted(probability_table.items(), key=lambda x: x[1], reverse=True)
+        for k, v in sorted(probability_table.items(), key=lambda x: x[1], reverse=True)
     ]
     return TimeToEvent(
         time_intervals=time_intervals,
@@ -47,19 +49,19 @@ def create_time_to_event(time_event_tuples: List[Tuple[str, int]], num_of_simula
         standard_deviation=np.std(time_intervals),
         most_likely_time=most_common_item,
         num_of_simulations=num_of_simulations,
-        time_interval_probability_table=sorted_probability_table
+        time_interval_probability_table=sorted_probability_table,
     )
 
 
 class TimeToEventModel:
     def __init__(
-            self,
-            tokenizer: CehrGptTokenizer,
-            model: CEHRGPT2LMHeadModel,
-            outcome_events: List[str],
-            generation_config: GenerationConfig,
-            device: torch.device = torch.device("cpu"),
-            batch_size: int = 32
+        self,
+        tokenizer: CehrGptTokenizer,
+        model: CEHRGPT2LMHeadModel,
+        outcome_events: List[str],
+        generation_config: GenerationConfig,
+        device: torch.device = torch.device("cpu"),
+        batch_size: int = 32,
     ):
         self.tokenizer = tokenizer
         self.model = model.eval()
@@ -73,11 +75,12 @@ class TimeToEventModel:
         return token in self.outcome_events
 
     def simulate(
-            self,
-            partial_history: Union[np.ndarray, List[str]]
+        self, partial_history: Union[np.ndarray, List[str]]
     ) -> List[List[str]]:
 
-        sequence_is_demographics = len(partial_history) == 4 and partial_history[0].startswith("year")
+        sequence_is_demographics = len(partial_history) == 4 and partial_history[
+            0
+        ].startswith("year")
         sequence_ends_ve = is_visit_end(partial_history[-1])
 
         if not (sequence_is_demographics | sequence_ends_ve):
@@ -91,11 +94,12 @@ class TimeToEventModel:
 
         simulated_sequences = []
         num_iters = max(
-            math.ceil(self.generation_config.num_return_sequences / self.batch_size),
-            1
+            math.ceil(self.generation_config.num_return_sequences / self.batch_size), 1
         )
         old_num_return_sequences = self.generation_config.num_return_sequences
-        self.generation_config.num_return_sequences = min(self.batch_size, old_num_return_sequences)
+        self.generation_config.num_return_sequences = min(
+            self.batch_size, old_num_return_sequences
+        )
         with torch.no_grad():
             for _ in range(num_iters):
                 results = self.model.generate(
@@ -104,18 +108,20 @@ class TimeToEventModel:
                 )
                 # Clear the cache
                 torch.cuda.empty_cache()
-            simulated_sequences.extend([self.tokenizer.decode(seq.cpu().numpy()) for seq in results.sequences])
+            simulated_sequences.extend(
+                [self.tokenizer.decode(seq.cpu().numpy()) for seq in results.sequences]
+            )
 
         self.generation_config.num_return_sequences = old_num_return_sequences
         return simulated_sequences
 
     def predict_time_to_events(
-            self,
-            partial_history: Union[np.ndarray, list],
-            future_visit_start: int = 0,
-            future_visit_end: int = -1,
-            prediction_window_start: int = 0,
-            prediction_window_end: int = 365
+        self,
+        partial_history: Union[np.ndarray, list],
+        future_visit_start: int = 0,
+        future_visit_end: int = -1,
+        prediction_window_start: int = 0,
+        prediction_window_end: int = 365,
     ) -> Optional[TimeToEvent]:
 
         patient_history_length = len(partial_history)
@@ -127,30 +133,37 @@ class TimeToEventModel:
             time_delta = 0
             for next_token in seq[patient_history_length:]:
                 visit_counter += int(is_visit_end(next_token))
-                if visit_counter > future_visit_end != -1 or time_delta > prediction_window_end != -1:
+                if (
+                    visit_counter > future_visit_end != -1
+                    or time_delta > prediction_window_end != -1
+                ):
                     break
                 if is_att_token(next_token):
                     time_delta += extract_time_interval_in_days(next_token)
                 elif (
-                        visit_counter >= future_visit_start and
-                        time_delta >= prediction_window_start
+                    visit_counter >= future_visit_start
+                    and time_delta >= prediction_window_start
                 ) and self.is_outcome_event(next_token):
                     time_event_tuples.append((next_token, time_delta))
 
         # Count the occurrences of each time tokens for each concept
-        return create_time_to_event(time_event_tuples, len(simulated_seqs)) if len(time_event_tuples) > 0 else None
+        return (
+            create_time_to_event(time_event_tuples, len(simulated_seqs))
+            if len(time_event_tuples) > 0
+            else None
+        )
 
     @staticmethod
     def get_generation_config(
-            tokenizer: CehrGptTokenizer,
-            max_length: int,
-            num_return_sequences: int,
-            top_p: float = 1.0,
-            top_k: int = 300,
-            temperature: float = 1.0,
-            repetition_penalty: float = 1.0,
-            epsilon_cutoff: float = 0.0,
-            max_new_tokens: int = 128
+        tokenizer: CehrGptTokenizer,
+        max_length: int,
+        num_return_sequences: int,
+        top_p: float = 1.0,
+        top_k: int = 300,
+        temperature: float = 1.0,
+        repetition_penalty: float = 1.0,
+        epsilon_cutoff: float = 0.0,
+        max_new_tokens: int = 128,
     ) -> GenerationConfig:
         return GenerationConfig(
             max_length=max_length,
@@ -170,5 +183,5 @@ class TimeToEventModel:
             output_attentions=False,
             output_hidden_states=False,
             output_scores=False,
-            renormalize_logits=True
+            renormalize_logits=True,
         )
