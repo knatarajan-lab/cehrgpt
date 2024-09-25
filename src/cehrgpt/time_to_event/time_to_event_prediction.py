@@ -1,6 +1,7 @@
 import datetime
 import os
 import uuid
+from argparse import ArgumentError
 from pathlib import Path
 import shutil
 
@@ -68,6 +69,20 @@ def main(
     task_config = load_task_config_from_yaml(args.task_config)
     task_name = task_config.task_name
     outcome_events = task_config.outcome_events
+
+    if task_config.include_descendants:
+        if not args.concept_ancestor:
+            raise RuntimeError(
+                "When include_descendants is set to True, the concept_ancestor data needs to be provided."
+            )
+        concept_ancestor = pd.read_parquet(args.concept_ancestor)
+        ancestor_concept_ids = [int(_) for _ in outcome_events if _.isnumeric()]
+        descendant_concept_ids = (
+            concept_ancestor[concept_ancestor.ancestor_concept_id.isin(ancestor_concept_ids)].
+            descendant_concept_id.unique().astype(str).tolist()
+        )
+        descendant_concept_ids = [_ for _ in descendant_concept_ids if _ not in outcome_events]
+        outcome_events += descendant_concept_ids
 
     prediction_output_folder_name = os.path.join(
         args.output_folder,
