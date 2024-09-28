@@ -122,8 +122,12 @@ class CehrGptTokenizer(PushToHubMixin):
         encoded = self._tokenizer.encode(concept_ids, is_pretokenized=True)
         return encoded.ids
 
-    def decode(self, concept_token_ids: List[int]) -> List[str]:
-        return self._tokenizer.decode(concept_token_ids).split(" ")
+    def decode(
+        self, concept_token_ids: List[int], skip_special_tokens: bool = True
+    ) -> List[str]:
+        return self._tokenizer.decode(
+            concept_token_ids, skip_special_tokens=skip_special_tokens
+        ).split(" ")
 
     def _convert_token_to_id(self, token):
         """Converts a token (str) in an id using the vocab."""
