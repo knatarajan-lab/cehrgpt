@@ -116,7 +116,7 @@ class CehrGptDataCollator:
                 batch_input_ids,
                 batch_first=True,
                 padding_value=self.tokenizer.pad_token_id,
-            ).to(torch.int64)
+            ).to(torch.int)
         )
 
         batch["attention_mask"] = self._try_reverse_tensor(
@@ -137,7 +137,7 @@ class CehrGptDataCollator:
                 (
                     masked_tokens.unsqueeze(-1)
                     == self.time_tokens.unsqueeze(0).unsqueeze(0)
-                ).to(torch.int32),
+                ).to(torch.int),
                 dim=-1,
             )
             sub_time_tokens = self.mapped_sub_time_tokens[sub_time_token_indices]
@@ -190,7 +190,7 @@ class CehrGptDataCollator:
                     for example in examples
                 ],
                 dim=0,
-            ).to(torch.float)
+            ).to(torch.int)
 
         if "index_date" in examples[0]:
             batch["index_date"] = torch.cat(
@@ -199,7 +199,7 @@ class CehrGptDataCollator:
                     for example in examples
                 ],
                 dim=0,
-            ).to(torch.float32)
+            ).to(torch.float)
 
         if "age_at_index" in examples[0]:
             batch["age_at_index"] = torch.cat(

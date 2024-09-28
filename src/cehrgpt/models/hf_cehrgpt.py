@@ -926,15 +926,31 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 loss += torch.mean(time_token_loss) * self.config.time_token_loss_weight
 
         if time_to_visits is not None:
+            # Get lambda and k parameters
             lambda_param, k_param = self.tte_head(hidden_states)
+
+            # Perform slicing before tensors are split across GPUs
             shifted_lambda_param = lambda_param[..., :-1, :].contiguous()
             shifted_k_param = k_param[..., :-1, :].contiguous()
             shift_time_to_visits = time_to_visits[..., 1:].contiguous()
-            shift_time_to_visits = shift_time_to_visits.to(lm_logits.device)
-            time_to_visit_indicator = (shift_time_to_visits >= 0).to(torch.float32)
+
+            assert shift_time_to_visits.shape[-2] == shifted_lambda_param.shape[-2], (
+                f"time_to_visits: {time_to_visits.shape}\n"
+                f"input_ids: {input_ids.shape}\n"
+                f"hidden_states: {hidden_states.shape}\n"
+            )
+
+            # Move to the same device as lambda_param
+            shift_time_to_visits = shift_time_to_visits.to(lambda_param.device)
+
+            time_to_visit_indicator = (shift_time_to_visits >= 0).to(torch.float)
+            # Define the Gamma distribution
             dist = Gamma(shifted_k_param.squeeze(-1), shifted_lambda_param.squeeze(-1))
+            # Compute log-probs and apply the time_to_visit_indicator
             log_probs = dist.log_prob(torch.clamp(shift_time_to_visits, min=0.0) + 1e-6)
             log_probs *= time_to_visit_indicator
+
+            # Compute the loss
             loss += -log_probs.mean() * self.config.time_to_visit_loss_weight
 
         if true_values is not None and true_value_indicators is not None:
