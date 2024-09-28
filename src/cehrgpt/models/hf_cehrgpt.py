@@ -934,12 +934,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             shifted_k_param = k_param[..., :-1, :].contiguous()
             shift_time_to_visits = time_to_visits[..., 1:].contiguous()
 
-            assert shift_time_to_visits.shape[-2] == shifted_lambda_param.shape[-2], (
-                f"time_to_visits: {time_to_visits.shape}\n"
-                f"input_ids: {input_ids.shape}\n"
-                f"hidden_states: {hidden_states.shape}\n"
-            )
-
             # Move to the same device as lambda_param
             shift_time_to_visits = shift_time_to_visits.to(lambda_param.device)
 
