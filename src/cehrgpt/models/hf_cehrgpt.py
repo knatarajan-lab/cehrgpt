@@ -937,7 +937,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # Move to the same device as lambda_param
             shift_time_to_visits = shift_time_to_visits.to(lambda_param.device)
 
-            time_to_visit_indicator = (shift_time_to_visits >= 0).to(torch.float)
+            time_to_visit_indicator = (shift_time_to_visits >= 0).to(torch.float32)
             # Define the Gamma distribution
             dist = Gamma(shifted_k_param.squeeze(-1), shifted_lambda_param.squeeze(-1))
             # Compute log-probs and apply the time_to_visit_indicator
