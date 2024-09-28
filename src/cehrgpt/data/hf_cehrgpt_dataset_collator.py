@@ -88,7 +88,11 @@ class CehrGptDataCollator:
             except ValueError:
                 return -100
 
-        return [float(default_value(_)) for _ in concept_ids]
+        time_intervals = [float(default_value(_)) for _ in concept_ids]
+        assert len(time_intervals) == len(concept_ids), (
+            f"concept_ids: {concept_ids}\n" f"time_intervals: {time_intervals}"
+        )
+        return time_intervals
 
     def __call__(self, examples):
 
@@ -288,14 +292,21 @@ class CehrGptDataCollator:
                     ]
                 )
             if self.include_ttv_prediction:
-                record["time_to_visits"] = torch.concat(
+                time_to_visits = self._convert_to_tensor(
+                    self._convert_time_to_event(concept_ids)
+                )
+                assert time_to_visits.shape == record["input_ids"][:, :-1].shape
+                time_to_visits = torch.concat(
                     [
-                        self._convert_to_tensor(
-                            self._convert_time_to_event(concept_ids)
-                        ),
+                        time_to_visits,
                         self._convert_to_tensor([-100.0]),
                     ]
                 )
+                assert time_to_visits.shape == record["input_ids"].shape, (
+                    f"time_to_visits.shape: {time_to_visits.shape}\n"
+                    f"record['input_ids'].shape: {record['input_ids'].shape}"
+                )
+                record["time_to_visits"] = time_to_visits
 
             return record
 
