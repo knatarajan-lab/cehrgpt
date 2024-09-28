@@ -116,7 +116,7 @@ class CehrGptDataCollator:
                 batch_input_ids,
                 batch_first=True,
                 padding_value=self.tokenizer.pad_token_id,
-            ).to(torch.int32)
+            ).to(torch.int64)
         )
 
         batch["attention_mask"] = self._try_reverse_tensor(
