@@ -11,7 +11,6 @@ import torch
 import yaml
 from cehrbert.runners.runner_util import load_parquet_as_dataset
 from datasets import Dataset
-from time_to_event_model import TimeToEventModel
 from tqdm import tqdm
 from transformers.utils import is_flash_attn_2_available, logging
 
@@ -19,6 +18,7 @@ from cehrgpt.cehrgpt_args import create_inference_base_arg_parser
 from cehrgpt.gpt_utils import get_cehrgpt_output_folder, is_visit_end, is_visit_start
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.time_to_event.time_to_event_model import TimeToEventModel
 
 LOG = logging.get_logger("transformers")
 
