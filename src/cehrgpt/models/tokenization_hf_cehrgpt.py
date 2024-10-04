@@ -56,7 +56,7 @@ class CehrGptTokenizer(PushToHubMixin):
         self._token_to_sub_time_token_mapping = token_to_sub_time_token_mapping
         self._lab_stats = lab_stats
         self._lab_stat_mapping = {
-            lab_stat["concept_id"]: {
+            (lab_stat["concept_id"], lab_stat["unit"]): {
                 "unit": lab_stat["unit"],
                 "mean": lab_stat["mean"],
                 "std": lab_stat["std"],
@@ -427,9 +427,9 @@ class CehrGptTokenizer(PushToHubMixin):
             concept_name_mapping,
         )
 
-    def normalize(self, concept_id, concept_value) -> float:
-        if concept_id in self._lab_stat_mapping:
-            mean_ = concept_value - self._lab_stat_mapping[concept_id]["mean"]
+    def normalize(self, concept_id, unit, concept_value) -> float:
+        if (concept_id, unit) in self._lab_stat_mapping:
+            mean_ = concept_value - self._lab_stat_mapping[(concept_id, unit)]["mean"]
             std = self._lab_stat_mapping[concept_id]["std"]
             if std > 0:
                 value_outlier_std = self._lab_stat_mapping[concept_id][
