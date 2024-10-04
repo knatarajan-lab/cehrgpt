@@ -34,23 +34,13 @@ def create_cehrgpt_pretraining_dataset(
     data_args: DataTrainingArguments,
 ) -> Dataset:
     required_columns = TRANSFORMER_COLUMNS + CEHRGPT_COLUMNS
-    # If the data is already in meds, we don't need to sort the sequence anymore
-    if data_args.is_data_in_med:
-        mapping_functions = [HFCehrGptTokenizationMapping(cehrgpt_tokenizer)]
-    else:
-        mapping_functions = [
-            SortPatientSequenceMapping(),
-            HFCehrGptTokenizationMapping(cehrgpt_tokenizer),
-        ]
-
-    for mapping_function in mapping_functions:
-        dataset = apply_cehrbert_dataset_mapping(
-            dataset,
-            mapping_function,
-            num_proc=data_args.preprocessing_num_workers,
-            batch_size=data_args.preprocessing_batch_size,
-            streaming=data_args.streaming,
-        )
+    dataset = apply_cehrbert_dataset_mapping(
+        dataset,
+        HFCehrGptTokenizationMapping(cehrgpt_tokenizer),
+        num_proc=data_args.preprocessing_num_workers,
+        batch_size=data_args.preprocessing_batch_size,
+        streaming=data_args.streaming,
+    )
 
     if not data_args.streaming:
         if isinstance(dataset, DatasetDict):
