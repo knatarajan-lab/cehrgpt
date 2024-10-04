@@ -1,19 +1,12 @@
 import unittest
-from typing import Any, Dict, List
 
 import numpy as np
 
-from cehrgpt.models.tokenization_hf_cehrgpt import NA, NumericEventStatistics
-
-
-# Mock function for create_numeric_concept_unit_mapping
-def create_numeric_concept_unit_mapping(lab_stats: List[Dict[str, Any]]):
-    concept_prob_mapping = {
-        "concept_1": [1.0],  # 100% probability for the single unit
-        "concept_2": [0.5, 0.5],  # Equal probabilities for multiple units
-    }
-    concept_unit_mapping = {"concept_1": ["unit_1"], "concept_2": ["unit_1", "unit_2"]}
-    return concept_prob_mapping, concept_unit_mapping
+from cehrgpt.models.tokenization_hf_cehrgpt import (
+    NA,
+    NumericEventStatistics,
+    create_numeric_concept_unit_mapping,
+)
 
 
 class TestNumericEventStatistics(unittest.TestCase):
@@ -54,6 +47,28 @@ class TestNumericEventStatistics(unittest.TestCase):
         # Create an instance of NumericEventStatistics
         self.numeric_event_statistics = NumericEventStatistics(self.lab_stats)
 
+    def test_create_numeric_concept_unit_mapping(self):
+        # Call the function
+        concept_prob_mapping, concept_unit_mapping = (
+            create_numeric_concept_unit_mapping(self.lab_stats)
+        )
+
+        # Check the concept_prob_mapping
+        # For concept_1: Only one unit, so probability = 1.0
+        self.assertEqual(concept_prob_mapping["concept_1"], [1.0])
+
+        # For concept_2: Two units, unit_1 with count 100, unit_2 with count 200
+        total_count_concept_2 = 100 + 200
+        expected_probs_concept_2 = [
+            100 / total_count_concept_2,
+            200 / total_count_concept_2,
+        ]
+        self.assertEqual(concept_prob_mapping["concept_2"], expected_probs_concept_2)
+
+        # Check the concept_unit_mapping
+        self.assertEqual(concept_unit_mapping["concept_1"], ("unit_1",))
+        self.assertEqual(concept_unit_mapping["concept_2"], ("unit_1", "unit_2"))
+
     def test_get_numeric_concept_ids(self):
         # Test for correct concept IDs
         expected_concept_ids = ["concept_1", "concept_2", "concept_2"]
@@ -69,6 +84,7 @@ class TestNumericEventStatistics(unittest.TestCase):
         unit = self.numeric_event_statistics.get_random_unit("concept_2")
         self.assertIn(unit, ["unit_1", "unit_2"])
 
+        # Test get_random_unit method for non-existent concept_3
         unit = self.numeric_event_statistics.get_random_unit("concept_3")
         self.assertEqual(unit, NA)
 
