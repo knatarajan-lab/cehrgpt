@@ -22,7 +22,11 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
         concept_ids = record["concept_ids"]
         input_ids = self._concept_tokenizer.encode(concept_ids)
         record["input_ids"] = input_ids
-        units = record["units"]
+        try:
+            units = record["units"]
+        except Exception:
+            print(record)
+            units = ["Unknown" for _ in range(concept_ids)]
         concept_value_masks = record["concept_value_masks"]
         concept_values = record["concept_values"]
 
