@@ -19,7 +19,10 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
         return ["concept_value_masks", "concept_values"]
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        input_ids = self._concept_tokenizer.encode(record["concept_ids"])
+        concept_ids = record["concept_ids"]
+        if isinstance(concept_ids, np.ndarray):
+            concept_ids = concept_ids.tolist()
+        input_ids = self._concept_tokenizer.encode(concept_ids)
         record["input_ids"] = input_ids
         concept_value_masks = record["concept_value_masks"]
         concept_values = record["concept_values"]
