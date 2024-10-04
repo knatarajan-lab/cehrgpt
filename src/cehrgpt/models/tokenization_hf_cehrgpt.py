@@ -55,7 +55,7 @@ class CehrGptTokenizer(PushToHubMixin):
         self._att_tokenizer = att_tokenizer
         self._token_to_sub_time_token_mapping = token_to_sub_time_token_mapping
         self._lab_stats = lab_stats
-        self._lab_stat_mapping = {
+        self._lab_stats_mapping = {
             (lab_stat["concept_id"], lab_stat["unit"]): {
                 "unit": lab_stat["unit"],
                 "mean": lab_stat["mean"],
@@ -428,14 +428,13 @@ class CehrGptTokenizer(PushToHubMixin):
         )
 
     def normalize(self, concept_id, unit, concept_value) -> float:
-        if (concept_id, unit) in self._lab_stat_mapping:
-            mean_ = concept_value - self._lab_stat_mapping[(concept_id, unit)]["mean"]
-            std = self._lab_stat_mapping[concept_id]["std"]
+        if (concept_id, unit) in self._lab_stats_mapping:
+            concept_unit_stats = self._lab_stats_mapping[(concept_id, unit)]
+            mean_ = concept_value - concept_unit_stats["mean"]
+            std = concept_unit_stats["std"]
             if std > 0:
-                value_outlier_std = self._lab_stat_mapping[concept_id][
-                    "value_outlier_std"
-                ]
-                normalized_value = mean_ / self._lab_stat_mapping[concept_id]["std"]
+                value_outlier_std = concept_unit_stats["value_outlier_std"]
+                normalized_value = mean_ / std
                 # Clip the value between the lower and upper bounds of the corresponding lab
                 normalized_value = max(
                     -value_outlier_std, min(value_outlier_std, normalized_value)
@@ -448,10 +447,10 @@ class CehrGptTokenizer(PushToHubMixin):
         return concept_value
 
     def denormalize(self, concept_id, value) -> float:
-        if concept_id in self._lab_stat_mapping:
+        if concept_id in self._lab_stats_mapping:
             value = (
-                value * self._lab_stat_mapping[concept_id]["std"]
-                + self._lab_stat_mapping[concept_id]["mean"]
+                value * self._lab_stats_mapping[concept_id]["std"]
+                + self._lab_stats_mapping[concept_id]["mean"]
             )
         return value
 
