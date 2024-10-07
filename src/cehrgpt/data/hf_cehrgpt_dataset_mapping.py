@@ -22,12 +22,12 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
         concept_ids = record["concept_ids"]
         input_ids = self._concept_tokenizer.encode(concept_ids)
         record["input_ids"] = input_ids
-        units = record["units"]
         concept_value_masks = record["concept_value_masks"]
         concept_values = record["concept_values"]
 
         # If any concept has a value associated with it, we normalize the value
         if np.any(np.asarray(concept_value_masks) > 0):
+            units = record["units"]
             normalized_concept_values = copy.deepcopy(concept_values)
             for i, (
                 concept_id,
