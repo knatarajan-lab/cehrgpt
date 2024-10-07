@@ -109,7 +109,7 @@ def normalize_value(
                 normalized_values.append(normalized_value)
                 units.append(unit)
             else:
-                normalized_values.append(value)
+                normalized_values.append(0.0)
                 units.append(NA)
         return normalized_values, units
     return None, None
