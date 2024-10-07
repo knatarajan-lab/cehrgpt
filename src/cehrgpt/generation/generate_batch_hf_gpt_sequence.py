@@ -71,7 +71,8 @@ def generate_single_batch(
         value_indicators = [
             m[: len(s)]
             for m, s in zip(
-                results.sequence_val_masks.detach().cpu().numpy(), sequences
+                results.sequence_val_masks.detach().cpu().numpy(),
+                sequences,
             )
         ]
     else:
@@ -79,7 +80,10 @@ def generate_single_batch(
     if results.sequence_vals is not None:
         values = [
             v[: len(s)]
-            for v, s in zip(results.sequence_vals.detach().cpu().numpy(), sequences)
+            for v, s in zip(
+                results.sequence_vals.detach().to(torch.float32).cpu().numpy(),
+                sequences,
+            )
         ]
     else:
         values = [None] * len(sequences)

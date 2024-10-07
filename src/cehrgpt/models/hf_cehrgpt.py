@@ -795,9 +795,14 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 "value_indicators", torch.zeros_like(input_ids).to(torch.bool)
             )
             values = kwargs.get(
-                "values", torch.zeros_like(input_ids, dtype=torch.float32)
+                "values",
+                torch.zeros_like(
+                    input_ids,
+                    dtype=(
+                        torch.bfloat16 if is_flash_attn_2_available() else torch.float32
+                    ),
+                ),
             )
-
             # Omit tokens covered by past_key_values
             if past_key_values:
                 past_length = past_key_values[0][0].shape[2]
@@ -921,7 +926,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
                 time_token_loss = time_token_loss.view(
                     -1, 3
-                ) * shifted_time_token_indicators.view(-1, 1).to(torch.float32)
+                ) * shifted_time_token_indicators.view(-1, 1).to(hidden_states.dtype)
                 time_token_loss = time_token_loss.sum(-1)
                 loss += torch.mean(time_token_loss) * self.config.time_token_loss_weight
 
@@ -937,7 +942,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # Move to the same device as lambda_param
             shift_time_to_visits = shift_time_to_visits.to(lambda_param.device)
 
-            time_to_visit_indicator = (shift_time_to_visits >= 0).to(torch.float32)
+            time_to_visit_indicator = (shift_time_to_visits >= 0).to(
+                hidden_states.dtype
+            )
             # Define the Gamma distribution
             dist = Gamma(shifted_k_param.squeeze(-1), shifted_lambda_param.squeeze(-1))
             # Compute log-probs and apply the time_to_visit_indicator
@@ -953,7 +960,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             shift_value_indicators = true_value_indicators[..., :-1].contiguous()
             shift_next_values = true_values[..., 1:].contiguous()
             num_items = (
-                torch.sum(shift_value_indicators.to(torch.float32), dim=-1) + 1e-6
+                torch.sum(shift_value_indicators.to(hidden_states.dtype), dim=-1) + 1e-6
             )
             masked_mse = (
                 torch.sum(
@@ -1105,7 +1112,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             dtype=torch.int32,
         )
         value_indicators = torch.zeros_like(input_ids).to(torch.bool)
-        values = torch.zeros_like(input_ids, dtype=torch.float32)
+        values = torch.zeros_like(
+            input_ids,
+            dtype=torch.bfloat16 if is_flash_attn_2_available() else torch.float32,
+        )
         model_kwargs["value_indicators"] = value_indicators
         model_kwargs["values"] = values
         while self._has_unfinished_sequences(
@@ -1216,9 +1226,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             sequence_val_masks=(
                 value_indicators.to(torch.bool) if self.cehrgpt.include_values else None
             ),
-            sequence_vals=(
-                values.to(torch.float32) if self.cehrgpt.include_values else None
-            ),
+            sequence_vals=(values if self.cehrgpt.include_values else None),
             scores=scores,
             logits=raw_logits,
             attentions=decoder_attentions,
