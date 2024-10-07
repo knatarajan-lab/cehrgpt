@@ -111,12 +111,12 @@ class NumericEventStatistics:
             return normalized_value
         return concept_value
 
-    def denormalize(self, concept_id: str, value: float) -> float:
+    def denormalize(self, concept_id: str, value: float) -> Tuple[float, str]:
         unit = self.get_random_unit(concept_id)
         if (concept_id, unit) in self._lab_stats_mapping:
             stats = self._lab_stats_mapping[(concept_id, unit)]
             value = value * stats["std"] + stats["mean"]
-        return value
+        return value, unit
 
 
 class CehrGptTokenizer(PushToHubMixin):
@@ -498,7 +498,7 @@ class CehrGptTokenizer(PushToHubMixin):
     def normalize(self, concept_id: str, unit: str, concept_value: float) -> float:
         return self._numeric_event_statistics.normalize(concept_id, unit, concept_value)
 
-    def denormalize(self, concept_id: str, value: float) -> float:
+    def denormalize(self, concept_id: str, value: float) -> Tuple[float, str]:
         return self._numeric_event_statistics.denormalize(concept_id, value)
 
     @classmethod

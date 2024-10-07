@@ -4,7 +4,7 @@ import os
 import random
 import uuid
 from enum import Enum
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import pandas as pd
 import torch
@@ -12,7 +12,7 @@ from transformers import GenerationConfig
 from transformers.utils import is_flash_attn_2_available
 
 from ..models.hf_cehrgpt import CEHRGPT2LMHeadModel
-from ..models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from ..models.tokenization_hf_cehrgpt import NA, CehrGptTokenizer
 
 
 class SamplingStrategy(Enum):
@@ -92,6 +92,27 @@ def generate_single_batch(
         "value_indicators": value_indicators,
         "values": values,
     }
+
+
+def normalize_value(
+    seq: Sequence[str],
+    value_indicators: Sequence[bool],
+    values: Sequence[float],
+    tokenizer: CehrGptTokenizer,
+) -> Tuple[Optional[Sequence[float]], Optional[Sequence[str]]]:
+    if value_indicators is not None and values is not None:
+        normalized_values = []
+        units = []
+        for concept_id, value_indicator, value in zip(seq, value_indicators, values):
+            if value_indicator:
+                normalized_value, unit = tokenizer.denormalize(concept_id, value)
+                normalized_values.append(normalized_value)
+                units.append(unit)
+            else:
+                normalized_values.append(value)
+                units.append(NA)
+        return normalized_values, units
+    return None, None
 
 
 def main(args):
@@ -211,11 +232,16 @@ def main(args):
             batch_sequences["value_indicators"],
             batch_sequences["values"],
         ):
+            normalized_values, units = normalize_value(
+                seq, value_indicator, value, cehrgpt_tokenizer
+            )
             output = {"concept_ids": seq, "person_id": current_person_id}
-            if value is not None:
-                output["concept_values"] = value
+            if normalized_values is not None:
+                output["concept_values"] = normalized_values
             if value_indicator is not None:
                 output["concept_value_masks"] = value_indicator
+            if units is not None:
+                output["units"] = units
 
             sequence_to_flush.append(output)
             current_person_id += 1
@@ -229,15 +255,23 @@ def main(args):
                     "person_id",
                     "concept_values",
                     "concept_value_masks",
+                    "units",
                 ],
             ).to_parquet(os.path.join(output_folder_name, f"{uuid.uuid4()}.parquet"))
             sequence_to_flush.clear()
 
     if len(sequence_to_flush) > 0:
         print(f"{datetime.datetime.now()}: Flushing to the Disk at Final Batch")
-        pd.DataFrame(sequence_to_flush, columns=["concept_ids"]).to_parquet(
-            os.path.join(output_folder_name, f"{uuid.uuid4()}-last.parquet")
-        )
+        pd.DataFrame(
+            sequence_to_flush,
+            columns=[
+                "concept_ids",
+                "person_id",
+                "concept_values",
+                "concept_value_masks",
+                "units",
+            ],
+        ).to_parquet(os.path.join(output_folder_name, f"{uuid.uuid4()}-last.parquet"))
 
 
 if __name__ == "__main__":
