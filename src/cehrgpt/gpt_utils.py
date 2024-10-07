@@ -3,8 +3,8 @@ import re
 from datetime import date, timedelta
 from typing import List, Sequence, Tuple
 
-from src.cehrgpt.cehrgpt_args import SamplingStrategy
-from src.cehrgpt.models.special_tokens import (
+from cehrgpt.cehrgpt_args import SamplingStrategy
+from cehrgpt.models.special_tokens import (
     DISCHARGE_CONCEPT_IDS,
     END_TOKEN,
     VISIT_CONCEPT_IDS,

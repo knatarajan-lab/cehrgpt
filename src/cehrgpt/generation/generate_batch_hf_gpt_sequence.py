@@ -9,11 +9,10 @@ import torch
 from transformers import GenerationConfig
 from transformers.utils import is_flash_attn_2_available, logging
 
-from src.cehrgpt.cehrgpt_args import create_inference_base_arg_parser
-
-from ..models.hf_cehrgpt import CEHRGPT2LMHeadModel
-from ..models.tokenization_hf_cehrgpt import NA, CehrGptTokenizer
-from ..gpt_utils import get_cehrgpt_output_folder
+from cehrgpt.cehrgpt_args import create_inference_base_arg_parser
+from cehrgpt.gpt_utils import get_cehrgpt_output_folder
+from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
+from cehrgpt.models.tokenization_hf_cehrgpt import NA, CehrGptTokenizer
 
 LOG = logging.get_logger("transformers")
 
