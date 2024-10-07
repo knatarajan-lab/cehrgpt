@@ -115,14 +115,20 @@ class TestNumericEventStatistics(unittest.TestCase):
         np.random.choice = lambda *args, **kwargs: "unit_1"
 
         # Test denormalization for concept_1, unit_1
-        denormalized_value = self.numeric_event_statistics.denormalize("concept_1", 1.0)
+        denormalized_value, unit = self.numeric_event_statistics.denormalize(
+            "concept_1", 1.0
+        )
         # value = 1.0 * 2.0 + 10.0 = 12.0
         self.assertEqual(denormalized_value, 12.0)
+        self.assertEqual(unit, "unit_1")
 
         # Test denormalization for concept_2, unit_1
-        denormalized_value = self.numeric_event_statistics.denormalize("concept_2", 0.5)
+        denormalized_value, unit = self.numeric_event_statistics.denormalize(
+            "concept_2", 0.5
+        )
         # value = 0.5 * 5.0 + 20.0 = 22.5
         self.assertEqual(denormalized_value, 22.5)
+        self.assertEqual(unit, "unit_1")
 
 
 # Entry point for running the tests
