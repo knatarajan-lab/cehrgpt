@@ -28,8 +28,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "cehrbert==1.1.9",
-    "cehrbert_data==0.0.1"
+    "cehrbert==1.2.2"
 ]
 
 [tool.setuptools_scm]
