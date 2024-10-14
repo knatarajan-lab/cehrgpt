@@ -132,7 +132,6 @@ def main(
             os.path.join(output_folder, concept_table),
         )
 
-
 def create_app_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Arguments for generate training data for Bert"
