@@ -253,7 +253,7 @@ def main():
 
     processed_dataset.set_format("pt")
 
-    if training_args.do_predict:
+    if training_args.do_train:
         model = load_finetuned_model(model_args, model_args.model_name_or_path)
         # If lora is enabled, we add LORA adapters to the model
         if model_args.use_lora:
