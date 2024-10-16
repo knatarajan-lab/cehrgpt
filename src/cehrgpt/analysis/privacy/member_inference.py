@@ -22,6 +22,7 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 LOG = logging.getLogger("member_inference")
+THRESHOLD = 5
 
 
 def main(args):
@@ -87,8 +88,7 @@ def main(args):
         dist_metrics.extend([(_, 0) for _ in synthetic_evaluation_dist])
 
         metrics_pd = pd.DataFrame(dist_metrics, columns=["dist", "label"])
-        threshold = metrics_pd.dist.median()
-        metrics_pd["pred"] = (metrics_pd.dist < threshold).astype(int)
+        metrics_pd["pred"] = (metrics_pd.dist < THRESHOLD).astype(int)
 
         results = {
             "Iteration": i,
