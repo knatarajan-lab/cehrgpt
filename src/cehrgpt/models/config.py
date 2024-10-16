@@ -94,8 +94,8 @@ class CEHRGPTConfig(PretrainedConfig):
         time_token_vocab_size=50257,
         n_positions=1024,
         n_embd=768,
-        n_layer=12,
-        n_head=12,
+        n_layer=3,
+        n_head=8,
         n_inner=None,
         activation_function="gelu_new",
         resid_pdrop=0.1,
@@ -122,6 +122,8 @@ class CEHRGPTConfig(PretrainedConfig):
         time_token_loss_weight=1.0,
         time_to_visit_loss_weight=1.0,
         token_to_time_token_mapping: Dict[int, List] = None,
+        tokenizer_path = "/home/mc.cumc.columbia.edu/cp3016/Documents/cehrgpt_resources/cehrgpt_without_val/ohdsi_cumc_deid_2023q4r2_cleaned/cehrgpt_pretrain_12_layers_768_embeddings_768_sub_time_tokenization_tte",
+        knowledge_graph_path = "/home/jason/workspace/cehr_gpt_graphs/knowledge_graph.pkl",
         **kwargs,
     ):
         if token_to_time_token_mapping is None:
@@ -160,6 +162,8 @@ class CEHRGPTConfig(PretrainedConfig):
         self._token_to_time_token_mapping = token_to_time_token_mapping
         self.time_token_loss_weight = time_token_loss_weight
         self.time_to_visit_loss_weight = time_to_visit_loss_weight
+        self.tokenizer_path = tokenizer_path
+        self.knowledge_graph_path = knowledge_graph_path
 
         super().__init__(bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
 

@@ -25,6 +25,9 @@ from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
+import pickle
+import dgl
+
 LOG = logging.get_logger("transformers")
 
 
@@ -102,6 +105,20 @@ def main():
         # Otherwise the trainer will throw an error
         training_args.dataloader_num_workers = 0
         training_args.dataloader_prefetch_factor = 0
+
+
+    ############################ Knowledge Graph processing
+    knowledge_graph_path = "/home/jason/workspace/cehr_gpt_graphs/knowledge_graph.pkl"
+
+    with open(knowledge_graph_path, 'rb') as f:
+        kg = pickle.load(f)
+
+    g = dgl.from_networkx(kg,
+                        node_attrs=['concept_id'],
+                        edge_attrs=['id', 'rel_type'])
+        
+
+    #############################
 
     prepared_ds_path = generate_prepared_ds_path(data_args, model_args)
     if os.path.exists(os.path.join(data_args.data_folder, "dataset_dict.json")):
@@ -200,6 +217,14 @@ def main():
         # only save the data to the disk if it is not streaming
         if not data_args.streaming:
             processed_dataset.save_to_disk(prepared_ds_path)
+
+    ##################### Append graph concept ids to vocab
+
+    graph_concept_ids = list(map(str, g.ndata['concept_id'].tolist()))
+    added_tokens = list(set(graph_concept_ids) - set(list(cehrgpt_tokenizer._tokenizer.get_vocab().keys())))
+    num_added_tokens = cehrgpt_tokenizer._tokenizer.add_tokens(added_tokens)
+    
+    #####################
 
     def filter_func(examples):
         return [_ >= data_args.min_num_tokens for _ in examples["num_of_concepts"]]

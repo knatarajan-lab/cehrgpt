@@ -17,6 +17,7 @@ from transformers.generation.stopping_criteria import (
 )
 from transformers.generation.streamers import BaseStreamer
 from transformers.models.gpt2.modeling_gpt2 import GPT2Attention, GPT2Block
+from .custom_layers import GPT2GraphBlock
 from transformers.pytorch_utils import Conv1D
 from transformers.utils import is_flash_attn_2_available, logging
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
@@ -28,6 +29,11 @@ from cehrgpt.models.hf_modeling_outputs import (
     CehrGptOutputWithPast,
     CehrGptSequenceClassifierOutput,
 )
+
+import pickle
+import dgl
+from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from dgl.nn.pytorch.conv import GATv2Conv
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -386,7 +392,7 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
                 )
 
 
-class CEHRGPT2Model(CEHRGPTPreTrainedModel):
+class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
     def __init__(self, config: CEHRGPTConfig):
         super().__init__(config)
 
@@ -401,10 +407,33 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             self.embed_dim
         )
 
+        #################################### Load Knowledge Graph
+
+        # knowledge_graph_path = "knowledge_graph.pkl"
+
+        with open(config.knowledge_graph_path, 'rb') as f:
+            kg = pickle.load(f)
+
+        g = dgl.from_networkx(kg,
+                            node_attrs=['concept_id'],
+                            edge_attrs=['id', 'rel_type'])
+        self.g = g
+        self.concept_id_to_index_map = dict(zip(g.ndata['concept_id'].tolist(), g.nodes().tolist()))
+
+        self.cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(self.config.tokenizer_path)
+        graph_concept_ids = list(map(str, self.g.ndata['concept_id'].tolist()))
+        added_tokens = list(set(graph_concept_ids) - set(list(self.cehrgpt_tokenizer._tokenizer.get_vocab().keys())))
+        _ = self.cehrgpt_tokenizer._tokenizer.add_tokens(added_tokens)
+        self.g.ndata['vocab_id'] = torch.tensor([self.cehrgpt_tokenizer._convert_token_to_id(token) for token in graph_concept_ids])
+
+        self.g = self.g.to('cuda')
+
+        ####################################
+
         self.drop = nn.Dropout(config.embd_pdrop)
         gpt_blocks = []
         for i in range(config.num_hidden_layers):
-            gpt_block = GPT2Block(config, layer_idx=i)
+            gpt_block = GPT2GraphBlock(config, layer_idx=i)
             if getattr(config, "_attn_implementation", "eager") == "flash_attention_2":
                 gpt_block.attn = GPT2FlashAttention(config, layer_idx=i)
                 gpt_block.is_causal = True
@@ -423,7 +452,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
     def parallelize(self, device_map=None):
         # Check validity of device_map
         warnings.warn(
-            "`CEHRGPT2Model.parallelize` is deprecated and will be removed in v5 of Transformers, you should load your"
+            "`CEHRGPT2GraphModel.parallelize` is deprecated and will be removed in v5 of Transformers, you should load your"
             " model with `device_map='balanced'` in the call to `from_pretrained`. You can also provide your own"
             " `device_map` but it needs to be a dictionary module_name to device, so for instance {'h.0': 0, 'h.1': 1,"
             " ...}",
@@ -483,6 +512,42 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         for layer, heads in heads_to_prune.items():
             self.h[layer].attn.prune_heads(heads)
 
+    def connect_sequence_to_graph(self, g, input_ids):
+        # g_merged = deepcopy(g)
+        next_node_id = g.num_nodes()
+        
+        edges_to_add_u = []
+        edges_to_add_v = []
+        nodes_to_add = []
+
+        sequence_indices = []
+        agg_edge_ids_u = []
+        agg_edge_ids_v = []
+        
+        for i, input_id in enumerate(input_ids):
+            if input_id in g.ndata['vocab_id']:
+                connected_node_id = int(torch.argwhere(g.ndata['vocab_id'] == input_id)[0].item())
+                nodes_to_add.append(input_id)
+                
+                edges_to_add_u.append(next_node_id)
+                edges_to_add_v.append(connected_node_id)
+                
+                sequence_indices.append(i)
+                agg_edge_ids_u.append(next_node_id)
+                agg_edge_ids_v.append(connected_node_id)
+
+                next_node_id += 1
+        
+        nodes_to_add = torch.tensor(nodes_to_add).to('cuda')
+
+        g = dgl.add_nodes(g, len(nodes_to_add), data={'vocab_id': nodes_to_add})
+        g = dgl.add_edges(g, edges_to_add_u, edges_to_add_v)
+
+        g = dgl.add_self_loop(g)
+
+
+        return g, sequence_indices, (agg_edge_ids_u, agg_edge_ids_v)
+
     def forward(
         self,
         input_ids: Optional[torch.LongTensor],
@@ -533,6 +598,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 device=device,
             )
             position_ids = position_ids.unsqueeze(0)
+        
+
 
         # GPT2Attention mask.
         if attention_mask is not None:
@@ -585,6 +652,53 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
 
         hidden_states = self.drop(hidden_states)
 
+        ############################ Knowledge Graph
+        
+        # flattened_input_ids = torch.flatten(input_ids).tolist()
+        # concept_ids = [self.cehrgpt_tokenizer._convert_id_to_token(id) for id in flattened_input_ids]
+        # concept_ids = [int(token) for token in concept_ids[4:] if token.isnumeric()]
+
+        # concept_node_ids = [self.concept_id_to_index_map[token] for token in concept_ids if token in self.concept_id_to_index_map]
+        # induced_subgraph, new_concept_node_ids = dgl.khop_in_subgraph(self.g, concept_node_ids, 3)
+
+        # is_input_id_in_graph = torch.isin(input_ids, induced_subgraph.ndata['vocab_id'])
+        # agg_node_hidden_states = torch.where(is_input_id_in_graph, hidden_states, torch.zeros_like(hidden_states))
+        
+        # input_ids_in_graph = torch.where(is_input_id_in_graph, input_ids, torch.zeros_like(input_ids))
+
+        # induced_subgraph.ndata['vocab_id']
+
+        # induced_subgraph = self.connect_sequence_to_graph(induced_subgraph, new_concept_node_ids)
+
+        # how to keep track of ids?
+
+        induced_subgraphs = []
+        agg_node_hidden_states = torch.zeros_like(hidden_states)
+        for batch in range(input_ids.shape[0]):
+            batch_input_ids = input_ids[batch]
+            flattened_batch_input_ids = torch.flatten(batch_input_ids)
+            concept_ids = [self.cehrgpt_tokenizer._convert_id_to_token(id) for id in flattened_batch_input_ids]
+            concept_ids = [int(token) for token in concept_ids[4:] if token.isnumeric()]
+
+            concept_node_ids = [self.concept_id_to_index_map[token] for token in concept_ids if token in self.concept_id_to_index_map]
+            induced_subgraph, new_concept_node_ids = dgl.khop_in_subgraph(self.g, concept_node_ids, 3)
+
+            is_input_id_in_graph = torch.isin(flattened_batch_input_ids, induced_subgraph.ndata['vocab_id'])
+            # agg_node_hidden_states = torch.where(is_input_id_in_graph, hidden_states, torch.zeros_like(hidden_states))
+            
+            input_ids_in_graph = torch.where(is_input_id_in_graph, flattened_batch_input_ids, torch.zeros_like(flattened_batch_input_ids))
+
+            induced_subgraph, connected_sequence_indices, agg_edge_ids = self.connect_sequence_to_graph(induced_subgraph, input_ids_in_graph)
+            induced_subgraphs.append((induced_subgraph, connected_sequence_indices, agg_edge_ids))
+            
+            agg_node_hidden_states[batch, connected_sequence_indices] = hidden_states[batch, connected_sequence_indices]
+
+        bg = dgl.batch([induced_subgraph[0] for induced_subgraph in induced_subgraphs])
+        # bg = dgl.add_self_loop(bg)
+        bg.ndata['h'] = self.wte(bg.ndata['vocab_id'])
+    
+        ############################
+
         output_shape = (-1,) + input_shape[1:] + (hidden_states.size(-1),)
 
         if self.gradient_checkpointing and self.training:
@@ -618,6 +732,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 outputs = self._gradient_checkpointing_func(
                     block.__call__,
                     hidden_states,
+                    agg_node_hidden_states,
+                    bg,
                     None,
                     attention_mask,
                     head_mask[i],
@@ -629,6 +745,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             else:
                 outputs = block(
                     hidden_states,
+                    agg_node_hidden_states,
+                    bg,
                     layer_past=layer_past,
                     attention_mask=attention_mask,
                     head_mask=head_mask[i],
@@ -646,6 +764,25 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 all_self_attentions = all_self_attentions + (
                     outputs[2 if use_cache else 1],
                 )
+            
+            unbatched_graphs = dgl.unbatch(bg)
+            altered_graphs = []
+            agg_node_hidden_states = torch.zeros_like(agg_node_hidden_states)
+            for i, sg in enumerate(unbatched_graphs):
+                agg_edge_ids_u, agg_edge_ids_v  = induced_subgraphs[i][2]
+                connected_sequence_indices = induced_subgraphs[i][1]
+
+                temp_tensor = sg.ndata['h'].clone()
+                temp_tensor[agg_edge_ids_u] = hidden_states[i][connected_sequence_indices]
+                sg.ndata['h'] = temp_tensor
+                
+                altered_graphs.append(sg)
+
+                agg_node_hidden_states[i][connected_sequence_indices] = sg.ndata['h'][agg_edge_ids_v]
+            
+            bg = dgl.batch(altered_graphs)
+
+
 
             # Model Parallel: If it's the last layer for that device, put things on the next device
             if self.model_parallel:
@@ -685,7 +822,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
     def __init__(self, config: CEHRGPTConfig):
         super().__init__(config)
-        self.cehrgpt = CEHRGPT2Model(config)
+        self.cehrgpt = CEHRGPT2GraphModel(config)
         if self.config.include_values:
             self.concept_value_decoder_layer = ConceptValuePredictionLayer(
                 config.n_embd
@@ -1240,7 +1377,7 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
     def __init__(self, config: CEHRGPTConfig):
         super().__init__(config)
 
-        self.cehrgpt = CEHRGPT2Model(config)
+        self.cehrgpt = CEHRGPT2GraphModel(config)
         self.age_batch_norm = torch.nn.BatchNorm1d(1)
 
         self.dropout = nn.Dropout(config.summary_first_dropout)
