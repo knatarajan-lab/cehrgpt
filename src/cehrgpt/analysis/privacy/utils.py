@@ -110,8 +110,9 @@ def transform_concepts(dataset, concept_tokenizer):
 
 def scale_age(dataset):
     # The first 4 elements have a value of -1 because the corresponding positions are demographic tokens
-    ages = dataset.ages.apply(lambda age_list: age_list[4])
-    assert (ages >= 0).all() > 0
+    ages = dataset.ages.apply(lambda age_list: age_list[1])
+    dataset = dataset[ages >= 0]
+    ages = ages[ages >= 0]
     max_age = ages.max()
     dataset["scaled_age"] = ages / max_age
     return dataset
