@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import shutil
 from enum import Enum
 from typing import List
 
@@ -123,6 +124,13 @@ def main(
     ).withColumnRenamed("new_person_id", "person_id").write.mode("overwrite").parquet(
         os.path.join(output_folder, "patient_splits")
     )
+
+    # Copy concept tables
+    for concept_table in ["concept", "concept_relationship", "concept_ancestor"]:
+        shutil.copytree(
+            os.path.join(real_omop_folder, concept_table),
+            os.path.join(output_folder, concept_table),
+        )
 
 
 def create_app_arg_parser() -> argparse.ArgumentParser:
