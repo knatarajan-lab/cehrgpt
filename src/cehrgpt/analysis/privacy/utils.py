@@ -75,7 +75,7 @@ def extract_medical_concepts(concept_ids):
 
 def create_binary_format(concept_ids, concept_tokenizer):
     indices = np.array(concept_tokenizer.encode(concept_ids)).flatten().astype(int)
-    embeddings = np.zeros(concept_tokenizer.get_vocab_size())
+    embeddings = np.zeros(concept_tokenizer.vocab_size)
     embeddings.put(indices, 1)
     return embeddings
 
