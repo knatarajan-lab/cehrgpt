@@ -1,11 +1,12 @@
 import logging
 import os
-import pickle
 import random
 from datetime import datetime
 
 import pandas as pd
 from sklearn import metrics
+
+from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 from .utils import (
     RANDOM_SEE,
@@ -25,8 +26,7 @@ LOG = logging.getLogger("member_inference")
 
 def main(args):
     LOG.info(f"Started loading tokenizer at {args.tokenizer_path}")
-    with open(args.tokenizer_path, "rb") as f:
-        concept_tokenizer = pickle.load(f)
+    concept_tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer_path)
 
     LOG.info(f"Started loading training data at {args.training_data_folder}")
     train_data = pd.read_parquet(args.training_data_folder)
