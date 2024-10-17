@@ -328,10 +328,6 @@ def main(args):
         )
 
         synthetic_data = spark.read.parquet(args.synthetic_data_folder)
-        # Remove [START]
-        synthetic_data = synthetic_data.withColumn(
-            "concept_ids", f.slice(f.col("concept_ids"), 2, 100000)
-        )
 
         synthetic_reid_data = (
             synthetic_data.withColumn("age", f.col("concept_ids")[1])
