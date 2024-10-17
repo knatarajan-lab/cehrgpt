@@ -217,7 +217,7 @@ def gpt_to_omop_converter_serial(
         tokens_generated = row[START_TOKEN_SIZE:]
         concept_values = (
             full_concept_values[START_TOKEN_SIZE:]
-            if full_concept_values is not None and ~np.isnan(full_concept_values)
+            if full_concept_values is not None
             else None
         )
 
