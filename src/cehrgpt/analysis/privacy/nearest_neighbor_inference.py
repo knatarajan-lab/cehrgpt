@@ -26,7 +26,7 @@ formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(messag
 
 def main(args):
     LOG.info(f"Started loading tokenizer at {args.concept_tokenizer_path}")
-    concept_tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer_path)
+    concept_tokenizer = CehrGptTokenizer.from_pretrained(args.concept_tokenizer_path)
 
     LOG.info(f"Started loading training data at {args.training_data_folder}")
     train_data = pd.read_parquet(args.training_data_folder)
