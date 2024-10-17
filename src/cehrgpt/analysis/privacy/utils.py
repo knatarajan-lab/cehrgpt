@@ -220,24 +220,36 @@ def batched_pairwise_euclidean_distance_indices(A, B, batch_size, self_exclude=F
     return min_indices
 
 
-def find_match(source, target):
+def find_match(source, target, return_index: bool = False):
     a = np.sum(target**2, axis=1).reshape(target.shape[0], 1) + np.sum(
         source.T**2, axis=0
     )
     b = np.dot(target, source.T) * 2
     distance_matrix = a - b
-    return np.min(distance_matrix, axis=0)
+    return (
+        np.argmin(distance_matrix, axis=0)
+        if return_index
+        else np.min(distance_matrix, axis=0)
+    )
 
 
-def find_match_self(source, target):
+def find_match_self(source, target, return_index: bool = False):
     a = np.sum(target**2, axis=1).reshape(target.shape[0], 1) + np.sum(
         source.T**2, axis=0
     )
     b = np.dot(target, source.T) * 2
     distance_matrix = a - b
     n_col = np.shape(distance_matrix)[1]
-    min_distance = np.zeros(n_col)
-    for i in range(n_col):
-        sorted_column = np.sort(distance_matrix[:, i])
-        min_distance[i] = sorted_column[1]
-    return min_distance
+
+    if return_index:
+        min_indices = np.zeros(n_col, dtype=int)
+        for i in range(n_col):
+            sorted_indices = np.argsort(distance_matrix[:, i])
+            min_indices[i] = sorted_indices[1]  # Get index of second smallest value
+        return min_indices
+    else:
+        min_distance = np.zeros(n_col)
+        for i in range(n_col):
+            sorted_column = np.sort(distance_matrix[:, i])
+            min_distance[i] = sorted_column[1]
+        return min_distance

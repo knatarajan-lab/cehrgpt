@@ -134,9 +134,11 @@ def main(args):
             f"Started calculating the distances between synthetic and training vectors"
         )
         train_synthetic_index = find_match(
-            train_common_vectors, synthetic_common_vectors
+            train_common_vectors, synthetic_common_vectors, return_index=True
         )
-        train_train_index = find_match_self(train_common_vectors, train_common_vectors)
+        train_train_index = find_match_self(
+            train_common_vectors, train_common_vectors, return_index=True
+        )
 
         f1_syn_train, precision_syn_train, recall_syn_train = cal_f1_score(
             train_sensitive_vectors, synthetic_sensitive_vectors, train_synthetic_index
