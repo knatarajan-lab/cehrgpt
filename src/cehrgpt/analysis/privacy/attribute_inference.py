@@ -231,6 +231,7 @@ def create_argparser():
         "--matching_batch_size",
         dest="matching_batch_size",
         action="store",
+        type=int,
         default=1000,
         help="The batch size of the matching algorithm",
         required=False,
