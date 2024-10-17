@@ -218,9 +218,9 @@ def gpt_to_omop_converter_serial(
                 row = row[0:]
         tokens_generated = row[START_TOKEN_SIZE:]
         concept_values = (
-            full_concept_values[START_TOKEN_SIZE:]
-            if full_concept_values is not None
-            else None
+            None
+            if np.any(pd.isnull(full_concept_values))
+            else full_concept_values[START_TOKEN_SIZE:]
         )
 
         # Skip the sequences whose sequence length is 0
