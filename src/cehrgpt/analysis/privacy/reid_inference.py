@@ -262,12 +262,15 @@ def main(args):
             t.ArrayType(t.StringType()),
         )
 
-        data = spark.read.parquet(args.population_data_folder)
-        data = (
-            data.select("concept_ids", "num_of_concepts", "person_id")
-            .withColumn("is_real", f.col("num_of_concepts") >= 20)
-            .drop("num_of_concepts")
-        )
+        training_data = spark.read.parquet(args.training_data_folder)
+        evaluation_data = spark.read.parquet(args.evaluation_data_folder)
+        training_data = training_data.select(
+            "concept_ids", "num_of_concepts", "person_id"
+        ).withColumn("is_real", f.lit(True))
+        evaluation_data = evaluation_data.select(
+            "concept_ids", "num_of_concepts", "person_id"
+        ).withColumn("is_real", f.lit(False))
+        data = training_data.unionByName(evaluation_data)
 
         reid_data = (
             data.withColumn("age", f.col("concept_ids")[1])
@@ -362,15 +365,21 @@ def main(args):
         spark.stop()
 
 
-if __name__ == "__main__":
+def create_argparser():
     import argparse
 
     parser = argparse.ArgumentParser(
         description="Arguments for re-identification risk evaluation"
     )
     parser.add_argument(
-        "--population_data_folder",
-        dest="population_data_folder",
+        "--training_data_folder",
+        dest="training_data_folder",
+        action="store",
+        required=True,
+    )
+    parser.add_argument(
+        "--evaluation_data_folder",
+        dest="evaluation_data_folder",
         action="store",
         required=True,
     )
@@ -395,4 +404,8 @@ if __name__ == "__main__":
         default=40,
         required=False,
     )
-    main(parser.parse_args())
+    return parser
+
+
+if __name__ == "__main__":
+    main(create_argparser().parse_args())
