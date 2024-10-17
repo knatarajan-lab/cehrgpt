@@ -89,6 +89,10 @@ def is_visit_start(token: str):
     return token in ["VS", "[VS]"]
 
 
+def is_visit_end(token: str):
+    return token in ["VE", "[VE]"]
+
+
 def is_att_token(token: str):
     if bool(re.match(r"^D\d+", token)):  # day tokens
         return True
