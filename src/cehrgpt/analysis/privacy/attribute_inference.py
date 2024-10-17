@@ -12,6 +12,7 @@ import yaml
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 from .utils import (
+    batched_pairwise_euclidean_distance_indices,
     create_demographics,
     create_gender_encoder,
     create_race_encoder,
@@ -133,12 +134,25 @@ def main(args):
         LOG.info(
             f"Started calculating the distances between synthetic and training vectors"
         )
-        train_synthetic_index = find_match(
-            train_common_vectors, synthetic_common_vectors, return_index=True
-        )
-        train_train_index = find_match_self(
-            train_common_vectors, train_common_vectors, return_index=True
-        )
+        if args.batched:
+            train_synthetic_index = batched_pairwise_euclidean_distance_indices(
+                train_common_vectors,
+                synthetic_common_vectors,
+                batch_size=args.batch_size,
+            )
+            train_train_index = batched_pairwise_euclidean_distance_indices(
+                train_common_vectors,
+                train_common_vectors,
+                batch_size=args.batch_size,
+                self_exclude=True,
+            )
+        else:
+            train_synthetic_index = find_match(
+                train_common_vectors, synthetic_common_vectors, return_index=True
+            )
+            train_train_index = find_match_self(
+                train_common_vectors, train_common_vectors, return_index=True
+            )
 
         f1_syn_train, precision_syn_train, recall_syn_train = cal_f1_score(
             train_sensitive_vectors, synthetic_sensitive_vectors, train_synthetic_index
@@ -224,13 +238,19 @@ def create_argparser():
         required=True,
     )
     parser.add_argument(
-        "--matching_batch_size",
-        dest="matching_batch_size",
+        "--batch_size",
+        dest="batch_size",
         action="store",
         type=int,
         default=1000,
         help="The batch size of the matching algorithm",
         required=False,
+    )
+    parser.add_argument(
+        "--batched",
+        dest="batched",
+        action="store_true",
+        help="Indicate whether we want to use the batch matrix operation",
     )
     parser.add_argument(
         "--num_of_samples",
