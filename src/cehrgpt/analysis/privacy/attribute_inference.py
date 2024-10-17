@@ -102,10 +102,10 @@ def main(args):
 
     random.seed(RANDOM_SEE)
     for i in range(1, args.n_iterations + 1):
-        LOG.info(f"Iteration {i}: Started creating train sample vectors")
+        LOG.info(f"Iteration {i}: Started creating data samples")
         train_data_sample = train_data.sample(args.num_of_samples)
         synthetic_data_sample = synthetic_data.sample(args.num_of_samples)
-        LOG.info(f"Iteration {i}: Started creating synthetic sample vectors")
+        LOG.info(f"Iteration {i}: Started creating train sample vectors")
         train_common_vectors, train_sensitive_vectors = (
             create_vector_representations_for_attribute(
                 train_data_sample,
