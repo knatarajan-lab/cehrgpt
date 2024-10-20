@@ -63,7 +63,7 @@ class CehrGptDataCollator:
                 list(token_to_time_token_mapping.values()), dtype=torch.int64
             )
 
-        with open("/home/jason/workspace/cehr_gpt_graphs/knowledge_graph.pkl", 'rb') as f:
+        with open("/home/jason/workspace/cehr_gpt_graphs/hierarchy_knowledge_graph.pkl", 'rb') as f:
             kg = pickle.load(f)
 
         g = dgl.from_networkx(kg,
@@ -135,7 +135,7 @@ class CehrGptDataCollator:
 
                 next_node_id += 1
         
-        nodes_to_add = torch.tensor(nodes_to_add)
+        nodes_to_add = torch.tensor(nodes_to_add).to(g.device)
 
         g = dgl.add_nodes(g, len(nodes_to_add), data={'vocab_id': nodes_to_add})
         g = dgl.add_edges(g, edges_to_add_u, edges_to_add_v)
@@ -146,9 +146,9 @@ class CehrGptDataCollator:
         return g, sequence_indices, (agg_edge_ids_u, agg_edge_ids_v)
 
     def _generate_batched_graph(self, input_ids, layers=3):
-        connected_sequence_mask = torch.zeros_like(input_ids, dtype=torch.bool)
-        agg_edge_ids_src = torch.zeros_like(input_ids).long()
-        agg_edge_ids_dst = torch.zeros_like(input_ids).long()
+        connected_sequence_mask = torch.zeros_like(input_ids, dtype=torch.bool).to(input_ids.device)
+        agg_edge_ids_src = torch.zeros_like(input_ids).long().to(input_ids.device)
+        agg_edge_ids_dst = torch.zeros_like(input_ids).long().to(input_ids.device)
 
         induced_subgraphs = []
 
@@ -164,12 +164,15 @@ class CehrGptDataCollator:
             concept_node_ids = [self.concept_id_to_g_index_map[token] for token in concept_ids if token in self.concept_id_to_g_index_map]
             induced_subgraph, _ = dgl.khop_in_subgraph(self.g, concept_node_ids, layers)
 
+            induced_subgraph = induced_subgraph.to(input_ids.device)
+
             is_input_id_in_graph = torch.isin(flattened_batch_input_ids, induced_subgraph.ndata['vocab_id'])
             input_ids_in_graph = torch.where(is_input_id_in_graph, flattened_batch_input_ids, torch.zeros_like(flattened_batch_input_ids))
 
             induced_subgraph, connected_sequence_indices, agg_edge_ids_batch = self._connect_sequence_to_graph(induced_subgraph, input_ids_in_graph)
             agg_edge_ids_src_batch, agg_edge_ids_dst_batch = agg_edge_ids_batch
-            agg_edge_ids_src_batch, agg_edge_ids_dst_batch = torch.LongTensor(agg_edge_ids_src_batch) + cumulative_num_nodes, torch.LongTensor(agg_edge_ids_dst_batch) + cumulative_num_nodes 
+            agg_edge_ids_src_batch, agg_edge_ids_dst_batch = torch.LongTensor(agg_edge_ids_src_batch).to(input_ids.device), torch.LongTensor(agg_edge_ids_dst_batch).to(input_ids.device)
+            agg_edge_ids_src_batch, agg_edge_ids_dst_batch = agg_edge_ids_src_batch + cumulative_num_nodes, agg_edge_ids_dst_batch + cumulative_num_nodes 
 
             connected_sequence_mask[batch, connected_sequence_indices] = 1
             agg_edge_ids_src[batch, connected_sequence_indices] = agg_edge_ids_src_batch
@@ -185,7 +188,6 @@ class CehrGptDataCollator:
 
 
     def __call__(self, examples):
-
         examples = [self.generate_start_end_index(_) for _ in examples]
         examples = [self.random_sort(_) for _ in examples]
         batch = {}
@@ -210,11 +212,12 @@ class CehrGptDataCollator:
                 batch_input_ids,
                 batch_first=True,
                 padding_value=self.tokenizer.pad_token_id,
+                padding_side='right'
             ).to(torch.int64)
         )
 
         batch["attention_mask"] = self._try_reverse_tensor(
-            pad_sequence(batch_attention_mask, batch_first=True, padding_value=0.0)
+            pad_sequence(batch_attention_mask, batch_first=True, padding_value=0.0, padding_side='right')
         )
         assert batch["input_ids"].shape[1] <= self.max_length
         assert batch["attention_mask"].shape[1] <= self.max_length
@@ -247,7 +250,8 @@ class CehrGptDataCollator:
             ]
             batch["time_to_visits"] = self._try_reverse_tensor(
                 pad_sequence(
-                    batch_time_to_visits, batch_first=True, padding_value=-100.0
+                    batch_time_to_visits, batch_first=True, padding_value=-100.0,
+                    padding_side='right'
                 )
             )
 
@@ -265,11 +269,12 @@ class CehrGptDataCollator:
 
             batch["value_indicators"] = self._try_reverse_tensor(
                 pad_sequence(
-                    batch_value_indicators, batch_first=True, padding_value=False
+                    batch_value_indicators, batch_first=True, padding_value=False,
+                    padding_side='right'
                 )
             )
             batch["values"] = self._try_reverse_tensor(
-                pad_sequence(batch_values, batch_first=True, padding_value=-1.0)
+                pad_sequence(batch_values, batch_first=True, padding_value=-1.0, padding_side='right')
             )
 
             assert batch["value_indicators"].shape[1] <= self.max_length
@@ -315,10 +320,11 @@ class CehrGptDataCollator:
 
         batched_graph, connected_sequence_mask, agg_edge_ids_src, agg_edge_ids_dst = self._generate_batched_graph(batch["input_ids"], layers=4)
 
-        batch["bg"] = batched_graph
-        batch["connected_sequence_mask"] = connected_sequence_mask
-        batch["agg_edge_ids_src"] = agg_edge_ids_src
-        batch["agg_edge_ids_dst"] = agg_edge_ids_dst
+        # batch["input_ids"] = batch["input_ids"].to('cuda')
+        batch["bg"] = batched_graph.to(batch["input_ids"].device)
+        batch["connected_sequence_mask"] = connected_sequence_mask.to(batch["input_ids"].device)
+        batch["agg_edge_ids_src"] = agg_edge_ids_src.to(batch["input_ids"].device)
+        batch["agg_edge_ids_dst"] = agg_edge_ids_dst.to(batch["input_ids"].device)
 
         return batch
 

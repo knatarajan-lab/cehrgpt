@@ -318,7 +318,8 @@ class GPT2GraphBlock(nn.Module):
 
         ############################### Knowledge Graph
 
-        g.ndata['h'] = self.gat_layer(g, g.ndata['h']).mean(dim=1)
+        if g.num_nodes() > 0:
+            g.ndata['h'] = self.gat_layer(g, g.ndata['h']).mean(dim=1)
 
         ###############################
 

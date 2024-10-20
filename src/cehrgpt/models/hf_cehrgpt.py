@@ -34,6 +34,7 @@ import pickle
 import dgl
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from dgl.nn.pytorch.conv import GATv2Conv
+from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -428,6 +429,8 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
 
         # self.g = self.g.to('cuda')
 
+        
+
         # ####################################
 
         self.drop = nn.Dropout(config.embd_pdrop)
@@ -774,12 +777,13 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
                 all_self_attentions = all_self_attentions + (
                     outputs[2 if use_cache else 1],
                 )
+            
+            if bg.num_nodes() > 0:
+                agg_node_hidden_states = torch.where(connected_sequence_mask.unsqueeze(-1), bg.ndata['h'][agg_edge_ids_dst], torch.zeros_like(agg_node_hidden_states))
+                # bg.ndata['h'][agg_edge_ids_src] = hidden_states[connected_sequence_indices]
 
-            agg_node_hidden_states = torch.where(connected_sequence_mask.unsqueeze(-1), bg.ndata['h'][agg_edge_ids_dst], torch.zeros_like(agg_node_hidden_states))
-            # bg.ndata['h'][agg_edge_ids_src] = hidden_states[connected_sequence_indices]
-
-            indices_to_update = torch.nonzero(agg_edge_ids_src, as_tuple=True)
-            bg.ndata['h'][agg_edge_ids_src[indices_to_update]] = hidden_states[indices_to_update]
+                indices_to_update = torch.nonzero(agg_edge_ids_src, as_tuple=True)
+                bg.ndata['h'][agg_edge_ids_src[indices_to_update]] = hidden_states[indices_to_update]
             
 
             # unbatched_graphs = dgl.unbatch(bg)
@@ -859,6 +863,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         self.model_parallel = False
         self.device_map = None
 
+        self.cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(self.config.tokenizer_path)
+        self.collator = CehrGptDataCollator(self.cehrgpt_tokenizer, 1024, pretraining=False)
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -912,10 +919,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs
     ):
-
+        # past_key_values = None
         # Omit tokens covered by past_key_values
         if past_key_values:
             past_length = past_key_values[0][0].shape[2]
+            # print(past_length)
 
             # Some generation methods already pass only the last input ID
             if input_ids.shape[1] > past_length:
@@ -924,6 +932,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 # Default to old behavior: keep only final ID
                 remove_prefix_length = input_ids.shape[1] - 1
 
+            # print(remove_prefix_length)
             input_ids = input_ids[:, remove_prefix_length:]
 
         attention_mask = kwargs.get("attention_mask", None)
@@ -973,16 +982,25 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 {"value_indicators": value_indicators, "values": values}
             )
 
+
+        # Graph/collation specific updates
+        bg, connected_sequence_mask, agg_edge_ids_src, agg_edge_ids_dst = self.collator._generate_batched_graph(input_ids, layers=4)
+
+        model_inputs.update(
+            {
+                "bg": bg,
+                "connected_sequence_mask": connected_sequence_mask,
+                "agg_edge_ids_src": agg_edge_ids_src,
+                "agg_edge_ids_dst": agg_edge_ids_dst
+            }
+        )
+
         model_inputs.update(
             {
                 "past_key_values": past_key_values,
                 "use_cache": kwargs.get("use_cache"),
                 "position_ids": position_ids,
                 "attention_mask": attention_mask,
-                "bg": kwargs.get("bg"),
-                "connected_sequence_mask": kwargs.get("connected_sequence_mask"),
-                "agg_edge_ids_src": kwargs.get("agg_edge_ids_src"),
-                "agg_edge_ids_dst": kwargs.get("agg_edge_ids_dst"),
             }
         )
 
@@ -1023,11 +1041,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         )
 
         transformer_outputs = self.cehrgpt(
-            input_ids.to('cuda'),
-            bg.to('cuda'),
-            connected_sequence_mask.to('cuda'),
-            agg_edge_ids_src.to('cuda'),
-            agg_edge_ids_dst.to('cuda'),
+            input_ids,
+            bg,
+            connected_sequence_mask,
+            agg_edge_ids_src,
+            agg_edge_ids_dst,
             value_indicators=value_indicators,
             values=values,
             past_key_values=past_key_values,
@@ -1062,6 +1080,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             shift_labels = labels[..., 1:].contiguous()
             # Flatten the tokens
             loss_fct = CrossEntropyLoss()
+            # print("PREDICTED CLASS LOGITS")
+            # print(torch.argmax(shift_logits, dim=-1)[:, 40:50])
+            # print("REAL LABELS")
+            # print(shift_labels[:, 40:50])
             loss = loss_fct(
                 shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
             )
@@ -1289,7 +1311,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         ):
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
-
+            
             # forward pass to get next token
             outputs = self(
                 **model_inputs,
@@ -1332,6 +1354,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # sample
             probs = nn.functional.softmax(next_token_scores, dim=-1)
             next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+
+            # print(next_tokens)
 
             # finished sentences should have their next token be a padding token
             if eos_token_id is not None:

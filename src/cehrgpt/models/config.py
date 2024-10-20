@@ -123,7 +123,7 @@ class CEHRGPTConfig(PretrainedConfig):
         time_to_visit_loss_weight=1.0,
         token_to_time_token_mapping: Dict[int, List] = None,
         tokenizer_path = "/home/mc.cumc.columbia.edu/cp3016/Documents/cehrgpt_resources/cehrgpt_without_val/ohdsi_cumc_deid_2023q4r2_cleaned/cehrgpt_pretrain_12_layers_768_embeddings_768_sub_time_tokenization_tte",
-        knowledge_graph_path = "/home/jason/workspace/cehr_gpt_graphs/knowledge_graph.pkl",
+        knowledge_graph_path = "/home/jason/workspace/cehr_gpt_graphs/hierarchy_knowledge_graph.pkl",
         **kwargs,
     ):
         if token_to_time_token_mapping is None:

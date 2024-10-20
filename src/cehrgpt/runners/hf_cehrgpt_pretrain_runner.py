@@ -108,7 +108,7 @@ def main():
 
 
     ############################ Knowledge Graph processing
-    knowledge_graph_path = "/home/jason/workspace/cehr_gpt_graphs/knowledge_graph.pkl"
+    knowledge_graph_path = "/home/jason/workspace/cehr_gpt_graphs/hierarchy_knowledge_graph.pkl"
 
     with open(knowledge_graph_path, 'rb') as f:
         kg = pickle.load(f)
