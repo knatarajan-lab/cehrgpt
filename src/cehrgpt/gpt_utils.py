@@ -10,7 +10,8 @@ from cehrgpt.models.special_tokens import (
     VISIT_CONCEPT_IDS,
 )
 
-INPATIENT_ATT_PATTERN = re.compile(r"(?:VS-|i-)D(\d+)(?:-VE)?")
+# Regular expression pattern to match inpatient attendance tokens
+inpatient_att_pattern = re.compile(r"(?:VS-|i-)D(\d+)(?:-VE)?")
 
 
 class RandomSampleCache:
@@ -20,6 +21,13 @@ class RandomSampleCache:
         cache_size: int,
         sample_weights: Sequence[float] = None,
     ):
+        """
+        Initialize the RandomSampleCache.
+
+        :param data_indices: Sequence of data indices to sample from.
+        :param cache_size: Size of the cache.
+        :param sample_weights: Optional sequence of weights for sampling.
+        """
         self._data_indices = data_indices
         self._sample_weights = sample_weights
         self._cache_size = cache_size
@@ -29,6 +37,13 @@ class RandomSampleCache:
             assert sum(self._sample_weights) - 1 < 1e-8
 
     def next(self):
+        """
+        Get the next sample from the cache.
+
+        If the cache is empty, refill it.
+
+        :return: A sampled data index.
+        """
         if not self._cache:
             if self._sample_weights is not None:
                 self._cache.extend(
@@ -74,6 +89,13 @@ def collect_demographic_prompts_at_visits(
 
 
 def random_slice_gpt_sequence(concept_ids, max_seq_len):
+    """
+    Randomly slice a GPT sequence.
+
+    :param concept_ids: List of concept IDs.
+    :param max_seq_len: Maximum sequence length.
+    :return: Tuple containing start index, end index, and demographic tokens.
+    """
     seq_length = len(concept_ids)
     starting_points = []
     [start_year, start_age, start_gender, start_race] = [_ for _ in concept_ids[0:4]]
@@ -113,7 +135,6 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
             if current_token == "VE":
                 random_end_index = i
                 break
-        # new_token_ids = demographic_tokens + concept_ids[random_starting_index:random_end_index + 1]
         return random_starting_index, random_end_index, demographic_tokens
 
     except Exception:
@@ -153,8 +174,13 @@ def get_cehrgpt_output_folder(args, cehrgpt_tokenizer) -> str:
 def is_clinical_event(token: str) -> bool:
     return token.isnumeric()
 
+def is_visit_start(token: str):
+    """
+    Check if the token indicates the start of a visit.
 
-def is_visit_start(token: str) -> bool:
+    :param token: Token to check.
+    :return: True if the token is a visit start token, False otherwise.
+    """
     return token in ["VS", "[VS]"]
 
 
@@ -163,6 +189,12 @@ def is_visit_end(token: str) -> bool:
 
 
 def is_att_token(token: str):
+    """
+    Check if the token is an attention token.
+
+    :param token: Token to check.
+    :return: True if the token is an attention token, False otherwise.
+    """
     if bool(re.match(r"^D\d+", token)):  # day tokens
         return True
     elif bool(re.match(r"^W\d+", token)):  # week tokens
@@ -199,6 +231,12 @@ def is_artificial_token(token: str) -> bool:
 
 
 def is_inpatient_att_token(token: str):
+    """
+    Check if the token is an inpatient attendance token.
+
+    :param token: Token to check.
+    :return: True if the token is an inpatient attendance token, False otherwise.
+    """
     if token[:3] == "VS-":  # VS-D7-VE
         return True
     elif token[:2] == "i-":  # i-D7
@@ -207,6 +245,13 @@ def is_inpatient_att_token(token: str):
 
 
 def extract_time_interval_in_days(token: str):
+    """
+    Extract the time interval in days from a token.
+
+    :param token: Token to extract from.
+    :return: Time interval in days.
+    :raises ValueError: If the token is invalid.
+    """
     try:
         if token[0] == "D":  # day tokens
             return int(token[1:])
@@ -236,6 +281,13 @@ def extract_time_interval_in_days(token: str):
 def convert_time_interval_to_time_tuple(
     time_interval: int, is_inpatient: bool
 ) -> Tuple[str, str, str]:
+    """
+    Convert a time interval to a tuple of time tokens.
+
+    :param time_interval: Time interval in days.
+    :param is_inpatient: Whether the interval is for an inpatient.
+    :return: Tuple of year, month, and day tokens.
+    """
     assert time_interval >= 0, "the time interval must equal and greater than zero"
     year = time_interval // 365
     month = time_interval % 365 // 30
@@ -250,7 +302,7 @@ def generate_artificial_time_tokens():
     """
     Generate all the time tokens used in training.
 
-    :return:
+    :return: List of time tokens.
     """
     day_tokens = [f"D{i}" for i in range(2000)]
     week_tokens = [f"W{i}" for i in range(4)]

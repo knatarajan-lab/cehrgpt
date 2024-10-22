@@ -3,29 +3,9 @@ import configparser
 from pathlib import Path
 
 import pyspark.sql.functions as f
-from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
 
-sc = SparkContext()
-# Get current sparkconf which is set by glue
-conf = sc.getConf()
-# add additional spark configurations
-conf.set("spark.sql.legacy.parquet.int96RebaseModeInRead", "CORRECTED")
-conf.set("spark.sql.legacy.parquet.int96RebaseModeInWrite", "CORRECTED")
-conf.set("spark.sql.legacy.parquet.datetimeRebaseModeInRead", "CORRECTED")
-conf.set("spark.sql.legacy.parquet.datetimeRebaseModeInWrite", "CORRECTED")
-# Restart spark context
-sc.stop()
-
-
-omop_table_dict = {
-    "person": "person_id",
-    "condition_occurrence": "condition_occurrence_id",
-    "measurement": "measurement_id",
-    "drug_exposure": "drug_exposure_id",
-    "procedure_occurrence": "procedure_occurrence_id",
-    "observation": "observation_id",
-    "visit_occurrence": "visit_occurrence_id",
-}
+# Define timestamp column for filtering based on the folder name
 omop_timestamp_dict = {
     "person": "birth_datetime",
     "condition_occurrence": "condition_start_date",
@@ -36,35 +16,42 @@ omop_timestamp_dict = {
     "visit_occurrence": "visit_start_date",
 }
 
-sc = SparkContext.getOrCreate(conf=conf)
-from pyspark.sql import SQLContext
 
-sqlContext = SQLContext(sc)
-
-
-def upload_omop_tables(domain_table_folder, db_properties):
-    df = sqlContext.read.format("parquet").load(str(domain_table_folder) + "/")
-    df = df.filter(
-        f.col(omop_timestamp_dict[domain_table_folder.name])
-        > f.unix_timestamp(f.lit("1900-01-01 00:00:00")).cast("timestamp")
+# Function to initialize and return the SparkSession
+def get_spark_session():
+    spark = (
+        SparkSession.builder.appName("OMOP Upload")
+        .config("spark.sql.legacy.parquet.int96RebaseModeInRead", "CORRECTED")
+        .config("spark.sql.legacy.parquet.int96RebaseModeInWrite", "CORRECTED")
+        .config("spark.sql.legacy.parquet.datetimeRebaseModeInRead", "CORRECTED")
+        .config("spark.sql.legacy.parquet.datetimeRebaseModeInWrite", "CORRECTED")
+        .getOrCreate()
     )
-    df = df.filter(
-        f.col(omop_timestamp_dict[domain_table_folder.name])
-        < f.unix_timestamp(f.lit("9999-01-01 00:00:00")).cast("timestamp")
-    )
+    return spark
 
-    # cast the concept id columns to integer type
+
+# Function to upload OMOP tables to a database
+def upload_omop_tables(spark, domain_table_folder, db_properties):
+    # Load parquet file from the specified folder
+    df = spark.read.format("parquet").load(str(domain_table_folder) + "/")
+
+    # Filter dates outside of the acceptable range
+    if domain_table_folder.name in omop_timestamp_dict:
+        timestamp_column = omop_timestamp_dict[domain_table_folder.name]
+        df = df.filter(f.col(timestamp_column) > f.lit("1900-01-01").cast("date"))
+        df = df.filter(f.col(timestamp_column) < f.lit("9999-01-01").cast("date"))
+
+    # Cast appropriate columns to integer and date types
     for column in df.columns:
         if "concept_id" in column:
             df = df.withColumn(column, f.col(column).cast("integer"))
         if "date" in column:
             df = df.withColumn(column, f.col(column).cast("date"))
 
-    # if domain_table_folder.name == 'person':
-    #    df = df.withColumn("birth_datetime", df["birth_datetime"].cast("string"))
+    # Write to the database with specified options
     df.repartition(10).write.format("jdbc").options(
         url=db_properties["base_url"],
-        dbtable=f"{domain_table_folder.name}",
+        dbtable=domain_table_folder.name,
         user=db_properties["user"],
         password=db_properties["password"],
         batchsize=200000,
@@ -72,45 +59,50 @@ def upload_omop_tables(domain_table_folder, db_properties):
     ).mode("overwrite").save()
 
 
+# Main function to process the folders and upload tables
+def main(credential_path, input_folder):
+    # Load database properties from the credentials file
+    config = configparser.ConfigParser()
+    config.read(credential_path)
+    db_properties = config.defaults()
+
+    # Initialize SparkSession
+    spark = get_spark_session()
+
+    # Process each folder within the input folder
+    input_folder = Path(input_folder)
+    uploaded_tables = []
+    for folder in input_folder.glob("*"):
+        try:
+            if folder.is_dir() and folder.name in omop_timestamp_dict:
+                upload_omop_tables(spark, folder, db_properties)
+                uploaded_tables.append(folder.name)
+                print(f"Table: {folder.name} uploaded successfully")
+        except Exception as e:
+            print(f"Error uploading table {folder.name}: {e}")
+
+    print(f"Uploaded tables: {uploaded_tables}")
+
+
+# Argument parsing moved under __name__ == "__main__"
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Arguments for uploading OMOP tables")
 
     parser.add_argument(
         "-c",
         "--credential_path",
-        dest="credential_path",
-        action="store",
-        help="The path for your database credentials",
         required=True,
+        help="The path for your database credentials",
     )
 
     parser.add_argument(
         "-i",
         "--input_folder",
-        dest="input_folder",
-        action="store",
-        help=(
-            "Full path to the input folder that contains "
-            "the domain tables as separate folders with parquet files"
-        ),
         required=True,
+        help="Path to the input folder containing the OMOP tables",
     )
 
-    ARGS = parser.parse_args()
-    credential_path = ARGS.credential_path
-    input_folder = Path(ARGS.input_folder)
-    config = configparser.ConfigParser()
-    config.read(credential_path)
-    properties = config.defaults()
-    uploaded_tables = []
+    args = parser.parse_args()
 
-    for folder in input_folder.glob("*"):
-        try:
-            if folder.name in omop_table_dict:
-                upload_omop_tables(folder, properties)
-                uploaded_tables.append(folder.name)
-                print(f"Table: {str(folder.name)} is uploaded")
-        except Exception as e:
-            print(str(e))
-            print(f"The table {str(folder.name)} was not uploaded")
-    print(f"The following tables were uploaded:{str(uploaded_tables)}")
+    # Call the main function with parsed arguments
+    main(args.credential_path, args.input_folder)
