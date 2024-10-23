@@ -13,6 +13,8 @@ from pyspark.sql import functions as F
 add_console_logging()
 logger = logging.getLogger(__name__)
 
+COHORT_FOLDER_NAME = "cohorts"
+
 
 class MergeType(Enum):
     TRAIN_AND_TEST = "train_and_test"
@@ -29,6 +31,7 @@ def main(
     spark = SparkSession.builder.appName(
         "Merge Synthetic OMOP and Real OMOP datasets"
     ).getOrCreate()
+
     logger.info(
         f"real_omop_folder: {real_omop_folder}\n"
         f"synthetic_omop_folder: {synthetic_omop_folder}\n"
@@ -69,6 +72,23 @@ def main(
     )
     merge_patient_splits.cache()
 
+    # re-assign visit_occurrence_id
+    real_visit_occurrence = spark.read.parquet(
+        os.path.join(real_omop_folder, "visit_occurrence")
+    )
+    max_real_visit_occurrence_id = real_visit_occurrence.select(
+        F.max("visit_occurrence_id")
+    ).collect()[0][0]
+
+    synthetic_visit_occurrence_mapping = (
+        spark.read.parquet(os.path.join(synthetic_omop_folder, "visit_occurrence"))
+        .select("visit_occurrence_id")
+        .withColumn(
+            "new_visit_occurrence_id",
+            F.col("visit_occurrence_id") + F.lit(max_real_visit_occurrence_id),
+        )
+    )
+
     for domain_table in domain_table_list:
         real_domain_table = spark.read.parquet(
             os.path.join(real_omop_folder, domain_table)
@@ -76,7 +96,6 @@ def main(
         synthetic_domain_table = spark.read.parquet(
             os.path.join(synthetic_omop_folder, domain_table)
         )
-
         # The synthetic and real datasets should have the same schema, this is the pre-caution to make sure the columns
         # exist in both datasets
         real_columns = real_domain_table.schema.fieldNames()
@@ -108,6 +127,18 @@ def main(
                 merge_patient_splits["new_person_id"],
             ]
         )
+        # Re-map visit_occurrence_id
+        if "visit_occurrence_id" in [
+            _.lower() for _ in synthetic_domain_table.schema.fieldNames()
+        ]:
+            synthetic_domain_table = (
+                synthetic_domain_table.join(
+                    synthetic_visit_occurrence_mapping, "visit_occurrence_id"
+                )
+                .drop("visit_occurrence_id")
+                .withColumnRenamed("new_visit_occurrence_id", "visit_occurrence_id")
+            )
+
         merge_domain_table = real_domain_table.unionByName(synthetic_domain_table)
         merge_domain_table = (
             merge_domain_table.withColumnRenamed("person_id", "original_person_id")
