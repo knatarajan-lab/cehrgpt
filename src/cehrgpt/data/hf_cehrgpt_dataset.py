@@ -4,14 +4,13 @@ from cehrbert.data_generators.hf_data_generator.hf_dataset import (
     FINETUNING_COLUMNS,
     apply_cehrbert_dataset_mapping,
 )
-from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import (
-    HFFineTuningMapping,
-    SortPatientSequenceMapping,
-)
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import Dataset, DatasetDict
 
-from cehrgpt.data.hf_cehrgpt_dataset_mapping import HFCehrGptTokenizationMapping
+from cehrgpt.data.hf_cehrgpt_dataset_mapping import (
+    HFCehrGptTokenizationMapping,
+    HFFineTuningMapping,
+)
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 CEHRGPT_COLUMNS = [

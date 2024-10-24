@@ -1,10 +1,17 @@
 import copy
+import datetime
 from typing import Any, Dict
 
 import numpy as np
 from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import DatasetMapping
 
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+
+
+def convert_date_to_posix_time(index_date: datetime.date) -> float:
+    return datetime.datetime.combine(
+        index_date, datetime.datetime.min.time()
+    ).timestamp()
 
 
 class HFCehrGptTokenizationMapping(DatasetMapping):
@@ -55,3 +62,23 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
         record["value_indicators"] = record["concept_value_masks"]
         record["values"] = record["concept_values"]
         return record
+
+
+class HFFineTuningMapping(DatasetMapping):
+    """Consider removing this transformation in the future."""
+
+    def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "age_at_index": (
+                record["age"] if "age" in record else record["age_at_index"]
+            ),
+            "classifier_label": record["label"],
+            "index_date": (
+                convert_date_to_posix_time(record["index_date"])
+                if "index_date" in record
+                else None
+            ),
+        }
+
+    def remove_columns(self):
+        return ["label"]
