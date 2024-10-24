@@ -22,11 +22,11 @@ class MergeType(Enum):
 
 
 def main(
-        real_omop_folder: str,
-        synthetic_omop_folder: str,
-        domain_table_list: List[str],
-        output_folder: str,
-        merge_type: str,
+    real_omop_folder: str,
+    synthetic_omop_folder: str,
+    domain_table_list: List[str],
+    output_folder: str,
+    merge_type: str,
 ):
     spark = SparkSession.builder.appName(
         "Merge Synthetic OMOP and Real OMOP datasets"

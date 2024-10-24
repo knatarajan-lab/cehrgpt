@@ -174,6 +174,7 @@ def get_cehrgpt_output_folder(args, cehrgpt_tokenizer) -> str:
 def is_clinical_event(token: str) -> bool:
     return token.isnumeric()
 
+
 def is_visit_start(token: str):
     """
     Check if the token indicates the start of a visit.
