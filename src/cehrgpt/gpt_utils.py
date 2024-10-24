@@ -11,7 +11,8 @@ from cehrgpt.models.special_tokens import (
 )
 
 # Regular expression pattern to match inpatient attendance tokens
-inpatient_att_pattern = re.compile(r"(?:VS-|i-)D(\d+)(?:-VE)?")
+INPATIENT_ATT_PATTERN = re.compile(r"(?:VS-|i-)D(\d+)(?:-VE)?")
+DEMOGRAPHIC_PROMPT_SIZE = 4
 
 
 class RandomSampleCache:
@@ -98,13 +99,18 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
     """
     seq_length = len(concept_ids)
     starting_points = []
-    [start_year, start_age, start_gender, start_race] = [_ for _ in concept_ids[0:4]]
+    start_year, start_age, start_gender, start_race = [
+        _ for _ in concept_ids[:DEMOGRAPHIC_PROMPT_SIZE]
+    ]
     try:
         start_year = int(start_year.split(":")[1])
         start_age = int(start_age.split(":")[1])
         data_cursor = date(int(start_year), 1, 1)
         birth_date = date(start_year - start_age, 1, 1)
-        for i in range(4, max(5, seq_length - max_seq_len)):
+        for i in range(
+            DEMOGRAPHIC_PROMPT_SIZE,
+            min(seq_length, seq_length - max_seq_len + DEMOGRAPHIC_PROMPT_SIZE),
+        ):
             current_token = concept_ids[i]
             if is_visit_start(current_token):
                 starting_points.append(
@@ -115,7 +121,7 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
                 data_cursor = data_cursor + timedelta(days=att_date_delta)
 
         if len(starting_points) == 0:
-            return 0, 0, concept_ids[0:4]
+            return 0, 0, concept_ids[:DEMOGRAPHIC_PROMPT_SIZE]
 
         random_starting_index, random_starting_year, random_starting_age = (
             random.choice(starting_points)
@@ -129,7 +135,10 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
         # Remove the number of demographic tokens
         random_end_index = random_starting_index
         for i in reversed(
-            list(range(random_starting_index, random_starting_index + max_seq_len - 4))
+            range(
+                random_starting_index,
+                random_starting_index + max_seq_len - DEMOGRAPHIC_PROMPT_SIZE,
+            )
         ):
             current_token = concept_ids[i]
             if current_token == "VE":
@@ -238,11 +247,7 @@ def is_inpatient_att_token(token: str):
     :param token: Token to check.
     :return: True if the token is an inpatient attendance token, False otherwise.
     """
-    if token[:3] == "VS-":  # VS-D7-VE
-        return True
-    elif token[:2] == "i-":  # i-D7
-        return True
-    return False
+    return INPATIENT_ATT_PATTERN.match(token)
 
 
 def extract_time_interval_in_days(token: str):

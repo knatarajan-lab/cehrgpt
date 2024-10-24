@@ -1,6 +1,7 @@
+import random
 import unittest
 
-from src.cehrgpt.gpt_utils import (
+from cehrgpt.gpt_utils import (
     RandomSampleCache,
     convert_time_interval_to_time_tuple,
     extract_time_interval_in_days,
@@ -36,19 +37,83 @@ class TestRandomSampleCache(unittest.TestCase):
 class TestRandomSliceGPTSequence(unittest.TestCase):
     def test_random_slice_gpt_sequence_with_empty_starting_points(self):
         result = random_slice_gpt_sequence(["year:2020", "age:30", "male", "race"], 10)
-        self.assertEqual(result, (0, 0, ["year:2020", "age:30", "male", "race"]))
+        self.assertEqual((0, 0, ["year:2020", "age:30", "male", "race"]), result)
 
     def test_random_slice_gpt_sequence_with_valid_data(self):
-        concept_ids = ["year:2020", "age:30", "male", "race", "VS", "D7", "VS", "VE"]
+
+        random.seed(0)
+
+        # The pat sequence is greater than max_seq_len,
+        # it should randomly pick a starting point and do not update the demographic prompt
+        # because the time interval between the visits is 7 days
+        concept_ids = [
+            "year:2020",
+            "age:30",
+            "male",
+            "race",
+            "VS",
+            "C",
+            "C",
+            "VE",
+            "D7",
+            "VS",
+            "C",
+            "VE",
+        ]
         result = random_slice_gpt_sequence(concept_ids, 10)
-        self.assertTrue(result[0] >= 0)
-        self.assertTrue(result[1] > result[0])
-        self.assertEqual(len(result[2]), 4)  # demographic tokens
+        self.assertTrue(result[0] == 4)
+        self.assertTrue(result[1] == 7)
+        self.assertEqual(result[2], ["year:2020", "age:30", "male", "race"])
+
+        concept_ids = [
+            "year:2020",
+            "age:30",
+            "male",
+            "race",
+            "VS",
+            "C",
+            "C",
+            "VE",
+            "D500",
+            "VS",
+            "C",
+            "VE",
+            "VS",
+            "C",
+            "C",
+            "VE",
+            "D500",
+            "VS",
+            "C",
+            "VE",
+            "VS",
+            "C",
+            "C",
+            "VE",
+            "D500",
+            "VS",
+            "C",
+            "VE",
+        ]
+
+        # The pat sequence is greater than max_seq_len,
+        # it should randomly pick a starting point and update the demographic prompt
+        result = random_slice_gpt_sequence(concept_ids, 20)
+        self.assertTrue(result[0] == 9)
+        self.assertTrue(result[1] == 23)
+        self.assertEqual(result[2], ["year:2021", "age:31", "male", "race"])
+
+        # The pat sequence is shorter than max_seq_len, it should return the original demographic prompt
+        concept_ids = ["year:2020", "age:30", "male", "race", "VS", "C", "C", "VE"]
+        result = random_slice_gpt_sequence(concept_ids, 10)
+        self.assertTrue(result[0] == 0)
+        self.assertTrue(result[1] == 0)
+        self.assertEqual(result[2], ["year:2020", "age:30", "male", "race"])
 
     def test_random_slice_gpt_sequence_with_invalid_data(self):
         concept_ids = ["year:2020", "age:30", "male", "race", "invalid"]
         result = random_slice_gpt_sequence(concept_ids, 10)
-        self.assertEqual(result, (0, 9, []))
+        self.assertEqual(result, (0, 0, ["year:2020", "age:30", "male", "race"]))
 
 
 class TestTokenFunctions(unittest.TestCase):
@@ -63,7 +128,11 @@ class TestTokenFunctions(unittest.TestCase):
 
     def test_is_inpatient_att_token(self):
         self.assertTrue(is_inpatient_att_token("VS-D7"))
-        self.assertFalse(is_inpatient_att_token("VS-D7-VE"))
+        self.assertTrue(is_inpatient_att_token("VS-D7-VE"))
+        self.assertTrue(is_inpatient_att_token("i-D7"))
+        self.assertTrue(is_inpatient_att_token("i-D7-VE"))
+        self.assertFalse(is_inpatient_att_token("V-D7"))
+        self.assertFalse(is_inpatient_att_token("D7-VE"))
 
 
 class TestTimeIntervalFunctions(unittest.TestCase):
