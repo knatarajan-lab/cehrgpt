@@ -25,18 +25,16 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from scipy.special import expit as sigmoid
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import (
-    AutoConfig,
-    EarlyStoppingCallback,
-    Trainer,
-    TrainingArguments,
-    set_seed,
-)
+from transformers import EarlyStoppingCallback, Trainer, TrainingArguments, set_seed
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
-from cehrgpt.models.hf_cehrgpt import CehrGptForClassification, CEHRGPTPreTrainedModel
+from cehrgpt.models.hf_cehrgpt import (
+    CEHRGPTConfig,
+    CehrGptForClassification,
+    CEHRGPTPreTrainedModel,
+)
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 LOG = logging.get_logger("transformers")
@@ -260,7 +258,7 @@ def main():
 
     processed_dataset.set_format("pt")
 
-    config = AutoConfig.from_pretrained(model_args.model_name_or_path)
+    config = CEHRGPTConfig.from_pretrained(model_args.model_name_or_path)
     # We suppress the additional learning objectives in fine-tuning
     collator = CehrGptDataCollator(
         tokenizer=tokenizer,
