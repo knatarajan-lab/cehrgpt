@@ -78,27 +78,28 @@ class GPT2GraphAttention(nn.Module):
         if self.scale_attn_by_inverse_layer_idx:
             attn_weights = attn_weights / float(self.layer_idx + 1)
 
-        if not self.is_cross_attention:
-            # if only "normal" attention layer implements causal mask
-            query_length, key_length = query.size(-2), key.size(-2)
-            # causal_mask = self.bias[:, :, key_length - query_length : key_length, :key_length]
-            # causal_mask = self.bias
+        # if not self.is_cross_attention:
+        # if only "normal" attention layer implements causal mask
+        query_length, key_length = query.size(-2), key.size(-2)
+        causal_mask = self.bias[:, :, key_length - query_length : key_length, :key_length]
+        # causal_mask = self.bias
 
 
-            causal_mask = torch.concat([torch.tril(torch.ones((query_length, query_length), dtype=torch.bool)), torch.diag(torch.ones(query_length, dtype=torch.bool))], -1).view(
-                1, 1, query_length, 2 * query_length
-            ).to('cuda')
-            
-            mask_value = torch.finfo(attn_weights.dtype).min
-            # Need to be a tensor, otherwise we get error: `RuntimeError: expected scalar type float but found double`.
-            # Need to be on the same device, otherwise `RuntimeError: ..., x and y to be on the same device`
-            mask_value = torch.full([], mask_value, dtype=attn_weights.dtype, device=attn_weights.device)
-            # print(attn_weights.shape, causal_mask.shape)
-            attn_weights = torch.where(causal_mask, attn_weights.to(attn_weights.dtype), mask_value)
+        # causal_mask = torch.concat([torch.tril(torch.ones((query_length, query_length), dtype=torch.bool)), torch.diag(torch.ones(query_length, dtype=torch.bool))], -1).view(
+        #     1, 1, query_length, 2 * query_length
+        # ).to('cuda')
+        
+        mask_value = torch.finfo(attn_weights.dtype).min
+        # Need to be a tensor, otherwise we get error: `RuntimeError: expected scalar type float but found double`.
+        # Need to be on the same device, otherwise `RuntimeError: ..., x and y to be on the same device`
+        mask_value = torch.full([], mask_value, dtype=attn_weights.dtype, device=attn_weights.device)
+        # print(attn_weights.shape, causal_mask.shape)
+        attn_weights = torch.where(causal_mask, attn_weights.to(attn_weights.dtype), mask_value)
 
         if attention_mask is not None:
             # Apply the attention mask
-            attn_weights = attn_weights + attention_mask.repeat((1, 1, 1, 2)).to('cuda')
+            # attn_weights = attn_weights + attention_mask.repeat((1, 1, 1, 2)).to('cuda')
+            attn_weights = attn_weights + attention_mask
 
         attn_weights = nn.functional.softmax(attn_weights, dim=-1)
 
@@ -185,7 +186,7 @@ class GPT2GraphAttention(nn.Module):
     def forward(
         self,
         hidden_states: Optional[Tuple[torch.FloatTensor]],
-        agg_node_hidden_states: Optional[Tuple[torch.FloatTensor]],
+        # agg_node_hidden_states: Optional[Tuple[torch.FloatTensor]],
         layer_past: Optional[Tuple[torch.Tensor]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
@@ -206,8 +207,8 @@ class GPT2GraphAttention(nn.Module):
             attention_mask = encoder_attention_mask
         else:
             query, key, value = self.c_attn(hidden_states).split(self.split_size, dim=2)
-            _, agg_node_key, agg_node_value = self.c_attn(agg_node_hidden_states).split(self.split_size, dim=2)
-            key, value = torch.concat([key, agg_node_key], dim=-2), torch.concat([value, agg_node_value], dim=-2)
+            # _, agg_node_key, agg_node_value = self.c_attn(agg_node_hidden_states).split(self.split_size, dim=2)
+            # key, value = torch.concat([key, agg_node_key], dim=-2), torch.concat([value, agg_node_value], dim=-2)
 
         
 
@@ -240,6 +241,13 @@ class GPT2GraphAttention(nn.Module):
 
         return outputs  # a, present, (attentions)
 
+# class GATBlock(nn.Module):
+#     def __init__(self):
+#         pass
+    
+#     def forward(self, sequence_indices):
+#         pass
+
 class GPT2GraphBlock(nn.Module):
     def __init__(self, config, layer_idx=None):
         super().__init__()
@@ -256,13 +264,13 @@ class GPT2GraphBlock(nn.Module):
 
         self.mlp = GPT2MLP(inner_dim, config)
 
-        self.gat_layer = GATv2Conv(config.n_embd, config.n_embd, 4, residual=True, activation=torch.relu)
+        # self.gat_layer = GATv2Conv(config.n_embd, config.n_embd, 4, residual=True, activation=torch.relu)
 
     def forward(
         self,
         hidden_states: Optional[Tuple[torch.FloatTensor]],
-        agg_node_hidden_states: Optional[Tuple[torch.FloatTensor]],
-        g,
+        # agg_node_hidden_states: Optional[Tuple[torch.FloatTensor]],
+        # g,
         layer_past: Optional[Tuple[torch.Tensor]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
@@ -275,7 +283,7 @@ class GPT2GraphBlock(nn.Module):
         hidden_states = self.ln_1(hidden_states)
         attn_outputs = self.attn(
             hidden_states,
-            agg_node_hidden_states,
+            # agg_node_hidden_states,
             layer_past=layer_past,
             attention_mask=attention_mask,
             head_mask=head_mask,
@@ -298,7 +306,7 @@ class GPT2GraphBlock(nn.Module):
             hidden_states = self.ln_cross_attn(hidden_states)
             cross_attn_outputs = self.crossattention(
                 hidden_states,
-                agg_node_hidden_states,
+                # agg_node_hidden_states,
                 attention_mask=attention_mask,
                 head_mask=head_mask,
                 encoder_hidden_states=encoder_hidden_states,
@@ -318,8 +326,8 @@ class GPT2GraphBlock(nn.Module):
 
         ############################### Knowledge Graph
 
-        if g.num_nodes() > 0:
-            g.ndata['h'] = self.gat_layer(g, g.ndata['h']).mean(dim=1)
+        # if g.num_nodes() > 0:
+        #     g.ndata['h'] = self.gat_layer(g, g.ndata['h']).mean(dim=1)
 
         ###############################
 

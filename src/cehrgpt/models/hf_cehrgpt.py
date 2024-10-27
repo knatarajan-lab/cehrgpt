@@ -429,6 +429,12 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
 
         # self.g = self.g.to('cuda')
 
+
+        gat_layers = []
+        for i in range(3):
+            gat_layers.append(GATv2Conv(config.n_embd, config.n_embd, 8, residual=True, activation=torch.relu))
+        self.gat_block = nn.ModuleList(gat_layers)
+        self.gat_block_ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
         
 
         # ####################################
@@ -569,6 +575,8 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CehrGptOutputWithPast]:
+
+        # print('NUM NODES, ', bg.num_nodes())
         output_attentions = (
             output_attentions
             if output_attentions is not None
@@ -708,7 +716,20 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
         
         bg.ndata['h'] = self.wte(bg.ndata['vocab_id'])
 
-        agg_node_hidden_states = torch.where(connected_sequence_mask.unsqueeze(-1), hidden_states, torch.zeros_like(hidden_states))
+        # agg_node_hidden_states = torch.where(connected_sequence_mask.unsqueeze(-1), hidden_states, torch.zeros_like(hidden_states))
+        # agg_node_hidden_states = torch.where(connected_sequence_mask.unsqueeze(-1), hidden_states, torch.zeros_like(hidden_states))
+
+        if bg.num_nodes() > 0:
+            for i, gat_layer in enumerate(self.gat_block):
+                bg.ndata['h'] = gat_layer(bg, bg.ndata['h']).mean(dim=1)
+
+            encoder_hidden_states = torch.where(connected_sequence_mask.unsqueeze(-1), bg.ndata['h'][agg_edge_ids_dst], torch.zeros_like(hidden_states)) + hidden_states
+            encoder_hidden_states = self.gat_block_ln_f(encoder_hidden_states)
+        else:
+            # encoder_hidden_states = torch.where(connected_sequence_mask.unsqueeze(-1), hidden_states, torch.zeros_like(hidden_states))
+            encoder_hidden_states = hidden_states
+            encoder_hidden_states = self.gat_block_ln_f(encoder_hidden_states)
+
         # print('Number of graph-connected concepts in batch ', torch.sum(connected_sequence_mask))
 
         output_shape = (-1,) + input_shape[1:] + (hidden_states.size(-1),)
@@ -744,8 +765,8 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
                 outputs = self._gradient_checkpointing_func(
                     block.__call__,
                     hidden_states,
-                    agg_node_hidden_states,
-                    bg,
+                    # agg_node_hidden_states,
+                    # bg,
                     None,
                     attention_mask,
                     head_mask[i],
@@ -758,13 +779,13 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
                 # print(i, input_ids.shape)
                 outputs = block(
                     hidden_states,
-                    agg_node_hidden_states,
-                    bg,
+                    # agg_node_hidden_states,
+                    # bg,
                     layer_past=layer_past,
                     attention_mask=attention_mask,
                     head_mask=head_mask[i],
-                    encoder_hidden_states=None,
-                    encoder_attention_mask=None,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=attention_mask,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
                 )
@@ -778,12 +799,12 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
                     outputs[2 if use_cache else 1],
                 )
             
-            if bg.num_nodes() > 0:
-                agg_node_hidden_states = torch.where(connected_sequence_mask.unsqueeze(-1), bg.ndata['h'][agg_edge_ids_dst], torch.zeros_like(agg_node_hidden_states))
-                # bg.ndata['h'][agg_edge_ids_src] = hidden_states[connected_sequence_indices]
+            # if bg.num_nodes() > 0:
+            #     agg_node_hidden_states = torch.where(connected_sequence_mask.unsqueeze(-1), bg.ndata['h'][agg_edge_ids_dst], torch.zeros_like(agg_node_hidden_states))
+            #     # bg.ndata['h'][agg_edge_ids_src] = hidden_states[connected_sequence_indices]
 
-                indices_to_update = torch.nonzero(agg_edge_ids_src, as_tuple=True)
-                bg.ndata['h'][agg_edge_ids_src[indices_to_update]] = hidden_states[indices_to_update]
+            #     # indices_to_update = torch.nonzero(agg_edge_ids_src, as_tuple=True)
+            #     # bg.ndata['h'][agg_edge_ids_src[indices_to_update]] = hidden_states[indices_to_update]
             
 
             # unbatched_graphs = dgl.unbatch(bg)
@@ -984,7 +1005,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
 
         # Graph/collation specific updates
-        bg, connected_sequence_mask, agg_edge_ids_src, agg_edge_ids_dst = self.collator._generate_batched_graph(input_ids, layers=4)
+        bg, connected_sequence_mask, agg_edge_ids_src, agg_edge_ids_dst = self.collator._generate_batched_graph(input_ids, layers=3)
 
         model_inputs.update(
             {
@@ -1058,6 +1079,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             return_dict=return_dict
         )
         hidden_states = transformer_outputs[0]
+
+        # print('HIDDEN STATES,  ', hidden_states.shape)
 
         # Set device for model parallelism
         if self.model_parallel:
