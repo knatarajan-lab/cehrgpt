@@ -17,7 +17,7 @@ from transformers.generation.stopping_criteria import (
 )
 from transformers.generation.streamers import BaseStreamer
 from transformers.models.gpt2.modeling_gpt2 import GPT2Attention, GPT2Block
-from .custom_layers import GPT2GraphBlock
+from .custom_layers import GPT2GraphBlock, GATBlock
 from transformers.pytorch_utils import Conv1D
 from transformers.utils import is_flash_attn_2_available, logging
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
@@ -430,11 +430,13 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
         # self.g = self.g.to('cuda')
 
 
-        gat_layers = []
-        for i in range(3):
-            gat_layers.append(GATv2Conv(config.n_embd, config.n_embd, 8, residual=True, activation=torch.relu))
-        self.gat_block = nn.ModuleList(gat_layers)
-        self.gat_block_ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        # gat_layers = []
+        # for i in range(3):
+        #     gat_layers.append(GATv2Conv(config.n_embd, config.n_embd, 8, residual=True, activation=torch.relu))
+        # self.gat_block = nn.ModuleList(gat_layers)
+        # self.gat_block_ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+
+        self.gat_block = GATBlock(config)
         
 
         # ####################################
@@ -576,6 +578,10 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CehrGptOutputWithPast]:
 
+        bg = bg.to(input_ids.device)
+        connected_sequence_mask = connected_sequence_mask.to(input_ids.device)
+        agg_edge_ids_dst = agg_edge_ids_dst.to(input_ids.device)
+
         # print('NUM NODES, ', bg.num_nodes())
         output_attentions = (
             output_attentions
@@ -598,6 +604,10 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
         batch_size = input_ids.shape[0]
 
         device = input_ids.device
+
+        # free, total = torch.cuda.mem_get_info(device)
+        # mem_used_MB = (total - free) / 1024 ** 2
+        # print(mem_used_MB)
 
         if past_key_values is None:
             past_length = 0
@@ -720,15 +730,23 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
         # agg_node_hidden_states = torch.where(connected_sequence_mask.unsqueeze(-1), hidden_states, torch.zeros_like(hidden_states))
 
         if bg.num_nodes() > 0:
-            for i, gat_layer in enumerate(self.gat_block):
-                bg.ndata['h'] = gat_layer(bg, bg.ndata['h']).mean(dim=1)
+            # for i, gat_layer in enumerate(self.gat_block):
+            #     bg.ndata['h'] = gat_layer(bg, bg.ndata['h']).mean(dim=1)
+
+            self.gat_block(bg)
+
+            # print('NDATA SHAPE, ', bg.ndata['h'].shape)
+            # print('HIDDEN STATES, ', hidden_states.shape)
+            # free, total = torch.cuda.mem_get_info(device)
+            # mem_used_MB = (total - free) / 1024 ** 2
+            # print(mem_used_MB)
 
             encoder_hidden_states = torch.where(connected_sequence_mask.unsqueeze(-1), bg.ndata['h'][agg_edge_ids_dst], torch.zeros_like(hidden_states)) + hidden_states
-            encoder_hidden_states = self.gat_block_ln_f(encoder_hidden_states)
+            # encoder_hidden_states = self.gat_block_ln_f(encoder_hidden_states)
         else:
             # encoder_hidden_states = torch.where(connected_sequence_mask.unsqueeze(-1), hidden_states, torch.zeros_like(hidden_states))
             encoder_hidden_states = hidden_states
-            encoder_hidden_states = self.gat_block_ln_f(encoder_hidden_states)
+            # encoder_hidden_states = self.gat_block_ln_f(encoder_hidden_states)
 
         # print('Number of graph-connected concepts in batch ', torch.sum(connected_sequence_mask))
 
@@ -878,7 +896,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 config.n_embd // 3, config.time_token_vocab_size, bias=False
             )
 
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, 19187, bias=False)
 
         # Model parallel
         self.model_parallel = False
@@ -935,7 +953,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         return self.lm_head
 
     def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
+        self.lm_head = new_embeddings[:19187]
 
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs
@@ -1484,8 +1502,15 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        bg = None,
+        connected_sequence_mask = None,
+        agg_edge_ids_src = None,
+        agg_edge_ids_dst = None,
     ) -> CehrGptSequenceClassifierOutput:
-        normalized_age = self.age_batch_norm(age_at_index)
+        if age_at_index.shape[0] > 1:
+            normalized_age = self.age_batch_norm(age_at_index)
+        else:
+            normalized_age = age_at_index
 
         cehrgpt_output = self.cehrgpt(
             input_ids=input_ids,
@@ -1499,6 +1524,10 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            bg = bg,
+            connected_sequence_mask = connected_sequence_mask,
+            agg_edge_ids_src = agg_edge_ids_src,
+            agg_edge_ids_dst = agg_edge_ids_dst,
         )
 
         # In fine-tuning, the sequences are left-padded, so we use the last element as the pooler

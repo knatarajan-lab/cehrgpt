@@ -288,12 +288,11 @@ class CehrGptDataCollator:
                 batch_input_ids,
                 batch_first=True,
                 padding_value=self.tokenizer.pad_token_id,
-                padding_side='right'
             ).to(torch.int64)
         )
 
         batch["attention_mask"] = self._try_reverse_tensor(
-            pad_sequence(batch_attention_mask, batch_first=True, padding_value=0.0, padding_side='right')
+            pad_sequence(batch_attention_mask, batch_first=True, padding_value=0.0)
         )
         assert batch["input_ids"].shape[1] <= self.max_length
         assert batch["attention_mask"].shape[1] <= self.max_length
@@ -327,7 +326,6 @@ class CehrGptDataCollator:
             batch["time_to_visits"] = self._try_reverse_tensor(
                 pad_sequence(
                     batch_time_to_visits, batch_first=True, padding_value=-100.0,
-                    padding_side='right'
                 )
             )
 
@@ -346,11 +344,10 @@ class CehrGptDataCollator:
             batch["value_indicators"] = self._try_reverse_tensor(
                 pad_sequence(
                     batch_value_indicators, batch_first=True, padding_value=False,
-                    padding_side='right'
                 )
             )
             batch["values"] = self._try_reverse_tensor(
-                pad_sequence(batch_values, batch_first=True, padding_value=-1.0, padding_side='right')
+                pad_sequence(batch_values, batch_first=True, padding_value=-1.0)
             )
 
             assert batch["value_indicators"].shape[1] <= self.max_length

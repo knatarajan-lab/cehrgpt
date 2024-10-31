@@ -5,6 +5,7 @@ from transformers.pytorch_utils import Conv1D, find_pruneable_heads_and_indices,
 from transformers.models.gpt2.modeling_gpt2 import GPT2MLP
 
 from dgl.nn.pytorch.conv import GATv2Conv
+import torch.nn.functional as F
 
 class GPT2GraphAttention(nn.Module):
     def __init__(self, config, is_cross_attention=False, layer_idx=None):
@@ -225,6 +226,10 @@ class GPT2GraphAttention(nn.Module):
             present = (key, value)
         else:
             present = None
+    
+        # free, total = torch.cuda.mem_get_info(hidden_states.device)
+        # mem_used_MB = (total - free) / 1024 ** 2
+        # print(self.layer_idx, mem_used_MB)
 
         if self.reorder_and_upcast_attn:
             attn_output, attn_weights = self._upcast_and_reordered_attn(query, key, value, attention_mask, head_mask)
@@ -241,12 +246,34 @@ class GPT2GraphAttention(nn.Module):
 
         return outputs  # a, present, (attentions)
 
-# class GATBlock(nn.Module):
-#     def __init__(self):
-#         pass
+class GATBlock(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+
+        # hidden_size = 56
+        hidden_size = config.n_embd
+
+        self.incoming_linear_layer = nn.Linear(config.n_embd, hidden_size)
+        gat_layers = []
+        for i in range(3):
+            gat_layers.append(GATv2Conv(hidden_size, hidden_size, 8, residual=True, activation=torch.relu))
+        self.gat_block = nn.ModuleList(gat_layers)
+        self.gat_block_ln_f = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
+
+        self.outgoing_linear_layer = nn.Linear(hidden_size, config.n_embd)
     
-#     def forward(self, sequence_indices):
-#         pass
+    def forward(self, bg):
+        h = bg.ndata['h']
+        h = F.relu(self.incoming_linear_layer(h))
+        for i, gat_layer in enumerate(self.gat_block):
+            h = gat_layer(bg, h).mean(dim=1)
+        h = self.gat_block_ln_f(h)
+        h = F.relu(self.outgoing_linear_layer(h))
+
+        bg.ndata['h'] = h
+
+        return h
+
 
 class GPT2GraphBlock(nn.Module):
     def __init__(self, config, layer_idx=None):

@@ -33,6 +33,9 @@ from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
 from cehrgpt.models.hf_cehrgpt import CehrGptForClassification, CEHRGPTPreTrainedModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
+import dgl
+import pickle
+
 LOG = logging.get_logger("transformers")
 
 
@@ -73,6 +76,22 @@ def main():
     data_args, model_args, training_args = parse_runner_args()
 
     tokenizer = load_pretrained_tokenizer(model_args)
+    ############################ Knowledge Graph processing
+    knowledge_graph_path = "/home/jason/workspace/cehr_gpt_graphs/hierarchy_knowledge_graph_uni.pkl"
+
+    with open(knowledge_graph_path, 'rb') as f:
+        kg = pickle.load(f)
+
+    g = dgl.from_networkx(kg,
+                        node_attrs=['concept_id'],
+                        edge_attrs=['id', 'rel_type'])
+    
+    graph_concept_ids = list(map(str, g.ndata['concept_id'].tolist()))
+    added_tokens = list(set(graph_concept_ids) - set(list(tokenizer._tokenizer.get_vocab().keys())))
+    num_added_tokens = tokenizer._tokenizer.add_tokens(added_tokens)
+        
+
+    #############################
     prepared_ds_path = generate_prepared_ds_path(
         data_args, model_args, data_folder=data_args.cohort_folder
     )
@@ -309,6 +328,9 @@ def main():
             trainer.save_state()
 
         if training_args.do_predict:
+            processed_dataset["test"] = processed_dataset["test"].remove_columns("index_date")
+            print(processed_dataset["test"])
+
             test_dataloader = DataLoader(
                 dataset=processed_dataset["test"],
                 batch_size=training_args.per_device_eval_batch_size,
