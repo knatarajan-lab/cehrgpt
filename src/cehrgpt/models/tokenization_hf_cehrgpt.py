@@ -448,7 +448,9 @@ class CehrGptTokenizer(PushToHubMixin):
                     lab_stat["upper_bound"],
                 )
             else:
-                lab_stats_existing_mapping[concept_unit_pair] = lab_stat
+                if lab_stat["count"] > 0:
+                    lab_stats_existing_mapping[concept_unit_pair] = lab_stat
+
         return list(lab_stats_existing_mapping.values())
 
     @classmethod
