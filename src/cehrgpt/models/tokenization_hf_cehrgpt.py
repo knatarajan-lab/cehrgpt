@@ -404,7 +404,13 @@ class CehrGptTokenizer(PushToHubMixin):
             if token not in cehrgpt_tokenizer_copy._concept_name_mapping:
                 cehrgpt_tokenizer_copy._concept_name_mapping[token] = concept_name
 
-        return cehrgpt_tokenizer_copy
+        return CehrGptTokenizer(
+            tokenizer=cehrgpt_tokenizer_copy._tokenizer,
+            att_tokenizer=cehrgpt_tokenizer_copy._att_tokenizer,
+            token_to_sub_time_token_mapping=cehrgpt_tokenizer_copy._token_to_sub_time_token_mapping,
+            lab_stats=cehrgpt_tokenizer_copy._lab_stats,
+            concept_name_mapping=cehrgpt_tokenizer_copy._concept_name_mapping,
+        )
 
     @classmethod
     def merge_lab_stats(
