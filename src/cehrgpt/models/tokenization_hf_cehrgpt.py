@@ -1,4 +1,5 @@
 import collections
+import copy
 import json
 import os
 import pickle
@@ -16,6 +17,7 @@ from cehrbert.models.hf_models.tokenization_utils import (
 )
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import Dataset, DatasetDict
+from femr.stat_utils import OnlineStatistics
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
@@ -345,6 +347,109 @@ class CehrGptTokenizer(PushToHubMixin):
             lab_stats,
             concept_name_mapping,
         )
+
+    @classmethod
+    def expand_trained_tokenizer(
+        cls,
+        cehrgpt_tokenizer,
+        dataset: Union[Dataset, DatasetDict],
+        feature_names: List[str],
+        concept_name_mapping: Dict[str, str],
+        data_args: DataTrainingArguments,
+    ):
+        if not isinstance(cehrgpt_tokenizer, CehrGptTokenizer):
+            raise ValueError(
+                "The existing cehrgpt must be an instance of CehrGptTokenizer"
+            )
+
+        cehrgpt_tokenizer_copy = copy.deepcopy(cehrgpt_tokenizer)
+
+        new_tokenizer = CehrGptTokenizer.train_tokenizer(
+            dataset=dataset,
+            feature_names=feature_names,
+            concept_name_mapping=concept_name_mapping,
+            data_args=data_args,
+        )
+
+        new_tokens = list(new_tokenizer._tokenizer.get_vocab().keys())
+        new_att_tokens = list(new_tokenizer._att_tokenizer.get_vocab().keys())
+        new_token_to_sub_time_token_mapping = (
+            new_tokenizer._token_to_sub_time_token_mapping
+        )
+        new_lab_stats = new_tokenizer._lab_stats
+        new_concept_name_mapping = new_tokenizer._concept_name_mapping
+
+        # Add new tokens to the existing tokenizer
+        cehrgpt_tokenizer_copy._tokenizer.add_tokens(new_tokens)
+        # Add new time tokens to the existing att tokenizer
+        cehrgpt_tokenizer_copy._att_tokenizer.add_tokens(new_att_tokens)
+        # Merge the time_token -> List[sub_time_tokens] mapping
+        for time_token, sub_time_tokens in new_token_to_sub_time_token_mapping.items():
+            if (
+                time_token
+                not in cehrgpt_tokenizer_copy._token_to_sub_time_token_mapping
+            ):
+                cehrgpt_tokenizer_copy._token_to_sub_time_token_mapping[time_token] = (
+                    sub_time_tokens
+                )
+
+        # Merge lab_stats
+        cehrgpt_tokenizer_copy._lab_stats = cls.merge_lab_stats(
+            cehrgpt_tokenizer_copy._lab_stats,
+            new_lab_stats,
+        )
+
+        # Merge concept_name_mapping
+        for token, concept_name in new_concept_name_mapping.items():
+            if token not in cehrgpt_tokenizer_copy._concept_name_mapping:
+                cehrgpt_tokenizer_copy._concept_name_mapping[token] = concept_name
+
+        return cehrgpt_tokenizer_copy
+
+    @classmethod
+    def merge_lab_stats(
+        cls,
+        lab_stats_existing: List[Dict[str, Any]],
+        lab_stats_new: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+
+        lab_stats_existing_mapping = {
+            (lab_stat["concept_id"], lab_stat["unit"]): lab_stat
+            for lab_stat in lab_stats_existing
+        }
+        for lab_stat in lab_stats_new:
+            concept_unit_pair = (lab_stat["concept_id"], lab_stat["unit"])
+            if concept_unit_pair in lab_stats_existing_mapping:
+                existing = OnlineStatistics()
+                existing.count = lab_stats_existing_mapping[concept_unit_pair]["count"]
+                existing.current_mean = lab_stats_existing_mapping[concept_unit_pair][
+                    "mean"
+                ]
+                existing.variance = (
+                    lab_stats_existing_mapping[concept_unit_pair]["std"] ** 2
+                    * existing.count
+                )
+                new = OnlineStatistics()
+                new.count = lab_stat["count"]
+                new.current_mean = lab_stat["mean"]
+                new.variance = lab_stat["std"] ** 2 * new.count
+                existing.combine(new)
+                lab_stats_existing_mapping[concept_unit_pair]["mean"] = existing.mean()
+                lab_stats_existing_mapping[concept_unit_pair][
+                    "std"
+                ] = existing.standard_deviation()
+                lab_stats_existing_mapping[concept_unit_pair]["count"] = existing.count
+                lab_stats_existing_mapping[concept_unit_pair]["lower_bound"] = min(
+                    lab_stats_existing_mapping[concept_unit_pair]["lower_bound"],
+                    lab_stat["lower_bound"],
+                )
+                lab_stats_existing_mapping[concept_unit_pair]["upper_bound"] = max(
+                    lab_stats_existing_mapping[concept_unit_pair]["upper_bound"],
+                    lab_stat["upper_bound"],
+                )
+            else:
+                lab_stats_existing_mapping[concept_unit_pair] = lab_stat
+        return list(lab_stats_existing_mapping.values())
 
     @classmethod
     def train_tokenizer(
