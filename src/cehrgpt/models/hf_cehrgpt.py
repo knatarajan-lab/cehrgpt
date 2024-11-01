@@ -472,7 +472,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         return self.wte
 
     def set_input_embeddings(self, new_embeddings: nn.Embedding):
-        self.wte.embedding_layer = new_embeddings
+        self.wte = new_embeddings
 
     def _prune_heads(self, heads_to_prune):
         """

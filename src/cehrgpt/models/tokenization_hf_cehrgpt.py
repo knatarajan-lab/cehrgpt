@@ -569,6 +569,7 @@ class CehrGptTokenizer(PushToHubMixin):
                 for (concept_id, unit), online_stats in current[
                     "numeric_stats_by_lab"
                 ].items()
+                if online_stats.count > 0
             ]
 
         # We will train a tokenizer specifically for time intervals
