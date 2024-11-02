@@ -445,37 +445,25 @@ def main():
             n_trials=cehrgpt_args.n_trials,
             compute_objective=lambda m: m["best_metric"],
         )
-        # Retrieve the number of epochs actually trained before early stopping
-        epochs_trained = hyperparam_trainer.state.global_step / len(sampled_train)
-        effective_epochs = max(
-            1, int(epochs_trained - model_args.early_stopping_patience)
-        )
         LOG.info("Best hyperparameters: %s", best_trial.hyperparameters)
-        LOG.info("Epochs trained with early stopping: %s", epochs_trained)
-        LOG.info("Effective epochs for full training: %s", effective_epochs)
 
         retrain_args = copy.deepcopy(training_args)
         # Update training arguments with best hyperparameters and set epochs based on adjusted effective epochs
-        retrain_args.num_train_epochs = effective_epochs
         retrain_args.learning_rate = best_trial.hyperparameters["learning_rate"]
         retrain_args.per_device_train_batch_size = best_trial.hyperparameters[
             "per_device_train_batch_size"
         ]
         retrain_args.weight_decay = best_trial.hyperparameters["weight_decay"]
 
-        # Combine train and validation sets
-        combined_train_val = concatenate_datasets(
-            [
-                processed_dataset["train"],
-                processed_dataset["validation"],
-            ]
-        )
-
         # Initialize Trainer for final training on the combined train+val set
         retrain_trainer = Trainer(
             model=model_init_func(),
             args=retrain_args,
-            train_dataset=combined_train_val,
+            train_dataset=processed_dataset["train"],
+            eval_dataset=processed_dataset["validation"],
+            callbacks=[
+                EarlyStoppingCallback(model_args.early_stopping_patience),
+            ],
             tokenizer=tokenizer,
         )
 
