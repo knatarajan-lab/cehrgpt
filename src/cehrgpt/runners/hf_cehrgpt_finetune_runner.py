@@ -56,11 +56,11 @@ def hp_space(
     if batch_sizes is None:
         batch_sizes = [4, 8]
     return {
-        "learning_rate": trial.suggest_loguniform("learning_rate", *lr_range),
+        "learning_rate": trial.suggest_float("learning_rate", *lr_range, log=True),
         "per_device_train_batch_size": trial.suggest_categorical(
             "per_device_train_batch_size", batch_sizes
         ),
-        "weight_decay": trial.suggest_loguniform("weight_decay", *weight_decays),
+        "weight_decay": trial.suggest_float("weight_decay", *weight_decays, log=True),
     }
 
 
