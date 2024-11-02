@@ -30,7 +30,13 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from scipy.special import expit as sigmoid
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import EarlyStoppingCallback, Trainer, TrainingArguments, set_seed
+from transformers import (
+    EarlyStoppingCallback,
+    Trainer,
+    TrainerCallback,
+    TrainingArguments,
+    set_seed,
+)
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
@@ -44,6 +50,53 @@ from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 
 LOG = logging.get_logger("transformers")
+
+
+class StoreBestMetricCallback(TrainerCallback):
+    """
+    A custom callback to store the best metric in the evaluation metrics dictionary during training.
+
+    This callback monitors the training state and updates the metrics dictionary with the `best_metric`
+    (e.g., the lowest `eval_loss` or highest accuracy) observed during training. It ensures that the
+    best metric value is preserved in the final evaluation results, even if early stopping occurs.
+
+    Attributes:
+        None
+
+    Methods:
+        on_evaluate(args, state, control, **kwargs):
+            Called during evaluation. Adds `state.best_metric` to `metrics` if it exists.
+
+    Example Usage:
+        ```
+        store_best_metric_callback = StoreBestMetricCallback()
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset,
+            eval_dataset=val_dataset,
+            callbacks=[store_best_metric_callback]
+        )
+        ```
+    """
+
+    def on_evaluate(self, args, state, control, **kwargs):
+        """
+        During evaluation, adds the best metric value to the metrics dictionary if it exists.
+
+        Args:
+            args: Training arguments.
+            state: Trainer state object that holds information about training progress.
+            control: Trainer control object to modify training behavior.
+            **kwargs: Additional keyword arguments, including `metrics`, which holds evaluation metrics.
+
+        Updates:
+            `metrics["best_metric"]`: Sets this to `state.best_metric` if available.
+        """
+        # Check if best metric is available and add it to metrics if it exists
+        if state.best_metric is not None:
+            metrics = kwargs.get("metrics")
+            metrics["best_metric"] = state.best_metric
 
 
 # Define the hyperparameter search space with parameters
@@ -366,16 +419,15 @@ def main():
             seed=training_args.seed,
         )["test"]
 
-        training_args.metric_for_best_model = "eval_loss"
-        training_args.load_best_model_at_end = True
-        training_args.greater_is_better = False
-
         hyperparam_trainer = Trainer(
             model_init=model_init_func,
             data_collator=collator,
             train_dataset=sampled_train,
             eval_dataset=sampled_val,
-            callbacks=[EarlyStoppingCallback(model_args.early_stopping_patience)],
+            callbacks=[
+                EarlyStoppingCallback(model_args.early_stopping_patience),
+                StoreBestMetricCallback(),
+            ],
             args=training_args,
         )
         # Perform hyperparameter search
@@ -389,6 +441,7 @@ def main():
             hp_space=hp_space_partial,
             backend="optuna",
             n_trials=cehrgpt_args.n_trials,
+            compute_objective=lambda m: m["best_metric"],
         )
         # Retrieve the number of epochs actually trained before early stopping
         epochs_trained = hyperparam_trainer.state.global_step / len(sampled_train)
