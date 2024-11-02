@@ -290,6 +290,13 @@ def create_dataset_splits(data_args: DataTrainingArguments, seed: int):
 
 def model_init(model_args, training_args, cehrgpt_args):
     model = load_finetuned_model(model_args, model_args.model_name_or_path)
+    # Enable include_values when include_values is set to be False during pre-training
+    if model_args.include_values and not model.cehrgpt.include_values:
+        model.cehrgpt.include_values = True
+    # Enable position embeddings when position embeddings are disabled in pre-training
+    if not model_args.exclude_position_ids and model.cehrgpt.exclude_position_ids:
+        model.cehrgpt.exclude_position_ids = False
+    # Expand tokenizer to adapt to the finetuning dataset
     if cehrgpt_args.expand_tokenizer:
         tokenizer = CehrGptTokenizer.from_pretrained(
             os.path.expanduser(training_args.output_dir)
