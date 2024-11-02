@@ -94,8 +94,8 @@ class StoreBestMetricCallback(TrainerCallback):
             `metrics["best_metric"]`: Sets this to `state.best_metric` if available.
         """
         # Check if best metric is available and add it to metrics if it exists
+        metrics = kwargs.get("metrics", {})
         if state.best_metric is not None:
-            metrics = kwargs.get("metrics")
             metrics["best_metric"] = state.best_metric
 
 
