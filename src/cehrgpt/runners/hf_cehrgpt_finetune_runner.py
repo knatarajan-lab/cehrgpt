@@ -149,7 +149,7 @@ def create_dataset_splits(data_args: DataTrainingArguments, seed: int):
     elif data_args.split_by_patient:
         # Patient-based split
         LOG.info("Using the split_by_patient strategy")
-        unique_patient_ids = np.unique(dataset["person_id"])
+        unique_patient_ids = dataset.unique("person_id")
         LOG.info(f"There are {len(unique_patient_ids)} patients in total")
 
         np.random.seed(seed)
