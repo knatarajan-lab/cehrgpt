@@ -29,7 +29,8 @@ classifiers = [
 
 dependencies = [
     "cehrbert==1.2.2",
-    "openai==1.54.3"
+    "openai==1.54.3",
+    "optuna==4.0.0"
 ]
 
 [tool.setuptools_scm]
