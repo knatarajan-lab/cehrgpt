@@ -433,6 +433,7 @@ def main():
                 OptunaMetricCallback(),
             ],
             args=training_args,
+            resume_from_checkpoint=True,
         )
         # Perform hyperparameter search
         hp_space_partial = partial(
