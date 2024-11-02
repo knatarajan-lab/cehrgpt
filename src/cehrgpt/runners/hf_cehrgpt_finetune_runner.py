@@ -96,7 +96,9 @@ class StoreBestMetricCallback(TrainerCallback):
         # Check if best metric is available and add it to metrics if it exists
         metrics = kwargs.get("metrics", {})
         if state.best_metric is not None:
-            metrics["best_metric"] = state.best_metric
+            metrics.update({"best_metric": state.best_metric})
+        else:
+            metrics.update({"best_metric": metrics["eval_loss"]})
 
 
 # Define the hyperparameter search space with parameters
