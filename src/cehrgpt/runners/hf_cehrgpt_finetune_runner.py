@@ -1,3 +1,4 @@
+import copy
 import json
 import os.path
 from datetime import datetime
@@ -23,7 +24,7 @@ from cehrbert.runners.runner_util import (
     get_meds_extension_path,
     load_parquet_as_dataset,
 )
-from datasets import DatasetDict, load_from_disk
+from datasets import DatasetDict, concatenate_datasets, load_from_disk
 from peft import LoraConfig, PeftModel, get_peft_model
 from scipy.special import expit as sigmoid
 from torch.utils.data import DataLoader
@@ -349,17 +350,66 @@ def main():
     )
 
     if training_args.do_train:
+        sampled_train = processed_dataset["train"].train_test_split(
+            test_size=cehrgpt_args.hyperparameter_tuning_percentage,
+            seed=training_args.seed,
+        )["test"]
+        sampled_val = processed_dataset["validation"].train_test_split(
+            test_size=cehrgpt_args.hyperparameter_tuning_percentage,
+            seed=training_args.seed,
+        )["test"]
         trainer = Trainer(
-            model=model_init(model_args, training_args),
+            model_init=model_init(model_args, training_args),
             data_collator=collator,
-            train_dataset=processed_dataset["train"],
-            eval_dataset=processed_dataset["validation"],
-            callbacks=[EarlyStoppingCallback()],
+            train_dataset=sampled_train,
+            eval_dataset=sampled_val,
+            callbacks=[EarlyStoppingCallback(cehrgpt_args.early_stopping_patience)],
             args=training_args,
         )
+        # Perform hyperparameter search
+        best_trial = trainer.hyperparameter_search(
+            direction="minimize",
+            hp_space=hp_space,
+            backend="optuna",
+            n_trials=cehrgpt_args.n_trials,
+        )
+        # Retrieve the number of epochs actually trained before early stopping
+        epochs_trained = trainer.state.global_step / len(sampled_train)
+        effective_epochs = max(
+            1, int(epochs_trained - cehrgpt_args.early_stopping_patience)
+        )
+        LOG.info("Best hyperparameters: %s", best_trial.hyperparameters)
+        LOG.info("Epochs trained with early stopping: %s", epochs_trained)
+        LOG.info("Effective epochs for full training: %s", effective_epochs)
 
+        retrain_args = copy.deepcopy(training_args)
+        # Update training arguments with best hyperparameters and set epochs based on adjusted effective epochs
+        retrain_args.num_train_epochs = effective_epochs
+        retrain_args.learning_rate = best_trial.hyperparameters["learning_rate"]
+        retrain_args.per_device_train_batch_size = best_trial.hyperparameters[
+            "per_device_train_batch_size"
+        ]
+        retrain_args.weight_decay = best_trial.hyperparameters["weight_decay"]
+
+        # Combine train and validation sets
+        combined_train_val = concatenate_datasets(
+            [
+                processed_dataset["train"],
+                processed_dataset["validation"],
+            ]
+        )
+
+        # Initialize Trainer for final training on the combined train+val set
+        retrain_trainer = Trainer(
+            model_init=model_init,
+            args=retrain_args,
+            train_dataset=combined_train_val,
+            tokenizer=tokenizer,
+        )
+
+        # Train the model on the combined train + val set
         checkpoint = get_last_hf_checkpoint(training_args)
-        train_result = trainer.train(resume_from_checkpoint=checkpoint)
+        train_result = retrain_trainer.train(resume_from_checkpoint=checkpoint)
         trainer.save_model()  # Saves the tokenizer too for easy upload
         metrics = train_result.metrics
 
