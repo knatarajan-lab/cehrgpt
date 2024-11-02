@@ -365,7 +365,7 @@ def main():
             test_size=cehrgpt_args.hyperparameter_tuning_percentage,
             seed=training_args.seed,
         )["test"]
-        trainer = Trainer(
+        hyperparam_trainer = Trainer(
             model_init=model_init_func,
             data_collator=collator,
             train_dataset=sampled_train,
@@ -379,14 +379,14 @@ def main():
             lr_range=(cehrgpt_args.lr_low, cehrgpt_args.lr_high),
             batch_sizes=cehrgpt_args.hyperparameter_batch_sizes,
         )
-        best_trial = trainer.hyperparameter_search(
+        best_trial = hyperparam_trainer.hyperparameter_search(
             direction="minimize",
             hp_space=hp_space_partial,
             backend="optuna",
             n_trials=cehrgpt_args.n_trials,
         )
         # Retrieve the number of epochs actually trained before early stopping
-        epochs_trained = trainer.state.global_step / len(sampled_train)
+        epochs_trained = hyperparam_trainer.state.global_step / len(sampled_train)
         effective_epochs = max(
             1, int(epochs_trained - model_args.early_stopping_patience)
         )
@@ -413,7 +413,7 @@ def main():
 
         # Initialize Trainer for final training on the combined train+val set
         retrain_trainer = Trainer(
-            model_init=model_init_func,
+            model=model_init_func(),
             args=retrain_args,
             train_dataset=combined_train_val,
             tokenizer=tokenizer,
@@ -422,12 +422,12 @@ def main():
         # Train the model on the combined train + val set
         checkpoint = get_last_hf_checkpoint(training_args)
         train_result = retrain_trainer.train(resume_from_checkpoint=checkpoint)
-        trainer.save_model()  # Saves the tokenizer too for easy upload
+        retrain_trainer.save_model()  # Saves the tokenizer too for easy upload
         metrics = train_result.metrics
 
-        trainer.log_metrics("train", metrics)
-        trainer.save_metrics("train", metrics)
-        trainer.save_state()
+        retrain_trainer.log_metrics("train", metrics)
+        retrain_trainer.save_metrics("train", metrics)
+        retrain_trainer.save_state()
 
     if training_args.do_predict:
         test_dataloader = DataLoader(
