@@ -460,6 +460,7 @@ def main():
         # Initialize Trainer for final training on the combined train+val set
         retrain_trainer = Trainer(
             model=model_init_func(),
+            ata_collator=collator,
             args=retrain_args,
             train_dataset=processed_dataset["train"],
             eval_dataset=processed_dataset["validation"],
