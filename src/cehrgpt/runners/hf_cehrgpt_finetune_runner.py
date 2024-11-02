@@ -2,6 +2,7 @@ import copy
 import json
 import os.path
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Tuple
 
@@ -350,6 +351,8 @@ def main():
     )
 
     if training_args.do_train:
+
+        model_init_func = partial(model_init, model_args, training_args)
         sampled_train = processed_dataset["train"].train_test_split(
             test_size=cehrgpt_args.hyperparameter_tuning_percentage,
             seed=training_args.seed,
@@ -359,7 +362,7 @@ def main():
             seed=training_args.seed,
         )["test"]
         trainer = Trainer(
-            model_init=model_init(model_args, training_args),
+            model_init=model_init_func,
             data_collator=collator,
             train_dataset=sampled_train,
             eval_dataset=sampled_val,
@@ -401,7 +404,7 @@ def main():
 
         # Initialize Trainer for final training on the combined train+val set
         retrain_trainer = Trainer(
-            model_init=model_init,
+            model_init=model_init_func,
             args=retrain_args,
             train_dataset=combined_train_val,
             tokenizer=tokenizer,
