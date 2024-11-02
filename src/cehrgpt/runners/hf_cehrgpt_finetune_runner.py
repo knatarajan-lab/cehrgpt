@@ -363,7 +363,7 @@ def main():
             data_collator=collator,
             train_dataset=sampled_train,
             eval_dataset=sampled_val,
-            callbacks=[EarlyStoppingCallback(cehrgpt_args.early_stopping_patience)],
+            callbacks=[EarlyStoppingCallback(model_args.early_stopping_patience)],
             args=training_args,
         )
         # Perform hyperparameter search
@@ -376,7 +376,7 @@ def main():
         # Retrieve the number of epochs actually trained before early stopping
         epochs_trained = trainer.state.global_step / len(sampled_train)
         effective_epochs = max(
-            1, int(epochs_trained - cehrgpt_args.early_stopping_patience)
+            1, int(epochs_trained - model_args.early_stopping_patience)
         )
         LOG.info("Best hyperparameters: %s", best_trial.hyperparameters)
         LOG.info("Epochs trained with early stopping: %s", epochs_trained)

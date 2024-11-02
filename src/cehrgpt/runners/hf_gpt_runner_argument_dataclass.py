@@ -30,9 +30,3 @@ class CehrGPTArguments:
             },
         ),
     )
-    early_stopping_patience: Optional[int] = (
-        dataclasses.field(
-            default=1,
-            metadata={"help": "The early_stopping_patience for overfitting"},
-        ),
-    )
