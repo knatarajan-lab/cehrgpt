@@ -286,6 +286,8 @@ def main():
 
     if training_args.do_train:
         model = load_finetuned_model(model_args, model_args.model_name_or_path)
+        if model_args.include_values:
+            model.cehrgpt.include_values = True
         if cehrgpt_args.expand_tokenizer:
             model.resize_token_embeddings(tokenizer.vocab_size)
         # If lora is enabled, we add LORA adapters to the model
