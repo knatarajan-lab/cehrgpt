@@ -286,8 +286,12 @@ def main():
 
     if training_args.do_train:
         model = load_finetuned_model(model_args, model_args.model_name_or_path)
-        if model_args.include_values:
+        # Enable include_values when include_values is set to be False during pre-training
+        if model_args.include_values and not model.cehrgpt.include_values:
             model.cehrgpt.include_values = True
+        # Enable position embeddings when position embeddings are disabled in pre-training
+        if not model_args.exclude_position_ids and model.cehrgpt.exclude_position_ids:
+            model.cehrgpt.exclude_position_ids = False
         if cehrgpt_args.expand_tokenizer:
             model.resize_token_embeddings(tokenizer.vocab_size)
         # If lora is enabled, we add LORA adapters to the model
