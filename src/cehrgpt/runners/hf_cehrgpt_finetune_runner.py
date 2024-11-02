@@ -365,6 +365,11 @@ def main():
             test_size=cehrgpt_args.hyperparameter_tuning_percentage,
             seed=training_args.seed,
         )["test"]
+
+        training_args.metric_for_best_model = "eval_loss"
+        training_args.load_best_model_at_end = True
+        training_args.greater_is_better = False
+
         hyperparam_trainer = Trainer(
             model_init=model_init_func,
             data_collator=collator,
