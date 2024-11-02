@@ -54,7 +54,7 @@ def hp_space(
     weight_decays: Tuple[float, float] = (1e-4, 1e-2),
 ):
     if batch_sizes is None:
-        batch_sizes = [8, 16, 32]
+        batch_sizes = [4, 8]
     return {
         "learning_rate": trial.suggest_loguniform("learning_rate", *lr_range),
         "per_device_train_batch_size": trial.suggest_categorical(
@@ -374,9 +374,14 @@ def main():
             args=training_args,
         )
         # Perform hyperparameter search
+        hp_space_partial = partial(
+            hp_space,
+            lr_range=(cehrgpt_args.lr_low, cehrgpt_args.lr_high),
+            batch_sizes=cehrgpt_args.hyperparameter_batch_sizes,
+        )
         best_trial = trainer.hyperparameter_search(
             direction="minimize",
-            hp_space=hp_space,
+            hp_space=hp_space_partial,
             backend="optuna",
             n_trials=cehrgpt_args.n_trials,
         )

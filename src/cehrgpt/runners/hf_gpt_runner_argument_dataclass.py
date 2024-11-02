@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Optional
+from typing import List, Optional
 
 
 @dataclasses.dataclass
@@ -22,5 +22,21 @@ class CehrGPTArguments:
         default=10,
         metadata={
             "help": "The number of trails will be use for hyperparameter tuning."
+        },
+    )
+    hyperparameter_batch_sizes: Optional[List[int]] = dataclasses.field(
+        default_factory=lambda: [4, 8, 16],
+        metadata={"help": "Hyperparameter search batch sizes"},
+    )
+    lr_low: Optional[float] = dataclasses.field(
+        default=1e-5,
+        metadata={
+            "help": "The lower bound of the learning rate range for hyperparameter tuning."
+        },
+    )
+    lr_high: Optional[float] = dataclasses.field(
+        default=5e-5,
+        metadata={
+            "help": "The upper bound of the learning rate range for hyperparameter tuning."
         },
     )
