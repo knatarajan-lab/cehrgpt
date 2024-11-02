@@ -231,8 +231,13 @@ def create_dataset_splits(data_args: DataTrainingArguments, seed: int):
     return train_set, validation_set, test_set
 
 
-def model_init(model_args, training_args):
+def model_init(model_args, training_args, cehrgpt_args):
     model = load_finetuned_model(model_args, model_args.model_name_or_path)
+    if cehrgpt_args.expand_tokenizer:
+        tokenizer = CehrGptTokenizer.from_pretrained(
+            os.path.expanduser(training_args.output_dir)
+        )
+        model.resize_token_embeddings(tokenizer.vocab_size)
     # If lora is enabled, we add LORA adapters to the model
     if model_args.use_lora:
         # When LORA is used, the trainer could not automatically find this label,
@@ -351,8 +356,7 @@ def main():
     )
 
     if training_args.do_train:
-
-        model_init_func = partial(model_init, model_args, training_args)
+        model_init_func = partial(model_init, model_args, training_args, cehrgpt_args)
         sampled_train = processed_dataset["train"].train_test_split(
             test_size=cehrgpt_args.hyperparameter_tuning_percentage,
             seed=training_args.seed,
