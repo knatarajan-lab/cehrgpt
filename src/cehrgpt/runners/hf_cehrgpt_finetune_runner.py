@@ -25,7 +25,7 @@ from cehrbert.runners.runner_util import (
     get_meds_extension_path,
     load_parquet_as_dataset,
 )
-from datasets import DatasetDict, concatenate_datasets, load_from_disk
+from datasets import DatasetDict, load_from_disk
 from peft import LoraConfig, PeftModel, get_peft_model
 from scipy.special import expit as sigmoid
 from torch.utils.data import DataLoader
@@ -52,7 +52,7 @@ from cehrgpt.runners.gpt_runner_util import parse_runner_args
 LOG = logging.get_logger("transformers")
 
 
-class StoreBestMetricCallback(TrainerCallback):
+class OptunaMetricCallback(TrainerCallback):
     """
     A custom callback to store the best metric in the evaluation metrics dictionary during training.
 
@@ -96,9 +96,11 @@ class StoreBestMetricCallback(TrainerCallback):
         # Check if best metric is available and add it to metrics if it exists
         metrics = kwargs.get("metrics", {})
         if state.best_metric is not None:
-            metrics.update({"best_metric": state.best_metric})
+            metrics.update(
+                {"optuna_best_metric": min(state.best_metric, metrics["eval_loss"])}
+            )
         else:
-            metrics.update({"best_metric": metrics["eval_loss"]})
+            metrics.update({"optuna_best_metric": metrics["eval_loss"]})
 
 
 # Define the hyperparameter search space with parameters
@@ -428,7 +430,7 @@ def main():
             eval_dataset=sampled_val,
             callbacks=[
                 EarlyStoppingCallback(model_args.early_stopping_patience),
-                StoreBestMetricCallback(),
+                OptunaMetricCallback(),
             ],
             args=training_args,
         )
@@ -443,7 +445,7 @@ def main():
             hp_space=hp_space_partial,
             backend="optuna",
             n_trials=cehrgpt_args.n_trials,
-            compute_objective=lambda m: m["best_metric"],
+            compute_objective=lambda m: m["optuna_best_metric"],
         )
         LOG.info("Best hyperparameters: %s", best_trial.hyperparameters)
 
