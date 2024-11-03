@@ -22,16 +22,17 @@ if __name__ == "__main__":
     with open(args.base_yaml_file, "rb") as stream:
         base_config = yaml.safe_load(stream)
 
-    for individual_cohort in os.listdir(args.cohort_dir):
-        if individual_cohort.endswith("/"):
-            individual_cohort = individual_cohort[:-1]
-        cohort_name = os.path.basename(individual_cohort)
+    for cohort_name in os.listdir(args.cohort_dir):
+        if cohort_name.endswith("/"):
+            cohort_name = cohort_name[:-1]
         individual_output = os.path.join(args.output_folder, cohort_name)
         if os.path.exists(individual_output):
             continue
         Path(individual_output).mkdir(parents=True, exist_ok=True)
-        base_config["data_folder"] = os.path.join(individual_cohort, "train")
-        base_config["test_data_folder"] = os.path.join(individual_cohort, "test")
+        base_config["data_folder"] = os.path.join(args.cohort_dir, cohort_name, "train")
+        base_config["test_data_folder"] = os.path.join(
+            args.cohort_dir, cohort_name, "test"
+        )
         base_config["output_dir"] = individual_output
 
         # Write YAML data to a file
