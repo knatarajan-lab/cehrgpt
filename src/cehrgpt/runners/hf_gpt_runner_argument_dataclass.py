@@ -44,3 +44,15 @@ class CehrGPTArguments:
             "help": "The upper bound of the learning rate range for hyperparameter tuning."
         },
     )
+    weight_decays_low: Optional[float] = dataclasses.field(
+        default=1e-3,
+        metadata={
+            "help": "The lower bound of the weight decays range for hyperparameter tuning."
+        },
+    )
+    weight_decays_high: Optional[float] = dataclasses.field(
+        default=1e-2,
+        metadata={
+            "help": "The upper bound of the weight decays range for hyperparameter tuning."
+        },
+    )

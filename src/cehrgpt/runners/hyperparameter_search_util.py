@@ -199,6 +199,10 @@ def perform_hyperparameter_search(
             hp_space=partial(
                 hp_space,
                 lr_range=(cehrgpt_args.lr_low, cehrgpt_args.lr_high),
+                weight_decays=(
+                    cehrgpt_args.weight_decays_low,
+                    cehrgpt_args.weight_decays_high,
+                ),
                 batch_sizes=cehrgpt_args.hyperparameter_batch_sizes,
             ),
             backend="optuna",
