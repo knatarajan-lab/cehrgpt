@@ -6,6 +6,12 @@ from typing import List, Optional
 class CehrGPTArguments:
     """Arguments pertaining to what data we are going to input our model for training and eval."""
 
+    retrain_with_full: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to retrain the model on the full set after early stopping"
+        },
+    )
     expand_tokenizer: Optional[bool] = dataclasses.field(
         default=False,
         metadata={

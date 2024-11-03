@@ -22,7 +22,7 @@ from cehrbert.runners.runner_util import (
     get_meds_extension_path,
     load_parquet_as_dataset,
 )
-from datasets import DatasetDict, load_from_disk
+from datasets import DatasetDict, concatenate_datasets, load_from_disk
 from peft import LoraConfig, PeftModel, get_peft_model
 from scipy.special import expit as sigmoid
 from torch.utils.data import DataLoader
@@ -348,6 +348,7 @@ def main():
     )
 
     if training_args.do_train:
+
         training_args = perform_hyperparameter_search(
             partial(model_init, model_args, training_args, cehrgpt_args),
             processed_dataset,
@@ -369,16 +370,46 @@ def main():
             ],
             tokenizer=tokenizer,
         )
-
         # Train the model on the combined train + val set
         checkpoint = get_last_hf_checkpoint(training_args)
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
         trainer.save_model()  # Saves the tokenizer too for easy upload
         metrics = train_result.metrics
-
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         trainer.save_state()
+
+        if cehrgpt_args.retrain_with_full:
+            total_train_batch_size = (
+                training_args.train_batch_size
+                * training_args.gradient_accumulation_steps
+                * training_args.world_size
+            )
+            num_of_epochs = (
+                trainer.state.global_step // total_train_batch_size
+            ) - model_args.early_stopping_patience
+            training_args.num_train_epochs = num_of_epochs
+            training_args.overwrite_output_dir = True
+            # Initialize Trainer for final training on the combined train+val set
+            full_dataset = concatenate_datasets(
+                [processed_dataset["train"], processed_dataset["validation"]]
+            )
+            training_args.output_dir = os.path.join(training_args.output_dir, "full")
+            Path(training_args.output_dir).mkdir(exist_ok=True)
+            checkpoint = get_last_hf_checkpoint(training_args)
+            trainer = Trainer(
+                model=model_init(model_args, training_args, cehrgpt_args),
+                data_collator=data_collator,
+                args=training_args,
+                train_dataset=full_dataset,
+                tokenizer=tokenizer,
+            )
+            train_result = trainer.train(resume_from_checkpoint=checkpoint)
+            trainer.save_model()  # Saves the tokenizer too for easy upload
+            metrics = train_result.metrics
+            trainer.log_metrics("train", metrics)
+            trainer.save_metrics("train", metrics)
+            trainer.save_state()
 
     if training_args.do_predict:
         test_dataloader = DataLoader(
