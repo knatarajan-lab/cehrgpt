@@ -30,9 +30,9 @@ if __name__ == "__main__":
         if os.path.exists(individual_output):
             continue
         Path(individual_output).mkdir(parents=True, exist_ok=True)
-        base_config.data_folder = os.path.join(individual_cohort, "train")
-        base_config.test_data_folder = os.path.join(individual_cohort, "test")
-        base_config.output_dir = individual_output
+        base_config["data_folder"] = os.path.join(individual_cohort, "train")
+        base_config["test_data_folder"] = os.path.join(individual_cohort, "test")
+        base_config["output_dir"] = individual_output
 
         # Write YAML data to a file
         config_path = os.path.join(individual_output, "config.yaml")
