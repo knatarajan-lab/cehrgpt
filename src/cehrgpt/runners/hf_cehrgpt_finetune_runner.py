@@ -389,7 +389,6 @@ def main():
                 trainer.state.global_step // total_train_batch_size
             ) - model_args.early_stopping_patience
             training_args.num_train_epochs = num_of_epochs
-            training_args.overwrite_output_dir = True
             # Initialize Trainer for final training on the combined train+val set
             full_dataset = concatenate_datasets(
                 [processed_dataset["train"], processed_dataset["validation"]]
