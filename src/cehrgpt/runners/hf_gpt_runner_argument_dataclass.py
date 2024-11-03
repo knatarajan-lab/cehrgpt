@@ -24,6 +24,10 @@ class CehrGPTArguments:
             "help": "The number of trails will be use for hyperparameter tuning."
         },
     )
+    hyperparameter_tuning: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={"help": "A flag to indicate if we want to do hyperparameter tuning."},
+    )
     hyperparameter_batch_sizes: Optional[List[int]] = dataclasses.field(
         default_factory=lambda: [4, 8, 16],
         metadata={"help": "Hyperparameter search batch sizes"},

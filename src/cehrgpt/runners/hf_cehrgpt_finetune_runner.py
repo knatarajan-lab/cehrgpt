@@ -1,10 +1,8 @@
-import copy
 import json
 import os.path
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import Tuple
 
 import numpy as np
 import optuna
@@ -48,77 +46,10 @@ from cehrgpt.models.hf_cehrgpt import (
 )
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
+from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
+from cehrgpt.runners.hyperparameter_search_util import perform_hyperparameter_search
 
 LOG = logging.get_logger("transformers")
-
-
-class OptunaMetricCallback(TrainerCallback):
-    """
-    A custom callback to store the best metric in the evaluation metrics dictionary during training.
-
-    This callback monitors the training state and updates the metrics dictionary with the `best_metric`
-    (e.g., the lowest `eval_loss` or highest accuracy) observed during training. It ensures that the
-    best metric value is preserved in the final evaluation results, even if early stopping occurs.
-
-    Attributes:
-        None
-
-    Methods:
-        on_evaluate(args, state, control, **kwargs):
-            Called during evaluation. Adds `state.best_metric` to `metrics` if it exists.
-
-    Example Usage:
-        ```
-        store_best_metric_callback = StoreBestMetricCallback()
-        trainer = Trainer(
-            model=model,
-            args=training_args,
-            train_dataset=train_dataset,
-            eval_dataset=val_dataset,
-            callbacks=[store_best_metric_callback]
-        )
-        ```
-    """
-
-    def on_evaluate(self, args, state, control, **kwargs):
-        """
-        During evaluation, adds the best metric value to the metrics dictionary if it exists.
-
-        Args:
-            args: Training arguments.
-            state: Trainer state object that holds information about training progress.
-            control: Trainer control object to modify training behavior.
-            **kwargs: Additional keyword arguments, including `metrics`, which holds evaluation metrics.
-
-        Updates:
-            `metrics["best_metric"]`: Sets this to `state.best_metric` if available.
-        """
-        # Check if best metric is available and add it to metrics if it exists
-        metrics = kwargs.get("metrics", {})
-        if state.best_metric is not None:
-            metrics.update(
-                {"optuna_best_metric": min(state.best_metric, metrics["eval_loss"])}
-            )
-        else:
-            metrics.update({"optuna_best_metric": metrics["eval_loss"]})
-
-
-# Define the hyperparameter search space with parameters
-def hp_space(
-    trial: optuna.Trial,
-    lr_range: Tuple[float, float] = (1e-5, 5e-5),
-    batch_sizes=None,
-    weight_decays: Tuple[float, float] = (1e-4, 1e-2),
-):
-    if batch_sizes is None:
-        batch_sizes = [4, 8]
-    return {
-        "learning_rate": trial.suggest_float("learning_rate", *lr_range, log=True),
-        "per_device_train_batch_size": trial.suggest_categorical(
-            "per_device_train_batch_size", batch_sizes
-        ),
-        "weight_decay": trial.suggest_float("weight_decay", *weight_decays, log=True),
-    }
 
 
 def load_pretrained_tokenizer(
@@ -288,7 +219,11 @@ def create_dataset_splits(data_args: DataTrainingArguments, seed: int):
     return train_set, validation_set, test_set
 
 
-def model_init(model_args, training_args, cehrgpt_args):
+def model_init(
+    model_args: ModelArguments,
+    training_args: TrainingArguments,
+    cehrgpt_args: CehrGPTArguments,
+):
     model = load_finetuned_model(model_args, model_args.model_name_or_path)
     # Enable include_values when include_values is set to be False during pre-training
     if model_args.include_values and not model.cehrgpt.include_values:
@@ -411,7 +346,7 @@ def main():
 
     config = CEHRGPTConfig.from_pretrained(model_args.model_name_or_path)
     # We suppress the additional learning objectives in fine-tuning
-    collator = CehrGptDataCollator(
+    data_collator = CehrGptDataCollator(
         tokenizer=tokenizer,
         max_length=config.max_position_embeddings,
         pretraining=False,
@@ -420,55 +355,20 @@ def main():
     )
 
     if training_args.do_train:
-        model_init_func = partial(model_init, model_args, training_args, cehrgpt_args)
-        sampled_train = processed_dataset["train"].train_test_split(
-            test_size=cehrgpt_args.hyperparameter_tuning_percentage,
-            seed=training_args.seed,
-        )["test"]
-        sampled_val = processed_dataset["validation"].train_test_split(
-            test_size=cehrgpt_args.hyperparameter_tuning_percentage,
-            seed=training_args.seed,
-        )["test"]
-
-        hyperparam_trainer = Trainer(
-            model_init=model_init_func,
-            data_collator=collator,
-            train_dataset=sampled_train,
-            eval_dataset=sampled_val,
-            callbacks=[
-                EarlyStoppingCallback(model_args.early_stopping_patience),
-                OptunaMetricCallback(),
-            ],
-            args=training_args,
+        training_args = perform_hyperparameter_search(
+            partial(model_init, model_args, training_args, cehrgpt_args),
+            processed_dataset,
+            data_collator,
+            training_args,
+            model_args,
+            cehrgpt_args,
         )
-        # Perform hyperparameter search
-        hp_space_partial = partial(
-            hp_space,
-            lr_range=(cehrgpt_args.lr_low, cehrgpt_args.lr_high),
-            batch_sizes=cehrgpt_args.hyperparameter_batch_sizes,
-        )
-        best_trial = hyperparam_trainer.hyperparameter_search(
-            direction="minimize",
-            hp_space=hp_space_partial,
-            backend="optuna",
-            n_trials=cehrgpt_args.n_trials,
-            compute_objective=lambda m: m["optuna_best_metric"],
-        )
-        LOG.info("Best hyperparameters: %s", best_trial.hyperparameters)
-
-        retrain_args = copy.deepcopy(training_args)
-        # Update training arguments with best hyperparameters and set epochs based on adjusted effective epochs
-        retrain_args.learning_rate = best_trial.hyperparameters["learning_rate"]
-        retrain_args.per_device_train_batch_size = best_trial.hyperparameters[
-            "per_device_train_batch_size"
-        ]
-        retrain_args.weight_decay = best_trial.hyperparameters["weight_decay"]
 
         # Initialize Trainer for final training on the combined train+val set
-        retrain_trainer = Trainer(
-            model=model_init_func(),
-            data_collator=collator,
-            args=retrain_args,
+        trainer = Trainer(
+            model=model_init(model_args, training_args, cehrgpt_args),
+            data_collator=data_collator,
+            args=training_args,
             train_dataset=processed_dataset["train"],
             eval_dataset=processed_dataset["validation"],
             callbacks=[
@@ -479,20 +379,20 @@ def main():
 
         # Train the model on the combined train + val set
         checkpoint = get_last_hf_checkpoint(training_args)
-        train_result = retrain_trainer.train(resume_from_checkpoint=checkpoint)
-        retrain_trainer.save_model()  # Saves the tokenizer too for easy upload
+        train_result = trainer.train(resume_from_checkpoint=checkpoint)
+        trainer.save_model()  # Saves the tokenizer too for easy upload
         metrics = train_result.metrics
 
-        retrain_trainer.log_metrics("train", metrics)
-        retrain_trainer.save_metrics("train", metrics)
-        retrain_trainer.save_state()
+        trainer.log_metrics("train", metrics)
+        trainer.save_metrics("train", metrics)
+        trainer.save_state()
 
     if training_args.do_predict:
         test_dataloader = DataLoader(
             dataset=processed_dataset["test"],
             batch_size=training_args.per_device_eval_batch_size,
             num_workers=training_args.dataloader_num_workers,
-            collate_fn=collator,
+            collate_fn=data_collator,
             pin_memory=training_args.dataloader_pin_memory,
         )
         do_predict(test_dataloader, model_args, training_args)
