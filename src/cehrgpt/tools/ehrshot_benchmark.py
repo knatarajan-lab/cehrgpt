@@ -1,5 +1,6 @@
 import argparse
 import os
+import select  # Import select for monitoring stdout and stderr
 import subprocess
 from pathlib import Path
 
@@ -52,8 +53,22 @@ if __name__ == "__main__":
         with subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         ) as process:
-            # Read stdout and stderr line-by-line in real time
-            for line in process.stdout:
-                print(line, end="")  # Print stdout line as it comes
-            for error_line in process.stderr:
-                print(error_line, end="")  # Print stderr line as it comes
+            while True:
+                # Use select to wait for either stdout or stderr to have data
+                reads = [process.stdout.fileno(), process.stderr.fileno()]
+                ret = select.select(reads, [], [])
+
+                # Read data from stdout and stderr as it becomes available
+                for fd in ret[0]:
+                    if fd == process.stdout.fileno():
+                        line = process.stdout.readline()
+                        if line:
+                            print(line, end="")
+                    elif fd == process.stderr.fileno():
+                        line = process.stderr.readline()
+                        if line:
+                            print(line, end="")
+
+                # Break loop when process finishes
+                if process.poll() is not None:
+                    break
