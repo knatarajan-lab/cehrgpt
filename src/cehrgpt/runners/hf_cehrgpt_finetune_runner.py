@@ -395,6 +395,7 @@ def main():
             )
             training_args.output_dir = os.path.join(training_args.output_dir, "full")
             Path(training_args.output_dir).mkdir(exist_ok=True)
+            tokenizer.save_pretrained(training_args.output_dir)
             checkpoint = get_last_hf_checkpoint(training_args)
             trainer = Trainer(
                 model=model_init(model_args, training_args, cehrgpt_args),
