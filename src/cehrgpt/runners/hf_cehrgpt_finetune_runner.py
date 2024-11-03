@@ -5,7 +5,6 @@ from functools import partial
 from pathlib import Path
 
 import numpy as np
-import optuna
 import pandas as pd
 import torch
 from cehrbert.data_generators.hf_data_generator.meds_utils import (
@@ -28,13 +27,7 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from scipy.special import expit as sigmoid
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import (
-    EarlyStoppingCallback,
-    Trainer,
-    TrainerCallback,
-    TrainingArguments,
-    set_seed,
-)
+from transformers import EarlyStoppingCallback, Trainer, TrainingArguments, set_seed
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
