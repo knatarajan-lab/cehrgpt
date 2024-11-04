@@ -1,4 +1,3 @@
-import copy
 import json
 import os
 from datetime import datetime
@@ -462,33 +461,31 @@ def main():
                     f"{UpdateNumEpochsBeforeEarlyStoppingCallback} must be included as a callback!"
                 )
 
-            final_training_args = copy.deepcopy(training_args)
             final_num_epochs = (
                 update_num_epoch_before_early_stopping_callback.num_epochs_before_early_stopping
             )
-            final_training_args.num_train_epochs = final_num_epochs
+            training_args.num_train_epochs = final_num_epochs
             LOG.info(
                 "Num Epochs before early stopping: %s",
-                final_training_args.num_train_epochs,
+                training_args.num_train_epochs,
             )
             # Initialize Trainer for final training on the combined train+val set
             full_dataset = concatenate_datasets(
                 [processed_dataset["train"], processed_dataset["validation"]]
             )
-            final_training_args.output_dir = os.path.join(
-                training_args.output_dir, "full"
-            )
+            training_args.output_dir = os.path.join(training_args.output_dir, "full")
             LOG.info(
                 "Final output_dir for final_training_args.output_dir %s",
-                final_training_args.output_dir,
+                training_args.output_dir,
             )
-            Path(final_training_args.output_dir).mkdir(exist_ok=True)
-            tokenizer.save_pretrained(final_training_args.output_dir)
-            checkpoint = get_last_hf_checkpoint(final_training_args)
+            Path(training_args.output_dir).mkdir(exist_ok=True)
+            # Disable evaluation
+            training_args.evaluation_strategy = "no"
+            checkpoint = get_last_hf_checkpoint(training_args)
             final_trainer = Trainer(
-                model=model_init(model_args, final_training_args, tokenizer),
+                model=model_init(model_args, training_args, tokenizer),
                 data_collator=data_collator,
-                args=final_training_args,
+                args=training_args,
                 train_dataset=full_dataset,
                 tokenizer=tokenizer,
             )
