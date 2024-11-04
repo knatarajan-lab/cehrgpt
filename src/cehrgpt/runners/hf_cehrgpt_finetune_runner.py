@@ -471,6 +471,10 @@ def main():
             final_training_args.output_dir = os.path.join(
                 training_args.output_dir, "full"
             )
+            LOG.info(
+                "Final output_dir for final_training_args.output_dir %s",
+                final_training_args.output_dir,
+            )
             Path(final_training_args.output_dir).mkdir(exist_ok=True)
             tokenizer.save_pretrained(final_training_args.output_dir)
             checkpoint = get_last_hf_checkpoint(final_training_args)
