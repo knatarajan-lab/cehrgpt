@@ -68,6 +68,20 @@ class UpdateNumEpochsBeforeEarlyStoppingCallback(TrainerCallback):
         self._metrics_path = os.path.join(
             model_folder, NUM_EPOCHS_BEFORE_EARLY_STOPPING
         )
+        self._num_epochs_before_early_stopping = 0
+        self._best_val_loss = float("inf")
+
+    @property
+    def num_epochs_before_early_stopping(self):
+        return self._num_epochs_before_early_stopping
+
+    def on_train_begin(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ):
         if os.path.exists(self._metrics_path):
             with open(self._metrics_path, "r") as f:
                 metrics = json.load(f)
@@ -75,13 +89,6 @@ class UpdateNumEpochsBeforeEarlyStoppingCallback(TrainerCallback):
                 "num_epochs_before_early_stopping"
             ]
             self._best_val_loss = metrics["best_val_loss"]
-        else:
-            self._num_epochs_before_early_stopping = 0
-            self._best_val_loss = float("inf")
-
-    @property
-    def num_epochs_before_early_stopping(self):
-        return self._num_epochs_before_early_stopping
 
     def on_evaluate(self, args, state, control, **kwargs):
         # Ensure metrics is available in kwargs
@@ -279,7 +286,7 @@ def create_dataset_splits(data_args: DataTrainingArguments, seed: int):
 def model_init(
     model_args: ModelArguments,
     training_args: TrainingArguments,
-    cehrgpt_args: CehrGPTArguments,
+    tokenizer: CehrGptTokenizer,
 ):
     model = load_finetuned_model(model_args, model_args.model_name_or_path)
     # Enable include_values when include_values is set to be False during pre-training
@@ -289,10 +296,7 @@ def model_init(
     if not model_args.exclude_position_ids and model.cehrgpt.exclude_position_ids:
         model.cehrgpt.exclude_position_ids = False
     # Expand tokenizer to adapt to the finetuning dataset
-    if cehrgpt_args.expand_tokenizer:
-        tokenizer = CehrGptTokenizer.from_pretrained(
-            os.path.expanduser(training_args.output_dir)
-        )
+    if model.config.vocab_size < tokenizer.vocab_size:
         model.resize_token_embeddings(tokenizer.vocab_size)
     # If lora is enabled, we add LORA adapters to the model
     if model_args.use_lora:
@@ -332,8 +336,15 @@ def main():
         LOG.info(f"Loading prepared dataset from disk at {prepared_ds_path}...")
         processed_dataset = load_from_disk(str(prepared_ds_path))
         LOG.info("Prepared dataset loaded from disk...")
+        if cehrgpt_args.expand_tokenizer:
+            try:
+                tokenizer = CehrGptTokenizer.from_pretrained(training_args.output_dir)
+            except Exception:
+                raise RuntimeError(
+                    f"CehrGptTokenizer must exist in {training_args.output_dir} "
+                    f"when the dataset has been processed and expand_tokenizer is set to True"
+                )
     else:
-
         # If the data is in the MEDS format, we need to convert it to the CEHR-BERT format
         if data_args.is_data_in_med:
             meds_extension_path = get_meds_extension_path(
@@ -412,9 +423,8 @@ def main():
     )
 
     if training_args.do_train:
-
         training_args = perform_hyperparameter_search(
-            partial(model_init, model_args, training_args, cehrgpt_args),
+            partial(model_init, model_args, training_args, tokenizer),
             processed_dataset,
             data_collator,
             training_args,
@@ -424,7 +434,7 @@ def main():
 
         # Initialize Trainer for final training on the combined train+val set
         trainer = Trainer(
-            model=model_init(model_args, training_args, cehrgpt_args),
+            model=model_init(model_args, training_args, tokenizer),
             data_collator=data_collator,
             args=training_args,
             train_dataset=processed_dataset["train"],
@@ -479,7 +489,7 @@ def main():
             tokenizer.save_pretrained(final_training_args.output_dir)
             checkpoint = get_last_hf_checkpoint(final_training_args)
             final_trainer = Trainer(
-                model=model_init(model_args, final_training_args, cehrgpt_args),
+                model=model_init(model_args, final_training_args, tokenizer),
                 data_collator=data_collator,
                 args=final_training_args,
                 train_dataset=full_dataset,
