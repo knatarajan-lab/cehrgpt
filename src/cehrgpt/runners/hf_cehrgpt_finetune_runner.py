@@ -445,14 +445,21 @@ def main():
         trainer.save_state()
 
         if cehrgpt_args.retrain_with_full:
-            if NUM_EPOCHS_BEFORE_EARLY_STOPPING not in metrics:
+            update_num_epoch_before_early_stopping_callback = None
+            for callback in trainer.callback_handler.callbacks:
+                if isinstance(callback, UpdateNumEpochsBeforeEarlyStoppingCallback):
+                    update_num_epoch_before_early_stopping_callback = callback
+
+            if update_num_epoch_before_early_stopping_callback is None:
                 raise RuntimeError(
-                    f"{NUM_EPOCHS_BEFORE_EARLY_STOPPING} must exist in the trainer metrics object!"
+                    f"{UpdateNumEpochsBeforeEarlyStoppingCallback} must be included as a callback!"
                 )
+
             final_training_args = copy.deepcopy(training_args)
-            final_training_args.num_train_epochs = metrics[
-                NUM_EPOCHS_BEFORE_EARLY_STOPPING
-            ]
+            final_num_epochs = (
+                update_num_epoch_before_early_stopping_callback.num_epochs_before_early_stopping
+            )
+            final_training_args.num_train_epochs = final_num_epochs
             LOG.info(
                 "Num Epochs before early stopping: %s",
                 final_training_args.num_train_epochs,
