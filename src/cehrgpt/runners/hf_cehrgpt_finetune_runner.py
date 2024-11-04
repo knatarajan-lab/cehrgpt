@@ -32,6 +32,8 @@ from transformers import (
     EarlyStoppingCallback,
     Trainer,
     TrainerCallback,
+    TrainerControl,
+    TrainerState,
     TrainingArguments,
     set_seed,
 )
@@ -51,7 +53,7 @@ from cehrgpt.runners.hyperparameter_search_util import perform_hyperparameter_se
 
 LOG = logging.get_logger("transformers")
 
-NUM_EPOCHS_BEFORE_EARLY_STOPPING = "num_epochs_trained_before_early_stopping"
+NUM_EPOCHS_BEFORE_EARLY_STOPPING = "num_epochs_trained_before_early_stopping.json"
 
 
 class UpdateNumEpochsBeforeEarlyStoppingCallback(TrainerCallback):
@@ -61,13 +63,50 @@ class UpdateNumEpochsBeforeEarlyStoppingCallback(TrainerCallback):
     based on the best evaluation metric (e.g., eval_loss).
     """
 
+    def __init__(self, model_folder: str):
+        self._model_folder = model_folder
+        self._metrics_path = os.path.join(
+            model_folder, NUM_EPOCHS_BEFORE_EARLY_STOPPING
+        )
+        if os.path.exists(self._metrics_path):
+            with open(self._metrics_path, "r") as f:
+                metrics = json.load(f)
+            self._num_epochs_before_early_stopping = metrics[
+                "num_epochs_before_early_stopping"
+            ]
+            self._best_val_loss = metrics["best_val_loss"]
+        else:
+            self._num_epochs_before_early_stopping = 0
+            self._best_val_loss = float("inf")
+
+    @property
+    def num_epochs_before_early_stopping(self):
+        return self._num_epochs_before_early_stopping
+
     def on_evaluate(self, args, state, control, **kwargs):
         # Ensure metrics is available in kwargs
         metrics = kwargs.get("metrics")
         if metrics is not None and "eval_loss" in metrics:
             # Check and update if a new best metric is achieved
-            if state.best_metric is None or metrics["eval_loss"] < state.best_metric:
-                metrics.update({NUM_EPOCHS_BEFORE_EARLY_STOPPING: round(state.epoch)})
+            if state.best_metric is None or metrics["eval_loss"] < self._best_val_loss:
+                self._num_epochs_before_early_stopping = round(state.epoch)
+                self._best_val_loss = metrics["eval_loss"]
+
+    def on_epoch_end(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ):
+        with open(self._metrics_path, "w") as f:
+            json.dump(
+                {
+                    "num_epochs_before_early_stopping": self._num_epochs_before_early_stopping,
+                    "best_val_loss": self._best_val_loss,
+                },
+                f,
+            )
 
 
 def load_pretrained_tokenizer(
@@ -392,7 +431,7 @@ def main():
             eval_dataset=processed_dataset["validation"],
             callbacks=[
                 EarlyStoppingCallback(model_args.early_stopping_patience),
-                UpdateNumEpochsBeforeEarlyStoppingCallback(),
+                UpdateNumEpochsBeforeEarlyStoppingCallback(training_args.output_dir),
             ],
             tokenizer=tokenizer,
         )
