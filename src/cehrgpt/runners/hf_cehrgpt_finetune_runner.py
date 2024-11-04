@@ -67,7 +67,7 @@ class UpdateNumEpochsBeforeEarlyStoppingCallback(TrainerCallback):
         if metrics is not None and "eval_loss" in metrics:
             # Check and update if a new best metric is achieved
             if state.best_metric is None or metrics["eval_loss"] < state.best_metric:
-                metrics[NUM_EPOCHS_BEFORE_EARLY_STOPPING] = state.epoch
+                metrics.update({NUM_EPOCHS_BEFORE_EARLY_STOPPING: state.epoch})
 
 
 def load_pretrained_tokenizer(
