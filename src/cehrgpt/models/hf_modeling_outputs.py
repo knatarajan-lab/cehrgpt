@@ -42,6 +42,8 @@ class CehrGptOutputWithPast(ModelOutput):
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
+    graph_hidden_states: torch.FloatTensor = None
+    graph_concept_ids: torch.FloatTensor = None
 
 
 @dataclass
@@ -81,6 +83,8 @@ class CehrGptCausalLMOutput(ModelOutput):
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
+    graph_hidden_states: torch.FloatTensor = None
+    graph_concept_ids: torch.FloatTensor = None
 
 
 @dataclass

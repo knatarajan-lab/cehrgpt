@@ -123,7 +123,9 @@ class CEHRGPTConfig(PretrainedConfig):
         time_to_visit_loss_weight=1.0,
         token_to_time_token_mapping: Dict[int, List] = None,
         tokenizer_path = "/home/mc.cumc.columbia.edu/cp3016/Documents/cehrgpt_resources/cehrgpt_without_val/ohdsi_cumc_deid_2023q4r2_cleaned/cehrgpt_pretrain_12_layers_768_embeddings_768_sub_time_tokenization_tte",
-        knowledge_graph_path = "/home/jason/workspace/cehr_gpt_graphs/hierarchy_knowledge_graph_uni.pkl",
+        use_knowledge_graph=True,
+        knowledge_graph_path=None,
+        num_graph_hidden_layers=3,
         add_cross_attention = True,
         save_steps=1000,
         **kwargs,
@@ -165,7 +167,9 @@ class CEHRGPTConfig(PretrainedConfig):
         self.time_token_loss_weight = time_token_loss_weight
         self.time_to_visit_loss_weight = time_to_visit_loss_weight
         self.tokenizer_path = tokenizer_path
+        self.use_knowledge_graph = use_knowledge_graph
         self.knowledge_graph_path = knowledge_graph_path
+        self.num_graph_hidden_layers = num_graph_hidden_layers
         self.add_cross_attention = add_cross_attention
         self.save_steps = save_steps
 

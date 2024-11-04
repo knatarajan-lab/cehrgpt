@@ -30,11 +30,12 @@ from cehrgpt.models.hf_modeling_outputs import (
     CehrGptSequenceClassifierOutput,
 )
 
-import pickle
 import dgl
+import pickle
+import networkx as nx
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
-from dgl.nn.pytorch.conv import GATv2Conv
 from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
+from transformers.models.gpt2.modeling_gpt2 import GPT2MLP
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -408,38 +409,8 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
             self.embed_dim
         )
 
-        # #################################### Load Knowledge Graph
-
-        # # knowledge_graph_path = "knowledge_graph.pkl"
-
-        # with open(config.knowledge_graph_path, 'rb') as f:
-        #     kg = pickle.load(f)
-
-        # g = dgl.from_networkx(kg,
-        #                     node_attrs=['concept_id'],
-        #                     edge_attrs=['id', 'rel_type'])
-        # self.g = g
-        # self.concept_id_to_index_map = dict(zip(g.ndata['concept_id'].tolist(), g.nodes().tolist()))
-
-        # self.cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(self.config.tokenizer_path)
-        # graph_concept_ids = list(map(str, self.g.ndata['concept_id'].tolist()))
-        # added_tokens = list(set(graph_concept_ids) - set(list(self.cehrgpt_tokenizer._tokenizer.get_vocab().keys())))
-        # _ = self.cehrgpt_tokenizer._tokenizer.add_tokens(added_tokens)
-        # self.g.ndata['vocab_id'] = torch.tensor([self.cehrgpt_tokenizer._convert_token_to_id(token) for token in graph_concept_ids])
-
-        # self.g = self.g.to('cuda')
-
-
-        # gat_layers = []
-        # for i in range(3):
-        #     gat_layers.append(GATv2Conv(config.n_embd, config.n_embd, 8, residual=True, activation=torch.relu))
-        # self.gat_block = nn.ModuleList(gat_layers)
-        # self.gat_block_ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
-
         self.gat_block = GATBlock(config)
         
-
-        # ####################################
 
         self.drop = nn.Dropout(config.embd_pdrop)
         gpt_blocks = []
@@ -459,6 +430,30 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+
+        # Init knowledge graph is needed
+        tokenizer = CehrGptTokenizer.from_pretrained(config.tokenizer_name_or_path)
+        self.original_tokenizer_size = tokenizer._tokenizer.get_vocab_size()
+        if config.use_knowledge_graph:
+            with open(config.knowledge_graph_path, 'rb') as f:
+                kg = pickle.load(f)
+
+            g = dgl.from_networkx(kg,
+                                node_attrs=['concept_id'],
+                                edge_attrs=['id', 'rel_type'])
+            g = dgl.to_bidirected(g, copy_ndata=True)
+            self.g = g
+            self.concept_id_to_g_index_map = dict(zip(g.ndata['concept_id'].tolist(), g.nodes().tolist()))
+
+            graph_concept_ids = list(map(str, self.g.ndata['concept_id'].tolist()))
+            added_tokens = list(set(graph_concept_ids) - set(list(tokenizer._tokenizer.get_vocab().keys())))
+            _ = tokenizer._tokenizer.add_tokens(added_tokens)
+            self.g.ndata['vocab_id'] = torch.tensor([tokenizer._convert_token_to_id(token) for token in graph_concept_ids])
+            self.vocab_id_to_g_index_map = dict(zip(g.ndata['vocab_id'].tolist(), g.nodes().tolist()))
+
+            self.gat_block_ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+            self.mlp = GPT2MLP(self.embed_dim, config)
+
 
     def parallelize(self, device_map=None):
         # Check validity of device_map
@@ -523,49 +518,32 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
         for layer, heads in heads_to_prune.items():
             self.h[layer].attn.prune_heads(heads)
 
-    # def connect_sequence_to_graph(self, g, input_ids):
-    #     # g_merged = deepcopy(g)
-    #     next_node_id = g.num_nodes()
+    def _generate_batched_graph(self, input_ids, layers=3):
+        is_input_id_in_graph = torch.isin(input_ids, self.g.ndata['vocab_id'].to(input_ids.device))
+        input_ids_in_graph = input_ids[is_input_id_in_graph]
+        concept_node_ids = [self.vocab_id_to_g_index_map[vocab_id.item()] for vocab_id in input_ids_in_graph.flatten().unique()]
+        bg, _ = dgl.khop_in_subgraph(self.g, concept_node_ids, layers)
+        bg = dgl.add_self_loop(bg).to(input_ids.device)
+
+        default_node_id = 0
+
+        # Step 3: Build the `agg_edge_ids_dst` tensor by looking up each `input_id`
+        vocab_id_to_g_index_map = dict(zip(bg.ndata['vocab_id'].tolist(), bg.nodes().tolist()))
         
-    #     edges_to_add_u = []
-    #     edges_to_add_v = []
-    #     nodes_to_add = []
+        # vocab_id_to_g_index_map = {vocab_id: self.vocab_id_to_g_index_map[vocab_id] for vocab_id in input_ids_in_graph.flatten().unique()}
+        agg_edge_ids_dst = torch.tensor([
+            [vocab_id_to_g_index_map.get(vocab_id.item(), default_node_id) for vocab_id in row]
+            for row in input_ids
+        ]).to(input_ids.device)
 
-    #     sequence_indices = []
-    #     agg_edge_ids_u = []
-    #     agg_edge_ids_v = []
-        
-    #     for i, input_id in enumerate(input_ids):
-    #         if input_id in g.ndata['vocab_id']:
-    #             connected_node_id = int(torch.argwhere(g.ndata['vocab_id'] == input_id)[0].item())
-    #             nodes_to_add.append(input_id)
-                
-    #             edges_to_add_u.append(next_node_id)
-    #             edges_to_add_v.append(connected_node_id)
-                
-    #             sequence_indices.append(i)
-    #             agg_edge_ids_u.append(next_node_id)
-    #             agg_edge_ids_v.append(connected_node_id)
+        connected_sequence_mask = is_input_id_in_graph
 
-    #             next_node_id += 1
-        
-    #     nodes_to_add = torch.tensor(nodes_to_add).to('cuda')
+        return bg, connected_sequence_mask, agg_edge_ids_dst
 
-    #     g = dgl.add_nodes(g, len(nodes_to_add), data={'vocab_id': nodes_to_add})
-    #     g = dgl.add_edges(g, edges_to_add_u, edges_to_add_v)
-
-    #     g = dgl.add_self_loop(g)
-
-
-    #     return g, sequence_indices, (agg_edge_ids_u, agg_edge_ids_v)
 
     def forward(
         self,
         input_ids: Optional[torch.LongTensor],
-        bg,
-        connected_sequence_mask,
-        agg_edge_ids_src,
-        agg_edge_ids_dst,
         value_indicators: Optional[torch.BoolTensor],
         values: Optional[torch.FloatTensor],
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
@@ -578,11 +556,7 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CehrGptOutputWithPast]:
 
-        bg = bg.to(input_ids.device)
-        connected_sequence_mask = connected_sequence_mask.to(input_ids.device)
-        agg_edge_ids_dst = agg_edge_ids_dst.to(input_ids.device)
 
-        # print('NUM NODES, ', bg.num_nodes())
         output_attentions = (
             output_attentions
             if output_attentions is not None
@@ -604,10 +578,6 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
         batch_size = input_ids.shape[0]
 
         device = input_ids.device
-
-        # free, total = torch.cuda.mem_get_info(device)
-        # mem_used_MB = (total - free) / 1024 ** 2
-        # print(mem_used_MB)
 
         if past_key_values is None:
             past_length = 0
@@ -677,79 +647,49 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
 
         hidden_states = self.drop(hidden_states)
 
-        # ############################ Knowledge Graph
-        
-        # # flattened_input_ids = torch.flatten(input_ids).tolist()
-        # # concept_ids = [self.cehrgpt_tokenizer._convert_id_to_token(id) for id in flattened_input_ids]
-        # # concept_ids = [int(token) for token in concept_ids[4:] if token.isnumeric()]
+        encoder_hidden_states = None
+        graph_hidden_states = None
+        graph_concept_ids = None
+        if self.config.use_knowledge_graph:
+            bg, connected_sequence_mask, agg_edge_ids_dst = self._generate_batched_graph(input_ids, layers=self.config.num_graph_hidden_layers)
+            bg = bg.to(input_ids.device)
+            connected_sequence_mask = connected_sequence_mask.to(input_ids.device)
+            agg_edge_ids_dst = agg_edge_ids_dst.to(input_ids.device)
 
-        # # concept_node_ids = [self.concept_id_to_index_map[token] for token in concept_ids if token in self.concept_id_to_index_map]
-        # # induced_subgraph, new_concept_node_ids = dgl.khop_in_subgraph(self.g, concept_node_ids, 3)
-
-        # # is_input_id_in_graph = torch.isin(input_ids, induced_subgraph.ndata['vocab_id'])
-        # # agg_node_hidden_states = torch.where(is_input_id_in_graph, hidden_states, torch.zeros_like(hidden_states))
-        
-        # # input_ids_in_graph = torch.where(is_input_id_in_graph, input_ids, torch.zeros_like(input_ids))
-
-        # # induced_subgraph.ndata['vocab_id']
-
-        # # induced_subgraph = self.connect_sequence_to_graph(induced_subgraph, new_concept_node_ids)
-
-        # # how to keep track of ids?
-
-        # induced_subgraphs = []
-        # agg_node_hidden_states = torch.zeros_like(hidden_states)
-        # for batch in range(input_ids.shape[0]):
-        #     batch_input_ids = input_ids[batch]
-        #     flattened_batch_input_ids = torch.flatten(batch_input_ids)
-        #     concept_ids = [self.cehrgpt_tokenizer._convert_id_to_token(id) for id in flattened_batch_input_ids]
-        #     concept_ids = [int(token) for token in concept_ids[4:] if token.isnumeric()]
-
-        #     concept_node_ids = [self.concept_id_to_index_map[token] for token in concept_ids if token in self.concept_id_to_index_map]
-        #     induced_subgraph, new_concept_node_ids = dgl.khop_in_subgraph(self.g, concept_node_ids, 3)
-
-        #     is_input_id_in_graph = torch.isin(flattened_batch_input_ids, induced_subgraph.ndata['vocab_id'])
-        #     # agg_node_hidden_states = torch.where(is_input_id_in_graph, hidden_states, torch.zeros_like(hidden_states))
+            bg.ndata['h'] = self.wte(bg.ndata['vocab_id'])
             
-        #     input_ids_in_graph = torch.where(is_input_id_in_graph, flattened_batch_input_ids, torch.zeros_like(flattened_batch_input_ids))
+            nonzero_indices = torch.nonzero(agg_edge_ids_dst)
+            nonzero_elements = agg_edge_ids_dst[nonzero_indices[:, 0], nonzero_indices[:, 1]]
+            # print('Non-zero elements')
+            # print(nonzero_elements)
+            # print(bg.ndata['concept_id'][nonzero_elements])
+            # nx_g = bg.cpu().to_networkx(node_attrs=['concept_id'])
+            # print(nx_g.nodes[nonzero_elements[-1].cpu().item()]['concept_id'], nx_g.nodes[nonzero_elements[-2].cpu().item()]['concept_id'])
+            # shortest_path = nx.shortest_path(nx_g, source=nonzero_elements[-1].cpu().item(), target=nonzero_elements[-2].cpu().item())
+            # shortest_path_length = nx.shortest_path_length(nx_g, source=nonzero_elements[-1].cpu().item(), target=nonzero_elements[-2].cpu().item())
+            # print('Shortest path, ', shortest_path_length)
+            # print([nx_g.nodes[n]['concept_id'] for n in shortest_path])
+            # print('Pre-activation')
+            # print(bg.ndata['h'][nonzero_elements])
+            mad = 1.0
+            original_hidden_states = hidden_states
+            if bg.num_nodes() > 0:
+                graph_hidden_states = self.gat_block(bg)
+                graph_concept_ids = bg.ndata['concept_id']
+                # print(torch.sum(connected_sequence_mask, -1) / (attention_mask == 0).sum(dim=(1, 2, 3)))
+                # print(torch.where(connected_sequence_mask.unsqueeze(-1), bg.ndata['h'][agg_edge_ids_dst], torch.zeros_like(hidden_states)))
 
-        #     induced_subgraph, connected_sequence_indices, agg_edge_ids = self.connect_sequence_to_graph(induced_subgraph, input_ids_in_graph)
-        #     induced_subgraphs.append((induced_subgraph, connected_sequence_indices, agg_edge_ids))
-            
-        #     agg_node_hidden_states[batch, connected_sequence_indices] = hidden_states[batch, connected_sequence_indices]
+                # print(bg.ndata['h'][agg_edge_ids_dst].mean(), hidden_states.mean())
+                # print('Post-activation')
 
-        # bg = dgl.batch([induced_subgraph[0] for induced_subgraph in induced_subgraphs])
-        # # bg = dgl.add_self_loop(bg)
-        # bg.ndata['h'] = self.wte(bg.ndata['vocab_id'])
-    
-        # ############################
+                # print(bg.ndata['h'][nonzero_elements])
+                encoder_hidden_states = self.gat_block_ln_f(torch.where(connected_sequence_mask.unsqueeze(-1), bg.ndata['h'][agg_edge_ids_dst], torch.zeros_like(hidden_states)) + hidden_states)
+                encoder_hidden_states = self.mlp(encoder_hidden_states) + encoder_hidden_states
+                
+            else:
+                encoder_hidden_states = self.gat_block_ln_f(hidden_states)
+                # encoder_hidden_states = self.gat_block_ln_f(encoder_hidden_states)
         
-        bg.ndata['h'] = self.wte(bg.ndata['vocab_id'])
-
-        # agg_node_hidden_states = torch.where(connected_sequence_mask.unsqueeze(-1), hidden_states, torch.zeros_like(hidden_states))
-        # agg_node_hidden_states = torch.where(connected_sequence_mask.unsqueeze(-1), hidden_states, torch.zeros_like(hidden_states))
-
-        if bg.num_nodes() > 0:
-            # for i, gat_layer in enumerate(self.gat_block):
-            #     bg.ndata['h'] = gat_layer(bg, bg.ndata['h']).mean(dim=1)
-
-            self.gat_block(bg)
-
-            # print('NDATA SHAPE, ', bg.ndata['h'].shape)
-            # print('HIDDEN STATES, ', hidden_states.shape)
-            # free, total = torch.cuda.mem_get_info(device)
-            # mem_used_MB = (total - free) / 1024 ** 2
-            # print(mem_used_MB)
-
-            encoder_hidden_states = torch.where(connected_sequence_mask.unsqueeze(-1), bg.ndata['h'][agg_edge_ids_dst], torch.zeros_like(hidden_states)) + hidden_states
-            # encoder_hidden_states = self.gat_block_ln_f(encoder_hidden_states)
-        else:
-            # encoder_hidden_states = torch.where(connected_sequence_mask.unsqueeze(-1), hidden_states, torch.zeros_like(hidden_states))
-            encoder_hidden_states = hidden_states
-            # encoder_hidden_states = self.gat_block_ln_f(encoder_hidden_states)
-
-        # print('Number of graph-connected concepts in batch ', torch.sum(connected_sequence_mask))
-
         output_shape = (-1,) + input_shape[1:] + (hidden_states.size(-1),)
 
         if self.gradient_checkpointing and self.training:
@@ -783,8 +723,6 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
                 outputs = self._gradient_checkpointing_func(
                     block.__call__,
                     hidden_states,
-                    # agg_node_hidden_states,
-                    # bg,
                     None,
                     attention_mask,
                     head_mask[i],
@@ -797,8 +735,6 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
                 # print(i, input_ids.shape)
                 outputs = block(
                     hidden_states,
-                    # agg_node_hidden_states,
-                    # bg,
                     layer_past=layer_past,
                     attention_mask=attention_mask,
                     head_mask=head_mask[i],
@@ -816,33 +752,6 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
                 all_self_attentions = all_self_attentions + (
                     outputs[2 if use_cache else 1],
                 )
-            
-            # if bg.num_nodes() > 0:
-            #     agg_node_hidden_states = torch.where(connected_sequence_mask.unsqueeze(-1), bg.ndata['h'][agg_edge_ids_dst], torch.zeros_like(agg_node_hidden_states))
-            #     # bg.ndata['h'][agg_edge_ids_src] = hidden_states[connected_sequence_indices]
-
-            #     # indices_to_update = torch.nonzero(agg_edge_ids_src, as_tuple=True)
-            #     # bg.ndata['h'][agg_edge_ids_src[indices_to_update]] = hidden_states[indices_to_update]
-            
-
-            # unbatched_graphs = dgl.unbatch(bg)
-            # altered_graphs = []
-            # agg_node_hidden_states = torch.zeros_like(agg_node_hidden_states)
-            # for i, sg in enumerate(unbatched_graphs):
-            #     agg_edge_ids_u, agg_edge_ids_v  = induced_subgraphs[i][2]
-            #     connected_sequence_indices = induced_subgraphs[i][1]
-
-            #     temp_tensor = sg.ndata['h'].clone()
-            #     temp_tensor[agg_edge_ids_u] = hidden_states[i][connected_sequence_indices]
-            #     sg.ndata['h'] = temp_tensor
-                
-            #     altered_graphs.append(sg)
-
-            #     agg_node_hidden_states[i][connected_sequence_indices] = sg.ndata['h'][agg_edge_ids_v]
-            
-            # bg = dgl.batch(altered_graphs)
-
-
 
             # Model Parallel: If it's the last layer for that device, put things on the next device
             if self.model_parallel:
@@ -850,7 +759,9 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
                     if i == v[-1] and "cuda:" + str(k) != self.last_device:
                         hidden_states = hidden_states.to("cuda:" + str(k + 1))
 
+        # hidden_states = encoder_hidden_states
         hidden_states = self.ln_f(hidden_states)
+        # hidden_states = torch.zeros_like(encoder_hidden_states)
 
         hidden_states = hidden_states.view(output_shape)
         # Add last hidden state
@@ -874,6 +785,8 @@ class CEHRGPT2GraphModel(CEHRGPTPreTrainedModel):
             past_key_values=presents,
             hidden_states=all_hidden_states,
             attentions=all_self_attentions,
+            graph_hidden_states=graph_hidden_states,
+            graph_concept_ids=graph_concept_ids
         )
 
 
@@ -896,14 +809,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 config.n_embd // 3, config.time_token_vocab_size, bias=False
             )
 
-        self.lm_head = nn.Linear(config.n_embd, 19187, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, self.cehrgpt.original_tokenizer_size, bias=False)
 
         # Model parallel
         self.model_parallel = False
         self.device_map = None
-
-        self.cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(self.config.tokenizer_path)
-        self.collator = CehrGptDataCollator(self.cehrgpt_tokenizer, 1024, pretraining=False)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -953,7 +863,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         return self.lm_head
 
     def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings[:19187]
+        self.lm_head = new_embeddings[:self.cehrgpt.original_tokenizer_size]
 
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs
@@ -962,7 +872,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # Omit tokens covered by past_key_values
         if past_key_values:
             past_length = past_key_values[0][0].shape[2]
-            # print(past_length)
 
             # Some generation methods already pass only the last input ID
             if input_ids.shape[1] > past_length:
@@ -971,7 +880,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 # Default to old behavior: keep only final ID
                 remove_prefix_length = input_ids.shape[1] - 1
 
-            # print(remove_prefix_length)
             input_ids = input_ids[:, remove_prefix_length:]
 
         attention_mask = kwargs.get("attention_mask", None)
@@ -1021,19 +929,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 {"value_indicators": value_indicators, "values": values}
             )
 
-
-        # Graph/collation specific updates
-        bg, connected_sequence_mask, agg_edge_ids_src, agg_edge_ids_dst = self.collator._generate_batched_graph(input_ids, layers=3)
-
-        model_inputs.update(
-            {
-                "bg": bg,
-                "connected_sequence_mask": connected_sequence_mask,
-                "agg_edge_ids_src": agg_edge_ids_src,
-                "agg_edge_ids_dst": agg_edge_ids_dst
-            }
-        )
-
         model_inputs.update(
             {
                 "past_key_values": past_key_values,
@@ -1063,11 +958,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        bg = None,
-        connected_sequence_mask = None,
-        agg_edge_ids_src = None,
-        agg_edge_ids_dst = None,
+        return_dict: Optional[bool] = None
     ) -> Union[Tuple, CehrGptCausalLMOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -1081,10 +972,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         transformer_outputs = self.cehrgpt(
             input_ids,
-            bg,
-            connected_sequence_mask,
-            agg_edge_ids_src,
-            agg_edge_ids_dst,
             value_indicators=value_indicators,
             values=values,
             past_key_values=past_key_values,
@@ -1097,8 +984,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             return_dict=return_dict
         )
         hidden_states = transformer_outputs[0]
-
-        # print('HIDDEN STATES,  ', hidden_states.shape)
 
         # Set device for model parallelism
         if self.model_parallel:
@@ -1121,10 +1006,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             shift_labels = labels[..., 1:].contiguous()
             # Flatten the tokens
             loss_fct = CrossEntropyLoss()
-            # print("PREDICTED CLASS LOGITS")
-            # print(torch.argmax(shift_logits, dim=-1)[:, 40:50])
-            # print("REAL LABELS")
-            # print(shift_labels[:, 40:50])
+
             loss = loss_fct(
                 shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
             )
@@ -1205,6 +1087,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             output = (lm_logits,) + transformer_outputs[1:]
             return ((loss,) + output) if loss is not None else output
 
+        # loss = loss + 8 * (1 - transformer_outputs.mad)
         return CehrGptCausalLMOutput(
             loss=loss,
             logits=lm_logits,
@@ -1212,6 +1095,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             past_key_values=transformer_outputs.past_key_values,
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
+            graph_hidden_states=transformer_outputs.graph_hidden_states,
+            graph_concept_ids=transformer_outputs.graph_concept_ids
         )
 
     @staticmethod
@@ -1395,9 +1280,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # sample
             probs = nn.functional.softmax(next_token_scores, dim=-1)
             next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
-
-            # print(next_tokens)
-
+            
             # finished sentences should have their next token be a padding token
             if eos_token_id is not None:
                 if pad_token_id is None:
@@ -1501,11 +1384,7 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        bg = None,
-        connected_sequence_mask = None,
-        agg_edge_ids_src = None,
-        agg_edge_ids_dst = None,
+        return_dict: Optional[bool] = None
     ) -> CehrGptSequenceClassifierOutput:
         if age_at_index.shape[0] > 1:
             normalized_age = self.age_batch_norm(age_at_index)
@@ -1523,11 +1402,7 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            bg = bg,
-            connected_sequence_mask = connected_sequence_mask,
-            agg_edge_ids_src = agg_edge_ids_src,
-            agg_edge_ids_dst = agg_edge_ids_dst,
+            return_dict=return_dict
         )
 
         # In fine-tuning, the sequences are left-padded, so we use the last element as the pooler

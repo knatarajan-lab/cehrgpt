@@ -14,7 +14,6 @@ from cehrgpt.gpt_utils import (
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 import dgl
-import pickle
 
 INPATIENT_STAY_DURATION_LIMIT = 30
 
@@ -63,24 +62,6 @@ class CehrGptDataCollator:
                 list(token_to_time_token_mapping.values()), dtype=torch.int64
             )
 
-        with open("/home/jason/workspace/cehr_gpt_graphs/hierarchy_knowledge_graph_uni.pkl", 'rb') as f:
-            kg = pickle.load(f)
-
-        g = dgl.from_networkx(kg,
-                            node_attrs=['concept_id'],
-                            edge_attrs=['id', 'rel_type'])
-        self.g = g
-        self.concept_id_to_g_index_map = dict(zip(g.ndata['concept_id'].tolist(), g.nodes().tolist()))
-
-        graph_concept_ids = list(map(str, self.g.ndata['concept_id'].tolist()))
-        added_tokens = list(set(graph_concept_ids) - set(list(tokenizer._tokenizer.get_vocab().keys())))
-        _ = tokenizer._tokenizer.add_tokens(added_tokens)
-        self.g.ndata['vocab_id'] = torch.tensor([tokenizer._convert_token_to_id(token) for token in graph_concept_ids])
-
-        self.vocab_id_to_g_index_map = dict(zip(g.ndata['vocab_id'].tolist(), g.nodes().tolist()))
-
-        # self.g = self.g.to('cuda')
-
     def _try_reverse_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         if not self.pretraining:
             return torch.flip(tensor, dims=[-1])
@@ -110,157 +91,6 @@ class CehrGptDataCollator:
                 return -100
 
         return [float(default_value(_)) for _ in concept_ids]
-
-    def _connect_sequence_to_graph(self, g, input_ids):
-        # g_merged = deepcopy(g)
-        next_node_id = g.num_nodes()
-        
-        edges_to_add_u = []
-        edges_to_add_v = []
-        nodes_to_add = []
-
-        sequence_indices = []
-        agg_edge_ids_u = []
-        agg_edge_ids_v = []
-        
-        for i, input_id in enumerate(input_ids):
-            if input_id in g.ndata['vocab_id']:
-                connected_node_id = int(torch.argwhere(g.ndata['vocab_id'] == input_id)[0].item())
-                nodes_to_add.append(input_id)
-                
-                edges_to_add_u.append(next_node_id)
-                edges_to_add_v.append(connected_node_id)
-                
-                sequence_indices.append(i)
-                agg_edge_ids_u.append(next_node_id)
-                agg_edge_ids_v.append(connected_node_id)
-
-                next_node_id += 1
-        
-        nodes_to_add = torch.tensor(nodes_to_add).to(g.device)
-
-        # g = dgl.add_nodes(g, len(nodes_to_add), data={'vocab_id': nodes_to_add})
-        # g = dgl.add_edges(g, edges_to_add_u, edges_to_add_v)
-
-        g = dgl.add_self_loop(g)
-
-
-        return g, sequence_indices, (agg_edge_ids_u, agg_edge_ids_v)
-
-    # def _k_hop_sample(self, graph, seed_nodes, num_hops, fanout):
-    #     sampled_nodes = seed_nodes
-    #     for _ in range(num_hops):
-    #         sampled_graph = dgl.sampling.sample_neighbors(graph, sampled_nodes, fanout)
-    #         # Update sampled_nodes to be the nodes in the current sampled_graph
-    #         # sampled_nodes = sampled_graph.ndata[dgl.NID]
-    #         sampled_nodes = sampled_graph.nodes()
-    #     return sampled_graph
-
-    # def _generate_batched_graph(self, input_ids, layers=3):
-    #     connected_sequence_mask = torch.zeros_like(input_ids, dtype=torch.bool).to(input_ids.device)
-    #     agg_edge_ids_src = torch.zeros_like(input_ids).long().to(input_ids.device)
-    #     agg_edge_ids_dst = torch.zeros_like(input_ids).long().to(input_ids.device)
-
-    #     induced_subgraphs = []
-
-    #     cumulative_num_nodes = 0
-
-    #     for batch in range(input_ids.shape[0]):
-            
-    #         batch_input_ids = input_ids[batch]
-    #         flattened_batch_input_ids = torch.flatten(batch_input_ids)
-    #         concept_ids = [self.tokenizer._convert_id_to_token(id) for id in flattened_batch_input_ids]
-    #         concept_ids = [int(token) for token in concept_ids[4:] if token.isnumeric()]
-
-    #         concept_node_ids = [self.concept_id_to_g_index_map[token] for token in concept_ids if token in self.concept_id_to_g_index_map]
-    #         # induced_subgraph, _ = dgl.khop_in_subgraph(self.g, concept_node_ids, layers)
-    #         induced_subgraph = self._k_hop_sample(self.g, concept_node_ids, layers, 4)
-
-    #         induced_subgraph = induced_subgraph.to(input_ids.device)
-
-    #         is_input_id_in_graph = torch.isin(flattened_batch_input_ids, induced_subgraph.ndata['vocab_id'])
-    #         input_ids_in_graph = torch.where(is_input_id_in_graph, flattened_batch_input_ids, torch.zeros_like(flattened_batch_input_ids))
-
-    #         induced_subgraph, connected_sequence_indices, agg_edge_ids_batch = self._connect_sequence_to_graph(induced_subgraph, input_ids_in_graph)
-    #         agg_edge_ids_src_batch, agg_edge_ids_dst_batch = agg_edge_ids_batch
-    #         agg_edge_ids_src_batch, agg_edge_ids_dst_batch = torch.LongTensor(agg_edge_ids_src_batch).to(input_ids.device), torch.LongTensor(agg_edge_ids_dst_batch).to(input_ids.device)
-    #         agg_edge_ids_src_batch, agg_edge_ids_dst_batch = agg_edge_ids_src_batch + cumulative_num_nodes, agg_edge_ids_dst_batch + cumulative_num_nodes 
-
-    #         connected_sequence_mask[batch, connected_sequence_indices] = 1
-    #         agg_edge_ids_src[batch, connected_sequence_indices] = agg_edge_ids_src_batch
-    #         agg_edge_ids_dst[batch, connected_sequence_indices] = agg_edge_ids_dst_batch
-    #         # induced_subgraph.ndata['orig_id'] = torch.arange(induced_subgraph.num_nodes())
-
-    #         induced_subgraphs.append(induced_subgraph)
-    #         cumulative_num_nodes += induced_subgraph.num_nodes()
-        
-    #     bg = dgl.batch(induced_subgraphs)
-
-    #     return bg, connected_sequence_mask, agg_edge_ids_src, agg_edge_ids_dst
-
-    def _generate_batched_graph(self, input_ids, layers=3):
-        # connected_sequence_mask = torch.zeros_like(input_ids, dtype=torch.bool).to(input_ids.device)
-        # agg_edge_ids_src = torch.zeros_like(input_ids).long().to(input_ids.device)
-        # agg_edge_ids_dst = torch.zeros_like(input_ids).long().to(input_ids.device)
-
-        # induced_subgraphs = []
-
-        # cumulative_num_nodes = 0
-
-        
-        is_input_id_in_graph = torch.isin(input_ids, self.g.ndata['vocab_id'].to(input_ids.device))
-        input_ids_in_graph = input_ids[is_input_id_in_graph]
-        concept_node_ids = [self.vocab_id_to_g_index_map[vocab_id.item()] for vocab_id in input_ids_in_graph.flatten().unique()]
-        bg, _ = dgl.khop_in_subgraph(self.g, concept_node_ids, layers)
-        bg = dgl.add_self_loop(bg).to(input_ids.device)
-
-        default_node_id = 0
-
-        # Step 3: Build the `agg_edge_ids_dst` tensor by looking up each `input_id`
-        vocab_id_to_g_index_map = dict(zip(bg.ndata['vocab_id'].tolist(), bg.nodes().tolist()))
-        
-        # vocab_id_to_g_index_map = {vocab_id: self.vocab_id_to_g_index_map[vocab_id] for vocab_id in input_ids_in_graph.flatten().unique()}
-        agg_edge_ids_dst = torch.tensor([
-            [vocab_id_to_g_index_map.get(vocab_id.item(), default_node_id) for vocab_id in row]
-            for row in input_ids
-        ]).to(input_ids.device)
-
-        connected_sequence_mask = is_input_id_in_graph
-
-
-
-        # for batch in range(input_ids.shape[0]):
-            
-        #     batch_input_ids = input_ids[batch]
-        #     flattened_batch_input_ids = torch.flatten(batch_input_ids)
-        #     concept_ids = [self.tokenizer._convert_id_to_token(id) for id in flattened_batch_input_ids]
-        #     concept_ids = [int(token) for token in concept_ids[4:] if token.isnumeric()]
-
-        #     concept_node_ids = [self.concept_id_to_g_index_map[token] for token in concept_ids if token in self.concept_id_to_g_index_map]
-        #     # induced_subgraph, _ = dgl.khop_in_subgraph(self.g, concept_node_ids, layers)
-        #     induced_subgraph = self._k_hop_sample(self.g, concept_node_ids, layers, 4)
-
-        #     induced_subgraph = induced_subgraph.to(input_ids.device)
-
-        #     is_input_id_in_graph = torch.isin(flattened_batch_input_ids, induced_subgraph.ndata['vocab_id'])
-        #     input_ids_in_graph = torch.where(is_input_id_in_graph, flattened_batch_input_ids, torch.zeros_like(flattened_batch_input_ids))
-
-        #     induced_subgraph, connected_sequence_indices, agg_edge_ids_batch = self._connect_sequence_to_graph(induced_subgraph, input_ids_in_graph)
-        #     agg_edge_ids_src_batch, agg_edge_ids_dst_batch = agg_edge_ids_batch
-        #     agg_edge_ids_src_batch, agg_edge_ids_dst_batch = torch.LongTensor(agg_edge_ids_src_batch).to(input_ids.device), torch.LongTensor(agg_edge_ids_dst_batch).to(input_ids.device)
-        #     agg_edge_ids_src_batch, agg_edge_ids_dst_batch = agg_edge_ids_src_batch + cumulative_num_nodes, agg_edge_ids_dst_batch + cumulative_num_nodes 
-
-        #     connected_sequence_mask[batch, connected_sequence_indices] = 1
-        #     agg_edge_ids_src[batch, connected_sequence_indices] = agg_edge_ids_src_batch
-        #     agg_edge_ids_dst[batch, connected_sequence_indices] = agg_edge_ids_dst_batch
-        #     # induced_subgraph.ndata['orig_id'] = torch.arange(induced_subgraph.num_nodes())
-
-        #     induced_subgraphs.append(induced_subgraph)
-        #     cumulative_num_nodes += induced_subgraph.num_nodes()
-        
-        # bg = dgl.batch(induced_subgraphs)
-
-        return bg, connected_sequence_mask, agg_edge_ids_dst, agg_edge_ids_dst
 
 
     def __call__(self, examples):
@@ -390,14 +220,6 @@ class CehrGptDataCollator:
                 ],
                 dim=0,
             ).to(torch.float32)
-
-        batched_graph, connected_sequence_mask, agg_edge_ids_src, agg_edge_ids_dst = self._generate_batched_graph(batch["input_ids"], layers=3)
-
-        # batch["input_ids"] = batch["input_ids"].to('cuda')
-        batch["bg"] = batched_graph.to(batch["input_ids"].device)
-        batch["connected_sequence_mask"] = connected_sequence_mask.to(batch["input_ids"].device)
-        batch["agg_edge_ids_src"] = agg_edge_ids_src.to(batch["input_ids"].device)
-        batch["agg_edge_ids_dst"] = agg_edge_ids_dst.to(batch["input_ids"].device)
 
         return batch
 

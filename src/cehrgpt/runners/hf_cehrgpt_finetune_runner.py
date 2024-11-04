@@ -9,11 +9,11 @@ from cehrbert.data_generators.hf_data_generator.meds_utils import (
     create_dataset_from_meds_reader,
 )
 from cehrbert.runners.hf_cehrbert_finetune_runner import compute_metrics
-from cehrbert.runners.hf_runner_argument_dataclass import (
+from .hf_runner_argument_dataclass import (
     FineTuneModelType,
     ModelArguments,
 )
-from cehrbert.runners.runner_util import (
+from .runner_util import (
     generate_prepared_ds_path,
     get_last_hf_checkpoint,
     get_meds_extension_path,
@@ -71,27 +71,66 @@ def load_finetuned_model(
     except ValueError:
         raise ValueError(f"Can not load the finetuned model from {model_name_or_path}")
 
+# class BalancedTrainer(Trainer):
+#     def __init__(self, **kwargs):
+#         super().__init__(**kwargs)
+
+#     def compute_loss(self, model, inputs, return_outputs=False):
+#         """
+#         How the loss is computed by Trainer. By default, all models return the loss in the first element.
+
+#         Subclass and override for custom behavior.
+#         """
+#         if self.label_smoother is not None and "labels" in inputs:
+#             labels = inputs.pop("labels")
+#         else:
+#             labels = None
+#         outputs = model(**inputs)
+#         # Save past state if it exists
+#         # TODO: this needs to be fixed and made cleaner later.
+#         if self.args.past_index >= 0:
+#             self._past = outputs[self.args.past_index]
+
+#         if labels is not None:
+#             unwrapped_model = unwrap_model(model)
+#             if _is_peft_model(unwrapped_model):
+#                 model_name = unwrapped_model.base_model.model._get_name()
+#             else:
+#                 model_name = unwrapped_model._get_name()
+#             if model_name in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.values():
+#                 loss = self.label_smoother(outputs, labels, shift_labels=True)
+#             else:
+#                 loss = self.label_smoother(outputs, labels)
+#         else:
+#             if isinstance(outputs, dict) and "loss" not in outputs:
+#                 raise ValueError(
+#                     "The model did not return a loss from the inputs, only the following keys: "
+#                     f"{','.join(outputs.keys())}. For reference, the inputs it received are {','.join(inputs.keys())}."
+#                 )
+#             # We don't use .loss here since the model may return tuples instead of ModelOutput.
+#             loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+
+#         return (loss, outputs) if return_outputs else loss
+
 
 def main():
     data_args, model_args, training_args = parse_runner_args()
 
     tokenizer = load_pretrained_tokenizer(model_args)
-    ############################ Knowledge Graph processing
-    knowledge_graph_path = "/home/jason/workspace/cehr_gpt_graphs/hierarchy_knowledge_graph_uni.pkl"
+    # Knowledge Graph processing
+    if model_args.use_knowledge_graph:
+        with open(model_args.knowledge_graph_path, 'rb') as f:
+            kg = pickle.load(f)
 
-    with open(knowledge_graph_path, 'rb') as f:
-        kg = pickle.load(f)
-
-    g = dgl.from_networkx(kg,
-                        node_attrs=['concept_id'],
-                        edge_attrs=['id', 'rel_type'])
-    
-    graph_concept_ids = list(map(str, g.ndata['concept_id'].tolist()))
-    added_tokens = list(set(graph_concept_ids) - set(list(tokenizer._tokenizer.get_vocab().keys())))
-    num_added_tokens = tokenizer._tokenizer.add_tokens(added_tokens)
+        g = dgl.from_networkx(kg,
+                            node_attrs=['concept_id'],
+                            edge_attrs=['id', 'rel_type'])
         
+        graph_concept_ids = list(map(str, g.ndata['concept_id'].tolist()))
+        added_tokens = list(set(graph_concept_ids) - set(list(tokenizer._tokenizer.get_vocab().keys())))
+        _ = tokenizer._tokenizer.add_tokens(added_tokens)
 
-    #############################
+
     prepared_ds_path = generate_prepared_ds_path(
         data_args, model_args, data_folder=data_args.cohort_folder
     )
@@ -313,7 +352,7 @@ def main():
             data_collator=collator,
             train_dataset=processed_dataset["train"],
             eval_dataset=processed_dataset["validation"],
-            callbacks=[EarlyStoppingCallback()],
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
             args=training_args,
         )
 

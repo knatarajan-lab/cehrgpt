@@ -79,23 +79,16 @@ class GPT2GraphAttention(nn.Module):
         if self.scale_attn_by_inverse_layer_idx:
             attn_weights = attn_weights / float(self.layer_idx + 1)
 
-        # if not self.is_cross_attention:
-        # if only "normal" attention layer implements causal mask
-        query_length, key_length = query.size(-2), key.size(-2)
-        causal_mask = self.bias[:, :, key_length - query_length : key_length, :key_length]
-        # causal_mask = self.bias
+        if self.config.use_knowledge_graph or not self.is_cross_attention:
+            # if only "normal" attention layer implements causal mask
+            query_length, key_length = query.size(-2), key.size(-2)
+            causal_mask = self.bias[:, :, key_length - query_length : key_length, :key_length]
 
-
-        # causal_mask = torch.concat([torch.tril(torch.ones((query_length, query_length), dtype=torch.bool)), torch.diag(torch.ones(query_length, dtype=torch.bool))], -1).view(
-        #     1, 1, query_length, 2 * query_length
-        # ).to('cuda')
-        
-        mask_value = torch.finfo(attn_weights.dtype).min
-        # Need to be a tensor, otherwise we get error: `RuntimeError: expected scalar type float but found double`.
-        # Need to be on the same device, otherwise `RuntimeError: ..., x and y to be on the same device`
-        mask_value = torch.full([], mask_value, dtype=attn_weights.dtype, device=attn_weights.device)
-        # print(attn_weights.shape, causal_mask.shape)
-        attn_weights = torch.where(causal_mask, attn_weights.to(attn_weights.dtype), mask_value)
+            mask_value = torch.finfo(attn_weights.dtype).min
+            # Need to be a tensor, otherwise we get error: `RuntimeError: expected scalar type float but found double`.
+            # Need to be on the same device, otherwise `RuntimeError: ..., x and y to be on the same device`
+            mask_value = torch.full([], mask_value, dtype=attn_weights.dtype, device=attn_weights.device)
+            attn_weights = torch.where(causal_mask, attn_weights.to(attn_weights.dtype), mask_value)
 
         if attention_mask is not None:
             # Apply the attention mask
@@ -138,7 +131,7 @@ class GPT2GraphAttention(nn.Module):
             attn_weights = torch.baddbmm(attn_weights, q.float(), k.float(), beta=0, alpha=scale_factor)
             attn_weights = attn_weights.reshape(bsz, num_heads, q_seq_len, k_seq_len)
 
-        if not self.is_cross_attention:
+        if self.config.use_knowledge_graph or not self.is_cross_attention:
             # if only "normal" attention layer implements causal mask
             query_length, key_length = query.size(-2), key.size(-2)
             causal_mask = self.bias[:, :, key_length - query_length : key_length, :key_length]
@@ -187,7 +180,6 @@ class GPT2GraphAttention(nn.Module):
     def forward(
         self,
         hidden_states: Optional[Tuple[torch.FloatTensor]],
-        # agg_node_hidden_states: Optional[Tuple[torch.FloatTensor]],
         layer_past: Optional[Tuple[torch.Tensor]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
@@ -203,14 +195,13 @@ class GPT2GraphAttention(nn.Module):
                     "Please make sure to instantiate class with `GPT2GraphAttention(..., is_cross_attention=True)`."
                 )
 
-            query = self.q_attn(hidden_states)
-            key, value = self.c_attn(encoder_hidden_states).split(self.split_size, dim=2)
+            # query = self.q_attn(hidden_states)
+            # key, value = self.c_attn(encoder_hidden_states).split(self.split_size, dim=2)
+            query = self.q_attn(encoder_hidden_states)
+            key, value = self.c_attn(hidden_states).split(self.split_size, dim=2)
             attention_mask = encoder_attention_mask
         else:
             query, key, value = self.c_attn(hidden_states).split(self.split_size, dim=2)
-            # _, agg_node_key, agg_node_value = self.c_attn(agg_node_hidden_states).split(self.split_size, dim=2)
-            # key, value = torch.concat([key, agg_node_key], dim=-2), torch.concat([value, agg_node_value], dim=-2)
-
         
 
         query = self._split_heads(query, self.num_heads, self.head_dim)
@@ -227,10 +218,6 @@ class GPT2GraphAttention(nn.Module):
         else:
             present = None
     
-        # free, total = torch.cuda.mem_get_info(hidden_states.device)
-        # mem_used_MB = (total - free) / 1024 ** 2
-        # print(self.layer_idx, mem_used_MB)
-
         if self.reorder_and_upcast_attn:
             attn_output, attn_weights = self._upcast_and_reordered_attn(query, key, value, attention_mask, head_mask)
         else:
@@ -246,33 +233,114 @@ class GPT2GraphAttention(nn.Module):
 
         return outputs  # a, present, (attentions)
 
+class DGN(torch.nn.Module):
+    def __init__(self, dim_hidden, type_norm, skip_connect=False, num_groups=1,
+                 skip_weight=0.005):
+        super(DGN, self).__init__()
+        self.type_norm = type_norm
+        self.skip_connect = skip_connect
+        self.num_groups = num_groups
+        self.skip_weight = skip_weight
+        self.dim_hidden = dim_hidden
+        if self.type_norm == 'batch':
+            self.bn = torch.nn.BatchNorm1d(dim_hidden, momentum=0.3)
+        elif self.type_norm == 'group':
+            self.bn = torch.nn.BatchNorm1d(dim_hidden*self.num_groups, momentum=0.3)
+            self.group_func = torch.nn.Linear(dim_hidden, self.num_groups, bias=True)
+        else:
+            pass
+
+    def forward(self, x):
+        if self.type_norm == 'None':
+            return x
+        elif self.type_norm == 'batch':
+            # print(self.bn.running_mean.size())
+            return self.bn(x)
+        elif self.type_norm == 'pair':
+            col_mean = x.mean(dim=0)
+            x = x - col_mean
+            rownorm_mean = (1e-6 + x.pow(2).sum(dim=1).mean()).sqrt()
+            x = x / rownorm_mean
+            return x
+        elif self.type_norm == 'group':
+            if self.num_groups == 1:
+                x_temp = self.bn(x)
+            else:
+                score_cluster = F.softmax(self.group_func(x), dim=1)
+                x_temp = torch.cat([score_cluster[:, group].unsqueeze(dim=1) * x for group in range(self.num_groups)], dim=1)
+                x_temp = self.bn(x_temp).view(-1, self.num_groups, self.dim_hidden).sum(dim=1)
+            x = x + x_temp * self.skip_weight
+            return x
+
+        else:
+            raise Exception(f'the normalization has not been implemented')
+
 class GATBlock(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        # hidden_size = 56
+        self.config = config
         hidden_size = config.n_embd
 
         self.incoming_linear_layer = nn.Linear(config.n_embd, hidden_size)
         gat_layers = []
-        for i in range(3):
-            gat_layers.append(GATv2Conv(hidden_size, hidden_size, 8, residual=True, activation=torch.relu))
+        # dgn_layers = []
+        layer_norm_layers = []
+        for i in range(config.num_graph_hidden_layers):
+            gat_layers.append(GATv2Conv(hidden_size, hidden_size, 8, residual=True, activation=torch.nn.LeakyReLU(0.1), feat_drop=0.0, attn_drop=0.0))
+            # dgn_layers.append(DGN(hidden_size, 'group', skip_connect=True, num_groups=20))
+            layer_norm_layers.append(nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon))
         self.gat_block = nn.ModuleList(gat_layers)
+        # self.dgn_block = nn.ModuleList(dgn_layers)
+        self.layer_norm_block = nn.ModuleList(layer_norm_layers)
+
         self.gat_block_ln_f = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
 
         self.outgoing_linear_layer = nn.Linear(hidden_size, config.n_embd)
+        
+
+    def _mean_average_distance(self, H):
+        
+        # Step 1: Compute the pairwise cosine distance matrix D
+        H_norm = H / (H.norm(dim=1, keepdim=True) + 1e-8)  # Normalize each row for cosine similarity
+        D = 1 - torch.mm(H_norm, H_norm.T)  # Compute cosine distance
+        
+        # Step 2: Element-wise multiplication with the mask matrix
+        M_tgt = torch.ones_like(D)
+        D_tgt = D * M_tgt  # Apply mask to filter target node pairs
+        
+        # Step 3: Compute the average distance for each node (ignoring zero values)
+        non_zero_counts = (D_tgt > 0).sum(dim=1).float()  # Count non-zero elements in each row
+        avg_distances = D_tgt.sum(dim=1) / (non_zero_counts + 1e-8)  # Avoid division by zero
+        
+        # Step 4: Compute the overall MAD value
+        valid_avg_distances = avg_distances[non_zero_counts > 0]  # Filter out nodes with no valid targets
+        MAD_tgt = valid_avg_distances.mean()  # Mean of non-zero average distances
+        
+        return MAD_tgt.item()
     
     def forward(self, bg):
         h = bg.ndata['h']
-        h = F.relu(self.incoming_linear_layer(h))
+        # h = F.relu(self.incoming_linear_layer(h)) + h
         for i, gat_layer in enumerate(self.gat_block):
+            # print(f'MAD pre-layer {i+1}: {self._mean_average_distance(h)}')
+            # print('FC Source')
+            # print(gat_layer.fc_src.weight)
+            # print('FC Dest')
+            # print(gat_layer.fc_dst.weight)
             h = gat_layer(bg, h).mean(dim=1)
-        h = self.gat_block_ln_f(h)
-        h = F.relu(self.outgoing_linear_layer(h))
+            # h = self.dgn_block[i](h)
+            h = self.layer_norm_block[i](h)
+
+        # print(f'MAD post-layer {i+1}: {self._mean_average_distance(h)}')
+        # h = self.gat_block_ln_f(h)
+        h = self.gat_block_ln_f(F.relu(self.outgoing_linear_layer(h)) + h)
 
         bg.ndata['h'] = h
 
-        return h
+        # print(h)
+
+        return h #, self._mean_average_distance(h)
 
 
 class GPT2GraphBlock(nn.Module):
@@ -291,13 +359,9 @@ class GPT2GraphBlock(nn.Module):
 
         self.mlp = GPT2MLP(inner_dim, config)
 
-        # self.gat_layer = GATv2Conv(config.n_embd, config.n_embd, 4, residual=True, activation=torch.relu)
-
     def forward(
         self,
         hidden_states: Optional[Tuple[torch.FloatTensor]],
-        # agg_node_hidden_states: Optional[Tuple[torch.FloatTensor]],
-        # g,
         layer_past: Optional[Tuple[torch.Tensor]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
@@ -310,7 +374,6 @@ class GPT2GraphBlock(nn.Module):
         hidden_states = self.ln_1(hidden_states)
         attn_outputs = self.attn(
             hidden_states,
-            # agg_node_hidden_states,
             layer_past=layer_past,
             attention_mask=attention_mask,
             head_mask=head_mask,
@@ -333,7 +396,6 @@ class GPT2GraphBlock(nn.Module):
             hidden_states = self.ln_cross_attn(hidden_states)
             cross_attn_outputs = self.crossattention(
                 hidden_states,
-                # agg_node_hidden_states,
                 attention_mask=attention_mask,
                 head_mask=head_mask,
                 encoder_hidden_states=encoder_hidden_states,
@@ -351,14 +413,6 @@ class GPT2GraphBlock(nn.Module):
         # residual connection
         hidden_states = residual + feed_forward_hidden_states
 
-        ############################### Knowledge Graph
-
-        # if g.num_nodes() > 0:
-        #     g.ndata['h'] = self.gat_layer(g, g.ndata['h']).mean(dim=1)
-
-        ###############################
-
-
         if use_cache:
             outputs = (hidden_states,) + outputs
         else:
@@ -367,7 +421,3 @@ class GPT2GraphBlock(nn.Module):
 
 
         return outputs  # hidden_states, present, (attentions, cross_attentions)
-
-# class GATv2ConvBlock(nn.Module):
-#     def __init__(self, config):
-        
