@@ -1,5 +1,6 @@
+import copy
 import json
-import os.path
+import os
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -27,7 +28,13 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from scipy.special import expit as sigmoid
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import EarlyStoppingCallback, Trainer, TrainingArguments, set_seed
+from transformers import (
+    EarlyStoppingCallback,
+    Trainer,
+    TrainerCallback,
+    TrainingArguments,
+    set_seed,
+)
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
@@ -43,6 +50,24 @@ from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.runners.hyperparameter_search_util import perform_hyperparameter_search
 
 LOG = logging.get_logger("transformers")
+
+NUM_EPOCHS_BEFORE_EARLY_STOPPING = "num_epochs_trained_before_early_stopping"
+
+
+class UpdateNumEpochsBeforeEarlyStoppingCallback(TrainerCallback):
+    """
+    Callback to update metrics with the number of epochs completed before early stopping.
+
+    based on the best evaluation metric (e.g., eval_loss).
+    """
+
+    def on_evaluate(self, args, state, control, **kwargs):
+        # Ensure metrics is available in kwargs
+        metrics = kwargs.get("metrics")
+        if metrics is not None and "eval_loss" in metrics:
+            # Check and update if a new best metric is achieved
+            if state.best_metric is None or metrics["eval_loss"] < state.best_metric:
+                metrics[NUM_EPOCHS_BEFORE_EARLY_STOPPING] = state.epoch
 
 
 def load_pretrained_tokenizer(
@@ -367,6 +392,7 @@ def main():
             eval_dataset=processed_dataset["validation"],
             callbacks=[
                 EarlyStoppingCallback(model_args.early_stopping_patience),
+                UpdateNumEpochsBeforeEarlyStoppingCallback(),
             ],
             tokenizer=tokenizer,
         )
@@ -380,36 +406,41 @@ def main():
         trainer.save_state()
 
         if cehrgpt_args.retrain_with_full:
-            total_train_batch_size = (
-                training_args.train_batch_size
-                * training_args.gradient_accumulation_steps
-                * training_args.world_size
+            if NUM_EPOCHS_BEFORE_EARLY_STOPPING not in metrics:
+                raise RuntimeError(
+                    f"{NUM_EPOCHS_BEFORE_EARLY_STOPPING} must exist in the trainer metrics object!"
+                )
+            final_training_args = copy.deepcopy(training_args)
+            final_training_args.num_train_epochs = metrics[
+                NUM_EPOCHS_BEFORE_EARLY_STOPPING
+            ]
+            LOG.info(
+                "Num Epochs before early stopping: %s",
+                final_training_args.num_train_epochs,
             )
-            num_of_epochs = (
-                trainer.state.global_step // total_train_batch_size
-            ) - model_args.early_stopping_patience
-            training_args.num_train_epochs = num_of_epochs
             # Initialize Trainer for final training on the combined train+val set
             full_dataset = concatenate_datasets(
                 [processed_dataset["train"], processed_dataset["validation"]]
             )
-            training_args.output_dir = os.path.join(training_args.output_dir, "full")
-            Path(training_args.output_dir).mkdir(exist_ok=True)
-            tokenizer.save_pretrained(training_args.output_dir)
-            checkpoint = get_last_hf_checkpoint(training_args)
-            trainer = Trainer(
-                model=model_init(model_args, training_args, cehrgpt_args),
+            final_training_args.output_dir = os.path.join(
+                training_args.output_dir, "full"
+            )
+            Path(final_training_args.output_dir).mkdir(exist_ok=True)
+            tokenizer.save_pretrained(final_training_args.output_dir)
+            checkpoint = get_last_hf_checkpoint(final_training_args)
+            final_trainer = Trainer(
+                model=model_init(model_args, final_training_args, cehrgpt_args),
                 data_collator=data_collator,
-                args=training_args,
+                args=final_training_args,
                 train_dataset=full_dataset,
                 tokenizer=tokenizer,
             )
-            train_result = trainer.train(resume_from_checkpoint=checkpoint)
-            trainer.save_model()  # Saves the tokenizer too for easy upload
-            metrics = train_result.metrics
-            trainer.log_metrics("train", metrics)
-            trainer.save_metrics("train", metrics)
-            trainer.save_state()
+            final_train_result = final_trainer.train(resume_from_checkpoint=checkpoint)
+            final_trainer.save_model()  # Saves the tokenizer too for easy upload
+            metrics = final_train_result.metrics
+            final_trainer.log_metrics("train", metrics)
+            final_trainer.save_metrics("train", metrics)
+            final_trainer.save_state()
 
     if training_args.do_predict:
         test_dataloader = DataLoader(
