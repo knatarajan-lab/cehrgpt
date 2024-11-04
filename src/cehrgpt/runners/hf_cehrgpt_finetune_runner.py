@@ -88,7 +88,7 @@ class UpdateNumEpochsBeforeEarlyStoppingCallback(TrainerCallback):
         metrics = kwargs.get("metrics")
         if metrics is not None and "eval_loss" in metrics:
             # Check and update if a new best metric is achieved
-            if state.best_metric is None or metrics["eval_loss"] < self._best_val_loss:
+            if metrics["eval_loss"] < self._best_val_loss:
                 self._num_epochs_before_early_stopping = round(state.epoch)
                 self._best_val_loss = metrics["eval_loss"]
 
