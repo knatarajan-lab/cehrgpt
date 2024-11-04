@@ -52,8 +52,6 @@ from cehrgpt.runners.hyperparameter_search_util import perform_hyperparameter_se
 
 LOG = logging.get_logger("transformers")
 
-NUM_EPOCHS_BEFORE_EARLY_STOPPING = "num_epochs_trained_before_early_stopping.json"
-
 
 class UpdateNumEpochsBeforeEarlyStoppingCallback(TrainerCallback):
     """
@@ -65,7 +63,7 @@ class UpdateNumEpochsBeforeEarlyStoppingCallback(TrainerCallback):
     def __init__(self, model_folder: str):
         self._model_folder = model_folder
         self._metrics_path = os.path.join(
-            model_folder, NUM_EPOCHS_BEFORE_EARLY_STOPPING
+            model_folder, "num_epochs_trained_before_early_stopping.json"
         )
         self._num_epochs_before_early_stopping = 0
         self._best_val_loss = float("inf")
