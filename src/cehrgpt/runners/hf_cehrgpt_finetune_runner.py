@@ -48,7 +48,6 @@ from cehrgpt.models.hf_cehrgpt import (
 )
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
-from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.runners.hyperparameter_search_util import perform_hyperparameter_search
 
 LOG = logging.get_logger("transformers")
@@ -99,7 +98,7 @@ class UpdateNumEpochsBeforeEarlyStoppingCallback(TrainerCallback):
                 self._num_epochs_before_early_stopping = round(state.epoch)
                 self._best_val_loss = metrics["eval_loss"]
 
-    def on_epoch_end(
+    def on_save(
         self,
         args: TrainingArguments,
         state: TrainerState,
