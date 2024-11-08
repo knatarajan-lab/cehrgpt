@@ -38,6 +38,10 @@ class CehrGPTArguments:
         default_factory=lambda: [4, 8, 16],
         metadata={"help": "Hyperparameter search batch sizes"},
     )
+    hyperparameter_num_train_epochs: Optional[List[int]] = dataclasses.field(
+        default_factory=lambda: [10],
+        metadata={"help": "Hyperparameter search num_train_epochs"},
+    )
     lr_low: Optional[float] = dataclasses.field(
         default=1e-5,
         metadata={

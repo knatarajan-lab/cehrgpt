@@ -4,6 +4,7 @@ from typing import Callable, Tuple
 import optuna
 from cehrbert.runners.hf_runner_argument_dataclass import ModelArguments
 from datasets import Dataset, DatasetDict
+from sympy.strategies.branch import chain
 from transformers import (
     EarlyStoppingCallback,
     Trainer,
@@ -75,6 +76,7 @@ def hp_space(
     lr_range: Tuple[float, float] = (1e-5, 5e-5),
     batch_sizes=None,
     weight_decays: Tuple[float, float] = (1e-4, 1e-2),
+    num_train_epochs: Tuple[float, ...] = 10,
 ):
     if batch_sizes is None:
         batch_sizes = [4, 8]
@@ -84,6 +86,7 @@ def hp_space(
             "per_device_train_batch_size", batch_sizes
         ),
         "weight_decay": trial.suggest_float("weight_decay", *weight_decays, log=True),
+        "num_train_epochs": trial.suggest_int("num_train_epochs", *num_train_epochs),
     }
 
 
@@ -114,6 +117,9 @@ def sample_dataset(data: Dataset, percentage: float, seed: int) -> Dataset:
           returns the "test" portion, which is the specified percentage of the dataset.
         - Ensure that `percentage` is between 0 and 1 to avoid errors.
     """
+    if percentage == 1.0:
+        return data
+
     return data.train_test_split(
         test_size=percentage,
         seed=seed,
@@ -204,6 +210,7 @@ def perform_hyperparameter_search(
                     cehrgpt_args.weight_decays_high,
                 ),
                 batch_sizes=cehrgpt_args.hyperparameter_batch_sizes,
+                num_train_epochs=cehrgpt_args.hyperparameter_num_train_epochs,
             ),
             backend="optuna",
             n_trials=cehrgpt_args.n_trials,
