@@ -28,7 +28,8 @@ classifiers = [
 ]
 
 dependencies = [
-    "cehrbert==1.2.2"
+    "cehrbert==1.2.2",
+    "openai==1.54.3"
 ]
 
 [tool.setuptools_scm]
