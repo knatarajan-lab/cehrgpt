@@ -4,7 +4,6 @@ from typing import Callable, Tuple
 import optuna
 from cehrbert.runners.hf_runner_argument_dataclass import ModelArguments
 from datasets import Dataset, DatasetDict
-from sympy.strategies.branch import chain
 from transformers import (
     EarlyStoppingCallback,
     Trainer,
@@ -218,10 +217,7 @@ def perform_hyperparameter_search(
         )
         LOG.info("Best hyperparameters: %s", best_trial.hyperparameters)
         # Update training arguments with best hyperparameters and set epochs based on adjusted effective epochs
-        training_args.learning_rate = best_trial.hyperparameters["learning_rate"]
-        training_args.per_device_train_batch_size = best_trial.hyperparameters[
-            "per_device_train_batch_size"
-        ]
-        training_args.weight_decay = best_trial.hyperparameters["weight_decay"]
+        for k, v in best_trial.hyperparameters.items():
+            setattr(training_args, k, v)
 
     return training_args
