@@ -1,6 +1,7 @@
 import os
 from textwrap import dedent
 
+import numpy as np
 from jinja2 import BaseLoader, Environment
 from openai import OpenAI
 from pydantic import BaseModel
@@ -95,5 +96,11 @@ if __name__ == "__main__":
         )
         patient_sequence = completion.choices[0].message.parsed.seq
         pd.DataFrame(
-            [{"concept_ids": patient_sequence}], columns=["concept_ids"]
+            [
+                {
+                    "concept_ids": patient_sequence,
+                    "concept_values": np.zeros_like(patient_sequence),
+                }
+            ],
+            columns=["concept_ids", "concept_values"],
         ).to_parquet(os.path.join(args.output_folder, f"{uuid.uuid4()}.parquet"))
