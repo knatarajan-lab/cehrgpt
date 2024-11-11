@@ -371,8 +371,18 @@ class CehrGptTokenizer(PushToHubMixin):
             data_args=data_args,
         )
 
-        new_tokens = list(new_tokenizer._tokenizer.get_vocab().keys())
-        new_att_tokens = list(new_tokenizer._att_tokenizer.get_vocab().keys())
+        existing_token_vocab = cehrgpt_tokenizer._tokenizer.get_vocab()
+        new_tokens = [
+            token
+            for token in new_tokenizer._tokenizer.get_vocab().keys()
+            if token not in existing_token_vocab
+        ]
+        existing_att_token_vocab = cehrgpt_tokenizer._att_tokenizer.get_vocab()
+        new_att_tokens = [
+            token
+            for token in new_tokenizer._att_tokenizer.get_vocab().keys()
+            if token not in existing_att_token_vocab
+        ]
         new_token_to_sub_time_token_mapping = (
             new_tokenizer._token_to_sub_time_token_mapping
         )
@@ -381,8 +391,10 @@ class CehrGptTokenizer(PushToHubMixin):
 
         # Add new tokens to the existing tokenizer
         cehrgpt_tokenizer_copy._tokenizer.add_tokens(new_tokens)
+        cehrgpt_tokenizer_copy._tokenizer.pre_tokenizer = WhitespaceSplit()
         # Add new time tokens to the existing att tokenizer
         cehrgpt_tokenizer_copy._att_tokenizer.add_tokens(new_att_tokens)
+        cehrgpt_tokenizer_copy._att_tokenizer.pre_tokenizer = WhitespaceSplit()
         # Merge the time_token -> List[sub_time_tokens] mapping
         for time_token, sub_time_tokens in new_token_to_sub_time_token_mapping.items():
             if (
