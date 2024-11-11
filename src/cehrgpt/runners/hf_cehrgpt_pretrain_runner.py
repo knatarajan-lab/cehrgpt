@@ -29,15 +29,13 @@ from src.cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArgument
 LOG = logging.get_logger("transformers")
 
 
-def tokenizer_exists(model_args: ModelArguments) -> bool:
+def tokenizer_exists(tokenizer_name_or_path: str) -> bool:
     # Try to load the pretrained tokenizer
     try:
-        CehrGptTokenizer.from_pretrained(
-            os.path.abspath(model_args.tokenizer_name_or_path)
-        )
+        CehrGptTokenizer.from_pretrained(os.path.abspath(tokenizer_name_or_path))
         return True
     except Exception:
-        LOG.info(f"The tokenizer does not exist at {model_args.tokenizer_name_or_path}")
+        LOG.info(f"The tokenizer does not exist at {tokenizer_name_or_path}")
         return False
 
 
@@ -123,28 +121,34 @@ def main():
         processed_dataset = load_from_disk(data_args.data_folder)
         # If the data has been processed in the past, it's assume the tokenizer has been created before.
         # we load the CEHR-GPT tokenizer from the output folder, otherwise an exception will be raised.
-        if not tokenizer_exists(model_args):
+        tokenizer_name_or_path = os.path.expanduser(
+            training_args.output_dir
+            if cehrgpt_args.expand_tokenizer
+            else model_args.tokenizer_name_or_path
+        )
+        if not tokenizer_exists(tokenizer_name_or_path):
             raise RuntimeError(
                 f"The dataset has been tokenized but the corresponding tokenizer: "
                 f"{model_args.tokenizer_name_or_path} does not exist"
             )
-        cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
-            model_args.tokenizer_name_or_path
-        )
+        cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_name_or_path)
     elif any(prepared_ds_path.glob("*")):
         LOG.info(f"Loading prepared dataset from disk at {prepared_ds_path}...")
         processed_dataset = load_from_disk(str(prepared_ds_path))
         LOG.info("Prepared dataset loaded from disk...")
         # If the data has been processed in the past, it's assume the tokenizer has been created before.
         # we load the CEHR-GPT tokenizer from the output folder, otherwise an exception will be raised.
-        if not tokenizer_exists(model_args):
+        tokenizer_name_or_path = os.path.expanduser(
+            training_args.output_dir
+            if cehrgpt_args.expand_tokenizer
+            else model_args.tokenizer_name_or_path
+        )
+        if not tokenizer_exists(tokenizer_name_or_path):
             raise RuntimeError(
                 f"The dataset has been tokenized but the corresponding tokenizer: "
                 f"{model_args.tokenizer_name_or_path} does not exist"
             )
-        cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
-            model_args.tokenizer_name_or_path
-        )
+        cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_name_or_path)
     else:
         # If the data is in the MEDS format, we need to convert it to the CEHR-BERT format
         if data_args.is_data_in_med:
