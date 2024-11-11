@@ -13,7 +13,6 @@ from cehrbert.runners.runner_util import (
     get_last_hf_checkpoint,
     get_meds_extension_path,
     load_parquet_as_dataset,
-    parse_runner_args,
 )
 from datasets import Dataset, DatasetDict, IterableDatasetDict, load_from_disk
 from transformers import AutoConfig, Trainer, set_seed
@@ -24,6 +23,7 @@ from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.runners.gpt_runner_util import parse_runner_args
 
 LOG = logging.get_logger("transformers")
 
@@ -92,7 +92,7 @@ def load_and_create_model(
 
 
 def main():
-    data_args, model_args, training_args = parse_runner_args()
+    cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
 
     if data_args.streaming:
         # This is for disabling the warning message https://github.com/huggingface/transformers/issues/5486
@@ -193,6 +193,23 @@ def main():
         cehrgpt_tokenizer = load_and_create_tokenizer(
             data_args=data_args, model_args=model_args, dataset=dataset
         )
+        # Retrain the tokenizer in case we want to pretrain the model further using different datasets
+        if cehrgpt_args.expand_tokenizer:
+            new_tokenizer_path = os.path.expanduser(training_args.output_dir)
+            try:
+                cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(new_tokenizer_path)
+            except Exception:
+                cehrgpt_tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
+                    cehrgpt_tokenizer=cehrgpt_tokenizer,
+                    dataset=dataset["train"],
+                    feature_names=["concept_ids"],
+                    data_args=data_args,
+                    concept_name_mapping={},
+                )
+                cehrgpt_tokenizer.save_pretrained(
+                    os.path.expanduser(training_args.output_dir)
+                )
+
         # sort the patient features chronologically and tokenize the data
         processed_dataset = create_cehrgpt_pretraining_dataset(
             dataset=dataset, cehrgpt_tokenizer=cehrgpt_tokenizer, data_args=data_args
@@ -223,6 +240,9 @@ def main():
         processed_dataset = processed_dataset.filter(filter_func, **filter_args)
 
     model = load_and_create_model(model_args, cehrgpt_tokenizer)
+    # Expand tokenizer to adapt to the new pretraining dataset
+    if model.config.vocab_size < cehrgpt_tokenizer.vocab_size:
+        model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)
 
     # Detecting last checkpoint.
     last_checkpoint = get_last_hf_checkpoint(training_args)
