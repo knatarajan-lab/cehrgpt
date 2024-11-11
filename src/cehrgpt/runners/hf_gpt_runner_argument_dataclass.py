@@ -6,6 +6,12 @@ from typing import List, Optional
 class CehrGPTArguments:
     """Arguments pertaining to what data we are going to input our model for training and eval."""
 
+    continue_pretrain: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to continue to pretrain cehrgpt on the new dataset"
+        },
+    )
     retrain_with_full: Optional[bool] = dataclasses.field(
         default=False,
         metadata={

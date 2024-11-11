@@ -24,6 +24,7 @@ from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
+from src.cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 
 LOG = logging.get_logger("transformers")
 
@@ -66,13 +67,26 @@ def load_and_create_tokenizer(
 
 
 def load_and_create_model(
-    model_args: ModelArguments, tokenizer: CehrGptTokenizer
+    model_args: ModelArguments,
+    cehrgpt_args: CehrGPTArguments,
+    tokenizer: CehrGptTokenizer,
 ) -> CEHRGPT2LMHeadModel:
     attn_implementation = (
         "flash_attention_2" if is_flash_attn_2_available() else "eager"
     )
+
+    model_abspath = os.path.expanduser(model_args.model_name_or_path)
+    if cehrgpt_args.continue_pretrain:
+        try:
+            return CEHRGPT2LMHeadModel.from_pretrained(model_abspath)
+        except Exception as e:
+            LOG.error(
+                f"When continue_pretrain is set to True, it assumes that CEHR-GPT has been trained "
+                f"and will be used to pretrain on new datasets. The CEHR-GPT checkpoint must exist at {model_abspath}"
+            )
+            raise e
+
     try:
-        model_abspath = os.path.abspath(model_args.model_name_or_path)
         model_config = AutoConfig.from_pretrained(
             model_abspath, attn_implementation=attn_implementation
         )
@@ -239,7 +253,7 @@ def main():
     else:
         processed_dataset = processed_dataset.filter(filter_func, **filter_args)
 
-    model = load_and_create_model(model_args, cehrgpt_tokenizer)
+    model = load_and_create_model(model_args, cehrgpt_args, cehrgpt_tokenizer)
     # Expand tokenizer to adapt to the new pretraining dataset
     if model.config.vocab_size < cehrgpt_tokenizer.vocab_size:
         model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)
