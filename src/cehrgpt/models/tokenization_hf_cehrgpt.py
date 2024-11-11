@@ -18,7 +18,7 @@ from cehrbert.models.hf_models.tokenization_utils import (
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import Dataset, DatasetDict
 from femr.stat_utils import OnlineStatistics
-from tokenizers import Tokenizer
+from tokenizers import AddedToken, Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
 from tokenizers.trainers import WordLevelTrainer
@@ -371,18 +371,8 @@ class CehrGptTokenizer(PushToHubMixin):
             data_args=data_args,
         )
 
-        existing_token_vocab = cehrgpt_tokenizer._tokenizer.get_vocab()
-        new_tokens = [
-            token
-            for token in new_tokenizer._tokenizer.get_vocab().keys()
-            if token not in existing_token_vocab
-        ]
-        existing_att_token_vocab = cehrgpt_tokenizer._att_tokenizer.get_vocab()
-        new_att_tokens = [
-            token
-            for token in new_tokenizer._att_tokenizer.get_vocab().keys()
-            if token not in existing_att_token_vocab
-        ]
+        new_tokens = list(new_tokenizer._tokenizer.get_vocab().keys())
+        new_att_tokens = list(new_tokenizer._att_tokenizer.get_vocab().keys())
         new_token_to_sub_time_token_mapping = (
             new_tokenizer._token_to_sub_time_token_mapping
         )
@@ -390,11 +380,19 @@ class CehrGptTokenizer(PushToHubMixin):
         new_concept_name_mapping = new_tokenizer._concept_name_mapping
 
         # Add new tokens to the existing tokenizer
-        cehrgpt_tokenizer_copy._tokenizer.add_tokens(new_tokens)
-        cehrgpt_tokenizer_copy._tokenizer.pre_tokenizer = WhitespaceSplit()
+        cehrgpt_tokenizer_copy._tokenizer.add_tokens(
+            [
+                AddedToken(token, single_word=True, normalized=False)
+                for token in new_tokens
+            ]
+        )
         # Add new time tokens to the existing att tokenizer
-        cehrgpt_tokenizer_copy._att_tokenizer.add_tokens(new_att_tokens)
-        cehrgpt_tokenizer_copy._att_tokenizer.pre_tokenizer = WhitespaceSplit()
+        cehrgpt_tokenizer_copy._att_tokenizer.add_tokens(
+            [
+                AddedToken(token, single_word=True, normalized=False)
+                for token in new_att_tokens
+            ]
+        )
         # Merge the time_token -> List[sub_time_tokens] mapping
         for time_token, sub_time_tokens in new_token_to_sub_time_token_mapping.items():
             if (
