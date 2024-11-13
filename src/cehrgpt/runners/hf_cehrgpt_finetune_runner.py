@@ -48,6 +48,7 @@ from cehrgpt.models.hf_cehrgpt import (
 )
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
+from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.runners.hyperparameter_search_util import perform_hyperparameter_search
 
 LOG = logging.get_logger("transformers")
@@ -494,7 +495,7 @@ def main():
             collate_fn=data_collator,
             pin_memory=training_args.dataloader_pin_memory,
         )
-        do_predict(test_dataloader, model_args, training_args)
+        do_predict(test_dataloader, model_args, training_args, cehrgpt_args)
 
 
 def retrain_with_full_set(
@@ -554,6 +555,7 @@ def do_predict(
     test_dataloader: DataLoader,
     model_args: ModelArguments,
     training_args: TrainingArguments,
+    cehrgpt_args: CehrGPTArguments,
 ):
     """
     Performs inference on the test dataset using a fine-tuned model, saves predictions and evaluation metrics.
@@ -565,7 +567,7 @@ def do_predict(
         test_dataloader (DataLoader): DataLoader containing the test dataset, with batches of input features and labels.
         model_args (ModelArguments): Arguments for configuring and loading the fine-tuned model.
         training_args (TrainingArguments): Arguments related to training, evaluation, and output directories.
-
+        cehrgpt_args (CehrGPTArguments):
     Returns:
         None. Results are saved to disk.
     """
@@ -575,7 +577,7 @@ def do_predict(
     model = (
         load_finetuned_model(model_args, training_args.output_dir)
         if not model_args.use_lora
-        else load_lora_model(model_args, training_args)
+        else load_lora_model(model_args, training_args, cehrgpt_args)
     )
 
     model = model.to(device).eval()
@@ -638,11 +640,26 @@ def do_predict(
     LOG.info("Test results: %s", metrics)
 
 
-def load_lora_model(model_args, training_args) -> PeftModel:
+def load_lora_model(
+    model_args: ModelArguments,
+    training_args: TrainingArguments,
+    cehrgpt_args: CehrGPTArguments,
+) -> PeftModel:
     LOG.info("Loading base model from %s", model_args.model_name_or_path)
-    base_model = load_finetuned_model(model_args, model_args.model_name_or_path)
+    model = load_finetuned_model(model_args, model_args.model_name_or_path)
+    # Enable include_values when include_values is set to be False during pre-training
+    if model_args.include_values and not model.cehrgpt.include_values:
+        model.cehrgpt.include_values = True
+    # Enable position embeddings when position embeddings are disabled in pre-training
+    if not model_args.exclude_position_ids and model.cehrgpt.exclude_position_ids:
+        model.cehrgpt.exclude_position_ids = False
+    if cehrgpt_args.expand_tokenizer:
+        tokenizer = CehrGptTokenizer.from_pretrained(training_args.output_dir)
+        # Expand tokenizer to adapt to the finetuning dataset
+        if model.config.vocab_size < tokenizer.vocab_size:
+            model.resize_token_embeddings(tokenizer.vocab_size)
     LOG.info("Loading LoRA adapter from %s", training_args.output_dir)
-    return PeftModel.from_pretrained(base_model, model_id=training_args.output_dir)
+    return PeftModel.from_pretrained(model, model_id=training_args.output_dir)
 
 
 if __name__ == "__main__":
