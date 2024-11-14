@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+import pandas as pd
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import Dataset
 
@@ -17,7 +18,8 @@ def load_parquet_as_dataset(folder_path):
         ),
         "person_id": np.random.randint(1, 20, 100),
     }
-    return Dataset.from_dict(data)
+    # Convert the Pandas dataframe to a Hugging Face dataset
+    return Dataset.from_pandas(pd.DataFrame(data, columns=["person_id", "index_date"]))
 
 
 class TestCreateDatasetSplits(unittest.TestCase):
