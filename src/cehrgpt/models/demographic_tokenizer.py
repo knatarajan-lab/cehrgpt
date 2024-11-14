@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Union
 from cehrbert.models.hf_models.tokenization_utils import agg_helper
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import Dataset
-from tokenizers import AddedToken, Tokenizer
+from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
 from tokenizers.trainers import WordLevelTrainer
@@ -18,13 +18,16 @@ from cehrgpt.models.tokenization_hf_cehrgpt import OUT_OF_VOCABULARY_TOKEN
 
 class DemographicTokenizer:
     """
-    A tokenizer for converting demographic data into tokenized forms suitable for model training.
+    A tokenizer for demographic data that supports encoding and decoding operations.
+
+    This tokenizer
+    integrates separate tokenizers for years, ages, genders, and races.
 
     Attributes:
-        initial_year_mapping (Dict[str, int]): Mapping from start year to unique identifier.
-        initial_age_mapping (Dict[str, int]): Mapping from start age to unique identifier.
-        gender_mapping (Dict[str, int]): Mapping from gender descriptor to unique identifier.
-        race_mapping (Dict[str, int]): Mapping from race descriptor to unique identifier.
+        initial_year_tokenizer (Tokenizer): Handles tokenization for initial years.
+        initial_age_tokenizer (Tokenizer): Handles tokenization for initial ages.
+        gender_tokenizer (Tokenizer): Handles tokenization for genders.
+        race_tokenizer (Tokenizer): Handles tokenization for races.
     """
 
     def __init__(
@@ -163,13 +166,17 @@ class DemographicTokenizer:
 
 def build_token_index_map(tokens: List[str]) -> Tokenizer:
     """
-    Creates a mapping from each unique token to a unique index.
+    Creates a tokenizer using a WordLevel model from a list of tokens, ensuring each unique token is mapped.
+
+    to a unique index and incorporating an unknown token to handle out-of-vocabulary words.
 
     Parameters:
-        tokens (List[str]): A list of tokens from which to create the mapping.
+        tokens (List[str]): A list of tokens from which to create the tokenizer's vocabulary.
+        Duplicates in this list will be ignored.
 
     Returns:
-        Dict[str, int]: A dictionary mapping each token to a unique index.
+        Tokenizer: A fully configured tokenizer object with a WordLevel model
+        and a vocabulary that includes a special unknown token.
     """
     tokenizer = Tokenizer(WordLevel(unk_token=OUT_OF_VOCABULARY_TOKEN, vocab=dict()))
     tokenizer.pre_tokenizer = WhitespaceSplit()
