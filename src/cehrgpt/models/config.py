@@ -122,6 +122,7 @@ class CEHRGPTConfig(PretrainedConfig):
         time_token_loss_weight=1.0,
         time_to_visit_loss_weight=1.0,
         token_to_time_token_mapping: Dict[int, List] = None,
+        causal_sfm=False,
         **kwargs,
     ):
         if token_to_time_token_mapping is None:
@@ -160,6 +161,7 @@ class CEHRGPTConfig(PretrainedConfig):
         self._token_to_time_token_mapping = token_to_time_token_mapping
         self.time_token_loss_weight = time_token_loss_weight
         self.time_to_visit_loss_weight = time_to_visit_loss_weight
+        self.causal_sfm = causal_sfm
 
         super().__init__(bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
 

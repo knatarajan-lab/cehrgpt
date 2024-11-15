@@ -72,3 +72,9 @@ class CehrGPTArguments:
             "help": "The upper bound of the weight decays range for hyperparameter tuning."
         },
     )
+    causal_sfm: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether the GPT conforms to the causal Standard Fairness Model"
+        },
+    )

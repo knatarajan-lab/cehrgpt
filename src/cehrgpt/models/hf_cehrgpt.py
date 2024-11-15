@@ -535,6 +535,12 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             )
             position_ids = position_ids.unsqueeze(0)
 
+        if position_ids is not None and self.config.causal_sfm:
+            # When causal_sfm is set to True, we will inject one more embedding into the sequence embeddings
+            position_ids = torch.concat(
+                [position_ids, torch.max(position_ids, dim=-1, keepdim=True)[0] + 1]
+            )
+
         # GPT2Attention mask.
         if attention_mask is not None:
             if batch_size <= 0:
@@ -576,6 +582,14 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 concept_embeddings=input_embeddings,
                 value_indicators=value_indicators,
                 concept_values=values,
+            )
+
+        if self.config.causal_sfm:
+            demographic_embeddings = input_embeddings[:, :4]
+            medical_event_embeddings = input_embeddings[:, 4:]
+            random_vectors = torch.rand_like(input_embeddings[:, :1])
+            input_embeddings = torch.concat(
+                [demographic_embeddings, random_vectors, medical_event_embeddings]
             )
 
         if not self.exclude_position_ids:
