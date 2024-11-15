@@ -301,7 +301,8 @@ class ConceptValueTransformationLayer(nn.Module):
         self.merge_value_transformation_layer = nn.Sequential(
             nn.Linear(
                 embedding_size + 1, embedding_size
-            )  # +1 for the concept_values concatenation
+            ),  # +1 for the concept_values concatenation
+            gelu_new(),
         )
 
     def forward(
