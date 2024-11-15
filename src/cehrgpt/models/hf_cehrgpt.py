@@ -302,7 +302,7 @@ class ConceptValueTransformationLayer(nn.Module):
             nn.Linear(
                 embedding_size + 1, embedding_size
             ),  # +1 for the concept_values concatenation
-            gelu_new(),
+            gelu_new,
         )
 
     def forward(
@@ -390,6 +390,9 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
 class CEHRGPT2Model(CEHRGPTPreTrainedModel):
     def __init__(self, config: CEHRGPTConfig):
         super().__init__(config)
+
+        if self.config.causal_sfm:
+            config.n_positions += 1
 
         self.exclude_position_ids = config.exclude_position_ids
         self.include_values = config.include_values
@@ -492,6 +495,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
+        random_vectors: Optional[torch.FloatTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
@@ -518,6 +522,14 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         input_ids = input_ids.view(-1, input_shape[-1])
         batch_size = input_ids.shape[0]
 
+        if self.config.causal_sfm:
+            # Convert torch.Size to a list
+            shape_list = list(input_shape)
+            # Increment the last dimension
+            shape_list[-1] += 1
+            # Convert list back to torch.Size if needed
+            input_shape = torch.Size(shape_list)
+
         device = input_ids.device
 
         if past_key_values is None:
@@ -534,12 +546,6 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 device=device,
             )
             position_ids = position_ids.unsqueeze(0)
-
-        if position_ids is not None and self.config.causal_sfm:
-            # When causal_sfm is set to True, we will inject one more embedding into the sequence embeddings
-            position_ids = torch.concat(
-                [position_ids, torch.max(position_ids, dim=-1, keepdim=True)[0] + 1]
-            )
 
         # GPT2Attention mask.
         if attention_mask is not None:
@@ -587,9 +593,19 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         if self.config.causal_sfm:
             demographic_embeddings = input_embeddings[:, :4]
             medical_event_embeddings = input_embeddings[:, 4:]
-            random_vectors = torch.rand_like(input_embeddings[:, :1])
+            if random_vectors is None:
+                random_vectors = torch.rand_like(input_embeddings[:, :1])
             input_embeddings = torch.concat(
-                [demographic_embeddings, random_vectors, medical_event_embeddings]
+                [demographic_embeddings, random_vectors, medical_event_embeddings],
+                dim=1,
+            )
+            attention_mask = torch.concat(
+                [
+                    attention_mask[..., :4],
+                    attention_mask[..., :1],
+                    attention_mask[..., 4:],
+                ],
+                dim=-1,
             )
 
         if not self.exclude_position_ids:
@@ -789,6 +805,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         attention_mask = kwargs.get("attention_mask", None)
         position_ids = kwargs.get("position_ids", None)
+        random_vectors = kwargs.get("random_vectors", None)
 
         if attention_mask is not None and position_ids is None:
             # create position_ids on the fly for batch generation
@@ -840,6 +857,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 "use_cache": kwargs.get("use_cache"),
                 "position_ids": position_ids,
                 "attention_mask": attention_mask,
+                "random_vectors": random_vectors,
             }
         )
 
@@ -854,6 +872,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         attention_mask: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
+        random_vectors: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         true_value_indicators: Optional[torch.BoolTensor] = None,
         true_values: Optional[torch.FloatTensor] = None,
@@ -882,6 +901,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             past_key_values=past_key_values,
             attention_mask=attention_mask,
             position_ids=position_ids,
+            random_vectors=random_vectors,
             head_mask=head_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
@@ -889,6 +909,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             return_dict=return_dict,
         )
         hidden_states = transformer_outputs[0]
+        # get rid of the random vector:
+        if self.config.causal_sfm:
+            hidden_states = torch.concat(
+                [hidden_states[:, :4], hidden_states[:, 5:]], dim=1
+            )
 
         # Set device for model parallelism
         if self.model_parallel:
@@ -1131,6 +1156,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             input_ids,
             dtype=torch.bfloat16 if is_flash_attn_2_available() else torch.float32,
         )
+        # Generate initial random_vectors
+        if self.cehrgpt.config.causal_sfm:
+            model_kwargs["random_vectors"] = torch.rand_like(input_ids[:, :1])
+        else:
+            model_kwargs["random_vectors"] = None
         model_kwargs["value_indicators"] = value_indicators
         model_kwargs["values"] = values
         while self._has_unfinished_sequences(
