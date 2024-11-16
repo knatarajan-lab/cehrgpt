@@ -101,6 +101,7 @@ def load_and_create_model(
             token_to_time_token_mapping=tokenizer.token_to_time_token_mapping,
             attn_implementation=attn_implementation,
             causal_sfm=cehrgpt_args.causal_sfm,
+            demographics_size=cehrgpt_args.demographics_size,
             **model_args.as_dict(),
         )
     return CEHRGPT2LMHeadModel(model_config)

@@ -21,7 +21,6 @@ from transformers.pytorch_utils import Conv1D
 from transformers.utils import is_flash_attn_2_available, logging
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 
-from cehrgpt.generation.omop_converter_batch import START_TOKEN_SIZE
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_modeling_outputs import (
     CehrGptCausalLMOutput,
@@ -521,7 +520,10 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         batch_size = input_ids.shape[0]
 
         # When causal SFM is enabled, we need to expand the context window by one to make room for the random vector
-        if self.config.causal_sfm and input_ids.shape[1] >= START_TOKEN_SIZE:
+        if (
+            self.config.causal_sfm
+            and input_ids.shape[1] >= self.config.demographics_size
+        ):
             # Convert torch.Size to a list
             shape_list = list(input_shape)
             # Increment the last dimension
@@ -591,9 +593,13 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 concept_values=values,
             )
 
-        if self.config.causal_sfm and input_shape[1] >= START_TOKEN_SIZE:
-            demographic_embeddings = input_embeddings[:, :START_TOKEN_SIZE]
-            medical_event_embeddings = input_embeddings[:, START_TOKEN_SIZE:]
+        if self.config.causal_sfm and input_shape[1] >= self.config.demographics_size:
+            demographic_embeddings = input_embeddings[
+                :, : self.config.demographics_size
+            ]
+            medical_event_embeddings = input_embeddings[
+                :, self.config.demographics_size :
+            ]
             if random_vectors is None:
                 random_vectors = torch.rand_like(input_embeddings[:, :1])
             input_embeddings = torch.concat(
@@ -601,12 +607,15 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 dim=1,
             )
 
-        if self.config.causal_sfm and attention_mask.shape[-1] >= START_TOKEN_SIZE:
+        if (
+            self.config.causal_sfm
+            and attention_mask.shape[-1] >= self.config.demographics_size
+        ):
             attention_mask = torch.concat(
                 [
-                    attention_mask[..., :START_TOKEN_SIZE],
+                    attention_mask[..., : self.config.demographics_size],
                     attention_mask.new_ones(attention_mask.shape[0:3] + (1,)),
-                    attention_mask[..., START_TOKEN_SIZE:],
+                    attention_mask[..., self.config.demographics_size :],
                 ],
                 dim=-1,
             )
@@ -822,7 +831,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # Add one more position for the random vectors
             if (
                 self.cehrgpt.config.causal_sfm
-                and position_ids.shape[-1] >= START_TOKEN_SIZE
+                and position_ids.shape[-1] >= self.cehrgpt.config.demographics_size
             ):
                 position_ids = torch.concat(
                     [
@@ -928,11 +937,14 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         )
         hidden_states = transformer_outputs[0]
         # get rid of the random vector:
-        if self.config.causal_sfm:
+        if (
+            self.config.causal_sfm
+            and hidden_states.shape[1] > self.config.demographics_size + 1
+        ):
             hidden_states = torch.concat(
                 [
-                    hidden_states[:, :START_TOKEN_SIZE],
-                    hidden_states[:, START_TOKEN_SIZE + 1 :],
+                    hidden_states[:, : self.config.demographics_size],
+                    hidden_states[:, self.config.demographics_size + 1 :],
                 ],
                 dim=1,
             )

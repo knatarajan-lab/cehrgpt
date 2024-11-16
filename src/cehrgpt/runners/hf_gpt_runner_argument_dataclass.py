@@ -78,3 +78,10 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether the GPT conforms to the causal Standard Fairness Model"
         },
     )
+    demographics_size: Optional[int] = dataclasses.field(
+        default=4,
+        metadata={
+            "help": "The number of demographics tokens in the patient sequence "
+            "It defaults to 4, assuming the demographics tokens follow this pattern [Year][Age][Gender][Race]"
+        },
+    )
