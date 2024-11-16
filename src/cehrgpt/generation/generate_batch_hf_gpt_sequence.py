@@ -10,6 +10,7 @@ from transformers import GenerationConfig
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.cehrgpt_args import create_inference_base_arg_parser
+from cehrgpt.generation.omop_converter_batch import START_TOKEN_SIZE
 from cehrgpt.gpt_utils import get_cehrgpt_output_folder
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import NA, CehrGptTokenizer
@@ -158,10 +159,10 @@ def main(args):
     LOG.info(f"Loading demographic_info at {args.demographic_data_path}")
 
     data = pd.read_parquet(args.demographic_data_path)
-
-    data = pd.read_parquet(args.demographic_data_path)
     # data = data[data.num_of_concepts >= args.min_num_of_concepts]
-    demographic_info = data.concept_ids.apply(lambda concept_list: concept_list[0:4])
+    demographic_info = data.concept_ids.apply(
+        lambda concept_list: concept_list[:START_TOKEN_SIZE]
+    )
     demographic_info = [cehrgpt_tokenizer.encode(_) for _ in demographic_info]
 
     num_of_batches = args.num_of_patients // args.batch_size + 1

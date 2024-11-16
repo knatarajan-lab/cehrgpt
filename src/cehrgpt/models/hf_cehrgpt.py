@@ -21,6 +21,7 @@ from transformers.pytorch_utils import Conv1D
 from transformers.utils import is_flash_attn_2_available, logging
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 
+from cehrgpt.generation.omop_converter_batch import START_TOKEN_SIZE
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_modeling_outputs import (
     CehrGptCausalLMOutput,
@@ -591,8 +592,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             )
 
         if self.config.causal_sfm:
-            demographic_embeddings = input_embeddings[:, :4]
-            medical_event_embeddings = input_embeddings[:, 4:]
+            demographic_embeddings = input_embeddings[:, :START_TOKEN_SIZE]
+            medical_event_embeddings = input_embeddings[:, START_TOKEN_SIZE:]
             if random_vectors is None:
                 random_vectors = torch.rand_like(input_embeddings[:, :1])
             input_embeddings = torch.concat(
@@ -601,9 +602,9 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             )
             attention_mask = torch.concat(
                 [
-                    attention_mask[..., :4],
+                    attention_mask[..., :START_TOKEN_SIZE],
                     attention_mask[..., :1],
-                    attention_mask[..., 4:],
+                    attention_mask[..., START_TOKEN_SIZE:],
                 ],
                 dim=-1,
             )
@@ -912,7 +913,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # get rid of the random vector:
         if self.config.causal_sfm:
             hidden_states = torch.concat(
-                [hidden_states[:, :4], hidden_states[:, 5:]], dim=1
+                [
+                    hidden_states[:, :START_TOKEN_SIZE],
+                    hidden_states[:, START_TOKEN_SIZE + 1 :],
+                ],
+                dim=1,
             )
 
         # Set device for model parallelism

@@ -50,7 +50,6 @@ TABLE_LIST = [
 DISCHARGE_CONCEPT_LIST = [4216643, 4021968, 4146681]
 OOV_CONCEPT_MAP = {
     1525734: "Drug",
-    1525543: "Drug",
     779414: "Drug",
     722117: "Drug",
     722118: "Drug",
