@@ -60,6 +60,8 @@ class HfCehrGptCausalRunnerIntegrationTest(unittest.TestCase):
             "--hidden_size",
             "192",
             "--causal_sfm",
+            "--demographics_size",
+            "4",
         ]
         train_main()
 
