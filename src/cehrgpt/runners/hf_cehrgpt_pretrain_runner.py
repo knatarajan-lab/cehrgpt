@@ -90,6 +90,8 @@ def load_and_create_model(
         )
     except Exception as e:
         LOG.warning(e)
+        if cehrgpt_args.causal_sfm:
+            model_args.max_position_embeddings += 1
         model_config = CEHRGPTConfig(
             vocab_size=tokenizer.vocab_size,
             time_token_vocab_size=tokenizer.time_token_vocab_size,
@@ -192,11 +194,14 @@ def main():
                 dataset = dataset.shuffle(buffer_size=10_000, seed=training_args.seed)
                 train_set = dataset.skip(data_args.validation_split_num)
                 val_set = dataset.take(data_args.validation_split_num)
-                dataset = DatasetDict({"train": train_set, "test": val_set})
+                dataset = DatasetDict({"train": train_set, "validation": val_set})
             elif data_args.validation_split_percentage:
                 dataset = dataset.train_test_split(
                     test_size=data_args.validation_split_percentage,
                     seed=training_args.seed,
+                )
+                dataset = DatasetDict(
+                    {"train": dataset["train"], "validation": dataset["test"]}
                 )
             else:
                 raise RuntimeError(
@@ -272,14 +277,6 @@ def main():
     if not data_args.streaming:
         processed_dataset.set_format("pt")
 
-    eval_dataset = None
-    if isinstance(processed_dataset, DatasetDict):
-        train_dataset = processed_dataset["train"]
-        if "test" in processed_dataset:
-            eval_dataset = processed_dataset["test"]
-    else:
-        train_dataset = processed_dataset
-
     trainer = Trainer(
         model=model,
         data_collator=CehrGptDataCollator(
@@ -290,8 +287,8 @@ def main():
             include_ttv_prediction=model_args.include_ttv_prediction,
             use_sub_time_tokenization=model_args.use_sub_time_tokenization,
         ),
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
+        train_dataset=processed_dataset["train"],
+        eval_dataset=processed_dataset["validation"],
         args=training_args,
     )
 

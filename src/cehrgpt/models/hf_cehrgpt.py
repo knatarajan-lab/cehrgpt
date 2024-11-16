@@ -392,9 +392,6 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
     def __init__(self, config: CEHRGPTConfig):
         super().__init__(config)
 
-        if self.config.causal_sfm:
-            config.n_positions += 1
-
         self.exclude_position_ids = config.exclude_position_ids
         self.include_values = config.include_values
         self.include_ttv_prediction = config.include_ttv_prediction
@@ -523,7 +520,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         input_ids = input_ids.view(-1, input_shape[-1])
         batch_size = input_ids.shape[0]
 
-        if self.config.causal_sfm:
+        # When causal SFM is enabled, we need to expand the context window by one to make room for the random vector
+        if self.config.causal_sfm and input_ids.shape[1] >= START_TOKEN_SIZE:
             # Convert torch.Size to a list
             shape_list = list(input_shape)
             # Increment the last dimension
@@ -539,6 +537,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         else:
             past_length = past_key_values[0][0].size(-2)
 
+        # This is normally called during training or fine-tuning.
+        # While the generation logic will handle position_ids in the sampling logic
         if position_ids is None and not self.exclude_position_ids:
             position_ids = torch.arange(
                 past_length,
@@ -591,7 +591,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 concept_values=values,
             )
 
-        if self.config.causal_sfm:
+        if self.config.causal_sfm and input_shape[1] >= START_TOKEN_SIZE:
             demographic_embeddings = input_embeddings[:, :START_TOKEN_SIZE]
             medical_event_embeddings = input_embeddings[:, START_TOKEN_SIZE:]
             if random_vectors is None:
@@ -600,10 +600,12 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 [demographic_embeddings, random_vectors, medical_event_embeddings],
                 dim=1,
             )
+
+        if self.config.causal_sfm and attention_mask.shape[-1] >= START_TOKEN_SIZE:
             attention_mask = torch.concat(
                 [
                     attention_mask[..., :START_TOKEN_SIZE],
-                    attention_mask[..., :1],
+                    attention_mask.new_ones(attention_mask.shape[0:3] + (1,)),
                     attention_mask[..., START_TOKEN_SIZE:],
                 ],
                 dim=-1,
@@ -794,7 +796,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # Omit tokens covered by past_key_values
         if past_key_values:
             past_length = past_key_values[0][0].shape[2]
-
+            # Subtract the past_length by 1 due to the random vector
+            if self.cehrgpt.config.causal_sfm:
+                past_length -= 1
             # Some generation methods already pass only the last input ID
             if input_ids.shape[1] > past_length:
                 remove_prefix_length = past_length
@@ -814,6 +818,19 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             position_ids.masked_fill_(attention_mask == 0, 1)
             if past_key_values:
                 position_ids = position_ids[:, -input_ids.shape[1] :]
+
+            # Add one more position for the random vectors
+            if (
+                self.cehrgpt.config.causal_sfm
+                and position_ids.shape[-1] >= START_TOKEN_SIZE
+            ):
+                position_ids = torch.concat(
+                    [
+                        position_ids,
+                        torch.max(position_ids, dim=-1, keepdim=True)[0] + 1,
+                    ],
+                    dim=-1,
+                )
         else:
             position_ids = None
 
@@ -1163,7 +1180,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         )
         # Generate initial random_vectors
         if self.cehrgpt.config.causal_sfm:
-            model_kwargs["random_vectors"] = torch.rand_like(input_ids[:, :1])
+            model_kwargs["random_vectors"] = torch.rand(
+                [batch_size, 1, self.cehrgpt.embed_dim],
+                dtype=(
+                    torch.bfloat16 if is_flash_attn_2_available() else torch.float32
+                ),
+            )
         else:
             model_kwargs["random_vectors"] = None
         model_kwargs["value_indicators"] = value_indicators

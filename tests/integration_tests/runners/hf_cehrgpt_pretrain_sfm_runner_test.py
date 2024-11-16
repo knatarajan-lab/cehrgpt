@@ -5,9 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pandas as pd
 from datasets import disable_caching
 
-from cehrgpt.runners.hf_cehrgpt_pretrain_runner import main
+from cehrgpt.generation.generate_batch_hf_gpt_sequence import create_arg_parser
+from cehrgpt.generation.generate_batch_hf_gpt_sequence import main as generate_main
+from cehrgpt.runners.hf_cehrgpt_pretrain_runner import main as train_main
 
 disable_caching()
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
@@ -16,18 +19,26 @@ os.environ["TRANSFORMERS_VERBOSITY"] = "info"
 
 
 class HfCehrGptCausalRunnerIntegrationTest(unittest.TestCase):
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
         # Get the root folder of the project
         root_folder = Path(os.path.abspath(__file__)).parent.parent.parent.parent
-        data_folder = os.path.join(root_folder, "sample_data", "pretrain")
+        cls.data_folder = os.path.join(root_folder, "sample_data", "pretrain")
         # Create a temporary directory to store model and tokenizer
-        self.temp_dir = tempfile.mkdtemp()
-        self.model_folder_path = os.path.join(self.temp_dir, "model")
-        Path(self.model_folder_path).mkdir(parents=True, exist_ok=True)
-        self.dataset_prepared_path = os.path.join(
-            self.temp_dir, "dataset_prepared_path"
-        )
-        Path(self.dataset_prepared_path).mkdir(parents=True, exist_ok=True)
+        cls.temp_dir = tempfile.mkdtemp()
+        cls.model_folder_path = os.path.join(cls.temp_dir, "model")
+        Path(cls.model_folder_path).mkdir(parents=True, exist_ok=True)
+        cls.dataset_prepared_path = os.path.join(cls.temp_dir, "dataset_prepared_path")
+        Path(cls.dataset_prepared_path).mkdir(parents=True, exist_ok=True)
+        cls.generation_folder_path = os.path.join(cls.temp_dir, "generation")
+        Path(cls.generation_folder_path).mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        # Remove the temporary directory
+        shutil.rmtree(cls.temp_dir)
+
+    def test_1_train_model(self):
         sys.argv = [
             "hf_cehrgpt_pretraining_runner.py",
             "--model_name_or_path",
@@ -37,22 +48,48 @@ class HfCehrGptCausalRunnerIntegrationTest(unittest.TestCase):
             "--output_dir",
             self.model_folder_path,
             "--data_folder",
-            data_folder,
+            self.data_folder,
             "--dataset_prepared_path",
             self.dataset_prepared_path,
             "--max_steps",
-            "10",
+            "40",
+            "--save_steps",
+            "40",
+            "--save_strategy",
+            "steps",
             "--hidden_size",
             "192",
             "--causal_sfm",
         ]
+        train_main()
 
-    def tearDown(self):
-        # Remove the temporary directory
-        shutil.rmtree(self.temp_dir)
-
-    def test_train_model(self):
-        main()
+    def test_2_generate_model(self):
+        sys.argv = [
+            "generate_batch_hf_gpt_sequence.py",
+            "--model_folder",
+            self.model_folder_path,
+            "--tokenizer_folder",
+            self.model_folder_path,
+            "--output_folder",
+            self.generation_folder_path,
+            "--context_window",
+            "128",
+            "--num_of_patients",
+            "16",
+            "--batch_size",
+            "4",
+            "--buffer_size",
+            "16",
+            "--sampling_strategy",
+            "TopPStrategy",
+            "--demographic_data_path",
+            self.data_folder,
+        ]
+        args = create_arg_parser().parse_args()
+        generate_main(args)
+        generated_sequences = pd.read_parquet(self.generation_folder_path)
+        for concept_ids in generated_sequences.concept_ids:
+            print(concept_ids)
 
 
 if __name__ == "__main__":
