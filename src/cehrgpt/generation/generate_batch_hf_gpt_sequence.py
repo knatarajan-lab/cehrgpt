@@ -161,7 +161,7 @@ def main(args):
     data = pd.read_parquet(args.demographic_data_path)
     # data = data[data.num_of_concepts >= args.min_num_of_concepts]
     demographic_info = data.concept_ids.apply(
-        lambda concept_list: concept_list[:START_TOKEN_SIZE]
+        lambda concept_list: concept_list[: START_TOKEN_SIZE + 1]
     )
     demographic_info = [cehrgpt_tokenizer.encode(_) for _ in demographic_info]
 

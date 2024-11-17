@@ -52,18 +52,23 @@ class HfCehrGptCausalRunnerIntegrationTest(unittest.TestCase):
             "--dataset_prepared_path",
             self.dataset_prepared_path,
             "--max_steps",
-            "40",
+            "1000",
             "--save_steps",
-            "40",
+            "1000",
             "--save_strategy",
             "steps",
             "--hidden_size",
             "192",
+            "--use_sub_time_tokenization",
+            "false",
+            "--include_ttv_prediction",
+            "false",
             "--causal_sfm",
             "--demographics_size",
             "4",
         ]
         train_main()
+        # Teacher force the prompt to consist of [year][age][gender][race][VS] then inject the random vector before [VS]
 
     def test_2_generate_model(self):
         sys.argv = [
