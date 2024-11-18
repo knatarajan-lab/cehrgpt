@@ -614,7 +614,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             attention_mask = torch.concat(
                 [
                     attention_mask[..., : self.config.demographics_size],
-                    attention_mask.new_ones(attention_mask.shape[0:3] + (1,)),
+                    attention_mask.new_ones(attention_mask.shape[0:1] + (1,)),
                     attention_mask[..., self.config.demographics_size :],
                 ],
                 dim=-1,
