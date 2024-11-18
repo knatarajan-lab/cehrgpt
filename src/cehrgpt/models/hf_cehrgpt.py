@@ -1197,6 +1197,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 dtype=(
                     torch.bfloat16 if is_flash_attn_2_available() else torch.float32
                 ),
+                device=input_ids.device,
             )
         else:
             model_kwargs["random_vectors"] = None
