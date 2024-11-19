@@ -965,6 +965,16 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         if labels is not None:
             # move labels to correct device to enable model parallelism
             labels = labels.to(lm_logits.device)
+            # If causal_sfm is enabled, we need to block the loss terms associated with the demographics
+            # because otherwise it violate the SFM assumptions for X and Z
+            if self.cehrgpt.config.causal_sfm:
+                labels.index_fill_(
+                    1,
+                    torch.arange(self.cehrgpt.config.demographics_size).to(
+                        lm_logits.device
+                    ),
+                    -100,
+                )
             # Shift so that tokens < n predict n
             shift_logits = lm_logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()

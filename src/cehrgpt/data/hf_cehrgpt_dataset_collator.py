@@ -126,7 +126,10 @@ class CehrGptDataCollator:
         assert batch["attention_mask"].shape[1] <= self.max_length
 
         if self.pretraining:
-            batch["labels"] = batch["input_ids"].clone()
+            labels = batch["input_ids"].clone()
+            batch["labels"] = torch.where(
+                labels == self.tokenizer.pad_token_id, -100, labels
+            )
 
         if self.use_sub_time_tokenization:
             time_token_indicators = torch.isin(batch["input_ids"], self.time_tokens)
