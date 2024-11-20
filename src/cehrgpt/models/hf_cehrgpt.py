@@ -559,12 +559,11 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 self.config.causal_sfm
                 and attention_mask.shape[-1] >= self.config.demographics_size
             ):
-                # Specify the indices to set to 0
-                rows = [1, 2, 2, 3, 3, 3]
-                cols = [0, 0, 1, 0, 1, 2]
-                # Set the specified indices to 0
-                attention_mask[rows, cols] = 0.0
-
+                # # Specify the indices to set to 0
+                # rows = [1, 2, 2, 3, 3, 3]
+                # cols = [0, 0, 1, 0, 1, 2]
+                # # Set the specified indices to 0
+                # attention_mask[rows, cols] = 0.0
                 attention_mask = torch.concat(
                     [
                         attention_mask[..., : self.config.demographics_size],
