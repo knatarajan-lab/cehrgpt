@@ -555,6 +555,25 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             if batch_size <= 0:
                 raise ValueError("batch_size has to be defined and > 0")
 
+            if (
+                self.config.causal_sfm
+                and attention_mask.shape[-1] >= self.config.demographics_size
+            ):
+                # Specify the indices to set to 0
+                rows = [1, 2, 2, 3, 3, 3]
+                cols = [0, 0, 1, 0, 1, 2]
+                # Set the specified indices to 0
+                attention_mask[rows, cols] = 0.0
+
+                attention_mask = torch.concat(
+                    [
+                        attention_mask[..., : self.config.demographics_size],
+                        attention_mask.new_ones(attention_mask.shape[:-1] + (1,)),
+                        attention_mask[..., self.config.demographics_size :],
+                    ],
+                    dim=-1,
+                )
+
             # The flash attention requires the original attention_mask
             if (
                 not getattr(self.config, "_attn_implementation", "eager")
@@ -605,19 +624,6 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             input_embeddings = torch.concat(
                 [demographic_embeddings, random_vectors, medical_event_embeddings],
                 dim=1,
-            )
-
-        if (
-            self.config.causal_sfm
-            and attention_mask.shape[-1] >= self.config.demographics_size
-        ):
-            attention_mask = torch.concat(
-                [
-                    attention_mask[..., : self.config.demographics_size],
-                    attention_mask.new_ones(attention_mask.shape[:-1] + (1,)),
-                    attention_mask[..., self.config.demographics_size :],
-                ],
-                dim=-1,
             )
 
         if not self.exclude_position_ids:
@@ -965,16 +971,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         if labels is not None:
             # move labels to correct device to enable model parallelism
             labels = labels.to(lm_logits.device)
-            # If causal_sfm is enabled, we need to block the loss terms associated with the demographics
-            # because otherwise it violate the SFM assumptions for X and Z
-            if self.cehrgpt.config.causal_sfm:
-                labels.index_fill_(
-                    1,
-                    torch.arange(self.cehrgpt.config.demographics_size).to(
-                        lm_logits.device
-                    ),
-                    -100,
-                )
             # Shift so that tokens < n predict n
             shift_logits = lm_logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
