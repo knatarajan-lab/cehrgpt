@@ -255,11 +255,7 @@ class NumericEventStatistics:
             bins = concept_unit_stats["bins"]
             if bins:
                 for each_bin in bins:
-                    if (
-                        each_bin["start_value"]
-                        <= concept_value
-                        <= each_bin["end_value"]
-                    ):
+                    if each_bin["start_val"] <= concept_value <= each_bin["end_val"]:
                         return create_value_bin(each_bin["bin_index"])
             else:
                 return UNKNOWN_BIN
@@ -711,6 +707,9 @@ class CehrGptTokenizer(PushToHubMixin):
                     for _ in range(NUM_OF_BINS)
                 ]
             )
+            concept_tokenizer.add_tokens(
+                [AddedToken(UNKNOWN_BIN, single_word=True, normalized=False)]
+            )
 
             map_statistics_partial = partial(
                 map_statistics, size=data_args.offline_stats_capacity
@@ -748,19 +747,19 @@ class CehrGptTokenizer(PushToHubMixin):
                 "numeric_stats_by_lab"
             ].items():
                 # The lab needs to have a sample of num_of_bins times 2 values to be included
-                if len(online_stats.sample) < NUM_OF_BINS * 2:
+                if len(online_stats.samples) < NUM_OF_BINS * 2:
                     continue
-                sample = truncated_sample(
-                    online_stats.sample, data_args.value_outlier_std
+                samples = truncated_sample(
+                    online_stats.samples, data_args.value_outlier_std
                 )
-                bins = create_bins_with_spline(sample, NUM_OF_BINS, DEGREE_OF_FREEDOM)
+                bins = create_bins_with_spline(samples, NUM_OF_BINS, DEGREE_OF_FREEDOM)
                 lab_stats.append(
                     {
                         "concept_id": concept_id,
                         "unit": unit,
-                        "mean": np.mean(sample),
-                        "std": np.std(sample),
-                        "count": len(online_stats.sample),
+                        "mean": np.mean(samples),
+                        "std": np.std(samples),
+                        "count": len(online_stats.samples),
                         "value_outlier_std": data_args.value_outlier_std,
                         "bins": bins,
                     }

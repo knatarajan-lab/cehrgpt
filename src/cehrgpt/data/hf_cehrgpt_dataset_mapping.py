@@ -55,9 +55,14 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
                     concept_value_bin = self._concept_tokenizer.normalize(
                         concept_id, unit, concept_value
                     )
-                    updated_input_ids.append(concept_value_bin)
+                    concept_value_token_id = (
+                        self._concept_tokenizer._tokenizer.token_to_id(
+                            concept_value_bin
+                        )
+                    )
+                    updated_input_ids.append(int(concept_value_token_id))
                     num_of_labs += 1
-            assert len(updated_input_ids == num_of_labs + len(concept_ids))
+            assert len(updated_input_ids) == num_of_labs + len(concept_ids)
             record["input_ids"] = updated_input_ids
         return record
 
