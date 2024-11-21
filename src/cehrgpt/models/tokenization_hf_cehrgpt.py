@@ -616,8 +616,10 @@ class CehrGptTokenizer(PushToHubMixin):
 
             concept_tokenizer.train_from_iterator(generator, trainer=concept_trainer)
             concept_tokenizer.add_tokens(
-                AddedToken("BIN:{i}", single_word=True, normalized=False)
-                for i in range(NUM_OF_BINS)
+                [
+                    AddedToken(f"BIN:{i}", single_word=True, normalized=False)
+                    for i in range(NUM_OF_BINS)
+                ]
             )
 
             map_statistics_partial = partial(
@@ -706,10 +708,10 @@ class CehrGptTokenizer(PushToHubMixin):
             concept_name_mapping,
         )
 
-    def normalize(self, concept_id: str, unit: str, concept_value: float) -> float:
+    def normalize(self, concept_id: str, unit: str, concept_value: float) -> str:
         return self._numeric_event_statistics.normalize(concept_id, unit, concept_value)
 
-    def denormalize(self, concept_id: str, value: float) -> Tuple[float, str]:
+    def denormalize(self, concept_id: str, value: str) -> Tuple[float, str]:
         return self._numeric_event_statistics.denormalize(concept_id, value)
 
     @classmethod
