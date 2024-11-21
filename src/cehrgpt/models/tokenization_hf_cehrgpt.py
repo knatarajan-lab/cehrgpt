@@ -58,6 +58,14 @@ def truncated_sample(sample, standard_deviation):
     return [x for x in sample if lower_bound <= x <= upper_bound]
 
 
+def is_valid_valid_bin(token: str) -> bool:
+    return token.startswith("BIN:")
+
+
+def create_value_bin(bin_index: int) -> str:
+    return "BIN:" + str(bin_index)
+
+
 def create_sample_from_bins(bins, sample_size: int = 10_000) -> List[float]:
     sample = []
     num_of_bins = len(bins)
@@ -180,7 +188,7 @@ class NumericEventStatistics:
                         <= concept_value
                         <= each_bin["end_value"]
                     ):
-                        return "BIN:" + str(each_bin["bin_index"])
+                        return create_value_bin(each_bin["bin_index"])
             else:
                 return UNKNOWN_BIN
 
@@ -189,7 +197,10 @@ class NumericEventStatistics:
     ) -> Tuple[Optional[float], str]:
         unit = self.get_random_unit(concept_id)
         concept_value = None
-        if (concept_id, unit) in self._lab_stats_mapping:
+        if (
+            is_valid_valid_bin(value_bin)
+            and (concept_id, unit) in self._lab_stats_mapping
+        ):
             lab_stats = self._lab_stats_mapping[(concept_id, unit)]
             bin_index = int(value_bin.split(":")[1])
             assert bin_index == lab_stats["bins"][bin_index]["bin_index"]
@@ -219,6 +230,9 @@ class CehrGptTokenizer(PushToHubMixin):
         self._padding_token_id = self._tokenizer.token_to_id(PAD_TOKEN)
         self._start_token_id = self._tokenizer.token_to_id(START_TOKEN)
         self._end_token_id = self._tokenizer.token_to_id(END_TOKEN)
+        self._numeric_concept_ids = (
+            self._numeric_event_statistics.get_numeric_concept_ids()
+        )
 
         super().__init__()
 
@@ -241,6 +255,10 @@ class CehrGptTokenizer(PushToHubMixin):
     @property
     def pad_token_id(self):
         return self._padding_token_id
+
+    @property
+    def numeric_concept_ids(self):
+        return self._numeric_concept_ids
 
     @property
     def lab_token_ids(self):
@@ -617,8 +635,8 @@ class CehrGptTokenizer(PushToHubMixin):
             concept_tokenizer.train_from_iterator(generator, trainer=concept_trainer)
             concept_tokenizer.add_tokens(
                 [
-                    AddedToken(f"BIN:{i}", single_word=True, normalized=False)
-                    for i in range(NUM_OF_BINS)
+                    AddedToken(create_value_bin(_), single_word=True, normalized=False)
+                    for _ in range(NUM_OF_BINS)
                 ]
             )
 
@@ -711,8 +729,8 @@ class CehrGptTokenizer(PushToHubMixin):
     def normalize(self, concept_id: str, unit: str, concept_value: float) -> str:
         return self._numeric_event_statistics.normalize(concept_id, unit, concept_value)
 
-    def denormalize(self, concept_id: str, value: str) -> Tuple[float, str]:
-        return self._numeric_event_statistics.denormalize(concept_id, value)
+    def denormalize(self, concept_id: str, value_bin: str) -> Tuple[float, str]:
+        return self._numeric_event_statistics.denormalize(concept_id, value_bin)
 
     @classmethod
     def batch_concat_concepts(
