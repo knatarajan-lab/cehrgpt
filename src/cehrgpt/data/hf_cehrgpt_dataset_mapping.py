@@ -1,4 +1,3 @@
-import copy
 import datetime
 from typing import Any, Dict
 
@@ -31,11 +30,11 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
         record["input_ids"] = input_ids
         concept_value_masks = record["concept_value_masks"]
         concept_values = record["concept_values"]
-
         # If any concept has a value associated with it, we normalize the value
         if np.any(np.asarray(concept_value_masks) > 0):
+            updated_input_ids = []
             units = record["units"]
-            normalized_concept_values = copy.deepcopy(concept_values)
+            num_of_labs = 0
             for i, (
                 concept_id,
                 unit,
@@ -51,16 +50,15 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
                     concept_values,
                 )
             ):
+                updated_input_ids.append(token_id)
                 if token_id in self._lab_token_ids:
-                    normalized_concept_value = self._concept_tokenizer.normalize(
+                    concept_value_bin = self._concept_tokenizer.normalize(
                         concept_id, unit, concept_value
                     )
-                    normalized_concept_values[i] = normalized_concept_value
-            record["concept_values"] = normalized_concept_values
-
-        # Overwrite the column names
-        record["value_indicators"] = record["concept_value_masks"]
-        record["values"] = record["concept_values"]
+                    updated_input_ids.append(concept_value_bin)
+                    num_of_labs += 1
+            assert len(updated_input_ids == num_of_labs + len(concept_ids))
+            record["input_ids"] = updated_input_ids
         return record
 
 

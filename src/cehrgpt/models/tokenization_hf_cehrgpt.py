@@ -5,19 +5,20 @@ import os
 import pickle
 from functools import partial
 from itertools import islice
-from typing import Any, Dict, List, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
+import scipy.stats as stats
 import transformers
 from cehrbert.models.hf_models.tokenization_utils import (
     agg_helper,
     agg_statistics,
     load_json_file,
-    map_statistics,
 )
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import Dataset, DatasetDict
-from femr.stat_utils import OnlineStatistics
+from femr.stat_utils import OnlineStatistics, ReservoirSampler
+from scipy.interpolate import UnivariateSpline
 from tokenizers import AddedToken, Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
@@ -38,12 +39,86 @@ from cehrgpt.models.special_tokens import (
     START_TOKEN,
 )
 
+NUM_OF_BINS = 10
+DEGREE_OF_FREEDOM = 1
 NA = "N/A"
+UNKNOWN_BIN = "BIN:unknown"
 TOKENIZER_FILE_NAME = "cehrgpt_tokenizer.json"
 TIME_TOKENIZER_FILE_NAME = "cehrgpt_time_tokenizer.json"
 TOKEN_TO_SUB_TIME_TOKEN_MAPPING_FILE_NAME = "token_to_sub_time_token_mapping.json"
-LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.json"
+LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.pickle"
 CONCEPT_MAPPING_FILE_NAME = "concept_name_mapping.json"
+
+
+def truncated_sample(sample, standard_deviation):
+    lower_quantile = stats.norm.cdf(-standard_deviation)
+    upper_quantile = stats.norm.cdf(standard_deviation)
+    lower_bound = np.quantile(sample, lower_quantile)
+    upper_bound = np.quantile(sample, upper_quantile)
+    return [x for x in sample if lower_bound <= x <= upper_bound]
+
+
+def create_sample_from_bins(bins, sample_size: int = 10_000) -> List[float]:
+    sample = []
+    num_of_bins = len(bins)
+    sample_per_bin = sample_size // num_of_bins
+    for value_bin in bins:
+        bin_spline = value_bin["spline"]
+        x = np.random.uniform(
+            bin_spline.get_knots()[0], bin_spline.get_knots()[-1], sample_per_bin
+        )
+        y = bin_spline(x)
+        sample.extend(y)
+    return sample
+
+
+def create_bins_with_spline(samples, num_bins, d_freedom=1) -> List[Dict[str, Any]]:
+    samples.sort()
+    bins = []
+    if len(samples) >= num_bins * (d_freedom + 1):
+        samples_per_bin = len(samples) // num_bins
+        for bin_index in range(0, num_bins):
+            if bin_index == 0:
+                start_val = float("-inf")
+            else:
+                start_val = samples[bin_index * samples_per_bin]
+
+            if bin_index == 9:
+                end_val = float("inf")
+            else:
+                end_val = samples[(bin_index + 1) * samples_per_bin]
+            x = range(bin_index * samples_per_bin, (bin_index + 1) * samples_per_bin)
+            y = samples[bin_index * samples_per_bin : (bin_index + 1) * samples_per_bin]
+            spline = UnivariateSpline(x, y, s=0.1, k=d_freedom)
+            bins.append(
+                {
+                    "bin_index": bin_index,
+                    "start_val": start_val,
+                    "end_val": end_val,
+                    "spline": spline,
+                }
+            )
+    return bins
+
+
+def map_statistics(batch: Dict[str, Any], size=10_000) -> Dict[str, Any]:
+    if "units" in batch:
+        concept_value_units = batch["units"]
+    else:
+        concept_value_units = [[NA for _ in cons] for cons in batch["concept_ids"]]
+    numeric_stats_by_lab = collections.defaultdict(partial(ReservoirSampler, size=size))
+    for concept_ids, concept_values, concept_value_indicators, units in zip(
+        batch["concept_ids"],
+        batch["concept_values"],
+        batch["concept_value_masks"],
+        concept_value_units,
+    ):
+        for concept_id, concept_value, concept_value_indicator, unit in zip(
+            concept_ids, concept_values, concept_value_indicators, units
+        ):
+            if concept_value_indicator == 1:
+                numeric_stats_by_lab[(concept_id, unit)].add(concept_value, 1)
+    return {"numeric_stats_by_lab": numeric_stats_by_lab}
 
 
 def create_numeric_concept_unit_mapping(
@@ -75,8 +150,7 @@ class NumericEventStatistics:
                 "mean": lab_stat["mean"],
                 "std": lab_stat["std"],
                 "value_outlier_std": lab_stat["value_outlier_std"],
-                "lower_bound": lab_stat["lower_bound"],
-                "upper_bound": lab_stat["upper_bound"],
+                "bins": lab_stat["bins"],
             }
             for lab_stat in lab_stats
         }
@@ -95,31 +169,34 @@ class NumericEventStatistics:
             )
         return NA
 
-    def normalize(self, concept_id: str, unit: str, concept_value: float) -> float:
+    def normalize(self, concept_id: str, unit: str, concept_value: float) -> str:
         if (concept_id, unit) in self._lab_stats_mapping:
             concept_unit_stats = self._lab_stats_mapping[(concept_id, unit)]
-            mean_ = concept_value - concept_unit_stats["mean"]
-            std = concept_unit_stats["std"]
-            if std > 0:
-                value_outlier_std = concept_unit_stats["value_outlier_std"]
-                normalized_value = mean_ / std
-                # Clip the value between the lower and upper bounds of the corresponding lab
-                normalized_value = max(
-                    -value_outlier_std, min(value_outlier_std, normalized_value)
-                )
+            bins = concept_unit_stats["bins"]
+            if bins:
+                for each_bin in bins:
+                    if (
+                        each_bin["start_value"]
+                        <= concept_value
+                        <= each_bin["end_value"]
+                    ):
+                        return "BIN:" + str(each_bin["bin_index"])
             else:
-                # If there is not a valid standard deviation,
-                # we just the normalized value to the mean of the standard normal
-                normalized_value = 0.0
-            return normalized_value
-        return concept_value
+                return UNKNOWN_BIN
 
-    def denormalize(self, concept_id: str, value: float) -> Tuple[float, str]:
+    def denormalize(
+        self, concept_id: str, value_bin: str
+    ) -> Tuple[Optional[float], str]:
         unit = self.get_random_unit(concept_id)
+        concept_value = None
         if (concept_id, unit) in self._lab_stats_mapping:
-            stats = self._lab_stats_mapping[(concept_id, unit)]
-            value = value * stats["std"] + stats["mean"]
-        return value, unit
+            lab_stats = self._lab_stats_mapping[(concept_id, unit)]
+            bin_index = int(value_bin.split(":")[1])
+            assert bin_index == lab_stats["bins"][bin_index]["bin_index"]
+            bin_spline = lab_stats["bins"][bin_index]["spline"]
+            x = np.random.uniform(bin_spline.get_knots()[0], bin_spline.get_knots()[-1])
+            concept_value = bin_spline(x).item()
+        return concept_value, unit
 
 
 class CehrGptTokenizer(PushToHubMixin):
@@ -257,8 +334,8 @@ class CehrGptTokenizer(PushToHubMixin):
         ) as f:
             json.dump(self._token_to_sub_time_token_mapping, f)
 
-        with open(os.path.join(save_directory, LAB_STATS_FILE_NAME), "w") as f:
-            json.dump(self._lab_stats, f)
+        with open(os.path.join(save_directory, LAB_STATS_FILE_NAME), "wb") as f:
+            pickle.dump(self._lab_stats, f)
 
         with open(os.path.join(save_directory, CONCEPT_MAPPING_FILE_NAME), "w") as f:
             json.dump(self._concept_name_mapping, f)
@@ -338,7 +415,9 @@ class CehrGptTokenizer(PushToHubMixin):
 
         concept_name_mapping = load_json_file(concept_name_mapping_file)
 
-        lab_stats = load_json_file(lab_stats_file)
+        with open(lab_stats_file, "rb") as file:
+            # Use pickle.load() to deserialize the byte stream into a Python object
+            lab_stats = pickle.load(file)
 
         return CehrGptTokenizer(
             tokenizer,
@@ -455,14 +534,15 @@ class CehrGptTokenizer(PushToHubMixin):
                     "std"
                 ] = existing.standard_deviation()
                 lab_stats_existing_mapping[concept_unit_pair]["count"] = existing.count
-                lab_stats_existing_mapping[concept_unit_pair]["lower_bound"] = min(
-                    lab_stats_existing_mapping[concept_unit_pair]["lower_bound"],
-                    lab_stat["lower_bound"],
+                # recreate the bins
+                sample = create_sample_from_bins(
+                    lab_stats_existing_mapping[concept_unit_pair]["bins"]
                 )
-                lab_stats_existing_mapping[concept_unit_pair]["upper_bound"] = max(
-                    lab_stats_existing_mapping[concept_unit_pair]["upper_bound"],
-                    lab_stat["upper_bound"],
+                sample.extend(create_sample_from_bins(lab_stat["bins"]))
+                lab_stats_existing_mapping[concept_unit_pair]["bins"] = (
+                    create_bins_with_spline(sample, NUM_OF_BINS, DEGREE_OF_FREEDOM)
                 )
+
             else:
                 if lab_stat["count"] > 0:
                     lab_stats_existing_mapping[concept_unit_pair] = lab_stat
@@ -535,11 +615,13 @@ class CehrGptTokenizer(PushToHubMixin):
                 generator = concatenated_features[feature_name]
 
             concept_tokenizer.train_from_iterator(generator, trainer=concept_trainer)
+            concept_tokenizer.add_tokens(
+                AddedToken("BIN:{i}", single_word=True, normalized=False)
+                for i in range(NUM_OF_BINS)
+            )
 
             map_statistics_partial = partial(
-                map_statistics,
-                capacity=data_args.offline_stats_capacity,
-                value_outlier_std=data_args.value_outlier_std,
+                map_statistics, size=data_args.offline_stats_capacity
             )
 
             if data_args.streaming:
@@ -569,24 +651,28 @@ class CehrGptTokenizer(PushToHubMixin):
                 else:
                     current = agg_statistics(current, fixed_stat)
 
-            lab_stats = [
-                {
-                    "concept_id": concept_id,
-                    "unit": unit,
-                    "mean": online_stats.mean(),
-                    "std": online_stats.standard_deviation(),
-                    "count": online_stats.count,
-                    "value_outlier_std": data_args.value_outlier_std,
-                    "lower_bound": online_stats.mean()
-                    - data_args.value_outlier_std * online_stats.standard_deviation(),
-                    "upper_bound": online_stats.mean()
-                    + data_args.value_outlier_std * online_stats.standard_deviation(),
-                }
-                for (concept_id, unit), online_stats in current[
-                    "numeric_stats_by_lab"
-                ].items()
-                if online_stats.count > 0
-            ]
+            lab_stats = []
+            for (concept_id, unit), online_stats in current[
+                "numeric_stats_by_lab"
+            ].items():
+                # The lab needs to have a sample of num_of_bins times 2 values to be included
+                if len(online_stats.sample) < NUM_OF_BINS * 2:
+                    continue
+                sample = truncated_sample(
+                    online_stats.sample, data_args.value_outlier_std
+                )
+                bins = create_bins_with_spline(sample, NUM_OF_BINS, DEGREE_OF_FREEDOM)
+                lab_stats.append(
+                    {
+                        "concept_id": concept_id,
+                        "unit": unit,
+                        "mean": np.mean(sample),
+                        "std": np.std(sample),
+                        "count": len(online_stats.sample),
+                        "value_outlier_std": data_args.value_outlier_std,
+                        "bins": bins,
+                    }
+                )
 
         # We will train a tokenizer specifically for time intervals
         sub_time_token_data = []
