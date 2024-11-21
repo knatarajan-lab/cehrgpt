@@ -22,7 +22,6 @@ class CehrGptDataCollator:
         tokenizer: CehrGptTokenizer,
         max_length: int,
         shuffle_records: bool = False,
-        include_values: bool = False,
         include_ttv_prediction: bool = False,
         use_sub_time_tokenization: bool = False,
         pretraining: bool = True,
@@ -40,7 +39,6 @@ class CehrGptDataCollator:
             self.ve_token_id = tokenizer._convert_token_to_id("[VE]")
 
         self.shuffle_records = shuffle_records
-        self.include_values = include_values
         self.include_ttv_prediction = include_ttv_prediction
         self.use_sub_time_tokenization = use_sub_time_tokenization
         self.pretraining = pretraining
