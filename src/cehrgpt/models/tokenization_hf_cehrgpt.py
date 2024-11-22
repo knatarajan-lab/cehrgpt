@@ -257,8 +257,7 @@ class NumericEventStatistics:
                 for each_bin in bins:
                     if each_bin["start_val"] <= concept_value <= each_bin["end_val"]:
                         return create_value_bin(each_bin["bin_index"])
-            else:
-                return UNKNOWN_BIN
+        return UNKNOWN_BIN
 
     def denormalize(
         self, concept_id: str, value_bin: str
