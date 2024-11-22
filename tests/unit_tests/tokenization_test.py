@@ -1,5 +1,6 @@
-import math
 import unittest
+
+from scipy.interpolate import UnivariateSpline
 
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
@@ -7,78 +8,77 @@ from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 class TestMergeLabStats(unittest.TestCase):
 
     def test_merge_lab_stats(self):
+        spline = UnivariateSpline(list(range(100)), list(range(100)))
+        spline_2 = UnivariateSpline(list(range(100)), list(range(100, 200)))
         # Sample data for existing lab stats
         lab_stats_existing = [
             {
-                "concept_id": 101,
+                "concept_id": "101",
                 "unit": "mg/dL",
-                "mean": 5.0,
+                "mean": 10.0,
                 "std": 2.0,
-                "count": 10,
-                "lower_bound": 3.0,
-                "upper_bound": 7.0,
-            },
-            {
-                "concept_id": 102,
-                "unit": "mg/dL",
-                "mean": 7.5,
-                "std": 1.5,
-                "count": 15,
-                "lower_bound": 6.0,
-                "upper_bound": 9.0,
-            },
+                "value_outlier_std": 3.0,
+                "bins": [
+                    {
+                        "bin_index": 0,
+                        "spline": spline,
+                        "start_val": 0,
+                        "end_val": 100,
+                    }
+                ],
+                "count": 100,
+            }
         ]
 
         # Sample data for new lab stats
         lab_stats_new = [
             {
-                "concept_id": 101,
+                "concept_id": "101",
                 "unit": "mg/dL",
                 "mean": 6.0,
                 "std": 1.0,
-                "count": 5,
-                "lower_bound": 4.5,
-                "upper_bound": 7.5,
+                "bins": [
+                    {
+                        "bin_index": 0,
+                        "spline": spline_2,
+                        "start_val": 100,
+                        "end_val": 200,
+                    }
+                ],
+                "count": 100,
             },
             {
-                "concept_id": 103,
+                "concept_id": "102",
                 "unit": "mmol/L",
                 "mean": 8.0,
                 "std": 1.0,
-                "count": 8,
-                "lower_bound": 6.5,
-                "upper_bound": 9.5,
+                "count": 100,
+                "bins": [
+                    {
+                        "bin_index": 0,
+                        "spline": spline_2,
+                        "start_val": 100,
+                        "end_val": 200,
+                    }
+                ],
             },
         ]
 
         # Expected output after merging
         expected_output = [
             {
-                "concept_id": 101,
+                "concept_id": "101",
                 "unit": "mg/dL",
-                "mean": (10 * 5.0 + 5 * 6.0) / 15,
-                "std": math.sqrt(3.2222),
-                "count": 15,
-                "lower_bound": 3.0,
-                "upper_bound": 7.5,
+                "mean": 8,
+                "std": 2.5495,
+                "count": 200,
             },
             {
-                "concept_id": 102,
+                "concept_id": "102",
                 "unit": "mg/dL",
-                "mean": 7.5,
-                "std": 1.5,
-                "count": 15,
-                "lower_bound": 6.0,
-                "upper_bound": 9.0,
-            },
-            {
-                "concept_id": 103,
-                "unit": "mmol/L",
                 "mean": 8.0,
                 "std": 1.0,
-                "count": 8,
-                "lower_bound": 6.5,
-                "upper_bound": 9.5,
+                "count": 100,
             },
         ]
 
@@ -96,8 +96,6 @@ class TestMergeLabStats(unittest.TestCase):
             self.assertAlmostEqual(res["mean"], exp["mean"], places=4)
             self.assertAlmostEqual(res["std"], exp["std"], places=4)
             self.assertEqual(res["count"], exp["count"])
-            self.assertEqual(res["lower_bound"], exp["lower_bound"])
-            self.assertEqual(res["upper_bound"], exp["upper_bound"])
 
 
 if __name__ == "__main__":
