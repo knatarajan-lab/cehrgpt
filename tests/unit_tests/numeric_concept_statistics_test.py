@@ -1,9 +1,11 @@
 import unittest
 
 import numpy as np
+from scipy.interpolate import UnivariateSpline
 
 from cehrgpt.models.tokenization_hf_cehrgpt import (
     NA,
+    UNKNOWN_BIN,
     NumericEventStatistics,
     create_numeric_concept_unit_mapping,
 )
@@ -11,6 +13,8 @@ from cehrgpt.models.tokenization_hf_cehrgpt import (
 
 class TestNumericEventStatistics(unittest.TestCase):
     def setUp(self):
+        self.spline = UnivariateSpline(list(range(10)), list(range(10)))
+        self.spline_2 = UnivariateSpline(list(range(10)), list(range(100, 110)))
         # Mock lab stats data
         self.lab_stats = [
             {
@@ -19,8 +23,14 @@ class TestNumericEventStatistics(unittest.TestCase):
                 "mean": 10.0,
                 "std": 2.0,
                 "value_outlier_std": 3.0,
-                "lower_bound": 7.0,
-                "upper_bound": 13.0,
+                "bins": [
+                    {
+                        "bin_index": 0,
+                        "spline": self.spline,
+                        "start_val": 0,
+                        "end_val": 10,
+                    }
+                ],
                 "count": 100,
             },
             {
@@ -29,8 +39,14 @@ class TestNumericEventStatistics(unittest.TestCase):
                 "mean": 20.0,
                 "std": 5.0,
                 "value_outlier_std": 2.5,
-                "lower_bound": 10.0,
-                "upper_bound": 30.0,
+                "bins": [
+                    {
+                        "bin_index": 0,
+                        "spline": self.spline_2,
+                        "start_val": 100,
+                        "end_val": 110,
+                    }
+                ],
                 "count": 100,
             },
             {
@@ -39,8 +55,14 @@ class TestNumericEventStatistics(unittest.TestCase):
                 "mean": 15.0,
                 "std": 3.0,
                 "value_outlier_std": 2.0,
-                "lower_bound": 8.0,
-                "upper_bound": 22.0,
+                "bins": [
+                    {
+                        "bin_index": 0,
+                        "spline": self.spline,
+                        "start_val": 0,
+                        "end_val": 10,
+                    }
+                ],
                 "count": 200,
             },
         ]
@@ -91,43 +113,60 @@ class TestNumericEventStatistics(unittest.TestCase):
     def test_normalize(self):
         # Test normalization for concept_1, unit_1
         normalized_value = self.numeric_event_statistics.normalize(
-            "concept_1", "unit_1", 12.0
+            "concept_1", "unit_1", 9.0
         )
         # (12 - 10) / 2 = 1.0
-        self.assertEqual(normalized_value, 1.0)
+        self.assertEqual(normalized_value, "BIN:0")
 
         # Test normalization with value beyond outlier bound
         normalized_value = self.numeric_event_statistics.normalize(
-            "concept_1", "unit_1", 20.0
+            "concept_1", "unit_1", 3.0
         )
         # Since (20 - 10) / 2 = 5.0, but it's clipped at value_outlier_std = 3.0
-        self.assertEqual(normalized_value, 3.0)
+        self.assertEqual(normalized_value, "BIN:0")
 
         # Test normalization with a concept_id/unit pair not found
         normalized_value = self.numeric_event_statistics.normalize(
-            "concept_3", "unit_1", 15.0
+            "concept_2", "unit_1", 105.0
         )
         # Since the concept_id/unit doesn't exist, it should return the original value
-        self.assertEqual(normalized_value, 15.0)
+        self.assertEqual(normalized_value, "BIN:0")
+
+        # Test normalization with a concept_id/unit pair not found
+        normalized_value = self.numeric_event_statistics.normalize(
+            "concept_2", "unit_1", 9.9
+        )
+        # Since the concept_id/unit doesn't exist, it should return the original value
+        self.assertEqual(normalized_value, UNKNOWN_BIN)
 
     def test_denormalize(self):
         # Mock np.random.choice to return a predictable unit
         np.random.choice = lambda *args, **kwargs: "unit_1"
-
+        np.random.seed(42)
+        expected_value = self.spline(
+            np.random.uniform(self.spline.get_knots()[0], self.spline.get_knots()[-1])
+        )
+        np.random.seed(42)
         # Test denormalization for concept_1, unit_1
         denormalized_value, unit = self.numeric_event_statistics.denormalize(
-            "concept_1", 1.0
+            "concept_1", "BIN:0"
         )
         # value = 1.0 * 2.0 + 10.0 = 12.0
-        self.assertEqual(denormalized_value, 12.0)
+        self.assertEqual(denormalized_value, expected_value)
         self.assertEqual(unit, "unit_1")
 
+        np.random.seed(42)
+        expected_value = self.spline_2(
+            np.random.uniform(
+                self.spline_2.get_knots()[0], self.spline_2.get_knots()[-1]
+            )
+        )
+        np.random.seed(42)
         # Test denormalization for concept_2, unit_1
         denormalized_value, unit = self.numeric_event_statistics.denormalize(
-            "concept_2", 0.5
+            "concept_2", "BIN:0"
         )
-        # value = 0.5 * 5.0 + 20.0 = 22.5
-        self.assertEqual(denormalized_value, 22.5)
+        self.assertEqual(denormalized_value, expected_value)
         self.assertEqual(unit, "unit_1")
 
 

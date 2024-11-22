@@ -23,7 +23,7 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
     def setUpClass(cls):
         # Get the root folder of the project
         root_folder = Path(os.path.abspath(__file__)).parent.parent.parent.parent
-        cls.data_folder = os.path.join(root_folder, "sample_data", "temp")
+        cls.data_folder = os.path.join(root_folder, "sample_data", "pretrain")
         # Create a temporary directory to store model and tokenizer
         cls.temp_dir = tempfile.mkdtemp()
         cls.model_folder_path = os.path.join(cls.temp_dir, "model")
@@ -52,9 +52,9 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "--dataset_prepared_path",
             self.dataset_prepared_path,
             "--max_steps",
-            "100",
+            "1000",
             "--save_steps",
-            "100",
+            "1000",
             "--save_strategy",
             "steps",
             "--hidden_size",
