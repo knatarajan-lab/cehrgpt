@@ -36,6 +36,8 @@ def normalize_value(
     concept_values = []
     units = []
     for i in range(0, len(seq)):
+        if is_valid_valid_bin(seq[i]):
+            continue
         concept = seq[i]
         value_indicator = False
         concept_value = 0.0
