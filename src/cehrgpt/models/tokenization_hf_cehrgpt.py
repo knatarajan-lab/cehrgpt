@@ -270,10 +270,15 @@ class NumericEventStatistics:
         ):
             lab_stats = self._lab_stats_mapping[(concept_id, unit)]
             bin_index = int(value_bin.split(":")[1])
-            assert bin_index == lab_stats["bins"][bin_index]["bin_index"]
-            bin_spline = lab_stats["bins"][bin_index]["spline"]
-            x = np.random.uniform(bin_spline.get_knots()[0], bin_spline.get_knots()[-1])
-            concept_value = bin_spline(x).item()
+            # There are rare cases during sequence generation where bin_index could be out of range
+            # when there are no bins for (concept_id, unit) due to the small number of values in the source data
+            if len(lab_stats["bins"]) > bin_index:
+                assert bin_index == lab_stats["bins"][bin_index]["bin_index"]
+                bin_spline = lab_stats["bins"][bin_index]["spline"]
+                x = np.random.uniform(
+                    bin_spline.get_knots()[0], bin_spline.get_knots()[-1]
+                )
+                concept_value = bin_spline(x).item()
         return concept_value, unit
 
 
