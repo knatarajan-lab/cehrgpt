@@ -25,45 +25,35 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
         return ["concept_value_masks", "concept_values"]
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        concept_ids = record["concept_ids"]
-        input_ids = self._concept_tokenizer.encode(concept_ids)
-        record["input_ids"] = input_ids
-        concept_value_masks = record["concept_value_masks"]
-        concept_values = record["concept_values"]
+        num_of_labs = 0
+        original_size = len(record["concept_ids"])
         # If any concept has a value associated with it, we normalize the value
-        if np.any(np.asarray(concept_value_masks) > 0):
-            updated_input_ids = []
-            units = record["units"]
-            num_of_labs = 0
+        if np.any(np.asarray(record["concept_value_masks"]) > 0):
+            concept_ids = []
             for i, (
                 concept_id,
                 unit,
-                token_id,
                 concept_value_mask,
                 concept_value,
             ) in enumerate(
                 zip(
-                    concept_ids,
-                    units,
-                    input_ids,
-                    concept_value_masks,
-                    concept_values,
+                    record["concept_ids"],
+                    record["units"],
+                    record["concept_value_masks"],
+                    record["concept_values"],
                 )
             ):
-                updated_input_ids.append(token_id)
-                if token_id in self._lab_token_ids:
+                concept_ids.append(concept_id)
+                if concept_id in self._concept_tokenizer.numeric_concept_ids:
                     concept_value_bin = self._concept_tokenizer.normalize(
                         concept_id, unit, concept_value
                     )
-                    concept_value_token_id = (
-                        self._concept_tokenizer._tokenizer.token_to_id(
-                            concept_value_bin
-                        )
-                    )
-                    updated_input_ids.append(int(concept_value_token_id))
+                    concept_ids.append(concept_value_bin)
                     num_of_labs += 1
-            assert len(updated_input_ids) == num_of_labs + len(concept_ids)
-            record["input_ids"] = updated_input_ids
+            record["concept_ids"] = concept_ids
+        assert original_size + num_of_labs == len(record["concept_ids"])
+        input_ids = self._concept_tokenizer.encode(record["concept_ids"])
+        record["input_ids"] = input_ids
         return record
 
 
