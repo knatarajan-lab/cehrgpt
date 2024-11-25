@@ -101,6 +101,9 @@ def load_and_create_model(
             attn_implementation=attn_implementation,
             causal_sfm=cehrgpt_args.causal_sfm,
             demographics_size=cehrgpt_args.demographics_size,
+            token_frequency_penalty=cehrgpt_args.token_frequency_penalty,
+            entropy_penalty=cehrgpt_args.entropy_penalty,
+            entropy_penalty_alpha=cehrgpt_args.entropy_penalty_alpha,
             **model_args.as_dict(),
         )
     return CEHRGPT2LMHeadModel(model_config)

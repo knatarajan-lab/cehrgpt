@@ -85,3 +85,17 @@ class CehrGPTArguments:
             "It defaults to 4, assuming the demographics tokens follow this pattern [Year][Age][Gender][Race]"
         },
     )
+    token_frequency_penalty: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to use token-frequency penalty."
+        },
+    )
+    entropy_penalty: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={"help": "A flag to indicate whether we want to use entropy penalty."},
+    )
+    entropy_penalty_alpha: Optional[float] = dataclasses.field(
+        default=0.01,
+        metadata={"help": "Entropy penalty co-efficient"},
+    )
