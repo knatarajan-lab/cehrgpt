@@ -4,7 +4,11 @@ from typing import Any, Dict
 import numpy as np
 from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import DatasetMapping
 
-from cehrgpt.models.tokenization_hf_cehrgpt import NONE_BIN, CehrGptTokenizer
+from cehrgpt.models.tokenization_hf_cehrgpt import (
+    NONE_BIN,
+    UNKNOWN_BIN,
+    CehrGptTokenizer,
+)
 
 
 def convert_date_to_posix_time(index_date: datetime.date) -> float:
@@ -50,8 +54,10 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
                             concept_id, unit, concept_value
                         )
                         values.append(concept_value_bin)
-                    else:
+                    elif isinstance(concept_value, str):
                         values.append(concept_value)
+                    else:
+                        values.append(UNKNOWN_BIN)
                 else:
                     values.append(NONE_BIN)
             record["values"] = self._concept_tokenizer.encode_value(values)
