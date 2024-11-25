@@ -97,6 +97,9 @@ def load_and_create_model(
             lab_token_ids=tokenizer.lab_token_ids,
             token_to_time_token_mapping=tokenizer.token_to_time_token_mapping,
             attn_implementation=attn_implementation,
+            token_frequency_penalty=cehrgpt_args.token_frequency_penalty,
+            entropy_penalty=cehrgpt_args.entropy_penalty,
+            entropy_penalty_alpha=cehrgpt_args.entropy_penalty_alpha,
             **model_args.as_dict(),
         )
     return CEHRGPT2LMHeadModel(model_config)
