@@ -12,6 +12,7 @@ from transformers.utils import is_flash_attn_2_available, logging
 from cehrgpt.cehrgpt_args import create_inference_base_arg_parser
 from cehrgpt.gpt_utils import get_cehrgpt_output_folder
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
+from cehrgpt.models.special_tokens import END_TOKEN
 from cehrgpt.models.tokenization_hf_cehrgpt import (
     NA,
     CehrGptTokenizer,
@@ -23,40 +24,41 @@ LOG = logging.get_logger("transformers")
 
 def normalize_value(
     seq: Sequence[str],
+    values: Sequence[str],
     tokenizer: CehrGptTokenizer,
 ) -> Tuple[
     Sequence[str],
     Optional[Sequence[bool]],
     Optional[Sequence[float]],
     Optional[Sequence[str]],
+    Optional[Sequence[str]],
 ]:
     concepts = []
     value_indicators = []
-    concept_values = []
+    numeric_as_values = []
+    concept_as_values = []
     units = []
-    for i in range(0, len(seq)):
-        if is_valid_valid_bin(seq[i]):
-            continue
-        concept = seq[i]
-        value_indicator = False
-        concept_value = 0.0
+    for concept, concept_value in zip(seq, values):
+        if concept == END_TOKEN:
+            break
+        value_indicator = concept in tokenizer.numeric_concept_ids
+        numeric_as_value = 0.0
+        concept_as_value = "0"
         unit = NA
-        # If concept is numeric, we expect the next token to be a value bin
-        if concept in tokenizer.numeric_concept_ids:
-            if i + 1 < len(seq):
-                next_token = seq[i + 1]
-                value_indicator = True
-                concept_value, unit = tokenizer.denormalize(concept, next_token)
-                if is_valid_valid_bin(next_token):
-                    # If the next token is a valid value bin, we should skip this token
-                    i += 1
+        if value_indicator:
+            # If concept is numeric, we expect the next token to be a value bin
+            if is_valid_valid_bin(concept_value):
+                number_as_value, unit = tokenizer.denormalize(concept, concept_value)
+            elif concept_value.isnumeric():
+                concept_as_value = concept_value
 
         concepts.append(concept)
         value_indicators.append(value_indicator)
-        concept_values.append(concept_value)
+        numeric_as_values.append(numeric_as_value)
+        concept_as_values.append(concept_as_value)
         units.append(unit)
 
-    return concepts, value_indicators, concept_values, units
+    return concepts, value_indicators, numeric_as_values, concept_as_values, units
 
 
 def generate_single_batch(
@@ -104,9 +106,18 @@ def generate_single_batch(
             inputs=batched_prompts, generation_config=generation_config
         )
 
-    sequences = [tokenizer.decode(seq.cpu().numpy()) for seq in results.sequences]
+    sequences = [
+        tokenizer.decode(seq.cpu().numpy(), skip_special_tokens=False)
+        for seq in results.sequences
+    ]
+    values = [
+        tokenizer.decode_value(values.cpu().numpy(), skip_special_tokens=False)
+        for values in results.sequence_vals
+    ]
     return {
         "sequences": sequences,
+        "values": values,
+        "value_indicators": results.sequence_val_masks.cpu().numpy(),
     }
 
 
@@ -157,8 +168,6 @@ def main(args):
     LOG.info(f"Loading demographic_info at {args.demographic_data_path}")
 
     data = pd.read_parquet(args.demographic_data_path)
-
-    data = pd.read_parquet(args.demographic_data_path)
     # data = data[data.num_of_concepts >= args.min_num_of_concepts]
     demographic_info = data.concept_ids.apply(lambda concept_list: concept_list[0:4])
     demographic_info = [cehrgpt_tokenizer.encode(_) for _ in demographic_info]
@@ -188,13 +197,19 @@ def main(args):
         # Clear the cache
         torch.cuda.empty_cache()
 
-        for seq in batch_sequences["sequences"]:
-            seq, value_indicators, concept_values, units = normalize_value(
-                seq, cehrgpt_tokenizer
+        for seq, value_indicators, values in zip(
+            batch_sequences["sequences"],
+            batch_sequences["value_indicators"],
+            batch_sequences["values"],
+        ):
+            seq, value_indicators, value_as_numbers, value_as_concepts, units = (
+                normalize_value(seq, values, cehrgpt_tokenizer)
             )
             output = {"concept_ids": seq, "person_id": current_person_id}
-            if concept_values is not None:
-                output["concept_values"] = concept_values
+            if value_as_numbers is not None:
+                output["value_as_numbers"] = value_as_numbers
+            if value_as_concepts is not None:
+                output["value_as_concepts"] = value_as_concepts
             if value_indicators is not None:
                 output["concept_value_masks"] = value_indicators
             if units is not None:
@@ -210,7 +225,8 @@ def main(args):
                 columns=[
                     "concept_ids",
                     "person_id",
-                    "concept_values",
+                    "value_as_numbers",
+                    "value_as_concepts",
                     "concept_value_masks",
                     "units",
                 ],
@@ -224,7 +240,8 @@ def main(args):
             columns=[
                 "concept_ids",
                 "person_id",
-                "concept_values",
+                "value_as_numbers",
+                "value_as_concepts",
                 "concept_value_masks",
                 "units",
             ],
