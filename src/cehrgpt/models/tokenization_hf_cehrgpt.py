@@ -189,48 +189,36 @@ def map_statistics(batch: Dict[str, Any], size=10_000) -> Dict[str, Any]:
     else:
         concept_value_units = [[NA for _ in cons] for cons in batch["concept_ids"]]
 
-    if "concept_value_types" in batch:
-        concept_value_types = batch["concept_value_types"]
-    else:
-        concept_value_types = [
-            [int(isinstance(_, str)) + 1 for _ in concept_values]
+    if "number_as_values" not in batch:
+        number_as_values = [
+            [value if isinstance(value, float) else None for value in concept_values]
             for concept_values in batch["concept_values"]
         ]
+    else:
+        number_as_values = batch["number_as_values"]
 
     numeric_stats_by_lab = collections.defaultdict(partial(ReservoirSampler, size=size))
-    categorical_stats_by_lab = collections.defaultdict(
-        partial(collections.defaultdict, int)
-    )
     for (
         concept_ids,
         concept_values,
         concept_value_indicators,
-        concept_value_types,
         units,
     ) in zip(
         batch["concept_ids"],
-        batch["concept_values"],
+        number_as_values,
         batch["concept_value_masks"],
-        concept_value_types,
         concept_value_units,
     ):
-        for concept_id, concept_value, concept_value_indicator, value_type, unit in zip(
+        for concept_id, concept_value, concept_value_indicator, unit in zip(
             concept_ids,
             concept_values,
             concept_value_indicators,
-            concept_value_types,
             units,
         ):
-            if concept_value_indicator == 1:
-                if value_type == 1:
-                    numeric_stats_by_lab[(concept_id, unit)].add(concept_value, 1)
-                elif value_type == 2:
-                    categorical_stats_by_lab[concept_id][concept_value] += 1
+            if concept_value_indicator == 1 and concept_value:
+                numeric_stats_by_lab[(concept_id, unit)].add(concept_value, 1)
 
-    return {
-        "numeric_stats_by_lab": numeric_stats_by_lab,
-        "categorical_stats_by_lab": categorical_stats_by_lab,
-    }
+    return {"numeric_stats_by_lab": numeric_stats_by_lab}
 
 
 def create_numeric_concept_unit_mapping(
@@ -296,8 +284,7 @@ class NumericEventStatistics:
                             <= each_bin["end_val"]
                         ):
                             return create_value_bin(each_bin["bin_index"])
-                return UNKNOWN_BIN
-        return concept_value
+        return UNKNOWN_BIN
 
     def denormalize(
         self, concept_id: str, value_bin: str
@@ -745,20 +732,24 @@ class CehrGptTokenizer(PushToHubMixin):
             unk_token=OUT_OF_VOCABULARY_TOKEN,
             data_args=data_args,
         )
-        concept_tokenizer.add_tokens(
+        concept_value_column = "concept_as_values"
+        for row in dataset:
+            if concept_value_column not in row:
+                concept_value_column = "concept_values"
+            break
+        value_tokenizer = cls.train_concept_tokenizer(
+            dataset,
+            feature_name=concept_value_column,
+            special_tokens=[OUT_OF_VOCABULARY_TOKEN, PAD_TOKEN],
+            unk_token=OUT_OF_VOCABULARY_TOKEN,
+            data_args=data_args,
+        )
+        value_tokenizer.add_tokens(
             [
                 AddedToken(_, single_word=True, normalized=False)
                 for _ in [create_value_bin(_) for _ in range(NUM_OF_BINS)]
                 + [UNKNOWN_BIN, NONE_BIN]
             ]
-        )
-
-        value_tokenizer = cls.train_concept_tokenizer(
-            dataset,
-            feature_name="concept_values",
-            special_tokens=[OUT_OF_VOCABULARY_TOKEN, PAD_TOKEN],
-            unk_token=OUT_OF_VOCABULARY_TOKEN,
-            data_args=data_args,
         )
 
         map_statistics_partial = partial(
@@ -910,7 +901,9 @@ class CehrGptTokenizer(PushToHubMixin):
     ) -> Dict[str, List]:
         return {
             feature_name: [
-                " ".join([token for token in tokens if isinstance(token, str)])
+                " ".join(
+                    [token for token in tokens if token and isinstance(token, str)]
+                )
                 for tokens in records[feature_name]
             ]
         }
