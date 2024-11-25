@@ -527,7 +527,7 @@ class CehrGptTokenizer(PushToHubMixin):
 
         # Load the concept_value_tokenizer
         value_tokenizer_file = transformers.utils.hub.cached_file(
-            pretrained_model_name_or_path, TOKENIZER_FILE_NAME, **kwargs
+            pretrained_model_name_or_path, VALUE_TOKENIZER_FILE_NAME, **kwargs
         )
         if not value_tokenizer_file:
             return None
