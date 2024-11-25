@@ -117,6 +117,7 @@ class CEHRGPTConfig(PretrainedConfig):
         reorder_and_upcast_attn=False,
         exclude_position_ids=False,
         include_values=False,
+        value_vocab_size=None,
         include_ttv_prediction=False,
         use_sub_time_tokenization=True,
         time_token_loss_weight=1.0,
@@ -157,6 +158,8 @@ class CEHRGPTConfig(PretrainedConfig):
 
         self.exclude_position_ids = exclude_position_ids
         self.include_values = include_values
+        self.value_vocab_size = value_vocab_size
+
         self.include_ttv_prediction = include_ttv_prediction
         self.use_sub_time_tokenization = use_sub_time_tokenization
         self._token_to_time_token_mapping = token_to_time_token_mapping

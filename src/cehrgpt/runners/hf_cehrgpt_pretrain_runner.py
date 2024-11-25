@@ -45,7 +45,7 @@ def load_and_create_tokenizer(
     dataset: Optional[Union[Dataset, DatasetDict]] = None,
 ) -> CehrGptTokenizer:
     # Try to load the pretrained tokenizer
-    tokenizer_abspath = os.path.abspath(model_args.tokenizer_name_or_path)
+    tokenizer_abspath = os.path.expanduser(model_args.tokenizer_name_or_path)
     try:
         tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_abspath)
     except Exception as e:
@@ -56,9 +56,7 @@ def load_and_create_tokenizer(
                 f"Tried to create the tokenizer, however the dataset is not provided."
             )
 
-        tokenizer = CehrGptTokenizer.train_tokenizer(
-            dataset, ["concept_ids"], {}, data_args
-        )
+        tokenizer = CehrGptTokenizer.train_tokenizer(dataset, {}, data_args)
         tokenizer.save_pretrained(tokenizer_abspath)
 
     return tokenizer
@@ -94,6 +92,7 @@ def load_and_create_model(
             model_args.max_position_embeddings += 1
         model_config = CEHRGPTConfig(
             vocab_size=tokenizer.vocab_size,
+            value_vocab_size=tokenizer.value_vocab_size,
             time_token_vocab_size=tokenizer.time_token_vocab_size,
             bos_token_id=tokenizer.end_token_id,
             eos_token_id=tokenizer.end_token_id,
@@ -286,6 +285,7 @@ def main():
             shuffle_records=data_args.shuffle_records,
             include_ttv_prediction=model_args.include_ttv_prediction,
             use_sub_time_tokenization=model_args.use_sub_time_tokenization,
+            include_values=model_args.include_values,
         ),
         train_dataset=processed_dataset["train"],
         eval_dataset=processed_dataset["validation"],

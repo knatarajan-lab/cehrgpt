@@ -22,6 +22,7 @@ class CehrGptDataCollator:
         tokenizer: CehrGptTokenizer,
         max_length: int,
         shuffle_records: bool = False,
+        include_values: bool = False,
         include_ttv_prediction: bool = False,
         use_sub_time_tokenization: bool = False,
         pretraining: bool = True,
@@ -39,6 +40,7 @@ class CehrGptDataCollator:
             self.ve_token_id = tokenizer._convert_token_to_id("[VE]")
 
         self.shuffle_records = shuffle_records
+        self.include_values = include_values
         self.include_ttv_prediction = include_ttv_prediction
         self.use_sub_time_tokenization = use_sub_time_tokenization
         self.pretraining = pretraining
@@ -124,9 +126,12 @@ class CehrGptDataCollator:
         assert batch["attention_mask"].shape[1] <= self.max_length
 
         if self.pretraining:
-            labels = batch["input_ids"].clone()
-            batch["labels"] = torch.where(
-                labels == self.tokenizer.pad_token_id, -100, labels
+            batch["labels"] = self._try_reverse_tensor(
+                pad_sequence(
+                    batch_input_ids,
+                    batch_first=True,
+                    padding_value=-100,
+                ).to(torch.int64)
             )
 
         if self.use_sub_time_tokenization:
@@ -156,6 +161,37 @@ class CehrGptDataCollator:
                 pad_sequence(
                     batch_time_to_visits, batch_first=True, padding_value=-100.0
                 )
+            )
+
+        if self.include_values:
+            batch_value_indicators = [
+                self._try_reverse_tensor(
+                    self._convert_to_tensor(example["value_indicators"])
+                )
+                for example in examples
+            ]
+            batch_values = [
+                self._try_reverse_tensor(self._convert_to_tensor(example["values"]))
+                for example in examples
+            ]
+
+            batch["value_indicators"] = self._try_reverse_tensor(
+                pad_sequence(
+                    batch_value_indicators, batch_first=True, padding_value=False
+                )
+            )
+            batch["values"] = self._try_reverse_tensor(
+                pad_sequence(
+                    batch_values,
+                    batch_first=True,
+                    padding_value=self.tokenizer.pad_value_token_id,
+                ).to(torch.int64)
+            )
+            assert batch["value_indicators"].shape[1] <= self.max_length
+            assert batch["values"].shape[1] <= self.max_length
+            batch["true_value_indicators"] = batch["value_indicators"].clone()
+            batch["true_values"] = torch.where(
+                batch["value_indicators"], batch["values"].clone(), -100
             )
 
         if "person_id" in examples[0]:
@@ -206,10 +242,29 @@ class CehrGptDataCollator:
 
         sorting_column = record["record_ranks"]
         random_order = np.random.rand(len(sorting_column))
-        iterator = zip(sorting_column, random_order, record["input_ids"])
-        sorted_list = sorted(iterator, key=lambda tup2: (tup2[0], tup2[1], tup2[2]))
-        _, _, sorted_input_ids = zip(*list(sorted_list))
-        record["input_ids"] = self._convert_to_tensor(sorted_input_ids)
+
+        if self.include_values:
+            iterator = zip(
+                sorting_column,
+                random_order,
+                record["input_ids"],
+                record["value_indicators"],
+                record["values"],
+            )
+            sorted_list = sorted(iterator, key=lambda tup2: (tup2[0], tup2[1], tup2[2]))
+            _, _, sorted_input_ids, sorted_value_indicators, sorted_values = zip(
+                *list(sorted_list)
+            )
+            record["input_ids"] = self._convert_to_tensor(sorted_input_ids)
+            record["value_indicators"] = self._convert_to_tensor(
+                sorted_value_indicators
+            )
+            record["values"] = self._convert_to_tensor(sorted_values)
+        else:
+            iterator = zip(sorting_column, random_order, record["input_ids"])
+            sorted_list = sorted(iterator, key=lambda tup2: (tup2[0], tup2[1], tup2[2]))
+            _, _, sorted_input_ids = zip(*list(sorted_list))
+            record["input_ids"] = self._convert_to_tensor(sorted_input_ids)
         return record
 
     def generate_start_end_index(self, record: Dict[str, Any]) -> Dict[str, Any]:
@@ -230,6 +285,19 @@ class CehrGptDataCollator:
                     self._convert_to_tensor([self.tokenizer.end_token_id]),
                 ]
             )
+            if self.include_values:
+                record["value_indicators"] = torch.concat(
+                    [
+                        self._convert_to_tensor(record["value_indicators"]),
+                        self._convert_to_tensor([0]),
+                    ]
+                ).to(torch.bool)
+                record["values"] = torch.concat(
+                    [
+                        self._convert_to_tensor(record["values"]),
+                        self._convert_to_tensor([-1.0]),
+                    ]
+                )
             if self.include_ttv_prediction:
                 record["time_to_visits"] = torch.concat(
                     [
@@ -253,6 +321,13 @@ class CehrGptDataCollator:
                     record["input_ids"] = self._convert_to_tensor(
                         record["input_ids"][start_index : end_index + 1]
                     )
+                    if self.include_values:
+                        record["value_indicators"] = self._convert_to_tensor(
+                            record["value_indicators"][start_index : end_index + 1]
+                        ).to(torch.bool)
+                        record["values"] = self._convert_to_tensor(
+                            record["values"][start_index : end_index + 1]
+                        )
                     if self.include_ttv_prediction:
                         record["time_to_visits"] = self._convert_to_tensor(
                             self._convert_time_to_event(
@@ -270,6 +345,13 @@ class CehrGptDataCollator:
                     break
 
             record["input_ids"] = record["input_ids"][0:end_index]
+            if self.include_values:
+                record["value_indicators"] = self._convert_to_tensor(
+                    record["value_indicators"][0:end_index]
+                ).to(torch.bool)
+                record["values"] = self._convert_to_tensor(
+                    record["values"][0:end_index]
+                )
             if self.include_ttv_prediction:
                 record["time_to_visits"] = self._convert_to_tensor(
                     self._convert_time_to_event(concept_ids[0:end_index])
@@ -286,6 +368,13 @@ class CehrGptDataCollator:
                     start_index = i
                     break
             record["input_ids"] = record["input_ids"][start_index:end_index]
+            if self.include_values:
+                record["value_indicators"] = self._convert_to_tensor(
+                    record["value_indicators"][start_index:end_index]
+                ).to(torch.bool)
+                record["values"] = self._convert_to_tensor(
+                    record["values"][start_index:end_index]
+                )
             if self.include_ttv_prediction:
                 record["time_to_visits"] = self._convert_to_tensor(
                     self._convert_time_to_event(concept_ids[start_index:end_index])
