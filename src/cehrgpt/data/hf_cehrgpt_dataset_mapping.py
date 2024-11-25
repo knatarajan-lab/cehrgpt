@@ -26,45 +26,68 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
         self._lab_token_ids = self._concept_tokenizer.lab_token_ids
 
     def remove_columns(self):
-        return ["concept_value_masks", "concept_values"]
+        return [
+            "concept_value_masks",
+            "number_as_values",
+            "concept_as_values",
+            "is_numeric_types",
+        ]
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
         # If any concept has a value associated with it, we normalize the value
         input_ids = self._concept_tokenizer.encode(record["concept_ids"])
         record["input_ids"] = input_ids
         record["value_indicators"] = record["concept_value_masks"]
+        if "number_as_values" not in record or record["concept_as_values"] is None:
+            record["number_as_values"] = [
+                value if isinstance(value, float) else None
+                for value in record["concept_values"]
+            ]
+            record["is_numeric_types"] = [
+                isinstance(value, float) for value in record["concept_values"]
+            ]
+            record["concept_as_values"] = [
+                value if isinstance(value, str) else None
+                for value in record["concept_values"]
+            ]
         if np.any(np.asarray(record["concept_value_masks"]) > 0):
             values = []
             for i, (
                 concept_id,
                 unit,
                 concept_value_mask,
-                concept_value,
+                number_as_value,
+                concept_as_value,
+                is_numeric_type,
             ) in enumerate(
                 zip(
                     record["concept_ids"],
                     record["units"],
                     record["concept_value_masks"],
-                    record["concept_values"],
+                    record["number_as_values"],
+                    record["concept_as_values"],
+                    record["is_numeric_types"],
                 )
             ):
                 if concept_value_mask == 1:
-                    if concept_id in self._concept_tokenizer.numeric_concept_ids:
-                        concept_value_bin = self._concept_tokenizer.normalize(
-                            concept_id, unit, concept_value
-                        )
-                        values.append(concept_value_bin)
-                    elif isinstance(concept_value, str):
-                        values.append(concept_value)
-                    else:
-                        values.append(UNKNOWN_BIN)
+                    value = UNKNOWN_BIN
+                    if is_numeric_type == 1:
+                        if concept_id in self._concept_tokenizer.numeric_concept_ids:
+                            concept_value_bin = self._concept_tokenizer.normalize(
+                                concept_id, unit, number_as_value
+                            )
+                            value = concept_value_bin
+                    elif isinstance(concept_as_value, str):
+                        value = concept_as_value
+                    values.append(value)
                 else:
                     values.append(NONE_BIN)
+            assert len(values) == len(record["input_ids"])
             record["values"] = self._concept_tokenizer.encode_value(values)
         else:
             record["values"] = [
                 self._concept_tokenizer.pad_value_token_id
-                for _ in range(len(record["concept_values"]))
+                for _ in range(len(record["concept_value_masks"]))
             ]
         return record
 
