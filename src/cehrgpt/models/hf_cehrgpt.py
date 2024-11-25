@@ -426,6 +426,9 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.wte = self.wte.to(self.first_device)
         self.vte = self.vte.to(self.first_device)
         self.wpe = self.wpe.to(self.first_device)
+        self.concept_value_transformation_layer = (
+            self.concept_value_transformation_layer.to(self.first_device)
+        )
         # Load onto devices
         for k, v in self.device_map.items():
             for block in v:
@@ -446,6 +449,9 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.wte = self.wte.to("cpu")
         self.wpe = self.wpe.to("cpu")
         self.vte = self.vte.to("cpu")
+        self.concept_value_transformation_layer = (
+            self.concept_value_transformation_layer.to("cpu")
+        )
         for index in range(len(self.h)):
             self.h[index] = self.h[index].to("cpu")
         self.ln_f = self.ln_f.to("cpu")
