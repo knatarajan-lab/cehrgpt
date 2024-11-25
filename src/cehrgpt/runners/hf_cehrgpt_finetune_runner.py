@@ -393,7 +393,6 @@ def main():
                 tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
                     cehrgpt_tokenizer=tokenizer,
                     dataset=final_splits["train"],
-                    feature_names=["concept_ids"],
                     data_args=data_args,
                     concept_name_mapping={},
                 )
@@ -415,6 +414,7 @@ def main():
     data_collator = CehrGptDataCollator(
         tokenizer=tokenizer,
         max_length=config.max_position_embeddings,
+        include_values=model_args.include_values,
         pretraining=False,
         include_ttv_prediction=False,
         use_sub_time_tokenization=False,

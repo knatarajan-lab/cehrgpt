@@ -4,7 +4,7 @@ from typing import Any, Dict
 import numpy as np
 from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import DatasetMapping
 
-from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.models.tokenization_hf_cehrgpt import NONE_BIN, CehrGptTokenizer
 
 
 def convert_date_to_posix_time(index_date: datetime.date) -> float:
@@ -25,11 +25,12 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
         return ["concept_value_masks", "concept_values"]
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        num_of_labs = 0
-        original_size = len(record["concept_ids"])
         # If any concept has a value associated with it, we normalize the value
+        input_ids = self._concept_tokenizer.encode(record["concept_ids"])
+        record["input_ids"] = input_ids
+        record["value_indicators"] = record["concept_value_masks"]
         if np.any(np.asarray(record["concept_value_masks"]) > 0):
-            concept_ids = []
+            values = []
             for i, (
                 concept_id,
                 unit,
@@ -43,17 +44,22 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
                     record["concept_values"],
                 )
             ):
-                concept_ids.append(concept_id)
-                if concept_id in self._concept_tokenizer.numeric_concept_ids:
-                    concept_value_bin = self._concept_tokenizer.normalize(
-                        concept_id, unit, concept_value
-                    )
-                    concept_ids.append(concept_value_bin)
-                    num_of_labs += 1
-            record["concept_ids"] = concept_ids
-        assert original_size + num_of_labs == len(record["concept_ids"])
-        input_ids = self._concept_tokenizer.encode(record["concept_ids"])
-        record["input_ids"] = input_ids
+                if concept_value_mask == 1:
+                    if concept_id in self._concept_tokenizer.numeric_concept_ids:
+                        concept_value_bin = self._concept_tokenizer.normalize(
+                            concept_id, unit, concept_value
+                        )
+                        values.append(concept_value_bin)
+                    else:
+                        values.append(concept_value)
+                else:
+                    values.append(NONE_BIN)
+            record["values"] = self._concept_tokenizer.encode_value(values)
+        else:
+            record["values"] = [
+                self._concept_tokenizer.pad_value_token_id
+                for _ in range(len(record["concept_values"]))
+            ]
         return record
 
 

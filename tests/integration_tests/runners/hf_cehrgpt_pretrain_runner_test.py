@@ -52,9 +52,9 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "--dataset_prepared_path",
             self.dataset_prepared_path,
             "--max_steps",
-            "1000",
+            "100",
             "--save_steps",
-            "1000",
+            "100",
             "--save_strategy",
             "steps",
             "--hidden_size",
@@ -63,6 +63,8 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "false",
             "--include_ttv_prediction",
             "false",
+            "--include_values",
+            "true",
         ]
         train_main()
         # Teacher force the prompt to consist of [year][age][gender][race][VS] then inject the random vector before [VS]
