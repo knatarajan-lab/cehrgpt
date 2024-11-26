@@ -215,7 +215,6 @@ def main(args):
         ):
             (
                 concept_ids,
-                value_indicators,
                 is_numeric_types,
                 number_as_values,
                 concept_as_values,
