@@ -30,36 +30,48 @@ def normalize_value(
 ) -> Tuple[
     Sequence[str],
     Optional[Sequence[bool]],
-    Optional[Sequence[float]],
-    Optional[Sequence[str]],
+    Optional[Sequence[Optional[int]]],
+    Optional[Sequence[Optional[float]]],
+    Optional[Sequence[Optional[str]]],
     Optional[Sequence[str]],
 ]:
     concepts = []
     value_indicators = []
-    numeric_as_values = []
+    number_as_values = []
     concept_as_values = []
+    is_numeric_types = []
     units = []
     for concept, concept_value in zip(seq, values):
         if concept == END_TOKEN:
             break
         value_indicator = concept in tokenizer.numeric_concept_ids
-        numeric_as_value = 0.0
-        concept_as_value = "0"
+        numeric_as_value = None
+        concept_as_value = None
+        is_numeric_type = 0
         unit = NA
         if value_indicator:
             # If concept is numeric, we expect the next token to be a value bin
             if is_valid_valid_bin(concept_value):
                 number_as_value, unit = tokenizer.denormalize(concept, concept_value)
+                is_numeric_type = 1
             elif concept_value.isnumeric():
                 concept_as_value = concept_value
 
         concepts.append(concept)
         value_indicators.append(value_indicator)
-        numeric_as_values.append(numeric_as_value)
+        number_as_values.append(numeric_as_value)
         concept_as_values.append(concept_as_value)
+        is_numeric_types.append(is_numeric_type)
         units.append(unit)
 
-    return concepts, value_indicators, numeric_as_values, concept_as_values, units
+    return (
+        concepts,
+        value_indicators,
+        is_numeric_types,
+        number_as_values,
+        concept_as_values,
+        units,
+    )
 
 
 def generate_single_batch(
@@ -205,14 +217,21 @@ def main(args):
             batch_sequences["value_indicators"],
             batch_sequences["values"],
         ):
-            seq, value_indicators, value_as_numbers, value_as_concepts, units = (
-                normalize_value(seq, values, cehrgpt_tokenizer)
-            )
+            (
+                seq,
+                value_indicators,
+                is_numeric_types,
+                number_as_values,
+                concept_as_values,
+                units,
+            ) = normalize_value(seq, values, cehrgpt_tokenizer)
             output = {"concept_ids": seq, "person_id": current_person_id}
-            if value_as_numbers is not None:
-                output["value_as_numbers"] = value_as_numbers
-            if value_as_concepts is not None:
-                output["value_as_concepts"] = value_as_concepts
+            if is_numeric_types is not None:
+                output["is_numeric_types"] = is_numeric_types
+            if number_as_values is not None:
+                output["number_as_values"] = number_as_values
+            if concept_as_values is not None:
+                output["concept_as_values"] = concept_as_values
             if value_indicators is not None:
                 output["concept_value_masks"] = value_indicators
             if units is not None:
@@ -228,8 +247,9 @@ def main(args):
                 columns=[
                     "concept_ids",
                     "person_id",
-                    "value_as_numbers",
-                    "value_as_concepts",
+                    "is_numeric_types",
+                    "number_as_values",
+                    "concept_as_values",
                     "concept_value_masks",
                     "units",
                 ],
@@ -243,8 +263,9 @@ def main(args):
             columns=[
                 "concept_ids",
                 "person_id",
-                "value_as_numbers",
-                "value_as_concepts",
+                "is_numeric_types",
+                "number_as_values",
+                "concept_as_values",
                 "concept_value_masks",
                 "units",
             ],
