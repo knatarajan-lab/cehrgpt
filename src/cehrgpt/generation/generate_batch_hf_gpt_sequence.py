@@ -40,20 +40,18 @@ def normalize_value(
     concept_as_values = []
     is_numeric_types = []
     units = []
-    for concept, value_indicator, concept_value in zip(seq, value_indicators, values):
+    for concept, value_indicator, value in zip(seq, value_indicators, values):
         if concept == END_TOKEN:
             break
         number_as_value = None
-        concept_as_value = None
+        concept_as_value = value if value and value.isnumeric() else None
         is_numeric_type = 0
         unit = NA
         if value_indicator:
             # If concept is numeric, we expect the next token to be a value bin
-            if is_valid_valid_bin(concept_value):
-                number_as_value, unit = tokenizer.denormalize(concept, concept_value)
+            if is_valid_valid_bin(value):
+                number_as_value, unit = tokenizer.denormalize(concept, value)
                 is_numeric_type = 1
-            elif concept_value.isnumeric():
-                concept_as_value = concept_value
 
         concepts.append(concept)
         number_as_values.append(number_as_value)
