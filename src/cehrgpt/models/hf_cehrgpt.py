@@ -977,31 +977,35 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 # Regularization term: mean entropy scaled by alpha
                 loss += self.cehrgpt.config.entropy_penalty_alpha * entropy.mean()
 
-        # We add another loss term when use_sub_time_tokenization is enabled, we need to recover the sub time token
-        # predictions for year/month/token
-        if self.config.use_sub_time_tokenization:
-            # Split the last dimensions into three parts
-            time_loss_fct = CrossEntropyLoss(reduction="none")
-            time_token_logits = self.time_token_lm_head(
-                torch.unflatten(hidden_states, 2, (3, -1))
-            )
-            shifted_time_token_logits = time_token_logits[..., :-1, :, :].contiguous()
-            shifted_time_token_indicators = (
-                time_token_indicators[..., 1:].contiguous().to(lm_logits.device)
-            )
-            shifted_time_token_labels = (
-                sub_time_tokens[:, 1:, ...].contiguous().to(lm_logits.device)
-            )
-            time_token_loss = time_loss_fct(
-                shifted_time_token_logits.view(-1, self.config.time_token_vocab_size),
-                shifted_time_token_labels.view(-1),
-            )
+            # We add another loss term when use_sub_time_tokenization is enabled, we need to recover the sub time token
+            # predictions for year/month/token
+            if self.config.use_sub_time_tokenization:
+                # Split the last dimensions into three parts
+                time_loss_fct = CrossEntropyLoss(reduction="none")
+                time_token_logits = self.time_token_lm_head(
+                    torch.unflatten(hidden_states, 2, (3, -1))
+                )
+                shifted_time_token_logits = time_token_logits[
+                    ..., :-1, :, :
+                ].contiguous()
+                shifted_time_token_indicators = (
+                    time_token_indicators[..., 1:].contiguous().to(lm_logits.device)
+                )
+                shifted_time_token_labels = (
+                    sub_time_tokens[:, 1:, ...].contiguous().to(lm_logits.device)
+                )
+                time_token_loss = time_loss_fct(
+                    shifted_time_token_logits.view(
+                        -1, self.config.time_token_vocab_size
+                    ),
+                    shifted_time_token_labels.view(-1),
+                )
 
-            time_token_loss = time_token_loss.view(
-                -1, 3
-            ) * shifted_time_token_indicators.view(-1, 1).to(hidden_states.dtype)
-            time_token_loss = time_token_loss.sum(-1)
-            loss += torch.mean(time_token_loss) * self.config.time_token_loss_weight
+                time_token_loss = time_token_loss.view(
+                    -1, 3
+                ) * shifted_time_token_indicators.view(-1, 1).to(hidden_states.dtype)
+                time_token_loss = time_token_loss.sum(-1)
+                loss += torch.mean(time_token_loss) * self.config.time_token_loss_weight
 
         if time_to_visits is not None:
             # Get lambda and k parameters
