@@ -40,7 +40,7 @@ from cehrgpt.models.special_tokens import (
 )
 
 NUM_OF_BINS = 10
-DEGREE_OF_FREEDOM = 1
+DEGREE_OF_FREEDOM = 2
 SAMPLE_SIZE = 10_000
 NA = "N/A"
 UNKNOWN_BIN = "BIN:unknown"
