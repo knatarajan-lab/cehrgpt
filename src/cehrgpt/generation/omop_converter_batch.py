@@ -647,6 +647,7 @@ if __name__ == "__main__":
         action="store",
         help="The number of cpu cores to use for multiprocessing",
         required=False,
+        default=1,
     )
     parser.add_argument(
         "--original_person_id",
