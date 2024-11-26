@@ -404,16 +404,22 @@ class Measurement(OmopEntity):
         self,
         measurement_id,
         measurement_concept_id,
+        is_numeric_type,
         value_as_number,
+        value_as_concept_id,
         visit_occurrence: VisitOccurrence,
         measurement_date: date,
+        unit_source_value,
     ):
         self._measurement_id = measurement_id
         self._measurement_concept_id = measurement_concept_id
         self._value_as_number = value_as_number
+        self._value_as_concept_id = value_as_concept_id
         self._visit_occurrence = visit_occurrence
         self._measurement_date = measurement_date
         self._measurement_datetime = fill_start_datetime(measurement_date)
+        self._operator_concept_id = 4172703 if is_numeric_type == 1 else 0
+        self._unit_source_value = unit_source_value
 
     def export_as_json(self):
         return {
@@ -423,12 +429,14 @@ class Measurement(OmopEntity):
             "measurement_date": self._measurement_date,
             "measurement_datetime": self._measurement_datetime,
             "value_as_number": self._value_as_number,
-            "operator_concept_id": 4172703,
+            "value_as_concept_id": self._value_as_concept_id,
+            "operator_concept_id": self._operator_concept_id,
             "provider_id": 0,
             "visit_occurrence_id": self._visit_occurrence._visit_occurrence_id,
             "visit_detail_id": 0,
             "measurement_source_value": "",
             "measurement_source_concept_id": self._measurement_concept_id,
+            "unit_source_value": self._unit_source_value,
         }
 
     @classmethod
@@ -440,12 +448,14 @@ class Measurement(OmopEntity):
             "measurement_date": date,
             "measurement_datetime": datetime,
             "value_as_number": float,
+            "value_as_concept_id": int,
             "operator_concept_id": int,
             "provider_id": int,
             "visit_occurrence_id": int,
             "visit_detail_id": int,
             "measurement_source_value": str,
             "measurement_source_concept_id": int,
+            "unit_source_value": str,
         }
 
     def get_table_name(self):
