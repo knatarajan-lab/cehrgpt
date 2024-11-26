@@ -209,20 +209,20 @@ def main(args):
         # Clear the cache
         torch.cuda.empty_cache()
 
-        for seq, value_indicators, values in zip(
+        for concept_ids, value_indicators, values in zip(
             batch_sequences["sequences"],
             batch_sequences["value_indicators"],
             batch_sequences["values"],
         ):
             (
-                seq,
+                concept_ids,
                 value_indicators,
                 is_numeric_types,
                 number_as_values,
                 concept_as_values,
                 units,
-            ) = normalize_value(seq, values, cehrgpt_tokenizer)
-            output = {"concept_ids": seq, "person_id": current_person_id}
+            ) = normalize_value(concept_ids, values, cehrgpt_tokenizer)
+            output = {"concept_ids": concept_ids, "person_id": current_person_id}
             if is_numeric_types is not None:
                 output["is_numeric_types"] = is_numeric_types
             if number_as_values is not None:
