@@ -410,7 +410,12 @@ class CehrGptTokenizer(PushToHubMixin):
     def lab_token_ids(self):
         reserved_tokens = [START_TOKEN, PAD_TOKEN, END_TOKEN, OUT_OF_VOCABULARY_TOKEN]
         return self.encode(
-            self._numeric_concept_ids + self._categorical_concept_ids + reserved_tokens
+            [
+                concept_id
+                for concept_id in self._numeric_concept_ids
+                + self._categorical_concept_ids
+                if concept_id not in reserved_tokens
+            ]
         )
 
     @property
