@@ -72,3 +72,17 @@ class CehrGPTArguments:
             "help": "The upper bound of the weight decays range for hyperparameter tuning."
         },
     )
+    token_frequency_penalty: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to use token-frequency penalty."
+        },
+    )
+    entropy_penalty: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={"help": "A flag to indicate whether we want to use entropy penalty."},
+    )
+    entropy_penalty_alpha: Optional[float] = dataclasses.field(
+        default=0.01,
+        metadata={"help": "Entropy penalty co-efficient"},
+    )
