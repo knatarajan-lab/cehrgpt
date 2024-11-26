@@ -83,7 +83,9 @@ class TestMergeLabStats(unittest.TestCase):
         ]
 
         # Perform the merge operation
-        result = CehrGptTokenizer.merge_lab_stats(lab_stats_existing, lab_stats_new)
+        result = CehrGptTokenizer.merge_numeric_lab_stats(
+            lab_stats_existing, lab_stats_new
+        )
 
         # Sort results and expected output by concept_id and unit for comparison
         result_sorted = sorted(result, key=lambda x: (x["concept_id"], x["unit"]))
