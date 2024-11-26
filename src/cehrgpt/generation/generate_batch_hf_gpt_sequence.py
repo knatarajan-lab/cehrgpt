@@ -24,27 +24,25 @@ LOG = logging.get_logger("transformers")
 
 def normalize_value(
     seq: Sequence[str],
+    value_indicators: Sequence[bool],
     values: Sequence[str],
     tokenizer: CehrGptTokenizer,
 ) -> Tuple[
     Sequence[str],
-    Optional[Sequence[bool]],
     Optional[Sequence[Optional[int]]],
     Optional[Sequence[Optional[float]]],
     Optional[Sequence[Optional[str]]],
     Optional[Sequence[str]],
 ]:
     concepts = []
-    value_indicators = []
     number_as_values = []
     concept_as_values = []
     is_numeric_types = []
     units = []
-    for concept, concept_value in zip(seq, values):
+    for concept, value_indicator, concept_value in zip(seq, value_indicators, values):
         if concept == END_TOKEN:
             break
-        value_indicator = concept in tokenizer.numeric_concept_ids
-        numeric_as_value = None
+        number_as_value = None
         concept_as_value = None
         is_numeric_type = 0
         unit = NA
@@ -57,15 +55,13 @@ def normalize_value(
                 concept_as_value = concept_value
 
         concepts.append(concept)
-        value_indicators.append(value_indicator)
-        number_as_values.append(numeric_as_value)
+        number_as_values.append(number_as_value)
         concept_as_values.append(concept_as_value)
         is_numeric_types.append(is_numeric_type)
         units.append(unit)
 
     return (
         concepts,
-        value_indicators,
         is_numeric_types,
         number_as_values,
         concept_as_values,
@@ -221,7 +217,9 @@ def main(args):
                 number_as_values,
                 concept_as_values,
                 units,
-            ) = normalize_value(concept_ids, values, cehrgpt_tokenizer)
+            ) = normalize_value(
+                concept_ids, value_indicators, values, cehrgpt_tokenizer
+            )
             output = {"concept_ids": concept_ids, "person_id": current_person_id}
             if is_numeric_types is not None:
                 output["is_numeric_types"] = is_numeric_types
