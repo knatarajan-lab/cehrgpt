@@ -109,7 +109,9 @@ def generate_single_batch(
         )
         batched_prompts = torch.tensor(random_prompts).to(device)
         results = model.generate(
-            inputs=batched_prompts, generation_config=generation_config
+            inputs=batched_prompts,
+            generation_config=generation_config,
+            lab_token_ids=tokenizer.lab_token_ids,
         )
 
     sequences = [

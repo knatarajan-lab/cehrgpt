@@ -741,7 +741,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         self.lm_head = new_embeddings
 
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs
+        self,
+        input_ids,
+        past_key_values=None,
+        inputs_embeds=None,
+        lab_token_ids=None,
+        **kwargs,
     ):
 
         # Omit tokens covered by past_key_values
@@ -1119,10 +1124,17 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             batch_size, dtype=torch.long, device=input_ids.device
         )
         model_kwargs["cache_position"] = torch.arange(cur_len, device=input_ids.device)
-        lab_token_ids = torch.tensor(
-            [] if self.config.lab_token_ids is None else self.config.lab_token_ids,
-            dtype=torch.int32,
-        )
+        # Use the lab_token_ids in the argument, otherwise default to the configuration token_ids
+        if "lab_token_ids" in model_kwargs:
+            lab_token_ids = torch.tensor(
+                model_kwargs["lab_token_ids"],
+                dtype=torch.int32,
+            )
+        else:
+            lab_token_ids = torch.tensor(
+                [] if self.config.lab_token_ids is None else self.config.lab_token_ids,
+                dtype=torch.int32,
+            )
         value_indicators = torch.zeros_like(input_ids).to(torch.bool)
         values = torch.zeros_like(
             input_ids,

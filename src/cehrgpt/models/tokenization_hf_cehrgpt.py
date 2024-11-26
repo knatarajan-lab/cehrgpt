@@ -186,40 +186,64 @@ def create_bins_with_spline(samples, num_bins, d_freedom=1) -> List[Dict[str, An
 
 def map_statistics(batch: Dict[str, Any], size=10_000) -> Dict[str, Any]:
     if "units" in batch:
-        concept_value_units = batch["units"]
+        batch_value_units = batch["units"]
     else:
-        concept_value_units = [[NA for _ in cons] for cons in batch["concept_ids"]]
+        batch_value_units = [[NA for _ in cons] for cons in batch["concept_ids"]]
 
     if "number_as_values" not in batch:
-        number_as_values = [
+        batched_number_as_values = [
             [value if isinstance(value, float) else None for value in concept_values]
             for concept_values in batch["concept_values"]
         ]
     else:
-        number_as_values = batch["number_as_values"]
+        batched_number_as_values = batch["number_as_values"]
+
+    if "concept_as_values" not in batch:
+        batched_concept_as_values = [
+            [value if isinstance(value, str) else None for value in concept_values]
+            for concept_values in batch["concept_values"]
+        ]
+    else:
+        batched_concept_as_values = batch["concept_as_values"]
 
     numeric_stats_by_lab = collections.defaultdict(partial(ReservoirSampler, size=size))
+    categorical_stats_by_lab = collections.defaultdict(int)
     for (
         concept_ids,
-        concept_values,
+        number_as_values,
+        concept_as_values,
         concept_value_indicators,
         units,
     ) in zip(
         batch["concept_ids"],
-        number_as_values,
+        batched_number_as_values,
+        batched_concept_as_values,
         batch["concept_value_masks"],
-        concept_value_units,
+        batch_value_units,
     ):
-        for concept_id, concept_value, concept_value_indicator, unit in zip(
+        for (
+            concept_id,
+            number_as_value,
+            concept_as_value,
+            concept_value_indicator,
+            unit,
+        ) in zip(
             concept_ids,
-            concept_values,
+            number_as_values,
+            concept_as_values,
             concept_value_indicators,
             units,
         ):
-            if concept_value_indicator == 1 and concept_value:
-                numeric_stats_by_lab[(concept_id, unit)].add(concept_value, 1)
+            if concept_value_indicator == 1:
+                if number_as_value:
+                    numeric_stats_by_lab[(concept_id, unit)].add(number_as_value, 1)
+                if concept_as_value:
+                    categorical_stats_by_lab[(concept_id, concept_as_value)] += 1
 
-    return {"numeric_stats_by_lab": numeric_stats_by_lab}
+    return {
+        "numeric_stats_by_lab": numeric_stats_by_lab,
+        "categorical_stats_by_lab": categorical_stats_by_lab,
+    }
 
 
 def create_numeric_concept_unit_mapping(
@@ -320,15 +344,17 @@ class CehrGptTokenizer(PushToHubMixin):
         value_tokenizer: Tokenizer,
         att_tokenizer: Tokenizer,
         token_to_sub_time_token_mapping: Dict[str, List[str]],
-        lab_stats: List[Dict[str, Any]],
+        numeric_lab_stats: List[Dict[str, Any]],
+        categorical_lab_stats: Dict[Tuple[str, str], int],
         concept_name_mapping: Dict[str, str],
     ):
         self._tokenizer = tokenizer
         self._value_tokenizer = value_tokenizer
         self._att_tokenizer = att_tokenizer
         self._token_to_sub_time_token_mapping = token_to_sub_time_token_mapping
-        self._lab_stats = lab_stats
-        self._numeric_event_statistics = NumericEventStatistics(lab_stats)
+        self._numeric_lab_stats = numeric_lab_stats
+        self._numeric_event_statistics = NumericEventStatistics(numeric_lab_stats)
+        self._categorical_lab_stats = categorical_lab_stats
         self._concept_name_mapping = concept_name_mapping
         self._oov_token_id = self._tokenizer.token_to_id(OUT_OF_VOCABULARY_TOKEN)
         self._padding_token_id = self._tokenizer.token_to_id(PAD_TOKEN)
@@ -336,6 +362,9 @@ class CehrGptTokenizer(PushToHubMixin):
         self._end_token_id = self._tokenizer.token_to_id(END_TOKEN)
         self._numeric_concept_ids = (
             self._numeric_event_statistics.get_numeric_concept_ids()
+        )
+        self._categorical_concept_ids = list(
+            {t[0] for t in self._categorical_lab_stats.keys()}
         )
         self._padding_value_token_id = self._value_tokenizer.token_to_id(PAD_TOKEN)
 
@@ -374,14 +403,14 @@ class CehrGptTokenizer(PushToHubMixin):
         return self._numeric_concept_ids
 
     @property
+    def categorical_concept_ids(self):
+        return self._categorical_concept_ids
+
+    @property
     def lab_token_ids(self):
         reserved_tokens = [START_TOKEN, PAD_TOKEN, END_TOKEN, OUT_OF_VOCABULARY_TOKEN]
         return self.encode(
-            [
-                concept_id
-                for concept_id in self._numeric_event_statistics.get_numeric_concept_ids()
-                if concept_id not in reserved_tokens
-            ]
+            self._numeric_concept_ids + self._categorical_concept_ids + reserved_tokens
         )
 
     @property
@@ -481,7 +510,11 @@ class CehrGptTokenizer(PushToHubMixin):
             json.dump(self._token_to_sub_time_token_mapping, f)
 
         with open(os.path.join(save_directory, LAB_STATS_FILE_NAME), "wb") as f:
-            pickle.dump(self._lab_stats, f)
+            lab_stats = {
+                "numeric_lab_stats": self._numeric_lab_stats,
+                "categorical_lab_stats": self._categorical_lab_stats,
+            }
+            pickle.dump(lab_stats, f)
 
         with open(os.path.join(save_directory, CONCEPT_MAPPING_FILE_NAME), "w") as f:
             json.dump(self._concept_name_mapping, f)
@@ -576,7 +609,8 @@ class CehrGptTokenizer(PushToHubMixin):
             value_tokenizer,
             att_tokenizer,
             token_to_sub_time_token_mapping,
-            lab_stats,
+            lab_stats["numeric_lab_stats"],
+            lab_stats["categorical_lab_stats"],
             concept_name_mapping,
         )
 
@@ -607,7 +641,8 @@ class CehrGptTokenizer(PushToHubMixin):
         new_token_to_sub_time_token_mapping = (
             new_tokenizer._token_to_sub_time_token_mapping
         )
-        new_lab_stats = new_tokenizer._lab_stats
+        new_numeric_lab_stats = new_tokenizer._numeric_lab_stats
+        new_categorical_lab_stats = new_tokenizer._categorical_lab_stats
         new_concept_name_mapping = new_tokenizer._concept_name_mapping
 
         # Add new tokens to the existing tokenizer
@@ -641,10 +676,15 @@ class CehrGptTokenizer(PushToHubMixin):
                     sub_time_tokens
                 )
 
-        # Merge lab_stats
-        cehrgpt_tokenizer_copy._lab_stats = cls.merge_lab_stats(
-            cehrgpt_tokenizer_copy._lab_stats,
-            new_lab_stats,
+        # Merge numeric lab_stats
+        cehrgpt_tokenizer_copy._numeric_lab_stats = cls.merge_numeric_lab_stats(
+            cehrgpt_tokenizer_copy._numeric_lab_stats,
+            new_numeric_lab_stats,
+        )
+        # Merge categorical lab_stats
+        cehrgpt_tokenizer_copy._categorical_lab_stats = cls.merge_categorical_lab_stats(
+            cehrgpt_tokenizer_copy._categorical_lab_stats,
+            new_categorical_lab_stats,
         )
 
         # Merge concept_name_mapping
@@ -657,12 +697,13 @@ class CehrGptTokenizer(PushToHubMixin):
             value_tokenizer=cehrgpt_tokenizer_copy._value_tokenizer,
             att_tokenizer=cehrgpt_tokenizer_copy._att_tokenizer,
             token_to_sub_time_token_mapping=cehrgpt_tokenizer_copy._token_to_sub_time_token_mapping,
-            lab_stats=cehrgpt_tokenizer_copy._lab_stats,
+            numeric_lab_stats=cehrgpt_tokenizer_copy._numeric_lab_stats,
+            categorical_lab_stats=cehrgpt_tokenizer_copy._categorical_lab_stats,
             concept_name_mapping=cehrgpt_tokenizer_copy._concept_name_mapping,
         )
 
     @classmethod
-    def merge_lab_stats(
+    def merge_numeric_lab_stats(
         cls,
         lab_stats_existing: List[Dict[str, Any]],
         lab_stats_new: List[Dict[str, Any]],
@@ -708,6 +749,18 @@ class CehrGptTokenizer(PushToHubMixin):
                     lab_stats_existing_mapping[concept_unit_pair] = lab_stat
 
         return list(lab_stats_existing_mapping.values())
+
+    @classmethod
+    def merge_categorical_lab_stats(
+        cls,
+        categorical_lab_stats_existing: Dict[Tuple[str, str], int],
+        categorical_lab_stats_new: Dict[Tuple[str, str], int],
+    ) -> Dict[Tuple[str, str], int]:
+        for (concept_id, concept_as_value), count in categorical_lab_stats_new.items():
+            if (concept_id, concept_as_value) not in categorical_lab_stats_new:
+                categorical_lab_stats_existing[(concept_id, concept_as_value)] = 0
+            categorical_lab_stats_existing[(concept_id, concept_as_value)] += count
+        return categorical_lab_stats_existing
 
     @classmethod
     def train_tokenizer(
@@ -782,7 +835,7 @@ class CehrGptTokenizer(PushToHubMixin):
             else:
                 current = agg_statistics(current, fixed_stat)
 
-        lab_stats = []
+        numeric_lab_stats = []
         for (concept_id, unit), online_stats in current["numeric_stats_by_lab"].items():
             # The lab needs to have a sample of num_of_bins times 2 values to be included
             if len(online_stats.samples) < NUM_OF_BINS * 2:
@@ -791,7 +844,7 @@ class CehrGptTokenizer(PushToHubMixin):
                 online_stats.samples, data_args.value_outlier_std
             )
             bins = create_bins_with_spline(samples, NUM_OF_BINS, DEGREE_OF_FREEDOM)
-            lab_stats.append(
+            numeric_lab_stats.append(
                 {
                     "concept_id": concept_id,
                     "unit": unit,
@@ -802,6 +855,12 @@ class CehrGptTokenizer(PushToHubMixin):
                     "bins": bins,
                 }
             )
+
+        categorical_lab_stats = collections.defaultdict(int)
+        for (concept_id, value_as_concept), count in current[
+            "categorical_stats_by_lab"
+        ].items():
+            categorical_lab_stats[(concept_id, value_as_concept)] += count
 
         # We will train a tokenizer specifically for time intervals
         sub_time_token_data = []
@@ -832,7 +891,8 @@ class CehrGptTokenizer(PushToHubMixin):
             value_tokenizer,
             att_tokenizer,
             token_to_sub_time_token_mapping,
-            lab_stats,
+            numeric_lab_stats,
+            categorical_lab_stats,
             concept_name_mapping,
         )
 
