@@ -528,7 +528,7 @@ def gpt_to_omop_converter_parallel(
     num_of_cores: int,
     original_person_id: bool,
 ):
-    patient_sequences = patient_sequences["concept_ids"]
+    concept_ids = patient_sequences["concept_ids"]
     is_numeric_types = patient_sequences["is_numeric_types"]
     number_as_values = patient_sequences["number_as_values"]
     concept_as_values = patient_sequences["concept_as_values"]
@@ -537,7 +537,7 @@ def gpt_to_omop_converter_parallel(
     pool_tuples = []
     # TODO: Need to make this dynamic
     const = 10000000
-    patient_sequences_list = np.array_split(patient_sequences, num_of_cores)
+    concept_ids_list = np.array_split(concept_ids, num_of_cores)
     is_numeric_types_list = np.array_split(is_numeric_types, num_of_cores)
     number_as_values_list = np.array_split(number_as_values, num_of_cores)
     concept_as_values_list = np.array_split(concept_as_values, num_of_cores)
@@ -546,7 +546,7 @@ def gpt_to_omop_converter_parallel(
         pool_tuples.append(
             (
                 const * i,
-                patient_sequences_list[i - 1],
+                concept_ids_list[i - 1],
                 is_numeric_types_list[i - 1],
                 number_as_values_list[i - 1],
                 concept_as_values_list[i - 1],
