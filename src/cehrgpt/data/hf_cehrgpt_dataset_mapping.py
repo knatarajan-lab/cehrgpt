@@ -35,8 +35,7 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
         # If any concept has a value associated with it, we normalize the value
-        input_ids = self._concept_tokenizer.encode(record["concept_ids"])
-        record["input_ids"] = input_ids
+        record["input_ids"] = self._concept_tokenizer.encode(record["concept_ids"])
         record["value_indicators"] = record["concept_value_masks"]
         if "number_as_values" not in record or record["concept_as_values"] is None:
             record["number_as_values"] = [
@@ -73,10 +72,9 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
                     value = UNKNOWN_BIN
                     if is_numeric_type == 1:
                         if concept_id in self._concept_tokenizer.numeric_concept_ids:
-                            concept_value_bin = self._concept_tokenizer.normalize(
+                            value = self._concept_tokenizer.normalize(
                                 concept_id, unit, number_as_value
                             )
-                            value = concept_value_bin
                     elif isinstance(concept_as_value, str):
                         value = concept_as_value
                     values.append(value)
@@ -89,6 +87,9 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
                 self._concept_tokenizer.pad_value_token_id
                 for _ in range(len(record["concept_value_masks"]))
             ]
+        # Delete these features because they contain null values and pyarrow cannot concatenate multiple records
+        del record["number_as_values"]
+        del record["concept_as_values"]
         return record
 
 
