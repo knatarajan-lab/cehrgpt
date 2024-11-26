@@ -28,8 +28,6 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
     def remove_columns(self):
         return [
             "concept_value_masks",
-            "number_as_values",
-            "concept_as_values",
             "is_numeric_types",
         ]
 
