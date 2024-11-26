@@ -41,6 +41,7 @@ from cehrgpt.models.special_tokens import (
 
 NUM_OF_BINS = 10
 DEGREE_OF_FREEDOM = 1
+SAMPLE_SIZE = 10_000
 NA = "N/A"
 UNKNOWN_BIN = "BIN:unknown"
 NONE_BIN = "BIN:NONE"
@@ -752,9 +753,7 @@ class CehrGptTokenizer(PushToHubMixin):
             ]
         )
 
-        map_statistics_partial = partial(
-            map_statistics, size=data_args.offline_stats_capacity
-        )
+        map_statistics_partial = partial(map_statistics, size=SAMPLE_SIZE)
 
         if data_args.streaming:
             parts = dataset.map(
