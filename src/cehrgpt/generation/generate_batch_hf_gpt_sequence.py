@@ -25,7 +25,6 @@ LOG = logging.get_logger("transformers")
 
 def normalize_value(
     seq: Sequence[str],
-    value_indicators: Sequence[bool],
     values: Sequence[str],
     tokenizer: CehrGptTokenizer,
 ) -> Tuple[
@@ -40,17 +39,18 @@ def normalize_value(
     concept_as_values = []
     is_numeric_types = []
     units = []
-    for concept, value_indicator, value in zip(seq, value_indicators, values):
+    for concept, value in zip(seq, values):
         if concept == END_TOKEN:
             break
         number_as_value = None
         concept_as_value = value if value and value.isnumeric() else None
         is_numeric_type = 0
         unit = NA
-        if value_indicator:
-            # If concept is numeric, we expect the next token to be a value bin
-            if is_valid_valid_bin(value):
-                number_as_value, unit = tokenizer.denormalize(concept, value)
+        # If concept is numeric, we expect the next token to be a value bin
+        if is_valid_valid_bin(value):
+            converted_value, unit = tokenizer.denormalize(concept, value)
+            if isinstance(converted_value, float):
+                number_as_value = converted_value
                 is_numeric_type = 1
 
         concepts.append(concept)
@@ -217,9 +217,7 @@ def main(args):
                 number_as_values,
                 concept_as_values,
                 units,
-            ) = normalize_value(
-                concept_ids, value_indicators, values, cehrgpt_tokenizer
-            )
+            ) = normalize_value(concept_ids, values, cehrgpt_tokenizer)
             output = {"concept_ids": concept_ids, "person_id": current_person_id}
             if is_numeric_types is not None:
                 output["is_numeric_types"] = is_numeric_types
