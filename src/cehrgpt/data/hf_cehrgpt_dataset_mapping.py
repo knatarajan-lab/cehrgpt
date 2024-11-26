@@ -81,10 +81,9 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
             assert len(values) == len(record["input_ids"])
             record["values"] = self._concept_tokenizer.encode_value(values)
         else:
-            record["values"] = [
-                self._concept_tokenizer.pad_value_token_id
-                for _ in range(len(record["concept_value_masks"]))
-            ]
+            record["values"] = self._concept_tokenizer.encode_value(
+                [NONE_BIN for _ in range(len(record["concept_value_masks"]))]
+            )
         # Delete these features because they contain null values and pyarrow cannot concatenate multiple records
         del record["number_as_values"]
         del record["concept_as_values"]
