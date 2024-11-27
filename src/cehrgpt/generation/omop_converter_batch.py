@@ -9,19 +9,9 @@ from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
-from cehrbert.models.hf_models.tokenization_utils import load_json_file
 from tqdm import tqdm
 
-from cehrgpt.models.tokenization_hf_cehrgpt import END_TOKEN
-
-from ..gpt_utils import (
-    extract_time_interval_in_days,
-    generate_artificial_time_tokens,
-    is_inpatient_att_token,
-    is_visit_end,
-    is_visit_start,
-)
-from .omop_entity import (
+from cehrgpt.generation.omop_entity import (
     ConditionOccurrence,
     Death,
     DrugExposure,
@@ -31,6 +21,14 @@ from .omop_entity import (
     ProcedureOccurrence,
     VisitOccurrence,
 )
+from cehrgpt.gpt_utils import (
+    extract_time_interval_in_days,
+    generate_artificial_time_tokens,
+    is_inpatient_att_token,
+    is_visit_end,
+    is_visit_start,
+)
+from cehrgpt.models.tokenization_hf_cehrgpt import END_TOKEN
 
 # TODO: move these to cehrbert_data
 STOP_TOKENS = ["VE", "[VE]", END_TOKEN]
@@ -235,21 +233,15 @@ def gpt_to_omop_converter_serial(
                 row = row[0:]
         tokens_generated = row[START_TOKEN_SIZE:]
         is_numeric_types = (
-            None
-            if np.any(pd.isnull(is_numeric_types))
-            else is_numeric_types[START_TOKEN_SIZE:]
+            None if is_numeric_types is None else is_numeric_types[START_TOKEN_SIZE:]
         )
         number_as_values = (
-            None
-            if np.any(pd.isnull(number_as_values))
-            else number_as_values[START_TOKEN_SIZE:]
+            None if number_as_values is None else number_as_values[START_TOKEN_SIZE:]
         )
         concept_as_values = (
-            None
-            if np.any(pd.isnull(concept_as_values))
-            else concept_as_values[START_TOKEN_SIZE:]
+            None if concept_as_values is None else concept_as_values[START_TOKEN_SIZE:]
         )
-        units = None if np.any(pd.isnull(units)) else units[START_TOKEN_SIZE:]
+        units = None if units is None else units[START_TOKEN_SIZE:]
 
         # Skip the sequences whose sequence length is 0
         if len(tokens_generated) == 0:
@@ -636,7 +628,8 @@ if __name__ == "__main__":
         action="store",
         type=int,
         help="The size of the batch",
-        required=True,
+        required=False,
+        default=1024,
     )
     parser.add_argument(
         "--patient_sequence_path",
