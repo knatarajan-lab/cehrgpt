@@ -418,7 +418,7 @@ def gpt_to_omop_converter_serial(
                             discharged_to_concept_id = concept_id
                         elif domain == "Condition":
                             co = ConditionOccurrence(
-                                condition_occurrence_id, x, vo, data_cursor
+                                condition_occurrence_id, concept_id, vo, data_cursor
                             )
                             append_to_dict(
                                 omop_export_dict, co, condition_occurrence_id
@@ -429,7 +429,7 @@ def gpt_to_omop_converter_serial(
                             condition_occurrence_id += 1
                         elif domain == "Procedure":
                             po = ProcedureOccurrence(
-                                procedure_occurrence_id, x, vo, data_cursor
+                                procedure_occurrence_id, concept_id, vo, data_cursor
                             )
                             append_to_dict(
                                 omop_export_dict, po, procedure_occurrence_id
@@ -439,7 +439,9 @@ def gpt_to_omop_converter_serial(
                             ] = person_id
                             procedure_occurrence_id += 1
                         elif domain == "Drug":
-                            de = DrugExposure(drug_exposure_id, x, vo, data_cursor)
+                            de = DrugExposure(
+                                drug_exposure_id, concept_id, vo, data_cursor
+                            )
                             append_to_dict(omop_export_dict, de, drug_exposure_id)
                             id_mappings_dict["drug_exposure"][
                                 drug_exposure_id
@@ -464,7 +466,7 @@ def gpt_to_omop_converter_serial(
                             unit = units[idx] if units is not None else None
                             m = Measurement(
                                 measurement_id,
-                                measurement_concept_id=x,
+                                measurement_concept_id=concept_id,
                                 is_numeric_type=is_numeric_type,
                                 value_as_number=number_as_value,
                                 value_as_concept_id=concept_as_value,
