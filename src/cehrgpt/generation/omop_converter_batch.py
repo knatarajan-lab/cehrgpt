@@ -597,6 +597,10 @@ def main(args):
                 "units",
             ],
         )
+
+    if not os.path.exists(args.output_folder):
+        Path(args.output_folder).mkdir(parents=True, exist_ok=True)
+
     gpt_to_omop_converter_parallel(
         args.output_folder,
         concept_pd,
