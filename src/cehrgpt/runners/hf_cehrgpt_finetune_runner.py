@@ -296,6 +296,8 @@ def model_init(
     # Expand tokenizer to adapt to the finetuning dataset
     if model.config.vocab_size < tokenizer.vocab_size:
         model.resize_token_embeddings(tokenizer.vocab_size)
+    if model.config.value_vocab_size < tokenizer.value_vocab_size:
+        model.resize_value_embeddings(tokenizer.value_vocab_size)
     # If lora is enabled, we add LORA adapters to the model
     if model_args.use_lora:
         # When LORA is used, the trainer could not automatically find this label,
@@ -658,6 +660,8 @@ def load_lora_model(
         # Expand tokenizer to adapt to the finetuning dataset
         if model.config.vocab_size < tokenizer.vocab_size:
             model.resize_token_embeddings(tokenizer.vocab_size)
+        if model.config.value_vocab_size < tokenizer.value_vocab_size:
+            model.resize_value_embeddings(tokenizer.value_vocab_size)
     LOG.info("Loading LoRA adapter from %s", training_args.output_dir)
     return PeftModel.from_pretrained(model, model_id=training_args.output_dir)
 
