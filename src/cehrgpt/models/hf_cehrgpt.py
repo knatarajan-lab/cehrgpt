@@ -365,6 +365,133 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
                     ),
                 )
 
+    def tie_weights(self):
+        super().tie_weights()
+        if getattr(self.config, "tie_word_embeddings", True):
+            output_value_embeddings = self.get_value_output_embeddings()
+            if output_value_embeddings is not None:
+                self._tie_or_clone_weights(
+                    output_value_embeddings, self.get_value_input_embeddings()
+                )
+
+    def resize_value_embeddings(
+        self,
+        new_num_tokens: Optional[int] = None,
+        pad_to_multiple_of: Optional[int] = None,
+    ) -> nn.Embedding:
+        """
+        Resizes value token embeddings matrix of the model if `new_num_tokens != config.value_vocab_size`.
+
+        Takes care of tying weights embeddings afterwards if the model class has a `tie_weights()` method.
+
+        Arguments:
+            new_num_tokens (`int`, *optional*):
+                The new number of tokens in the embedding matrix. Increasing the size will add newly initialized
+                vectors at the end. Reducing the size will remove vectors from the end. If not provided or `None`, just
+                returns a pointer to the input tokens `torch.nn.Embedding` module of the model without doing anything.
+            pad_to_multiple_of (`int`, *optional*):
+                If set will pad the embedding matrix to a multiple of the provided value.If `new_num_tokens` is set to
+                `None` will just pad the embedding to a multiple of `pad_to_multiple_of`.
+
+                This is especially useful to enable the use of Tensor Cores on NVIDIA hardware with compute capability
+                `>= 7.5` (Volta), or on TPUs which benefit from having sequence lengths be a multiple of 128. For more
+                details about this, or help on choosing the correct value for resizing, refer to this guide:
+                https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html#requirements-tc
+
+        Return:
+            `torch.nn.Embedding`: Pointer to the input tokens Embeddings Module of the model.
+        """
+        from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
+
+        # check if the value vocab_size is less than the number of tokens
+        # we need to resize the value_embeddings if necessary
+        if self.config.value_vocab_size < new_num_tokens:
+            # Update the embedding size
+            old_value_embeddings = self.get_value_input_embeddings()
+            new_value_embeddings = self._get_resized_embeddings(
+                old_value_embeddings, new_num_tokens, pad_to_multiple_of
+            )
+            old_embeddings_requires_grad = old_value_embeddings.weight.requires_grad
+            new_value_embeddings.requires_grad_(old_embeddings_requires_grad)
+            self.set_value_input_embeddings(new_value_embeddings)
+            is_quantized = (
+                hasattr(self, "hf_quantizer") and self.hf_quantizer is not None
+            )
+            # Update new_num_tokens with the actual size of new_value_embeddings
+            if pad_to_multiple_of is not None:
+                if is_deepspeed_zero3_enabled() and not is_quantized:
+                    import deepspeed
+
+                    with deepspeed.zero.GatheredParameters(
+                        new_value_embeddings.weight, modifier_rank=None
+                    ):
+                        new_num_tokens = new_value_embeddings.weight.shape[0]
+                else:
+                    new_num_tokens = new_value_embeddings.weight.shape[0]
+
+            # make sure that lm head is resized as well
+            if (
+                self.get_value_output_embeddings() is not None
+                and not self.config.tie_word_embeddings
+            ):
+                old_value_head = self.get_value_output_embeddings()
+                new_value_head = self._get_resized_lm_head(
+                    old_value_head, new_num_tokens
+                )
+                old_value_head_requires_grad = old_value_head.weight.requires_grad
+                new_value_head.requires_grad_(old_value_head_requires_grad)
+                self.set_value_output_embeddings(new_value_head)
+            # Update base model and current model config
+            self.config.value_vocab_size = (
+                self.get_value_input_embeddings().weight.shape[0]
+            )
+
+        # Return the input value embeddings
+        return self.get_value_input_embeddings()
+
+    def get_value_input_embeddings(self) -> nn.Embedding:
+        """
+        Returns the model's input embeddings.
+
+        Returns:
+            `nn.Module`: A torch module mapping vocabulary to hidden states.
+        """
+        base_model = getattr(self, self.base_model_prefix, self)
+        if base_model is not self:
+            return base_model.get_value_input_embeddings()
+        else:
+            raise NotImplementedError
+
+    def set_value_input_embeddings(self, value: nn.Embedding):
+        """
+        Set model's input embeddings.
+
+        Args:
+            value (`nn.Module`): A module mapping vocabulary to hidden states.
+        """
+        base_model = getattr(self, self.base_model_prefix, self)
+        if base_model is not self:
+            base_model.set_value_input_embeddings(value)
+        else:
+            raise NotImplementedError
+
+    def get_value_output_embeddings(self) -> Optional[nn.Linear]:
+        """
+        Returns the model's output embeddings.
+
+        Returns:
+            `nn.Module`: A torch module mapping hidden states to vocabulary.
+        """
+        return None  # Overwrite for models with output embeddings
+
+    def set_value_output_embeddings(self, output_embeddings: nn.Module) -> None:
+        """
+        Returns the model's output embeddings.
+
+        Returns:
+            `nn.Module`: A torch module mapping hidden states to vocabulary.
+        """
+
 
 class CEHRGPT2Model(CEHRGPTPreTrainedModel):
     def __init__(self, config: CEHRGPTConfig):
@@ -456,6 +583,12 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             self.h[index] = self.h[index].to("cpu")
         self.ln_f = self.ln_f.to("cpu")
         torch.cuda.empty_cache()
+
+    def get_value_input_embeddings(self) -> nn.Module:
+        return self.vte
+
+    def set_value_input_embeddings(self, value: nn.Module):
+        self.vte = value
 
     def get_input_embeddings(self):
         return self.wte
@@ -740,6 +873,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
     def set_output_embeddings(self, new_embeddings):
         self.lm_head = new_embeddings
 
+    def get_value_output_embeddings(self):
+        return self.value_head
+
+    def set_value_output_embeddings(self, new_embeddings):
+        self.value_head = new_embeddings
+
     def prepare_inputs_for_generation(
         self,
         input_ids,
@@ -973,7 +1112,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             loss += -log_probs.mean() * self.config.time_to_visit_loss_weight
 
         if true_values is not None and true_value_indicators is not None:
-
             true_values = true_values.to(value_logits.device)
             shift_value_logits = value_logits[..., :-1, :].contiguous()
             shift_value_indicators = true_value_indicators[..., :-1].contiguous()
