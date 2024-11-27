@@ -189,10 +189,12 @@ class CehrGptDataCollator:
             )
             assert batch["value_indicators"].shape[1] <= self.max_length
             assert batch["values"].shape[1] <= self.max_length
-            batch["true_value_indicators"] = batch["value_indicators"].clone()
-            batch["true_values"] = torch.where(
-                batch["value_indicators"], batch["values"].clone(), -100
-            )
+
+            if self.pretraining:
+                batch["true_value_indicators"] = batch["value_indicators"].clone()
+                batch["true_values"] = torch.where(
+                    batch["value_indicators"], batch["values"].clone(), -100
+                )
 
         if "person_id" in examples[0]:
             batch["person_id"] = torch.cat(
