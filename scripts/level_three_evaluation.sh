@@ -20,7 +20,7 @@ create_directory_if_not_exists() {
 echo "Generating hf_readmission"
 create_directory_if_not_exists "$OMOP_FOLDER/cohorts/hf_readmission"
 
-python -u -m cehrbert_data.spark_apps.prediction_cohorts.hf_readmission \
+python -u -m cehrbert_data.prediction_cohorts.hf_readmission \
   -c hf_readmission_bow \
   -i "$OMOP_FOLDER" \
   -o "$OMOP_FOLDER/cohorts/hf_readmission" \
@@ -49,7 +49,7 @@ fi
 echo "Generating copd_readmission"
 create_directory_if_not_exists "$OMOP_FOLDER/cohorts/copd_readmission"
 
-python -u -m cehrbert_data.spark_apps.prediction_cohorts.copd_readmission \
+python -u -m cehrbert_data.prediction_cohorts.copd_readmission \
   -c copd_readmission_bow \
   -i "$OMOP_FOLDER" \
   -o "$OMOP_FOLDER/cohorts/copd_readmission" \
@@ -78,7 +78,7 @@ fi
 echo "Generating hospitalization"
 create_directory_if_not_exists "$OMOP_FOLDER/cohorts/hospitalization"
 
-python -u -m cehrbert_data.spark_apps.prediction_cohorts.hospitalization \
+python -u -m cehrbert_data.prediction_cohorts.hospitalization \
   -c hospitalization_bow \
   -i "$OMOP_FOLDER" \
   -o "$OMOP_FOLDER/cohorts/hospitalization" \
@@ -107,7 +107,7 @@ fi
 echo "Generating afib_ischemic_stroke"
 create_directory_if_not_exists "$OMOP_FOLDER/cohorts/afib_ischemic_stroke"
 
-python -u -m cehrbert_data.spark_apps.prediction_cohorts.afib_ischemic_stroke \
+python -u -m cehrbert_data.prediction_cohorts.afib_ischemic_stroke \
   -c afib_ischemic_stroke_bow \
   -i "$OMOP_FOLDER" \
   -o "$OMOP_FOLDER/cohorts/afib_ischemic_stroke" \
