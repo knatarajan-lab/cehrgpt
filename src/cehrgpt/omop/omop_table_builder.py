@@ -1,8 +1,25 @@
 from datetime import date
 from typing import Any, Dict, List, Optional
 
+import cehrbert_data.cohorts.spark_app_base
 from cehrbert_data.cohorts.query_builder import QueryBuilder, QuerySpec
 from cehrbert_data.cohorts.spark_app_base import BaseCohortBuilder
+from cehrbert_data.utils.spark_utils import preprocess_domain_table
+
+
+def custom_instantiate_dependencies(spark, input_folder, dependency_list):
+    dependency_dict = dict()
+    for domain_table_name in dependency_list:
+        table = preprocess_domain_table(spark, input_folder, domain_table_name)
+        table.createOrReplaceTempView(domain_table_name)
+        dependency_dict[domain_table_name] = table
+    return dependency_dict
+
+
+# Monkeypatch the function
+cehrbert_data.cohorts.spark_app_base.instantiate_dependencies = (
+    custom_instantiate_dependencies
+)
 
 
 class OmopTableBuilder(BaseCohortBuilder):
@@ -27,9 +44,6 @@ class OmopTableBuilder(BaseCohortBuilder):
             post_observation_period=0,
             continue_job=continue_job,
         )
-        # Re-initialize the dataframe as the local views
-        for table_name, dataframe in self._dependency_dict.items():
-            dataframe.createOrReplaceTempView(table_name)
 
     def build(self):
         # Check whether the cohort has been generated
