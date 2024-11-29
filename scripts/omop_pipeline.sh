@@ -51,11 +51,13 @@ python -m cehrgpt.generation.omop_converter_batch \
   --buffer_size 1280 \
   --cpu_cores 10
 
+# Create observation_period
 python -u -m cehrgpt.omop.observation_period \
   --input_folder $OMOP_FOLDER \
   --output_folder $OMOP_FOLDER \
   --domain_table_list condition_occurrence drug_exposure procedure_occurrence measurement
 
+# Create condition_era
 python -u -m cehrgpt.omop.condition_era \
   --input_folder $OMOP_FOLDER \
   --output_folder $OMOP_FOLDER \
