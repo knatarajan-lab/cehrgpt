@@ -16,6 +16,40 @@ create_directory_if_not_exists() {
     fi
 }
 
+#!/bin/bash
+
+# Generate CAD CABG Cohort
+echo "Generating cad_cabg"
+create_directory_if_not_exists "$OMOP_FOLDER/cohorts/cad_cabg"
+
+if [ -n "$2" ]; then
+    python -u -m cehrbert_data.prediction_cohorts.cad_cabg_cohort \
+        -c cad_cabg_bow \
+        -i "$OMOP_FOLDER" \
+        -o "$OMOP_FOLDER/cohorts/cad_cabg/" \
+        -dl 1985-01-01 -du 2023-05-01 \
+        -l 18 -u 100 -ow 360 -ps 0 -pw 360 -f \
+        --att_type cehr_bert \
+        --ehr_table_list condition_occurrence procedure_occurrence drug_exposure -iv
+fi
+
+# Run Predictions on CAD CABG
+echo "Run predictions on cad_cabg"
+create_directory_if_not_exists "$OMOP_FOLDER/evaluation_gpt/cad_cabg"
+
+if [ -n "$3" ]; then
+    python -m cehrbert.evaluations.evaluation \
+        -a baseline_model \
+        -d "$OMOP_FOLDER/cohorts/cad_cabg/cad_cabg_bow/" \
+        -ef "$OMOP_FOLDER/evaluation_gpt/cad_cabg/" \
+        --patient_splits_folder "$PATIENT_SPLITS_FOLDER"
+else
+    python -m cehrbert.evaluations.evaluation \
+        -a baseline_model \
+        -d "$OMOP_FOLDER/cohorts/cad_cabg/cad_cabg_bow/" \
+        -ef "$OMOP_FOLDER/evaluation_gpt/cad_cabg/"
+fi
+
 # Generate HF Readmission
 echo "Generating hf_readmission"
 create_directory_if_not_exists "$OMOP_FOLDER/cohorts/hf_readmission"
