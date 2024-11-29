@@ -11,6 +11,12 @@ echo "PATIENT_SEQUENCE_FOLDER=$PATIENT_SEQUENCE_FOLDER"
 echo "OMOP_FOLDER=$OMOP_FOLDER"
 echo "SOURCE_OMOP_FOLDER=$SOURCE_OMOP_FOLDER"
 
+# Ensure OMOP_FOLDER exists
+if [ ! -d "$OMOP_FOLDER" ]; then
+    echo "Creating $OMOP_FOLDER"
+    mkdir -p "$OMOP_FOLDER"
+fi
+
 # Removing existing OMOP tables
 rm -rf $OMOP_FOLDER/person/
 rm -rf $OMOP_FOLDER/visit_occurrence/
