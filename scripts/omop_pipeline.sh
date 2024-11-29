@@ -50,6 +50,7 @@ if [ ! -d $OMOP_FOLDER/concept_ancestor ]; then
 fi
 
 # Reconstructing the OMOP instance from patient sequences
+echo "Reconstructing the OMOP instance from patient sequences in $OMOP_FOLDER"
 python -m cehrgpt.generation.omop_converter_batch \
   --patient_sequence_path $PATIENT_SEQUENCE_FOLDER \
   --output_folder $OMOP_FOLDER \
@@ -58,12 +59,14 @@ python -m cehrgpt.generation.omop_converter_batch \
   --cpu_cores 10
 
 # Create observation_period
+echo "Reconstructing observation_period in $OMOP_FOLDER"
 python -u -m cehrgpt.omop.observation_period \
   --input_folder $OMOP_FOLDER \
   --output_folder $OMOP_FOLDER \
   --domain_table_list condition_occurrence drug_exposure procedure_occurrence measurement
 
 # Create condition_era
+echo "Reconstructing condition_era in $OMOP_FOLDER"
 python -u -m cehrgpt.omop.condition_era \
   --input_folder $OMOP_FOLDER \
   --output_folder $OMOP_FOLDER \
