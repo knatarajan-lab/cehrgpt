@@ -22,16 +22,14 @@ create_directory_if_not_exists() {
 echo "Generating cad_cabg"
 create_directory_if_not_exists "$OMOP_FOLDER/cohorts/cad_cabg"
 
-if [ -n "$2" ]; then
-    python -u -m cehrbert_data.prediction_cohorts.cad_cabg_cohort \
-        -c cad_cabg_bow \
-        -i "$OMOP_FOLDER" \
-        -o "$OMOP_FOLDER/cohorts/cad_cabg/" \
-        -dl 1985-01-01 -du 2023-05-01 \
-        -l 18 -u 100 -ow 360 -ps 0 -pw 360 -f \
-        --att_type cehr_bert \
-        --ehr_table_list condition_occurrence procedure_occurrence drug_exposure -iv
-fi
+python -u -m cehrbert_data.prediction_cohorts.cad_cabg_cohort \
+    -c cad_cabg_bow \
+    -i "$OMOP_FOLDER" \
+    -o "$OMOP_FOLDER/cohorts/cad_cabg/" \
+    -dl 1985-01-01 -du 2023-05-01 \
+    -l 18 -u 100 -ow 360 -ps 0 -pw 360 -f \
+    --att_type cehr_bert \
+    --ehr_table_list condition_occurrence procedure_occurrence drug_exposure -iv
 
 # Run Predictions on CAD CABG
 echo "Run predictions on cad_cabg"
