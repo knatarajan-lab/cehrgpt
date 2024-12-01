@@ -1050,8 +1050,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             if self.cehrgpt.config.entropy_penalty:
                 # Compute probabilities using softmax
                 probs = torch.softmax(lm_logits, dim=-1)
-                # Compute entropy: -sum(p * log(p))
-                entropy = -torch.sum(
+                # Compute negative entropy: sum(p * log(p))
+                entropy = torch.sum(
                     probs * torch.log(probs + 1e-9), dim=-1
                 )  # Add epsilon for numerical stability
                 # Regularization term: mean entropy scaled by alpha
