@@ -152,7 +152,7 @@ def main(args):
         num_proc=args.num_proc,
         remove_columns=dataset.column_names,
     )
-    prompts_and_concept_stats = dict()
+    prompts_and_concept_stats = defaultdict(dict)
     for stat in tqdm(parts, desc="Aggregating the concept counts"):
         fixed_stat = pickle.loads(stat["data"])
         for prompt, concept_stats in fixed_stat.items():
@@ -164,7 +164,7 @@ def main(args):
 
     for prompt, concept_stats in prompts_and_concept_stats.items():
         total_count = sum(concept_stats.values())
-        for concept_id in concept_stats.key():
+        for concept_id in concept_stats.keys():
             concept_stats[concept_id] = concept_stats[concept_id] / total_count
 
     prompts = list(prompts_and_concept_stats.keys())
@@ -228,7 +228,7 @@ def calculate_reward(
     for concept_id in actual_concept_dist.keys():
         actual_concept_dist[concept_id] /= total_count
     # Translate the concept ids to token ids
-    actual_dist = np.zeros((1, tokenizer.vocab_size))
+    actual_dist = np.zeros(tokenizer.vocab_size)
     actual_dist[tokenizer.encode(actual_concept_dist.keys())] = list(
         actual_concept_dist.values()
     )
@@ -236,14 +236,12 @@ def calculate_reward(
     epsilon = 1e-10
     logprob_dist = torch.tensor(np.log(actual_dist + epsilon))
     # Translate the concept ids to token ids
-    ref_dist = np.zeros((1, tokenizer.vocab_size))
+    ref_dist = np.zeros(tokenizer.vocab_size)
     ref_dist[tokenizer.encode(expected_concept_dist.keys())] = list(
         expected_concept_dist.values()
     )
     ref_logprob_dist = torch.tensor(np.log(ref_dist + epsilon))
-    return F.kl_div(
-        logprob_dist, ref_logprob_dist, log_target=True, reduction="none"
-    ).sum(-1)
+    return F.kl_div(logprob_dist, ref_logprob_dist, log_target=True, reduction="sum")
 
 
 def create_arg_parser():
