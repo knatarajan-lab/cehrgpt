@@ -175,13 +175,16 @@ def main(args):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
         random_index = random.randint(0, total - 1)
         expected_concept_dist = prompts_and_concept_stats[prompts[random_index]]
-        batched_prompt = cehrgpt_tokenizer.encode(
-            [prompts[random_index] for _ in range(args.batch_size)]
+        batched_prompts = torch.tensor(
+            [
+                cehrgpt_tokenizer.encode(prompts[random_index])
+                for _ in range(args.batch_size)
+            ]
         ).to(device)
         batched_sequences = generate_single_batch(
             cehrgpt_model,
             cehrgpt_tokenizer,
-            batched_prompt,
+            batched_prompts,
             max_new_tokens=args.context_window,
             mini_num_of_concepts=args.min_num_of_concepts,
             top_p=args.top_p,
