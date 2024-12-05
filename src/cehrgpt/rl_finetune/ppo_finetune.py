@@ -171,7 +171,7 @@ def main(args):
     total = len(prompts)
     device = ppo_trainer.current_device
     num_of_batches = args.num_of_patients // args.batch_size + 1
-    for i in range(num_of_batches):
+    for i in tqdm(range(num_of_batches)):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
         random_index = random.randint(0, total - 1)
         expected_concept_dist = prompts_and_concept_stats[prompts[random_index]]
@@ -261,6 +261,14 @@ def create_arg_parser():
         action="store",
         type=int,
         default=4,
+        required=False,
+    )
+    base_arg_parser.add_argument(
+        "--num_of_patients",
+        dest="num_of_patients",
+        action="store",
+        type=int,
+        default=1028,
         required=False,
     )
     base_arg_parser.add_argument(
