@@ -232,7 +232,7 @@ def calculate_reward(
         actual_concept_dist[concept_id] /= total_count
     # Translate the concept ids to token ids
     actual_dist = np.zeros(tokenizer.vocab_size)
-    actual_dist[tokenizer.encode(actual_concept_dist.keys())] = list(
+    actual_dist[tokenizer.encode(list(actual_concept_dist.keys()))] = list(
         actual_concept_dist.values()
     )
     # Add a small epsilon to avoid log(0)
@@ -240,7 +240,7 @@ def calculate_reward(
     logprob_dist = torch.tensor(np.log(actual_dist + epsilon))
     # Translate the concept ids to token ids
     ref_dist = np.zeros(tokenizer.vocab_size)
-    ref_dist[tokenizer.encode(expected_concept_dist.keys())] = list(
+    ref_dist[tokenizer.encode(list(expected_concept_dist.keys()))] = list(
         expected_concept_dist.values()
     )
     ref_logprob_dist = torch.tensor(np.log(ref_dist + epsilon))
