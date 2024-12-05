@@ -204,10 +204,11 @@ def main(args):
         )
         query_tensors = []
         response_tensors = []
+        rewards = []
         for sequence in batched_sequences:
             query_tensors.append(cehrgpt_tokenizer.encode(sequence[:4]))
             response_tensors.append(cehrgpt_tokenizer.encode(sequence[4:]))
-        rewards = [reward for _ in range(len(batched_sequences))]
+            rewards.append(reward)
         train_stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
         ppo_trainer.log_stats(stats=train_stats, batch={}, rewards=rewards)
 
