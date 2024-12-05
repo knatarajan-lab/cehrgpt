@@ -197,6 +197,9 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         )
         return default_mapping
 
+    def get_vocab(self):
+        self._tokenizer.get_vocab()
+
     def encode(self, concept_ids, **kwargs) -> Sequence[int]:
         encoded = self._tokenizer.encode(concept_ids, is_pretokenized=True)
         return encoded.ids
