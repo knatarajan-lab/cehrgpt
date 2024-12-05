@@ -195,6 +195,7 @@ def main(args):
             num_beam_groups=args.num_beam_groups,
             epsilon_cutoff=args.epsilon_cutoff,
         )
+        LOG.info(f"{datetime.datetime.now()}: Batch {i} sequence generated")
         # Clear the cache
         torch.cuda.empty_cache()
 
@@ -206,7 +207,7 @@ def main(args):
         for sequence in batched_sequences:
             query_tensors.append(cehrgpt_tokenizer.encode(sequence[:4]))
             response_tensors.append(cehrgpt_tokenizer.encode(sequence[4:]))
-        rewards = [torch.FloatTensor(reward) for _ in range(len(batched_sequences))]
+        rewards = [reward for _ in range(len(batched_sequences))]
         train_stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
         ppo_trainer.log_stats(stats=train_stats, batch={}, rewards=rewards)
 
