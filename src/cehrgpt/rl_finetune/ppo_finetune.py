@@ -109,13 +109,16 @@ def main(args):
     ref_model = create_reference_model(model).to(device)
 
     # create a ppo trainer
+    gpt2_tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    gpt2_tokenizer.pad_token = cehrgpt_tokenizer.pad_token
+    gpt2_tokenizer.eos_token = cehrgpt_tokenizer.eos_token
     ppo_trainer = PPOTrainer(
         config=PPOConfig(
             batch_size=args.batch_size, mini_batch_size=args.mini_batch_size
         ),
         model=model,
         ref_model=ref_model,
-        tokenizer=AutoTokenizer.from_pretrained("gpt2"),
+        tokenizer=gpt2_tokenizer,
     )
 
     model_folder_name = os.path.join(
