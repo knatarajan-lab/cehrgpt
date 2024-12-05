@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from cehrbert.models.hf_models.tokenization_utils import agg_helper
 from cehrbert.runners.runner_util import load_parquet_as_dataset
 from tqdm import tqdm
-from transformers import GenerationConfig
+from transformers import AutoTokenizer, GenerationConfig
 from transformers.utils import is_flash_attn_2_available, logging
 from trl import (
     AutoModelForCausalLMWithValueHead,
@@ -115,7 +115,7 @@ def main(args):
         ),
         model=model,
         ref_model=ref_model,
-        tokenizer=cehrgpt_tokenizer,
+        tokenizer=AutoTokenizer.from_pretrained("gpt2"),
     )
 
     model_folder_name = os.path.join(
