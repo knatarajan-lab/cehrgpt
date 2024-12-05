@@ -23,7 +23,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
 from tokenizers.trainers import WordLevelTrainer
 from tqdm import tqdm
-from transformers.tokenization_utils_base import PushToHubMixin
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from cehrgpt.gpt_utils import (
     convert_time_interval_to_time_tuple,
@@ -122,7 +122,7 @@ class NumericEventStatistics:
         return value, unit
 
 
-class CehrGptTokenizer(PushToHubMixin):
+class CehrGptTokenizer(PreTrainedTokenizerBase):
 
     def __init__(
         self,
@@ -162,8 +162,16 @@ class CehrGptTokenizer(PushToHubMixin):
         return self._end_token_id
 
     @property
+    def end_token(self):
+        return END_TOKEN
+
+    @property
     def pad_token_id(self):
         return self._padding_token_id
+
+    @property
+    def pad_token(self):
+        return PAD_TOKEN
 
     @property
     def lab_token_ids(self):
@@ -189,12 +197,12 @@ class CehrGptTokenizer(PushToHubMixin):
         )
         return default_mapping
 
-    def encode(self, concept_ids: Sequence[str]) -> Sequence[int]:
+    def encode(self, concept_ids, **kwargs) -> Sequence[int]:
         encoded = self._tokenizer.encode(concept_ids, is_pretokenized=True)
         return encoded.ids
 
     def decode(
-        self, concept_token_ids: List[int], skip_special_tokens: bool = True
+        self, concept_token_ids: List[int], skip_special_tokens: bool = True, **kwargs
     ) -> List[str]:
         return self._tokenizer.decode(
             concept_token_ids, skip_special_tokens=skip_special_tokens
