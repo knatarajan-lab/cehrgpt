@@ -256,6 +256,14 @@ def create_arg_parser():
         required=True,
     )
     base_arg_parser.add_argument(
+        "--num_proc",
+        dest="num_proc",
+        action="store",
+        type=int,
+        default=4,
+        required=False,
+    )
+    base_arg_parser.add_argument(
         "--demographic_data_path",
         dest="demographic_data_path",
         action="store",
