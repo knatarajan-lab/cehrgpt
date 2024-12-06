@@ -173,9 +173,8 @@ def main(args):
     prompts = list(prompts_and_concept_stats.keys())
     total = len(prompts)
     device = ppo_trainer.current_device
-    num_of_batches = args.num_of_patients // args.batch_size + 1
     num_of_micro_batches = args.batch_size // args.min_batch_size
-    for i in tqdm(range(num_of_batches)):
+    for i in tqdm(range(args.num_of_steps)):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
         random_index = random.randint(0, total - 1)
         expected_concept_dist = prompts_and_concept_stats[prompts[random_index]]
@@ -281,8 +280,8 @@ def create_arg_parser():
         required=False,
     )
     base_arg_parser.add_argument(
-        "--num_of_patients",
-        dest="num_of_patients",
+        "--num_of_steps",
+        dest="num_of_steps",
         action="store",
         type=int,
         default=1028,
