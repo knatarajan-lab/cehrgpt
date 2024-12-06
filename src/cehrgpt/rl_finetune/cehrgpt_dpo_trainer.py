@@ -4,7 +4,6 @@ from copy import deepcopy
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import torch
-import torch.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.utils import is_deepspeed_available
@@ -16,6 +15,7 @@ from trl.trainer.callbacks import SyncRefModelCallback
 from trl.trainer.dpo_config import DPOConfig, FDivergenceConstants, FDivergenceType
 from trl.trainer.utils import RunningMoments, cap_exp, disable_dropout_in_model
 
+from cehrgpt.data.hf_cehrgpt_dpo_collator import CehrGptDPODataCollator
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
@@ -30,7 +30,7 @@ class CehrGptDPOTrainer(Trainer):
         ref_model: CEHRGPT2LMHeadModel,
         tokenizer: CehrGptTokenizer,
         args: DPOConfig,
-        data_collator: DataCollator,
+        data_collator: CehrGptDPODataCollator,
         train_dataset: Optional[Dataset] = None,
         eval_dataset: Optional[Union[Dataset, Dict[str, Dataset]]] = None,
         callbacks: Optional[List[TrainerCallback]] = None,
@@ -189,15 +189,15 @@ class CehrGptDPOTrainer(Trainer):
         )
 
         rejected_outputs = model(
-            input_ids=batch["reject_input_ids"],
-            attention_mask=batch["reject_attention_mask"],
-            value_indicators=batch["reject_value_indicators"],
-            values=batch["reject_values"],
+            input_ids=batch["rejected_input_ids"],
+            attention_mask=batch["rejected_attention_mask"],
+            value_indicators=batch["rejected_value_indicators"],
+            values=batch["rejected_values"],
         )
 
         rejected_logps, rejected_logits = self.get_batch_logps(
             rejected_outputs.logits,
-            batch["reject_input_ids"],
+            batch["rejected_input_ids"],
             pad_token_id=self.tokenizer.pad_token_id,
         )
 
