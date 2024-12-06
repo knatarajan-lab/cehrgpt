@@ -114,7 +114,6 @@ def main(args):
             batch_size=args.batch_size,
             mini_batch_size=args.mini_batch_size,
             init_kl_coef=args.init_kl_coef,
-            use_score_scaling=args.use_score_scaling,
         ),
         model=model,
         ref_model=ref_model,
@@ -259,7 +258,9 @@ def calculate_reward(
         expected_concept_dist.values()
     )
     ref_logprob_dist = torch.tensor(np.log(ref_dist + epsilon))
-    return -F.kl_div(logprob_dist, ref_logprob_dist, log_target=True, reduction="sum")
+    return torch.exp(
+        -F.kl_div(logprob_dist, ref_logprob_dist, log_target=True, reduction="sum")
+    )
 
 
 def create_arg_parser():
@@ -303,11 +304,6 @@ def create_arg_parser():
         action="store",
         help="The path for your concept_path",
         required=True,
-    )
-    base_arg_parser.add_argument(
-        "--use_score_scaling",
-        dest="use_score_scaling",
-        action="store_true",
     )
     return base_arg_parser
 
