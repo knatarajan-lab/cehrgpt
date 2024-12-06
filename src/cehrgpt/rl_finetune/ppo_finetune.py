@@ -174,34 +174,38 @@ def main(args):
     total = len(prompts)
     device = ppo_trainer.current_device
     num_of_batches = args.num_of_patients // args.batch_size + 1
+    num_of_micro_batches = args.batch_size // args.min_batch_size
     for i in tqdm(range(num_of_batches)):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
         random_index = random.randint(0, total - 1)
         expected_concept_dist = prompts_and_concept_stats[prompts[random_index]]
-        batched_prompts = torch.tensor(
-            [
-                cehrgpt_tokenizer.encode(prompts[random_index])
-                for _ in range(args.batch_size)
-            ]
-        ).to(device)
-        batched_sequences = generate_single_batch(
-            cehrgpt_model,
-            cehrgpt_tokenizer,
-            batched_prompts,
-            max_new_tokens=args.context_window,
-            mini_num_of_concepts=args.min_num_of_concepts,
-            top_p=args.top_p,
-            top_k=args.top_k,
-            temperature=args.temperature,
-            repetition_penalty=args.repetition_penalty,
-            num_beams=args.num_beams,
-            num_beam_groups=args.num_beam_groups,
-            epsilon_cutoff=args.epsilon_cutoff,
-        )
-        LOG.info(f"{datetime.datetime.now()}: Batch {i} sequence generated")
-        # Clear the cache
-        torch.cuda.empty_cache()
+        batched_sequences = []
+        for _ in range(num_of_micro_batches):
+            batched_prompts = torch.tensor(
+                [
+                    cehrgpt_tokenizer.encode(prompts[random_index])
+                    for _ in range(args.min_batch_size)
+                ]
+            ).to(device)
+            min_batched_sequences = generate_single_batch(
+                cehrgpt_model,
+                cehrgpt_tokenizer,
+                batched_prompts,
+                max_new_tokens=args.context_window,
+                mini_num_of_concepts=args.min_num_of_concepts,
+                top_p=args.top_p,
+                top_k=args.top_k,
+                temperature=args.temperature,
+                repetition_penalty=args.repetition_penalty,
+                num_beams=args.num_beams,
+                num_beam_groups=args.num_beam_groups,
+                epsilon_cutoff=args.epsilon_cutoff,
+            )
+            # Clear the cache
+            torch.cuda.empty_cache()
+            batched_sequences.extend(min_batched_sequences)
 
+        LOG.info(f"{datetime.datetime.now()}: Batch {i} sequence generated")
         reward = calculate_reward(
             batched_sequences, expected_concept_dist, cehrgpt_tokenizer
         )
