@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.utils import is_deepspeed_available
 from datasets import Dataset
-from transformers import DataCollator, PreTrainedModel, Trainer
+from transformers import PreTrainedModel, Trainer
 from transformers.trainer_callback import TrainerCallback
 from transformers.trainer_utils import EvalLoopOutput
 from trl.trainer.callbacks import SyncRefModelCallback
@@ -178,8 +178,13 @@ class CehrGptDPOTrainer(Trainer):
         chosen_outputs = model(
             input_ids=batch["chosen_input_ids"],
             attention_mask=batch["chosen_attention_mask"],
-            value_indicators=batch["chosen_value_indicators"],
-            values=batch["chosen_values"],
+            value_indicators=(
+                batch["chosen_value_indicators"]
+                if "chosen_value_indicators" in batch
+                else None
+            ),
+            values=batch["chosen_values"] if "chosen_values" in batch else None,
+            labels=batch["chosen_input_ids"],
         )
 
         chosen_logps, chosen_logits = self.get_batch_logps(
@@ -191,8 +196,12 @@ class CehrGptDPOTrainer(Trainer):
         rejected_outputs = model(
             input_ids=batch["rejected_input_ids"],
             attention_mask=batch["rejected_attention_mask"],
-            value_indicators=batch["rejected_value_indicators"],
-            values=batch["rejected_values"],
+            value_indicators=(
+                batch["rejected_value_indicators"]
+                if "rejected_value_indicators" in batch
+                else None
+            ),
+            values=batch["rejected_values"] if "rejected_values" in batch else None,
         )
 
         rejected_logps, rejected_logits = self.get_batch_logps(
