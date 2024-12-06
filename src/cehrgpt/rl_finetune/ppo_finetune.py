@@ -113,6 +113,7 @@ def main(args):
         config=PPOConfig(
             batch_size=args.batch_size,
             mini_batch_size=args.mini_batch_size,
+            init_kl_coef=args.init_kl_coef,
         ),
         model=model,
         ref_model=ref_model,
@@ -218,6 +219,9 @@ def main(args):
             )
             rewards.append(reward)
         train_stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
+        for key_name in train_stats.keys():
+            if key_name.startswith("tokens"):
+                train_stats.pop(key_name)
         LOG.info(f"{datetime.datetime.now()}: Batch {i} stats: {train_stats}")
         logs.append(reward)
         ppo_trainer.log_stats(stats=train_stats, batch={}, rewards=rewards)
@@ -257,7 +261,9 @@ def calculate_reward(
         expected_concept_dist.values()
     )
     ref_logprob_dist = torch.tensor(np.log(ref_dist + epsilon))
-    return -F.kl_div(logprob_dist, ref_logprob_dist, log_target=True, reduction="sum")
+    return torch.exp(
+        -F.kl_div(logprob_dist, ref_logprob_dist, log_target=True, reduction="sum")
+    )
 
 
 def create_arg_parser():
@@ -270,6 +276,14 @@ def create_arg_parser():
         action="store",
         type=int,
         required=True,
+    )
+    base_arg_parser.add_argument(
+        "--init_kl_coef",
+        dest="init_kl_coef",
+        action="store",
+        type=float,
+        required=False,
+        default=0.1,
     )
     base_arg_parser.add_argument(
         "--num_proc",
