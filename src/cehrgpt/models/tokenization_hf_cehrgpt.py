@@ -23,7 +23,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
 from tokenizers.trainers import WordLevelTrainer
 from tqdm import tqdm
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+from transformers import PreTrainedTokenizer
 
 from cehrgpt.gpt_utils import (
     convert_time_interval_to_time_tuple,
@@ -122,7 +122,7 @@ class NumericEventStatistics:
         return value, unit
 
 
-class CehrGptTokenizer(PreTrainedTokenizerBase):
+class CehrGptTokenizer(PreTrainedTokenizer):
 
     def __init__(
         self,
@@ -196,6 +196,9 @@ class CehrGptTokenizer(PreTrainedTokenizerBase):
             }
         )
         return default_mapping
+
+    def get_vocab(self) -> Dict[str, int]:
+        return self._tokenizer.get_vocab()
 
     def encode(self, concept_ids, **kwargs) -> Sequence[int]:
         encoded = self._tokenizer.encode(concept_ids, is_pretokenized=True)
