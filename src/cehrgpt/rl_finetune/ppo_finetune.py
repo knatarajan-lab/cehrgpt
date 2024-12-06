@@ -219,7 +219,7 @@ def main(args):
             rewards.append(reward)
         train_stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
         LOG.info(f"{datetime.datetime.now()}: Batch {i} stats: {train_stats}")
-        logs.append(train_stats)
+        logs.append(reward)
         ppo_trainer.log_stats(stats=train_stats, batch={}, rewards=rewards)
     ppo_trainer.save_pretrained(model_folder_name)
     with open(os.path.join(model_folder_name, "ppo_finetune_stats.pkl"), "wb") as f:
