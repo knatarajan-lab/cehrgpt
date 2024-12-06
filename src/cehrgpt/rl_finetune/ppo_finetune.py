@@ -111,7 +111,9 @@ def main(args):
     # create a ppo trainer
     ppo_trainer = PPOTrainer(
         config=PPOConfig(
-            batch_size=args.batch_size, mini_batch_size=args.mini_batch_size
+            batch_size=args.batch_size,
+            mini_batch_size=args.mini_batch_size,
+            log_with="tensorboard",
         ),
         model=model,
         ref_model=ref_model,
@@ -167,6 +169,7 @@ def main(args):
         for concept_id in concept_stats.keys():
             concept_stats[concept_id] = concept_stats[concept_id] / total_count
 
+    logs = []
     prompts = list(prompts_and_concept_stats.keys())
     total = len(prompts)
     device = ppo_trainer.current_device
@@ -212,9 +215,12 @@ def main(args):
             )
             rewards.append(reward)
         train_stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
+        LOG.info(f"{datetime.datetime.now()}: Batch {i} stats: {train_stats}")
+        logs.append(train_stats)
         ppo_trainer.log_stats(stats=train_stats, batch={}, rewards=rewards)
-
     ppo_trainer.save_pretrained(model_folder_name)
+    with open(os.path.join(model_folder_name, "ppo_finetune_stats.pkl"), "wb") as f:
+        pickle.dump(logs, f)
 
 
 def calculate_reward(
