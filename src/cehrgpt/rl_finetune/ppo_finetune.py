@@ -207,6 +207,7 @@ def main(args):
         reward = calculate_reward(
             batched_sequences, expected_concept_dist, cehrgpt_tokenizer
         )
+        LOG.info(f"{datetime.datetime.now()}: Batch {i} KL divergence reward: {reward}")
         query_tensors = []
         response_tensors = []
         rewards = []
