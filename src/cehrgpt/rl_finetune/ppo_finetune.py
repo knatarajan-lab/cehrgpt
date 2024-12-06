@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from cehrbert.models.hf_models.tokenization_utils import agg_helper
 from cehrbert.runners.runner_util import load_parquet_as_dataset
 from tqdm import tqdm
-from transformers import AutoTokenizer, GenerationConfig
+from transformers import GenerationConfig
 from transformers.utils import is_flash_attn_2_available, logging
 from trl import (
     AutoModelForCausalLMWithValueHead,
@@ -113,7 +113,6 @@ def main(args):
         config=PPOConfig(
             batch_size=args.batch_size,
             mini_batch_size=args.mini_batch_size,
-            log_with="tensorboard",
         ),
         model=model,
         ref_model=ref_model,
