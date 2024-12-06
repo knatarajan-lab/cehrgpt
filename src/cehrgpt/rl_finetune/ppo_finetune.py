@@ -172,7 +172,7 @@ def main(args):
     prompts = list(prompts_and_concept_stats.keys())
     total = len(prompts)
     device = ppo_trainer.current_device
-    num_of_micro_batches = args.batch_size // args.min_batch_size
+    num_of_micro_batches = args.batch_size // args.mini_batch_size
     for i in tqdm(range(args.num_of_steps)):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
         random_index = random.randint(0, total - 1)
@@ -182,10 +182,10 @@ def main(args):
             batched_prompts = torch.tensor(
                 [
                     cehrgpt_tokenizer.encode(prompts[random_index])
-                    for _ in range(args.min_batch_size)
+                    for _ in range(args.mini_batch_size)
                 ]
             ).to(device)
-            min_batched_sequences = generate_single_batch(
+            mini_batched_sequences = generate_single_batch(
                 cehrgpt_model,
                 cehrgpt_tokenizer,
                 batched_prompts,
@@ -201,7 +201,7 @@ def main(args):
             )
             # Clear the cache
             torch.cuda.empty_cache()
-            batched_sequences.extend(min_batched_sequences)
+            batched_sequences.extend(mini_batched_sequences)
 
         LOG.info(f"{datetime.datetime.now()}: Batch {i} sequence generated")
         reward = calculate_reward(
