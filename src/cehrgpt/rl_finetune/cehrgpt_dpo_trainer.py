@@ -99,6 +99,17 @@ class CehrGptDPOTrainer(Trainer):
         # weighting of the NLL term in the loss. If `None`, no weighting is applied and the loss is the same as the
         # DPO loss. The paper recommends `rpo_alpha=1.0`.
         self.rpo_alpha = args.rpo_alpha
+        self.vs_token_id = tokenizer._convert_token_to_id("VS")
+        if self.vs_token_id == tokenizer._oov_token_id:
+            self.vs_token_id = tokenizer._convert_token_to_id("[VS]")
+        self.ve_token_id = tokenizer._convert_token_to_id("VE")
+        if self.ve_token_id == tokenizer._oov_token_id:
+            self.ve_token_id = tokenizer._convert_token_to_id("[VE]")
+        self.non_active_token_ids = [
+            tokenizer.pad_token_id,
+            self.vs_token_id,
+            self.ve_token_id,
+        ]
 
         super().__init__(
             model=model,
@@ -193,7 +204,7 @@ class CehrGptDPOTrainer(Trainer):
         chosen_logps, chosen_logits = self.get_batch_logps(
             chosen_outputs.logits,
             batch["chosen_input_ids"],
-            pad_token_id=self.tokenizer.pad_token_id,
+            pad_token_ids=[self.tokenizer.pad_token_id],
         )
 
         # move labels to correct device to enable model parallelism
@@ -490,7 +501,7 @@ class CehrGptDPOTrainer(Trainer):
 
     @staticmethod
     def get_batch_logps(
-        all_logits: torch.FloatTensor, labels: torch.Tensor, pad_token_id: int
+        all_logits: torch.FloatTensor, labels: torch.Tensor, pad_token_ids: List[int]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # remove the demographics
         all_logits = all_logits[:, 3:-1]
@@ -499,7 +510,10 @@ class CehrGptDPOTrainer(Trainer):
         per_token_logps = torch.gather(
             all_logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)
         ).squeeze(2)
-        per_token_logps *= labels != pad_token_id
+        non_pad_mask = ~torch.isin(
+            labels, torch.tensor(pad_token_ids, device=labels.device)
+        )
+        per_token_logps *= non_pad_mask
         all_logps = per_token_logps.sum(-1)
         return all_logps, all_logits
 
