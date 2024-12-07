@@ -3,9 +3,9 @@ import os
 import random
 import uuid
 
-import dask.dataframe as dd
 import pandas as pd
 import torch
+from cehrbert.runners.runner_util import load_parquet_as_dataset
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.cehrgpt_args import create_inference_base_arg_parser
@@ -66,27 +66,30 @@ def main(args):
     LOG.info(f"Top K {args.top_k}")
     LOG.info(f"Loading sequence_data_path at {args.sequence_data_path}")
 
-    data = dd.read_parquet(args.sequence_data_path)
-    sampling_frac = float(args.batch_size) / len(data.index)
+    data = load_parquet_as_dataset(args.sequence_data_path)
+    total_rows = len(data)
+    float(args.batch_size) / total_rows
     num_of_batches = args.num_of_patients // args.batch_size + 1
     sequence_to_flush = []
     for i in range(num_of_batches):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
-        sample_data = data.sample(frac=sampling_frac).compute()
+        random_indices = random.sample(range(total_rows), k=args.batch_size)
+        sample_data = data.select(random_indices)
         prompts = []
         chosen_responses = []
         cutoff_frac = random.uniform(0, args.cutoff_frac_max)
-        for row in sample_data.itertuples(index=True):
-            seq_len = len(row.concept_ids)
+        for row in sample_data:
+            seq_len = len(row["concept_ids"])
             prompt_len = max(4, int(seq_len * cutoff_frac))
-            prompts.append(cehrgpt_tokenizer.encode(row.concept_ids[:prompt_len]))
+            prompts.append(cehrgpt_tokenizer.encode(row["concept_ids"][:prompt_len]))
             chosen_responses.append(
                 {
-                    "person_id": row.person_id,
-                    "chosen_concept_ids": row.concept_ids,
-                    "chosen_concept_values": row.concept_values,
-                    "chosen_concept_value_masks": row.concept_value_masks,
-                    "chosen_units": row.units,
+                    "person_id": row["person_id"],
+                    "chosen_concept_ids": row["concept_ids"],
+                    "chosen_concept_values": row["concept_values"],
+                    "chosen_concept_value_masks": row["concept_value_masks"],
+                    "chosen_units": row["units"],
+                    "prompt_length": prompt_len,
                 }
             )
 
