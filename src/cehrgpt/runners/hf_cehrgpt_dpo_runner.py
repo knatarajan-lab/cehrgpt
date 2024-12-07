@@ -33,17 +33,9 @@ def main():
     else:
         dataset = load_parquet_as_dataset(data_args.data_folder)
         # Random split
-        train_set, validation_set = dataset.train_test_split(
+        dataset = dataset.train_test_split(
             test_size=data_args.validation_split_percentage, seed=dpo_config.seed
         )
-        # Organize them into a single DatasetDict
-        dataset = DatasetDict({"train": train_set, "validation": validation_set})
-        if data_args.streaming:
-            dataset = {
-                k: v.to_iterable_dataset(num_shards=dpo_config.dataloader_num_workers)
-                for k, v in dataset.items()
-            }
-
         processed_dataset = apply_cehrbert_dataset_mapping(
             dataset,
             mapping_function=HFCehrGptDPOTokenizationMapping(tokenizer),
@@ -70,8 +62,7 @@ def main():
             num_proc=data_args.preprocessing_num_workers,
         )
 
-    if not data_args.streaming:
-        processed_dataset.save_to_disk(prepared_ds_path)
+    processed_dataset.save_to_disk(prepared_ds_path)
 
     # Set seed before initializing model.
     set_seed(dpo_config.seed)
@@ -106,7 +97,7 @@ def main():
         args=dpo_config,
         tokenizer=tokenizer,
         train_dataset=processed_dataset["train"],
-        eval_dataset=processed_dataset["validation"],
+        eval_dataset=processed_dataset["test"],
         data_collator=CehrGptDPODataCollator(
             tokenizer=tokenizer,
             max_length=model_args.max_position_embeddings,
