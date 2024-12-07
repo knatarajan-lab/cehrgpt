@@ -232,7 +232,7 @@ class CehrGptDPOTrainer(Trainer):
         rejected_logps, rejected_logits = self.get_batch_logps(
             rejected_outputs.logits,
             batch["rejected_input_ids"],
-            pad_token_id=self.tokenizer.pad_token_id,
+            pad_token_ids=[self.tokenizer.pad_token_id],
         )
 
         return (
