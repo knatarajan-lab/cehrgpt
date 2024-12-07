@@ -67,6 +67,14 @@ def main(args):
     LOG.info(f"Loading sequence_data_path at {args.sequence_data_path}")
 
     dataset = load_parquet_as_dataset(args.sequence_data_path)
+    dataset = dataset.filter(
+        lambda batch: [
+            4 <= len(concept_ids) < cehrgpt_model.config.n_positions
+            for concept_ids in batch["concept_ids"]
+        ],
+        batched=True,
+        batch_size=1000,
+    )
     total_rows = len(dataset)
     float(args.batch_size) / total_rows
     num_of_batches = args.num_of_patients // args.batch_size + 1
