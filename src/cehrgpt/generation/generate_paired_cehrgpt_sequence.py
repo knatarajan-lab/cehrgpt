@@ -68,6 +68,14 @@ def main(args):
     LOG.info(f"Loading sequence_data_path at {args.sequence_data_path}")
 
     dataset = load_parquet_as_dataset(args.sequence_data_path)
+    dataset = dataset.filter(
+        lambda batch: [
+            4 <= len(concept_ids) < cehrgpt_model.config.n_positions
+            for concept_ids in batch["concept_ids"]
+        ],
+        batched=True,
+        batch_size=10000,
+    )
     total_rows = len(dataset)
     float(args.batch_size) / total_rows
     num_of_batches = args.num_of_patients // args.batch_size + 1
@@ -81,8 +89,6 @@ def main(args):
         cutoff_frac = random.uniform(0, args.cutoff_frac_max)
         for row in sample_data:
             seq_len = len(row["concept_ids"])
-            if seq_len > args.context_window or seq_len <= 4:
-                continue
             prompt_len = max(4, int(seq_len * cutoff_frac))
             prompts.append(cehrgpt_tokenizer.encode(row["concept_ids"][:prompt_len]))
             chosen_responses.append(
