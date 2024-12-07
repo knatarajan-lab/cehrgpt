@@ -44,9 +44,9 @@ def main(
         .withColumn("id", f.monotonically_increasing_id())
         .select(
             f.col("id").alias("chosen_id"),
-            f.col("concept_ids").alias("chosen_concept_id"),
-            f.col("concept_values").alias("chosen_concept_value"),
-            f.col("concept_value_masks").alias("chosen_concept_value_mask"),
+            f.col("concept_ids").alias("chosen_concept_ids"),
+            # f.col("concept_values").alias("chosen_concept_values"),
+            # f.col("concept_value_masks").alias("chosen_concept_value_masks"),
         )
     )
     synthetic_sequences_sample = (
@@ -56,9 +56,9 @@ def main(
         .withColumn("id", f.monotonically_increasing_id())
         .select(
             f.col("id").alias("rejected_id"),
-            f.col("concept_ids").alias("rejected_concept_id"),
-            f.col("concept_values").alias("rejected_concept_value"),
-            f.col("concept_value_masks").alias("rejected_concept_value_mask"),
+            f.col("concept_ids").alias("rejected_concept_ids"),
+            # f.col("concept_values").alias("rejected_concept_values"),
+            # f.col("concept_value_masks").alias("rejected_concept_value_mask"),
         )
     )
 
