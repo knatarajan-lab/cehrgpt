@@ -73,6 +73,7 @@ def main(args):
             for concept_ids in batch["concept_ids"]
         ],
         batched=True,
+        num_proc=args.num_proc,
         batch_size=1000,
     )
     total_rows = len(dataset)
@@ -214,6 +215,14 @@ def create_arg_parser():
         help="The max fraction of the patient sequences that will be used for prompting",
         required=False,
         default=0.5,
+    )
+    base_arg_parser.add_argument(
+        "--num_proc",
+        dest="num_proc",
+        action="store",
+        type=int,
+        required=False,
+        default=1,
     )
     return base_arg_parser
 
