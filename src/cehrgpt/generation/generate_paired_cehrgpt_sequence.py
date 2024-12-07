@@ -2,111 +2,22 @@ import datetime
 import os
 import random
 import uuid
-from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import dask.dataframe as dd
 import pandas as pd
 import torch
-from transformers import GenerationConfig
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.cehrgpt_args import create_inference_base_arg_parser
+from cehrgpt.generation.generate_batch_hf_gpt_sequence import (
+    generate_single_batch,
+    normalize_value,
+)
 from cehrgpt.gpt_utils import get_cehrgpt_output_folder
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
-from cehrgpt.models.tokenization_hf_cehrgpt import NA, CehrGptTokenizer
+from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 LOG = logging.get_logger("transformers")
-
-
-def generate_single_batch(
-    model: CEHRGPT2LMHeadModel,
-    tokenizer: CehrGptTokenizer,
-    prompts: List[List[int]],
-    max_new_tokens=512,
-    mini_num_of_concepts=1,
-    top_p=0.95,
-    top_k=50,
-    temperature=1.0,
-    repetition_penalty=1.0,
-    num_beams=1,
-    num_beam_groups=1,
-    epsilon_cutoff=0.0,
-    device: Any = "cpu",
-) -> Dict[str, Any]:
-
-    with torch.no_grad():
-        generation_config = GenerationConfig(
-            repetition_penalty=repetition_penalty,
-            max_length=max_new_tokens,
-            min_length=mini_num_of_concepts,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            bos_token_id=tokenizer.end_token_id,
-            eos_token_id=tokenizer.end_token_id,
-            pad_token_id=tokenizer.pad_token_id,
-            do_sample=True,
-            use_cache=True,
-            return_dict_in_generate=True,
-            output_attentions=False,
-            output_hidden_states=False,
-            output_scores=False,
-            renormalize_logits=True,
-            num_beams=num_beams,
-            num_beam_groups=num_beam_groups,
-            epsilon_cutoff=epsilon_cutoff,
-        )
-        batched_prompts = torch.tensor(prompts).to(device)
-        results = model.generate(
-            inputs=batched_prompts, generation_config=generation_config
-        )
-
-    sequences = [tokenizer.decode(seq.cpu().numpy()) for seq in results.sequences]
-    if results.sequence_val_masks is not None:
-        value_indicators = [
-            m[: len(s)]
-            for m, s in zip(
-                results.sequence_val_masks.detach().cpu().numpy(),
-                sequences,
-            )
-        ]
-    else:
-        value_indicators = [None] * len(sequences)
-    if results.sequence_vals is not None:
-        values = [
-            v[: len(s)]
-            for v, s in zip(
-                results.sequence_vals.detach().to(torch.float32).cpu().numpy(),
-                sequences,
-            )
-        ]
-    else:
-        values = [None] * len(sequences)
-    return {
-        "sequences": sequences,
-        "value_indicators": value_indicators,
-        "values": values,
-    }
-
-
-def normalize_value(
-    seq: Sequence[str],
-    value_indicators: Sequence[bool],
-    values: Sequence[float],
-    tokenizer: CehrGptTokenizer,
-) -> Tuple[Optional[Sequence[float]], Optional[Sequence[str]]]:
-    if value_indicators is not None and values is not None:
-        normalized_values = []
-        units = []
-        for concept_id, value_indicator, value in zip(seq, value_indicators, values):
-            if value_indicator:
-                normalized_value, unit = tokenizer.denormalize(concept_id, value)
-                normalized_values.append(normalized_value)
-                units.append(unit)
-            else:
-                normalized_values.append(0.0)
-                units.append(NA)
-        return normalized_values, units
-    return None, None
 
 
 def main(args):
@@ -155,20 +66,34 @@ def main(args):
     LOG.info(f"Top K {args.top_k}")
     LOG.info(f"Loading demographic_info at {args.demographic_data_path}")
 
-    data = pd.read_parquet(args.demographic_data_path)
-    demographic_info = data.concept_ids.apply(lambda concept_list: concept_list[0:4])
-    demographic_info = [cehrgpt_tokenizer.encode(_) for _ in demographic_info]
-
+    data = dd.read_parquet(args.sequence_data_path)
+    sampling_frac = float(args.batch_size) / len(data.index)
     num_of_batches = args.num_of_patients // args.batch_size + 1
     sequence_to_flush = []
-    current_person_id = 1
     for i in range(num_of_batches):
         print(f"{datetime.datetime.now()}: Batch {i} started")
-        random_prompts = random.sample(demographic_info, args.batch_size)
+        sample_data = data.sample(frac=sampling_frac).compute()
+        prompts = []
+        chosen_responses = []
+        cutoff_frac = random.uniform(0, args.cutoff_frac_max)
+        for row in sample_data.itertuples(index=True):
+            seq_len = len(row.concept_ids)
+            prompt_len = max(4, int(seq_len * cutoff_frac))
+            prompts.append(cehrgpt_tokenizer.encode(row.concept_ids[:prompt_len]))
+            chosen_responses.append(
+                {
+                    "person_id": row.person_id,
+                    "chosen_concept_ids": row.concept_ids,
+                    "chosen_concept_values": row.concept_values,
+                    "chosen_concept_value_masks": row.concept_value_masks,
+                    "chosen_units": row.units,
+                }
+            )
+
         batch_sequences = generate_single_batch(
             cehrgpt_model,
             cehrgpt_tokenizer,
-            random_prompts,
+            prompts=prompts,
             max_new_tokens=args.context_window,
             mini_num_of_concepts=args.min_num_of_concepts,
             top_p=args.top_p,
@@ -184,35 +109,39 @@ def main(args):
         # Clear the cache
         torch.cuda.empty_cache()
 
-        for seq, value_indicator, value in zip(
+        for seq, value_indicator, value, chosen_response in zip(
             batch_sequences["sequences"],
             batch_sequences["value_indicators"],
             batch_sequences["values"],
+            chosen_responses,
         ):
+            output = {"rejected_concept_ids": seq}
             normalized_values, units = normalize_value(
                 seq, value_indicator, value, cehrgpt_tokenizer
             )
-            output = {"concept_ids": seq, "person_id": current_person_id}
             if normalized_values is not None:
-                output["concept_values"] = normalized_values
+                output["rejected_concept_values"] = normalized_values
             if value_indicator is not None:
-                output["concept_value_masks"] = value_indicator
+                output["rejected_concept_value_masks"] = value_indicator
             if units is not None:
-                output["units"] = units
-
+                output["rejected_units"] = units
+            output.update(chosen_response)
             sequence_to_flush.append(output)
-            current_person_id += 1
 
         if len(sequence_to_flush) >= args.buffer_size:
             print(f"{datetime.datetime.now()}: Flushing to the Disk at Batch {i}")
             pd.DataFrame(
                 sequence_to_flush,
                 columns=[
-                    "concept_ids",
                     "person_id",
-                    "concept_values",
-                    "concept_value_masks",
-                    "units",
+                    "chosen_concept_ids",
+                    "chosen_concept_values",
+                    "chosen_concept_value_masks",
+                    "chosen_units",
+                    "rejected_concept_ids",
+                    "rejected_concept_values",
+                    "rejected_concept_value_masks",
+                    "rejected_units",
                 ],
             ).to_parquet(os.path.join(output_folder_name, f"{uuid.uuid4()}.parquet"))
             sequence_to_flush.clear()
@@ -222,18 +151,22 @@ def main(args):
         pd.DataFrame(
             sequence_to_flush,
             columns=[
-                "concept_ids",
                 "person_id",
-                "concept_values",
-                "concept_value_masks",
-                "units",
+                "chosen_concept_ids",
+                "chosen_concept_values",
+                "chosen_concept_value_masks",
+                "chosen_units",
+                "rejected_concept_ids",
+                "rejected_concept_values",
+                "rejected_concept_value_masks",
+                "rejected_units",
             ],
         ).to_parquet(os.path.join(output_folder_name, f"{uuid.uuid4()}-last.parquet"))
 
 
 def create_arg_parser():
     base_arg_parser = create_inference_base_arg_parser(
-        description="Arguments for generating patient sequences"
+        description="Arguments for generating paired patient sequences"
     )
     base_arg_parser.add_argument(
         "--num_of_patients",
@@ -243,13 +176,21 @@ def create_arg_parser():
         help="The number of patients that will be generated",
         required=True,
     )
-
     base_arg_parser.add_argument(
-        "--demographic_data_path",
-        dest="demographic_data_path",
+        "--sequence_data_path",
+        dest="sequence_data_path",
         action="store",
-        help="The path for your concept_path",
+        help="The path for your sequence data",
         required=True,
+    )
+    base_arg_parser.add_argument(
+        "--cutoff_frac_max",
+        dest="cutoff_frac_max",
+        action="store",
+        type=float,
+        help="The max fraction of the patient sequences that will be used for prompting",
+        required=False,
+        default=0.5,
     )
     return base_arg_parser
 
