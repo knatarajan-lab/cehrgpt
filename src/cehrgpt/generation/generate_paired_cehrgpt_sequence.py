@@ -68,22 +68,18 @@ def main(args):
     LOG.info(f"Loading sequence_data_path at {args.sequence_data_path}")
 
     dataset = load_parquet_as_dataset(args.sequence_data_path)
-    dataset = dataset.filter(
-        lambda batch: [
-            4 <= len(concept_ids) < cehrgpt_model.config.n_positions
-            for concept_ids in batch["concept_ids"]
-        ],
-        batched=True,
-        batch_size=10000,
-    )
     total_rows = len(dataset)
     float(args.batch_size) / total_rows
     num_of_batches = args.num_of_patients // args.batch_size + 1
     sequence_to_flush = []
     for i in range(num_of_batches):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
-        random_indices = random.sample(range(total_rows), k=1)
-        sample_data = dataset.select(random_indices)
+        sample_data = []
+        while len(sample_data) == 0:
+            random_indices = random.sample(range(total_rows), k=1)
+            for row in dataset.select(random_indices):
+                if 4 <= len(row["concept_ids"]) <= cehrgpt_model.config.n_positions:
+                    sample_data.append(row)
         prompts = []
         chosen_responses = []
         cutoff_frac = random.uniform(0, args.cutoff_frac_max)
