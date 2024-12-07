@@ -95,6 +95,10 @@ class CehrGptDPOTrainer(Trainer):
             FDivergenceConstants.ALPHA_DIVERGENCE_COEF_KEY: args.f_alpha_divergence_coef
         }
         self.reference_free = args.reference_free
+        # α parameter from the [RPO](https://huggingface.co/papers/2404.19733) paper (v3), which controls the
+        # weighting of the NLL term in the loss. If `None`, no weighting is applied and the loss is the same as the
+        # DPO loss. The paper recommends `rpo_alpha=1.0`.
+        self.rpo_alpha = args.rpo_alpha
 
         super().__init__(
             model=model,
@@ -170,7 +174,7 @@ class CehrGptDPOTrainer(Trainer):
         self,
         model: CEHRGPT2LMHeadModel,
         batch: Dict[str, torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
 
         We do this to avoid doing two forward passes, because it's faster for FSDP.
@@ -210,7 +214,13 @@ class CehrGptDPOTrainer(Trainer):
             pad_token_id=self.tokenizer.pad_token_id,
         )
 
-        return chosen_logps, rejected_logps, chosen_logits, rejected_logits
+        return (
+            chosen_logps,
+            rejected_logps,
+            chosen_logits,
+            rejected_logits,
+            chosen_outputs.loss,
+        )
 
     def dpo_loss(
         self,
@@ -431,6 +441,7 @@ class CehrGptDPOTrainer(Trainer):
             policy_rejected_logps,
             policy_chosen_logits,
             policy_rejected_logits,
+            policy_nll_loss,
         ) = forward_output[:5]
 
         with torch.no_grad():
@@ -446,6 +457,10 @@ class CehrGptDPOTrainer(Trainer):
         )
         reward_accuracies = (chosen_rewards > rejected_rewards).float()
 
+        if self.rpo_alpha is not None:
+            # RPO loss from V3 of the paper:
+            losses = losses + policy_nll_loss * self.rpo_alpha
+
         prefix = "eval_" if train_eval == "eval" else ""
         metrics[f"{prefix}rewards/chosen"] = chosen_rewards.mean().cpu()
         metrics[f"{prefix}rewards/rejected"] = rejected_rewards.mean().cpu()
@@ -459,6 +474,8 @@ class CehrGptDPOTrainer(Trainer):
             policy_rejected_logits.detach().mean().cpu()
         )
         metrics[f"{prefix}logits/chosen"] = policy_chosen_logits.detach().mean().cpu()
+        if self.rpo_alpha is not None:
+            metrics[f"{prefix}nll_loss"] = policy_nll_loss.detach().mean().cpu()
         return losses.mean(), metrics
 
     @staticmethod
