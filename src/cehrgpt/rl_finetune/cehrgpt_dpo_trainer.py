@@ -188,13 +188,23 @@ class CehrGptDPOTrainer(Trainer):
                 else None
             ),
             values=batch["chosen_values"] if "chosen_values" in batch else None,
-            labels=batch["chosen_input_ids"],
         )
 
         chosen_logps, chosen_logits = self.get_batch_logps(
             chosen_outputs.logits,
             batch["chosen_input_ids"],
             pad_token_id=self.tokenizer.pad_token_id,
+        )
+
+        # move labels to correct device to enable model parallelism
+        labels = batch["chosen_input_ids"].to(chosen_logits.device)
+        # Shift so that tokens < n predict n
+        shift_logits = chosen_logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        # Flatten the tokens
+        loss_fct = nn.CrossEntropyLoss()
+        nll_loss = loss_fct(
+            shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
         )
 
         rejected_outputs = model(
@@ -219,7 +229,7 @@ class CehrGptDPOTrainer(Trainer):
             rejected_logps,
             chosen_logits,
             rejected_logits,
-            chosen_outputs.loss,
+            nll_loss,
         )
 
     def dpo_loss(
