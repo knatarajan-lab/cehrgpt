@@ -66,21 +66,23 @@ def main(args):
     LOG.info(f"Top K {args.top_k}")
     LOG.info(f"Loading sequence_data_path at {args.sequence_data_path}")
 
-    data = load_parquet_as_dataset(args.sequence_data_path)
-    total_rows = len(data)
+    dataset = load_parquet_as_dataset(args.sequence_data_path)
+    total_rows = len(dataset)
     float(args.batch_size) / total_rows
     num_of_batches = args.num_of_patients // args.batch_size + 1
     sequence_to_flush = []
     for i in range(num_of_batches):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
         random_indices = random.sample(range(total_rows), k=1)
-        sample_data = data.select(random_indices)
+        sample_data = dataset.select(random_indices)
         prompts = []
         chosen_responses = []
         cutoff_frac = random.uniform(0, args.cutoff_frac_max)
         for row in sample_data:
             seq_len = len(row["concept_ids"])
             prompt_len = max(4, int(seq_len * cutoff_frac))
+            if prompt_len > args.context_window:
+                continue
             prompts.append(cehrgpt_tokenizer.encode(row["concept_ids"][:prompt_len]))
             chosen_responses.append(
                 {
