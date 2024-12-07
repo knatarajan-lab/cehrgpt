@@ -64,7 +64,7 @@ def main(args):
     LOG.info(f"Epsilon cutoff {args.epsilon_cutoff}")
     LOG.info(f"Top P {args.top_p}")
     LOG.info(f"Top K {args.top_k}")
-    LOG.info(f"Loading demographic_info at {args.demographic_data_path}")
+    LOG.info(f"Loading sequence_data_path at {args.sequence_data_path}")
 
     data = dd.read_parquet(args.sequence_data_path)
     sampling_frac = float(args.batch_size) / len(data.index)
