@@ -502,6 +502,30 @@ class CehrGptDPOTrainer(Trainer):
         loss, metrics = self.get_batch_loss_metrics(model, inputs, train_eval="train")
         # Make sure to move the loss to the device the original accumulating loss is at back in the `Trainer` class:
         loss = loss.to(self.args.device)
+        # force log the metrics
+        self.store_metrics(metrics, train_eval="train")
         if return_outputs:
             return (loss, metrics)
         return loss
+
+    def store_metrics(
+        self, metrics: Dict[str, float], train_eval: Literal["train", "eval"] = "train"
+    ) -> None:
+        for key, value in metrics.items():
+            self._stored_metrics[train_eval][key].append(value)
+
+    def log(self, logs: Dict[str, float]) -> None:
+        """
+        Log `logs` on the various objects watching training, including stored metrics.
+
+        Args:
+            logs (`Dict[str, float]`):
+                The values to log.
+        """
+        # logs either has 'loss' or 'eval_loss'
+        train_eval = "train" if "loss" in logs else "eval"
+        # Add averaged stored metrics to logs
+        for key, metrics in self._stored_metrics[train_eval].items():
+            logs[key] = torch.tensor(metrics).mean().item()
+        del self._stored_metrics[train_eval]
+        return super().log(logs)
