@@ -553,3 +553,34 @@ class CehrGptDPOTrainer(Trainer):
             logs[key] = torch.tensor(metrics).mean().item()
         del self._stored_metrics[train_eval]
         return super().log(logs)
+
+    def prediction_step(
+        self,
+        model: Union[PreTrainedModel, nn.Module],
+        inputs: Dict[str, Union[torch.Tensor, Any]],
+        prediction_loss_only: bool,
+        ignore_keys: Optional[List[str]] = None,
+    ):
+        with torch.no_grad():
+            loss, metrics = self.get_batch_loss_metrics(
+                model, inputs, train_eval="eval"
+            )
+
+        # force log the metrics
+        self.store_metrics(metrics, train_eval="eval")
+
+        if prediction_loss_only:
+            return (loss.detach(), None, None)
+
+        # logits for the chosen and rejected samples from model
+        logits_dict = {
+            "eval_logits/chosen": metrics["eval_logits/chosen"],
+            "eval_logits/rejected": metrics["eval_logits/rejected"],
+        }
+        logits = tuple(
+            v.unsqueeze(dim=0) for k, v in logits_dict.items() if k not in ignore_keys
+        )
+        logits = torch.stack(logits).mean(axis=1).to(self.accelerator.device)
+        labels = torch.zeros(logits.shape[0], device=self.accelerator.device)
+
+        return (loss.detach(), logits, labels)
