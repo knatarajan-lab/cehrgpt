@@ -64,7 +64,7 @@ def main(
 
     dataset = real_sequences_sample.join(
         synthetic_sequences_sample,
-        real_sequences_sample["chosen_id"] == synthetic_sequences["rejected_id"],
+        real_sequences_sample.chosen_id == synthetic_sequences_sample.rejected_id,
     ).drop("chosen_id", "rejected_id")
 
     dataset.write.mode("overwrite").parquet(output_folder)
