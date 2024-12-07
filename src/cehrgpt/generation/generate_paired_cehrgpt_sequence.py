@@ -71,7 +71,7 @@ def main(args):
     num_of_batches = args.num_of_patients // args.batch_size + 1
     sequence_to_flush = []
     for i in range(num_of_batches):
-        print(f"{datetime.datetime.now()}: Batch {i} started")
+        LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
         sample_data = data.sample(frac=sampling_frac).compute()
         prompts = []
         chosen_responses = []
@@ -129,7 +129,7 @@ def main(args):
             sequence_to_flush.append(output)
 
         if len(sequence_to_flush) >= args.buffer_size:
-            print(f"{datetime.datetime.now()}: Flushing to the Disk at Batch {i}")
+            LOG.info(f"{datetime.datetime.now()}: Flushing to the Disk at Batch {i}")
             pd.DataFrame(
                 sequence_to_flush,
                 columns=[
@@ -147,7 +147,7 @@ def main(args):
             sequence_to_flush.clear()
 
     if len(sequence_to_flush) > 0:
-        print(f"{datetime.datetime.now()}: Flushing to the Disk at Final Batch")
+        LOG.info(f"{datetime.datetime.now()}: Flushing to the Disk at Final Batch")
         pd.DataFrame(
             sequence_to_flush,
             columns=[
