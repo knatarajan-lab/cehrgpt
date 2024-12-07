@@ -197,9 +197,9 @@ class CehrGptDPOTrainer(Trainer):
         )
 
         # move labels to correct device to enable model parallelism
-        labels = batch["chosen_input_ids"].to(chosen_logits.device)
+        labels = batch["chosen_input_ids"].to(chosen_outputs.logits.device)
         # Shift so that tokens < n predict n
-        shift_logits = chosen_logits[..., :-1, :].contiguous()
+        shift_logits = chosen_outputs.logits[..., :-1, :].contiguous()
         shift_labels = labels[..., 1:].contiguous()
         # Flatten the tokens
         loss_fct = nn.CrossEntropyLoss()
