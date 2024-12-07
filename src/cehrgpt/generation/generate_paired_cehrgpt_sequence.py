@@ -85,10 +85,18 @@ def main(args):
             chosen_responses.append(
                 {
                     "person_id": row["person_id"],
-                    "chosen_concept_ids": row["concept_ids"],
-                    "chosen_concept_values": row["concept_values"],
-                    "chosen_concept_value_masks": row["concept_value_masks"],
-                    "chosen_units": row["units"],
+                    "chosen_concept_ids": (
+                        row["concept_ids"] if "concept_ids" in row else None
+                    ),
+                    "chosen_concept_values": (
+                        row["concept_values"] if "concept_values" in row else None
+                    ),
+                    "chosen_concept_value_masks": (
+                        row["concept_value_masks"]
+                        if "concept_value_masks" in row
+                        else None
+                    ),
+                    "chosen_units": row["units"] if "units" in row else None,
                     "prompt_length": prompt_len,
                 }
             )
