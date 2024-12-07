@@ -33,10 +33,9 @@ def main():
     else:
         dataset = load_parquet_as_dataset(data_args.data_folder)
         # Random split
-        train_val = dataset.train_test_split(
+        train_set, validation_set = dataset.train_test_split(
             test_size=data_args.validation_split_percentage, seed=dpo_config.seed
         )
-        train_set, validation_set = train_val["train"]
         # Organize them into a single DatasetDict
         dataset = DatasetDict({"train": train_set, "validation": validation_set})
         if data_args.streaming:
