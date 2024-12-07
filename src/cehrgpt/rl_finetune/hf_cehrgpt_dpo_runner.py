@@ -78,6 +78,7 @@ def main():
     set_seed(dpo_config.seed)
     processed_dataset.set_format("pt")
 
+    # A hacky way to prevent the training from removing unmatched inputs
     dpo_config.label_names = [
         "chosen_input_ids",
         "rejected_input_ids",
