@@ -73,7 +73,7 @@ def main(args):
     sequence_to_flush = []
     for i in range(num_of_batches):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
-        random_indices = random.sample(range(total_rows), k=args.batch_size)
+        random_indices = random.sample(range(total_rows), k=1)
         sample_data = data.select(random_indices)
         prompts = []
         chosen_responses = []
