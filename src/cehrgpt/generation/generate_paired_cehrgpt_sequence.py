@@ -5,7 +5,6 @@ import uuid
 
 import pandas as pd
 import torch
-from accelerate import PartialState
 from cehrbert.runners.runner_util import load_parquet_as_dataset
 from transformers.utils import is_flash_attn_2_available, logging
 
