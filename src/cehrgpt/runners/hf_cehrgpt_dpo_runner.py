@@ -61,8 +61,7 @@ def main():
             batch_size=data_args.preprocessing_batch_size,
             num_proc=data_args.preprocessing_num_workers,
         )
-
-    processed_dataset.save_to_disk(prepared_ds_path)
+        processed_dataset.save_to_disk(prepared_ds_path)
 
     # Set seed before initializing model.
     set_seed(dpo_config.seed)
