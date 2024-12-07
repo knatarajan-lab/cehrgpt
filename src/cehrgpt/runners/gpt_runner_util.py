@@ -9,6 +9,7 @@ from cehrbert.runners.hf_runner_argument_dataclass import (
 )
 from transformers import HfArgumentParser, TrainingArguments
 from transformers.utils import logging
+from trl.trainer.dpo_config import DPOConfig
 
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 
@@ -87,3 +88,12 @@ def parse_runner_args() -> (
         (CehrGPTArguments, DataTrainingArguments, ModelArguments, TrainingArguments)
     )
     return cehrgpt_args, data_args, model_args, training_args
+
+
+def parse_dpo_runner_args() -> (
+    Tuple[CehrGPTArguments, DataTrainingArguments, ModelArguments, DPOConfig]
+):
+    cehrgpt_args, data_args, model_args, dpo_config = parse_dynamic_arguments(
+        (CehrGPTArguments, DataTrainingArguments, ModelArguments, DPOConfig)
+    )
+    return cehrgpt_args, data_args, model_args, dpo_config
