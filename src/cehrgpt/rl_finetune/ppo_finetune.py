@@ -119,7 +119,7 @@ def main(args):
                 args.model_folder,
             )
             cehrgpt_model = CEHRGPT2LMHeadModel.from_pretrained(
-                model_folder=args.model_folder,
+                args.model_folder,
                 attn_implementation=(
                     "flash_attention_2" if is_flash_attn_2_available() else "eager"
                 ),
@@ -129,7 +129,7 @@ def main(args):
             )
     else:
         cehrgpt_model = CEHRGPT2LMHeadModel.from_pretrained(
-            model_folder=args.model_folder,
+            args.model_folder,
             attn_implementation=(
                 "flash_attention_2" if is_flash_attn_2_available() else "eager"
             ),
