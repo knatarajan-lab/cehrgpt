@@ -212,7 +212,7 @@ def main(args):
     logs = []
     prompts = list(prompt_weights.keys())
     weight_sum = sum(prompt_weights.values())
-    prompt_weights = np.asarray(prompt_weights.values()) / weight_sum
+    prompt_weights = np.asarray(list(prompt_weights.values())) / weight_sum
     device = ppo_trainer.current_device
     num_of_micro_batches = args.batch_size // args.mini_batch_size
     for i in tqdm(range(args.num_of_steps)):
