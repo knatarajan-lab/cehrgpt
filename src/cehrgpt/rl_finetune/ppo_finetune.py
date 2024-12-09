@@ -220,7 +220,7 @@ def main(args):
         random_prompt = random.choices(prompts, weights=prompt_weights, k=1)[0]
         prompt_weight = prompt_weights[prompts.index(random_prompt)]
         LOG.info(
-            f"%s: Batch %s random_prompt: %s with weight %s \$ (%s / %s)",
+            f"%s: Batch %s random_prompt: %s with weight %.2f%% (%s / %s)",
             datetime.datetime.now(),
             i,
             random_prompt,
