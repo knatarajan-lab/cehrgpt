@@ -41,6 +41,10 @@ def extract_demographics_info(
                 existing_stats[concept_id] += cnt
             else:
                 existing_stats[concept_id] = cnt
+        if "total" in existing_stats:
+            existing_stats["total"] += 1
+        else:
+            existing_stats["total"] = 1
     return outputs
 
 
@@ -197,25 +201,28 @@ def main(args):
                 else:
                     prompts_and_concept_stats[prompt][concept_id] += count
 
+    prompt_weights = defaultdict(int)
     for prompt, concept_stats in prompts_and_concept_stats.items():
+        prompt_weight = concept_stats.pop("total")
+        prompt_weights[prompt] = prompt_weight
         total_count = sum(concept_stats.values())
         for concept_id in concept_stats.keys():
             concept_stats[concept_id] = concept_stats[concept_id] / total_count
 
     logs = []
-    prompts = list(prompts_and_concept_stats.keys())
-    total = len(prompts)
+    prompts = list(prompt_weights.keys())
+    prompt_weights = list(prompt_weights.values())
     device = ppo_trainer.current_device
     num_of_micro_batches = args.batch_size // args.mini_batch_size
     for i in tqdm(range(args.num_of_steps)):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
-        random_index = random.randint(0, total - 1)
-        expected_concept_dist = prompts_and_concept_stats[prompts[random_index]]
+        random_prompt = random.choices(prompts, weights=prompt_weights, k=1)[0]
+        expected_concept_dist = prompts_and_concept_stats[random_prompt]
         batched_sequences = []
         for _ in range(num_of_micro_batches):
             batched_prompts = torch.tensor(
                 [
-                    cehrgpt_tokenizer.encode(prompts[random_index])
+                    cehrgpt_tokenizer.encode(random_prompt)
                     for _ in range(args.mini_batch_size)
                 ]
             ).to(device)
