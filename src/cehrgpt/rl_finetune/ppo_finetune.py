@@ -225,7 +225,7 @@ def main(args):
             i,
             random_prompt,
             prompt_weight * 100,
-            prompt_weights[prompts.index(random_prompt)],
+            prompt_weights[prompts.index(random_prompt)] * weight_sum,
             weight_sum,
         )
         expected_concept_dist = prompts_and_concept_stats[random_prompt]
