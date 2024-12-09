@@ -212,11 +212,20 @@ def main(args):
     logs = []
     prompts = list(prompt_weights.keys())
     prompt_weights = list(prompt_weights.values())
+    weight_sum = sum(prompt_weights)
     device = ppo_trainer.current_device
     num_of_micro_batches = args.batch_size // args.mini_batch_size
     for i in tqdm(range(args.num_of_steps)):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
         random_prompt = random.choices(prompts, weights=prompt_weights, k=1)[0]
+        prompt_weight = prompt_weights[prompts.index(random_prompt)] / weight_sum
+        LOG.info(
+            f"%s: Batch %s random_prompt: %s with weight %s",
+            datetime.datetime.now(),
+            i,
+            random_prompt,
+            prompt_weight,
+        )
         expected_concept_dist = prompts_and_concept_stats[random_prompt]
         batched_sequences = []
         for _ in range(num_of_micro_batches):
