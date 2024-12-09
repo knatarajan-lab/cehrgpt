@@ -220,11 +220,13 @@ def main(args):
         random_prompt = random.choices(prompts, weights=prompt_weights, k=1)[0]
         prompt_weight = prompt_weights[prompts.index(random_prompt)] / weight_sum
         LOG.info(
-            f"%s: Batch %s random_prompt: %s with weight %s",
+            f"%s: Batch %s random_prompt: %s with weight %s% (%s / %s)",
             datetime.datetime.now(),
             i,
             random_prompt,
-            prompt_weight,
+            round(prompt_weight * 100, 2),
+            prompt_weights[prompts.index(random_prompt)],
+            weight_sum,
         )
         expected_concept_dist = prompts_and_concept_stats[random_prompt]
         batched_sequences = []
