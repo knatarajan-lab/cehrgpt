@@ -333,8 +333,8 @@ def create_arg_parser():
         default=0.1,
     )
     base_arg_parser.add_argument(
-        "--vf_coef",
-        dest="vf_coef",
+        "--kl_penalty",
+        dest="kl_penalty",
         action="store",
         choices=["kl", "abs", "mse", "full"],
         required=False,
