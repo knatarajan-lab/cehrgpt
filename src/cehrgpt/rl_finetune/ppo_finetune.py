@@ -211,20 +211,20 @@ def main(args):
 
     logs = []
     prompts = list(prompt_weights.keys())
-    prompt_weights = list(prompt_weights.values())
-    weight_sum = sum(prompt_weights)
+    weight_sum = sum(prompt_weights.values())
+    prompt_weights = np.asarray(prompt_weights.values()) / weight_sum
     device = ppo_trainer.current_device
     num_of_micro_batches = args.batch_size // args.mini_batch_size
     for i in tqdm(range(args.num_of_steps)):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
         random_prompt = random.choices(prompts, weights=prompt_weights, k=1)[0]
-        prompt_weight = prompt_weights[prompts.index(random_prompt)] / weight_sum
+        prompt_weight = prompt_weights[prompts.index(random_prompt)]
         LOG.info(
-            f"%s: Batch %s random_prompt: %s with weight %s% (%s / %s)",
+            f"%s: Batch %s random_prompt: %s with weight %s \$ (%s / %s)",
             datetime.datetime.now(),
             i,
             random_prompt,
-            round(prompt_weight * 100, 2),
+            prompt_weight * 100,
             prompt_weights[prompts.index(random_prompt)],
             weight_sum,
         )
