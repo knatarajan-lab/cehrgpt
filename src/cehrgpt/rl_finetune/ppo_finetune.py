@@ -258,9 +258,7 @@ def calculate_reward(
         expected_concept_dist.values()
     )
     ref_logprob_dist = torch.tensor(np.log(ref_dist + epsilon))
-    return torch.exp(
-        -F.kl_div(logprob_dist, ref_logprob_dist, log_target=True, reduction="sum")
-    )
+    return -(logprob_dist - ref_logprob_dist).mean()
 
 
 def create_arg_parser():
