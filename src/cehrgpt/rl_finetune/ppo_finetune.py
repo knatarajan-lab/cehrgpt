@@ -151,6 +151,9 @@ def main(args):
             batch_size=args.batch_size,
             mini_batch_size=args.mini_batch_size,
             init_kl_coef=args.init_kl_coef,
+            vf_coef=args.vf_coef,
+            kl_penalty=args.kl_penalty,
+            gamma=args.gamma,
         ),
         model=model,
         ref_model=ref_model,
@@ -313,6 +316,30 @@ def create_arg_parser():
         type=float,
         required=False,
         default=0.1,
+    )
+    base_arg_parser.add_argument(
+        "--vf_coef",
+        dest="vf_coef",
+        action="store",
+        type=float,
+        required=False,
+        default=0.1,
+    )
+    base_arg_parser.add_argument(
+        "--vf_coef",
+        dest="vf_coef",
+        action="store",
+        choices=["kl", "abs", "mse", "full"],
+        required=False,
+        default="kl",
+    )
+    base_arg_parser.add_argument(
+        "--gamma",
+        dest="gamma",
+        action="store",
+        type=float,
+        required=False,
+        default=0.99,
     )
     base_arg_parser.add_argument(
         "--num_proc",
