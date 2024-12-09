@@ -235,7 +235,7 @@ def main(args):
             batched_sequences.extend(mini_batched_sequences)
 
         LOG.info(f"{datetime.datetime.now()}: Batch {i} sequence generated")
-        reward = calculate_reward(
+        reward = compute_marginal_dist_reward(
             batched_sequences, expected_concept_dist, cehrgpt_tokenizer
         )
         LOG.info(f"{datetime.datetime.now()}: Batch {i} KL divergence reward: {reward}")
@@ -257,7 +257,7 @@ def main(args):
         pickle.dump(logs, f)
 
 
-def calculate_reward(
+def compute_marginal_dist_reward(
     batched_sequences: List[List[str]],
     expected_concept_dist: Dict[str, float],
     tokenizer: CehrGptTokenizer,
@@ -288,7 +288,11 @@ def calculate_reward(
         expected_concept_dist.values()
     )
     ref_logprob_dist = torch.tensor(np.log(ref_dist + epsilon))
-    return -(logprob_dist - ref_logprob_dist).mean()
+
+    # Flip is required due to this issue? :https://github.com/pytorch/pytorch/issues/57459
+    return -torch.nn.functional.kl_div(
+        ref_logprob_dist, logprob_dist, log_target=True, reduction="none"
+    ).sum(-1)
 
 
 def create_arg_parser():
