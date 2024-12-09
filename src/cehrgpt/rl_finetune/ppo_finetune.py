@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from cehrbert.models.hf_models.tokenization_utils import agg_helper
 from cehrbert.runners.runner_util import load_parquet_as_dataset
 from tqdm import tqdm
