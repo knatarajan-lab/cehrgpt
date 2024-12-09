@@ -93,14 +93,52 @@ def main(args):
         device = torch.device("cuda")
     else:
         device = torch.device("cpu")
+
     cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer_folder)
-    cehrgpt_model = CEHRGPT2LMHeadModel.from_pretrained(
-        args.model_folder,
-        attn_implementation=(
-            "flash_attention_2" if is_flash_attn_2_available() else "eager"
-        ),
-        torch_dtype=(torch.bfloat16 if is_flash_attn_2_available() else torch.float32),
+    model_folder_name = os.path.join(
+        args.output_folder, get_cehrgpt_output_folder(args, cehrgpt_tokenizer), "model"
     )
+
+    if not os.path.exists(model_folder_name):
+        os.makedirs(model_folder_name)
+
+    if args.restore_from_checkpoint:
+        try:
+            cehrgpt_model = CEHRGPT2LMHeadModel.from_pretrained(
+                model_folder_name,
+                attn_implementation=(
+                    "flash_attention_2" if is_flash_attn_2_available() else "eager"
+                ),
+                torch_dtype=(
+                    torch.bfloat16 if is_flash_attn_2_available() else torch.float32
+                ),
+            )
+        except Exception:
+            LOG.warning(
+                "Checkpoint does not exist in %s, loading from the %s",
+                model_folder_name,
+                args.model_folder,
+            )
+            cehrgpt_model = CEHRGPT2LMHeadModel.from_pretrained(
+                model_folder=args.model_folder,
+                attn_implementation=(
+                    "flash_attention_2" if is_flash_attn_2_available() else "eager"
+                ),
+                torch_dtype=(
+                    torch.bfloat16 if is_flash_attn_2_available() else torch.float32
+                ),
+            )
+    else:
+        cehrgpt_model = CEHRGPT2LMHeadModel.from_pretrained(
+            model_folder=args.model_folder,
+            attn_implementation=(
+                "flash_attention_2" if is_flash_attn_2_available() else "eager"
+            ),
+            torch_dtype=(
+                torch.bfloat16 if is_flash_attn_2_available() else torch.float32
+            ),
+        )
+
     cehrgpt_model.generation_config.pad_token_id = cehrgpt_tokenizer.pad_token_id
     cehrgpt_model.generation_config.eos_token_id = cehrgpt_tokenizer.end_token_id
     cehrgpt_model.generation_config.bos_token_id = cehrgpt_tokenizer.end_token_id
@@ -119,13 +157,6 @@ def main(args):
         ref_model=ref_model,
         tokenizer=cehrgpt_tokenizer,
     )
-
-    model_folder_name = os.path.join(
-        args.output_folder, get_cehrgpt_output_folder(args, cehrgpt_tokenizer), "model"
-    )
-
-    if not os.path.exists(model_folder_name):
-        os.makedirs(model_folder_name)
 
     LOG.info(f"Loading tokenizer at {args.model_folder}")
     LOG.info(f"Loading model at {args.model_folder}")
@@ -302,6 +333,11 @@ def create_arg_parser():
         action="store",
         help="The path for your concept_path",
         required=True,
+    )
+    base_arg_parser.add_argument(
+        "--restore_from_checkpoint",
+        dest="restore_from_checkpoint",
+        action="store_true",
     )
     return base_arg_parser
 
