@@ -186,14 +186,14 @@ def main(args):
         num_proc=args.num_proc,
         remove_columns=dataset.column_names,
     )
+    total_rows = len(dataset)
     prompts_and_concept_stats = defaultdict(int)
     for stat in tqdm(parts, desc="Aggregating the concept counts"):
         fixed_stat = pickle.loads(stat["data"])
         for prompt, concept_stats in fixed_stat.items():
             for concept_id, count in concept_stats.items():
-                prompts_and_concept_stats[concept_id] += count
+                prompts_and_concept_stats[concept_id] += count / total_rows
 
-    total_rows = len(dataset)
     logs = []
     device = ppo_trainer.current_device
     num_of_micro_batches = args.batch_size // args.mini_batch_size
