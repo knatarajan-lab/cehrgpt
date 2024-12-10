@@ -238,7 +238,11 @@ def main(args):
         for sequence in batched_sequences:
             query_tensors.append(torch.tensor(cehrgpt_tokenizer.encode(sequence[:4])))
             response_tensors.append(
-                torch.tensor(cehrgpt_tokenizer.encode(sequence[4:]))
+                torch.tensor(
+                    cehrgpt_tokenizer.encode(
+                        sequence[4:] + [cehrgpt_tokenizer.eos_token]
+                    )
+                )
             )
             rewards.append(reward)
         train_stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
