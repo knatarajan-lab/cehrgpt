@@ -183,9 +183,8 @@ def main(args):
     concept_stats = defaultdict(float)
     for stat in tqdm(parts, desc="Aggregating the concept counts"):
         fixed_stat = pickle.loads(stat["data"])
-        for concept, concept_freq in fixed_stat.items():
-            for concept_id, count in concept_freq.items():
-                concept_stats[concept_id] += count
+        for concept_id, count in fixed_stat.items():
+            concept_stats[concept_id] += count
     total_sum = sum(concept_stats.values())
     for concept_id, count in concept_stats.items():
         concept_stats[concept_id] = count / total_sum
