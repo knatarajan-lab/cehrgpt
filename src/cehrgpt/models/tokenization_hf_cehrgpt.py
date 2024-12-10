@@ -166,6 +166,14 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         return END_TOKEN
 
     @property
+    def eos_token(self):
+        return END_TOKEN
+
+    @property
+    def eos_token_id(self):
+        return self._end_token_id
+
+    @property
     def pad_token_id(self):
         return self._padding_token_id
 
