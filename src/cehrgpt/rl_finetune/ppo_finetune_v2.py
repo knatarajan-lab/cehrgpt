@@ -31,7 +31,7 @@ def extract_concept_frequency(records: Dict[str, Any]) -> Dict[str, int]:
     batched_concept_ids = records["concept_ids"]
     outputs = defaultdict(int)
     for concept_ids in batched_concept_ids:
-        for concept_id, cnt in dict(Counter(concept_ids)).items():
+        for concept_id, cnt in dict(Counter(concept_ids[4:])).items():
             outputs[concept_id] += cnt
     return outputs
 
