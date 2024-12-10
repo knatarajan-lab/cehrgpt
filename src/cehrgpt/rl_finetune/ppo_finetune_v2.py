@@ -199,7 +199,10 @@ def main(args):
     num_of_micro_batches = args.batch_size // args.mini_batch_size
     for i in tqdm(range(args.num_of_steps)):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
-        random_prompts = np.random.randint(0, total_rows, args.batch_size)
+        random_indices = np.random.randint(0, total_rows, args.batch_size)
+        random_prompts = [
+            record["concept_ids"][:4] for record in dataset.select(random_indices)
+        ]
         batched_sequences = []
         for _ in range(num_of_micro_batches):
             batched_prompts = torch.tensor(
