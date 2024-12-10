@@ -3,7 +3,7 @@ import os
 import pickle
 from collections import Counter, defaultdict
 from functools import partial
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 import numpy as np
 import torch
@@ -27,19 +27,12 @@ from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 LOG = logging.get_logger("transformers")
 
 
-def extract_demographics_info(
-    records: Dict[str, Any]
-) -> Dict[Tuple[str, str, str, str], Dict[str, int]]:
+def extract_concept_frequency(records: Dict[str, Any]) -> Dict[str, int]:
     batched_concept_ids = records["concept_ids"]
-    outputs = defaultdict(dict)
+    outputs = defaultdict(int)
     for concept_ids in batched_concept_ids:
-        start_year, start_age, gender, race = concept_ids[:4]
-        existing_stats = outputs[(start_year, start_age, gender, race)]
-        for concept_id, cnt in dict(Counter(concept_ids[4:])).items():
-            if concept_id in existing_stats:
-                existing_stats[concept_id] += cnt
-            else:
-                existing_stats[concept_id] = cnt
+        for concept_id, cnt in dict(Counter(concept_ids)).items():
+            outputs[concept_id] += cnt
     return outputs
 
 
@@ -180,22 +173,26 @@ def main(args):
         batched=True,
     )
     parts = dataset.map(
-        partial(agg_helper, map_func=extract_demographics_info),
+        partial(agg_helper, map_func=extract_concept_frequency),
         batched=True,
         batch_size=1000,
         num_proc=args.num_proc,
         remove_columns=dataset.column_names,
     )
-    total_rows = len(dataset)
-    prompts_and_concept_stats = defaultdict(int)
+
+    concept_stats = defaultdict(float)
     for stat in tqdm(parts, desc="Aggregating the concept counts"):
         fixed_stat = pickle.loads(stat["data"])
-        for prompt, concept_stats in fixed_stat.items():
-            for concept_id, count in concept_stats.items():
-                prompts_and_concept_stats[concept_id] += count / total_rows
+        for concept, concept_freq in fixed_stat.items():
+            for concept_id, count in concept_freq.items():
+                concept_stats[concept_id] += count
+    total_sum = sum(concept_stats.values())
+    for concept_id, count in concept_stats.items():
+        concept_stats[concept_id] = count / total_sum
 
     logs = []
     device = ppo_trainer.current_device
+    total_rows = len(dataset)
     num_of_micro_batches = args.batch_size // args.mini_batch_size
     for i in tqdm(range(args.num_of_steps)):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
@@ -233,7 +230,7 @@ def main(args):
 
         LOG.info(f"{datetime.datetime.now()}: Batch {i} sequence generated")
         reward = compute_marginal_dist_reward(
-            batched_sequences, prompts_and_concept_stats, cehrgpt_tokenizer
+            batched_sequences, concept_stats, cehrgpt_tokenizer
         )
         LOG.info(f"{datetime.datetime.now()}: Batch {i} KL divergence reward: {reward}")
         query_tensors = []
