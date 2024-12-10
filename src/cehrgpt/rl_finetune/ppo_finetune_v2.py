@@ -199,22 +199,24 @@ def main(args):
     num_of_micro_batches = args.batch_size // args.mini_batch_size
     for i in tqdm(range(args.num_of_steps)):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
-        random_indices = np.random.randint(0, total_rows, args.batch_size)
-        random_prompts = [
-            record["concept_ids"][:4] for record in dataset.select(random_indices)
-        ]
+        random_prompts = []
         batched_sequences = []
         for _ in range(num_of_micro_batches):
-            batched_prompts = torch.tensor(
+            random_indices = np.random.randint(0, total_rows, args.mini_batch_size)
+            random_prompts_micro_batch = [
+                record["concept_ids"][:4] for record in dataset.select(random_indices)
+            ]
+            random_prompts.extend(random_prompts_micro_batch)
+            micro_batched_prompts = torch.tensor(
                 [
                     cehrgpt_tokenizer.encode(random_prompt)
-                    for random_prompt in random_prompts
+                    for random_prompt in random_prompts_micro_batch
                 ]
             ).to(device)
-            mini_batched_sequences = generate_single_batch(
+            micro_batched_sequences = generate_single_batch(
                 cehrgpt_model,
                 cehrgpt_tokenizer,
-                batched_prompts,
+                micro_batched_prompts,
                 max_new_tokens=args.context_window,
                 mini_num_of_concepts=args.min_num_of_concepts,
                 top_p=args.top_p,
@@ -227,7 +229,7 @@ def main(args):
             )
             # Clear the cache
             torch.cuda.empty_cache()
-            batched_sequences.extend(mini_batched_sequences)
+            batched_sequences.extend(micro_batched_sequences)
 
         LOG.info(f"{datetime.datetime.now()}: Batch {i} sequence generated")
         reward = compute_marginal_dist_reward(
