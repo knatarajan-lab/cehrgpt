@@ -2,7 +2,7 @@ import datetime
 import os
 import random
 import uuid
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import torch
@@ -69,10 +69,9 @@ def normalize_value(
 
 
 def generate_single_batch(
-    model,
-    tokenizer,
-    batch_size,
-    demographic_info,
+    model: CEHRGPT2LMHeadModel,
+    tokenizer: CehrGptTokenizer,
+    prompts: List[List[int]],
     max_new_tokens=512,
     mini_num_of_concepts=1,
     top_p=0.95,
@@ -84,7 +83,6 @@ def generate_single_batch(
     epsilon_cutoff=0.0,
     device: Any = "cpu",
 ) -> Dict[str, Any]:
-    random_prompts = random.sample(demographic_info, batch_size)
 
     with torch.no_grad():
         generation_config = GenerationConfig(
@@ -108,7 +106,7 @@ def generate_single_batch(
             num_beam_groups=num_beam_groups,
             epsilon_cutoff=epsilon_cutoff,
         )
-        batched_prompts = torch.tensor(random_prompts).to(device)
+        batched_prompts = torch.tensor(prompts).to(device)
         results = model.generate(
             inputs=batched_prompts,
             generation_config=generation_config,
@@ -177,7 +175,6 @@ def main(args):
     LOG.info(f"Loading demographic_info at {args.demographic_data_path}")
 
     data = pd.read_parquet(args.demographic_data_path)
-    # data = data[data.num_of_concepts >= args.min_num_of_concepts]
     demographic_info = data.concept_ids.apply(
         lambda concept_list: concept_list[: START_TOKEN_SIZE + 1]
     )
@@ -188,11 +185,11 @@ def main(args):
     current_person_id = 1
     for i in range(num_of_batches):
         print(f"{datetime.datetime.now()}: Batch {i} started")
+        random_prompts = random.sample(demographic_info, args.batch_size)
         batch_sequences = generate_single_batch(
             cehrgpt_model,
             cehrgpt_tokenizer,
-            args.batch_size,
-            demographic_info,
+            random_prompts,
             max_new_tokens=args.context_window,
             mini_num_of_concepts=args.min_num_of_concepts,
             top_p=args.top_p,
