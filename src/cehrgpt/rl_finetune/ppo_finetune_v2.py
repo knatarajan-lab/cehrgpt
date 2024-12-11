@@ -287,9 +287,11 @@ def compute_marginal_dist_reward(
     ref_logprob_dist = torch.tensor(np.log(ref_dist + epsilon))
 
     # Flip is required due to this issue? :https://github.com/pytorch/pytorch/issues/57459
-    return -torch.nn.functional.kl_div(
-        ref_logprob_dist, logprob_dist, log_target=True, reduction="none"
-    ).sum(-1)
+    return torch.exp(
+        -torch.nn.functional.kl_div(
+            ref_logprob_dist, logprob_dist, log_target=True, reduction="none"
+        ).sum(-1)
+    )
 
 
 def create_arg_parser():
