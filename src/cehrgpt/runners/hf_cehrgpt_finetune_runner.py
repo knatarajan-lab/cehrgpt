@@ -296,6 +296,8 @@ def model_init(
     # Expand tokenizer to adapt to the finetuning dataset
     if model.config.vocab_size < tokenizer.vocab_size:
         model.resize_token_embeddings(tokenizer.vocab_size)
+    if model.config.value_vocab_size < tokenizer.value_vocab_size:
+        model.resize_value_embeddings(tokenizer.value_vocab_size)
     # If lora is enabled, we add LORA adapters to the model
     if model_args.use_lora:
         # When LORA is used, the trainer could not automatically find this label,
@@ -393,7 +395,6 @@ def main():
                 tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
                     cehrgpt_tokenizer=tokenizer,
                     dataset=final_splits["train"],
-                    feature_names=["concept_ids"],
                     data_args=data_args,
                     concept_name_mapping={},
                 )
@@ -415,6 +416,7 @@ def main():
     data_collator = CehrGptDataCollator(
         tokenizer=tokenizer,
         max_length=config.max_position_embeddings,
+        include_values=model_args.include_values,
         pretraining=False,
         include_ttv_prediction=False,
         use_sub_time_tokenization=False,
@@ -658,6 +660,8 @@ def load_lora_model(
         # Expand tokenizer to adapt to the finetuning dataset
         if model.config.vocab_size < tokenizer.vocab_size:
             model.resize_token_embeddings(tokenizer.vocab_size)
+        if model.config.value_vocab_size < tokenizer.value_vocab_size:
+            model.resize_value_embeddings(tokenizer.value_vocab_size)
     LOG.info("Loading LoRA adapter from %s", training_args.output_dir)
     return PeftModel.from_pretrained(model, model_id=training_args.output_dir)
 

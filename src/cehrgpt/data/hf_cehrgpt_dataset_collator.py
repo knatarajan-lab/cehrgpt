@@ -126,7 +126,13 @@ class CehrGptDataCollator:
         assert batch["attention_mask"].shape[1] <= self.max_length
 
         if self.pretraining:
-            batch["labels"] = batch["input_ids"].clone()
+            batch["labels"] = self._try_reverse_tensor(
+                pad_sequence(
+                    batch_input_ids,
+                    batch_first=True,
+                    padding_value=-100,
+                ).to(torch.int64)
+            )
 
         if self.use_sub_time_tokenization:
             time_token_indicators = torch.isin(batch["input_ids"], self.time_tokens)
@@ -175,13 +181,20 @@ class CehrGptDataCollator:
                 )
             )
             batch["values"] = self._try_reverse_tensor(
-                pad_sequence(batch_values, batch_first=True, padding_value=-1.0)
+                pad_sequence(
+                    batch_values,
+                    batch_first=True,
+                    padding_value=self.tokenizer.pad_value_token_id,
+                ).to(torch.int64)
             )
-
             assert batch["value_indicators"].shape[1] <= self.max_length
             assert batch["values"].shape[1] <= self.max_length
-            batch["true_value_indicators"] = batch["value_indicators"].clone()
-            batch["true_values"] = batch["values"].clone()
+
+            if self.pretraining:
+                batch["true_value_indicators"] = batch["value_indicators"].clone()
+                batch["true_values"] = torch.where(
+                    batch["value_indicators"], batch["values"].clone(), -100
+                )
 
         if "person_id" in examples[0]:
             batch["person_id"] = torch.cat(
@@ -278,13 +291,13 @@ class CehrGptDataCollator:
                 record["value_indicators"] = torch.concat(
                     [
                         self._convert_to_tensor(record["value_indicators"]),
-                        self._convert_to_tensor([0]),
+                        self._convert_to_tensor([False]),
                     ]
                 ).to(torch.bool)
                 record["values"] = torch.concat(
                     [
                         self._convert_to_tensor(record["values"]),
-                        self._convert_to_tensor([-1.0]),
+                        self._convert_to_tensor([self.tokenizer.pad_value_token_id]),
                     ]
                 )
             if self.include_ttv_prediction:

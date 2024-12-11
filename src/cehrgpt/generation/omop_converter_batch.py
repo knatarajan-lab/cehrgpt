@@ -9,19 +9,9 @@ from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
-from cehrbert.models.hf_models.tokenization_utils import load_json_file
 from tqdm import tqdm
 
-from cehrgpt.models.tokenization_hf_cehrgpt import END_TOKEN
-
-from ..gpt_utils import (
-    extract_time_interval_in_days,
-    generate_artificial_time_tokens,
-    is_inpatient_att_token,
-    is_visit_end,
-    is_visit_start,
-)
-from .omop_entity import (
+from cehrgpt.generation.omop_entity import (
     ConditionOccurrence,
     Death,
     DrugExposure,
@@ -31,6 +21,14 @@ from .omop_entity import (
     ProcedureOccurrence,
     VisitOccurrence,
 )
+from cehrgpt.gpt_utils import (
+    extract_time_interval_in_days,
+    generate_artificial_time_tokens,
+    is_inpatient_att_token,
+    is_visit_end,
+    is_visit_start,
+)
+from cehrgpt.models.tokenization_hf_cehrgpt import END_TOKEN
 
 # TODO: move these to cehrbert_data
 STOP_TOKENS = ["VE", "[VE]", END_TOKEN]
@@ -174,12 +172,14 @@ def _is_none(x):
 def gpt_to_omop_converter_serial(
     const: int,
     pat_seq_split: Union[np.ndarray, pd.Series],
-    pat_concept_values: Union[np.ndarray, pd.Series],
+    pat_is_numeric_types_split: Union[np.ndarray, pd.Series],
+    pat_number_as_values_split: Union[np.ndarray, pd.Series],
+    pat_concept_as_values_split: Union[np.ndarray, pd.Series],
+    pat_units_split: Union[np.ndarray, pd.Series],
     domain_map: Dict[int, str],
     output_folder: str,
     buffer_size: int,
     original_person_id: bool,
-    lab_stats_mapping: Dict[int, Dict[str, float]],
 ):
     omop_export_dict = {}
     error_dict = {}
@@ -200,8 +200,23 @@ def gpt_to_omop_converter_serial(
 
     person_id: int = const + 1
 
-    for index, (row, full_concept_values) in tqdm(
-        enumerate(zip(pat_seq_split, pat_concept_values)), total=pat_seq_len
+    for index, (
+        row,
+        is_numeric_types,
+        number_as_values,
+        concept_as_values,
+        units,
+    ) in tqdm(
+        enumerate(
+            zip(
+                pat_seq_split,
+                pat_is_numeric_types_split,
+                pat_number_as_values_split,
+                pat_concept_as_values_split,
+                pat_units_split,
+            )
+        ),
+        total=pat_seq_len,
     ):
         bad_sequence = False
         # ignore start token
@@ -217,11 +232,16 @@ def gpt_to_omop_converter_serial(
             else:
                 row = row[0:]
         tokens_generated = row[START_TOKEN_SIZE:]
-        concept_values = (
-            None
-            if np.any(pd.isnull(full_concept_values))
-            else full_concept_values[START_TOKEN_SIZE:]
+        is_numeric_types = (
+            None if is_numeric_types is None else is_numeric_types[START_TOKEN_SIZE:]
         )
+        number_as_values = (
+            None if number_as_values is None else number_as_values[START_TOKEN_SIZE:]
+        )
+        concept_as_values = (
+            None if concept_as_values is None else concept_as_values[START_TOKEN_SIZE:]
+        )
+        units = None if units is None else units[START_TOKEN_SIZE:]
 
         # Skip the sequences whose sequence length is 0
         if len(tokens_generated) == 0:
@@ -399,7 +419,7 @@ def gpt_to_omop_converter_serial(
                             discharged_to_concept_id = concept_id
                         elif domain == "Condition":
                             co = ConditionOccurrence(
-                                condition_occurrence_id, x, vo, data_cursor
+                                condition_occurrence_id, concept_id, vo, data_cursor
                             )
                             append_to_dict(
                                 omop_export_dict, co, condition_occurrence_id
@@ -410,7 +430,7 @@ def gpt_to_omop_converter_serial(
                             condition_occurrence_id += 1
                         elif domain == "Procedure":
                             po = ProcedureOccurrence(
-                                procedure_occurrence_id, x, vo, data_cursor
+                                procedure_occurrence_id, concept_id, vo, data_cursor
                             )
                             append_to_dict(
                                 omop_export_dict, po, procedure_occurrence_id
@@ -420,25 +440,40 @@ def gpt_to_omop_converter_serial(
                             ] = person_id
                             procedure_occurrence_id += 1
                         elif domain == "Drug":
-                            de = DrugExposure(drug_exposure_id, x, vo, data_cursor)
+                            de = DrugExposure(
+                                drug_exposure_id, concept_id, vo, data_cursor
+                            )
                             append_to_dict(omop_export_dict, de, drug_exposure_id)
                             id_mappings_dict["drug_exposure"][
                                 drug_exposure_id
                             ] = person_id
                             drug_exposure_id += 1
                         elif domain == "Measurement":
-                            concept_value = (
-                                concept_values[idx]
-                                if concept_values is not None
-                                else 0.0
+                            number_as_value = (
+                                number_as_values[idx]
+                                if number_as_values is not None
+                                else None
                             )
-                            if concept_id in lab_stats_mapping:
-                                concept_value = (
-                                    concept_value * lab_stats_mapping[concept_id]["std"]
-                                    + lab_stats_mapping[concept_id]["mean"]
-                                )
+                            concept_as_value = (
+                                concept_as_values[idx]
+                                if concept_as_values is not None
+                                else None
+                            )
+                            is_numeric_type = (
+                                is_numeric_types[idx]
+                                if is_numeric_types is not None
+                                else None
+                            )
+                            unit = units[idx] if units is not None else None
                             m = Measurement(
-                                measurement_id, x, concept_value, vo, data_cursor
+                                measurement_id,
+                                measurement_concept_id=concept_id,
+                                is_numeric_type=is_numeric_type,
+                                value_as_number=number_as_value,
+                                value_as_concept_id=concept_as_value,
+                                visit_occurrence=vo,
+                                measurement_date=data_cursor,
+                                unit_source_value=unit,
                             )
                             append_to_dict(omop_export_dict, m, measurement_id)
                             id_mappings_dict["measurement"][measurement_id] = person_id
@@ -483,32 +518,38 @@ def gpt_to_omop_converter_serial(
 def gpt_to_omop_converter_parallel(
     output_folder: str,
     concept_pd: pd.DataFrame,
-    patient_sequences_concept_ids: pd.DataFrame,
+    patient_sequences: pd.DataFrame,
     buffer_size: int,
     num_of_cores: int,
     original_person_id: bool,
-    all_lab_stats: List[Dict[int, Any]] = None,
 ):
-    patient_sequences = patient_sequences_concept_ids["concept_ids"]
-    concept_values = patient_sequences_concept_ids["concept_values"]
+    concept_ids = patient_sequences["concept_ids"]
+    is_numeric_types = patient_sequences["is_numeric_types"]
+    number_as_values = patient_sequences["number_as_values"]
+    concept_as_values = patient_sequences["concept_as_values"]
+    units = patient_sequences["units"]
     domain_map = generate_omop_concept_domain(concept_pd)
-    lab_stats_mapping = generate_lab_stats_mapping(all_lab_stats)
     pool_tuples = []
     # TODO: Need to make this dynamic
     const = 10000000
-    patient_sequences_list = np.array_split(patient_sequences, num_of_cores)
-    concept_values_list = np.array_split(concept_values, num_of_cores)
+    concept_ids_list = np.array_split(concept_ids, num_of_cores)
+    is_numeric_types_list = np.array_split(is_numeric_types, num_of_cores)
+    number_as_values_list = np.array_split(number_as_values, num_of_cores)
+    concept_as_values_list = np.array_split(concept_as_values, num_of_cores)
+    units_list = np.array_split(units, num_of_cores)
     for i in range(1, num_of_cores + 1):
         pool_tuples.append(
             (
                 const * i,
-                patient_sequences_list[i - 1],
-                concept_values_list[i - 1],
+                concept_ids_list[i - 1],
+                is_numeric_types_list[i - 1],
+                number_as_values_list[i - 1],
+                concept_as_values_list[i - 1],
+                units_list[i - 1],
                 domain_map,
                 output_folder,
                 buffer_size,
                 original_person_id,
-                lab_stats_mapping,
             )
         )
 
@@ -522,33 +563,46 @@ def gpt_to_omop_converter_parallel(
 
 def main(args):
     concept_pd = pd.read_parquet(args.concept_path)
-    all_lab_stats = (
-        load_json_file(args.lab_stats_path) if args.lab_stats_path is not None else None
-    )
-
     if args.original_person_id:
-        patient_sequences_concept_ids = pd.read_parquet(
+        patient_sequences = pd.read_parquet(
             args.patient_sequence_path,
-            columns=["person_id", "concept_ids", "concept_values"],
+            columns=[
+                "person_id",
+                "concept_ids",
+                "is_numeric_types",
+                "number_as_values",
+                "concept_as_values",
+                "concept_value_masks",
+                "units",
+            ],
         )
-        patient_sequences_concept_ids["concept_ids"] = (
-            patient_sequences_concept_ids.apply(
-                lambda row: np.append(row.person_id, row.concept_ids), axis=1
-            )
+        patient_sequences["concept_ids"] = patient_sequences.apply(
+            lambda row: np.append(row.person_id, row.concept_ids), axis=1
         )
-        patient_sequences_concept_ids.drop(columns=["person_id"], inplace=True)
+        patient_sequences.drop(columns=["person_id"], inplace=True)
     else:
-        patient_sequences_concept_ids = pd.read_parquet(
-            args.patient_sequence_path, columns=["concept_ids", "concept_values"]
+        patient_sequences = pd.read_parquet(
+            args.patient_sequence_path,
+            columns=[
+                "concept_ids",
+                "is_numeric_types",
+                "number_as_values",
+                "concept_as_values",
+                "concept_value_masks",
+                "units",
+            ],
         )
+
+    if not os.path.exists(args.output_folder):
+        Path(args.output_folder).mkdir(parents=True, exist_ok=True)
+
     gpt_to_omop_converter_parallel(
         args.output_folder,
         concept_pd,
-        patient_sequences_concept_ids,
+        patient_sequences,
         args.buffer_size,
         args.cpu_cores,
         args.original_person_id,
-        all_lab_stats,
     )
 
 
@@ -571,15 +625,13 @@ if __name__ == "__main__":
         required=True,
     )
     parser.add_argument(
-        "--lab_stats_path", dest="lab_stats_path", action="store", required=False
-    )
-    parser.add_argument(
         "--buffer_size",
         dest="buffer_size",
         action="store",
         type=int,
         help="The size of the batch",
-        required=True,
+        required=False,
+        default=1024,
     )
     parser.add_argument(
         "--patient_sequence_path",
@@ -595,6 +647,7 @@ if __name__ == "__main__":
         action="store",
         help="The number of cpu cores to use for multiprocessing",
         required=False,
+        default=1,
     )
     parser.add_argument(
         "--original_person_id",

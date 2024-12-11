@@ -117,11 +117,15 @@ class CEHRGPTConfig(PretrainedConfig):
         reorder_and_upcast_attn=False,
         exclude_position_ids=False,
         include_values=False,
+        value_vocab_size=None,
         include_ttv_prediction=False,
         use_sub_time_tokenization=True,
         time_token_loss_weight=1.0,
         time_to_visit_loss_weight=1.0,
         token_to_time_token_mapping: Dict[int, List] = None,
+        token_frequency_penalty=False,
+        entropy_penalty=False,
+        entropy_penalty_alpha=0.01,
         **kwargs,
     ):
         if token_to_time_token_mapping is None:
@@ -155,11 +159,17 @@ class CEHRGPTConfig(PretrainedConfig):
 
         self.exclude_position_ids = exclude_position_ids
         self.include_values = include_values
+        self.value_vocab_size = value_vocab_size
+
         self.include_ttv_prediction = include_ttv_prediction
         self.use_sub_time_tokenization = use_sub_time_tokenization
         self._token_to_time_token_mapping = token_to_time_token_mapping
         self.time_token_loss_weight = time_token_loss_weight
         self.time_to_visit_loss_weight = time_to_visit_loss_weight
+
+        self.token_frequency_penalty = token_frequency_penalty
+        self.entropy_penalty = entropy_penalty
+        self.entropy_penalty_alpha = entropy_penalty_alpha
 
         super().__init__(bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
 

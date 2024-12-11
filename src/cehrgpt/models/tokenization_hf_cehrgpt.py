@@ -5,19 +5,20 @@ import os
 import pickle
 from functools import partial
 from itertools import islice
-from typing import Any, Dict, List, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
+import scipy.stats as stats
 import transformers
 from cehrbert.models.hf_models.tokenization_utils import (
     agg_helper,
     agg_statistics,
     load_json_file,
-    map_statistics,
 )
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import Dataset, DatasetDict
-from femr.stat_utils import OnlineStatistics
+from femr.stat_utils import OnlineStatistics, ReservoirSampler
+from scipy.interpolate import UnivariateSpline
 from tokenizers import AddedToken, Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
@@ -38,12 +39,211 @@ from cehrgpt.models.special_tokens import (
     START_TOKEN,
 )
 
+NUM_OF_BINS = 10
+DEGREE_OF_FREEDOM = 2
+SAMPLE_SIZE = 10_000
 NA = "N/A"
+UNKNOWN_BIN = "BIN:unknown"
+NONE_BIN = "BIN:NONE"
 TOKENIZER_FILE_NAME = "cehrgpt_tokenizer.json"
+VALUE_TOKENIZER_FILE_NAME = "cehrgpt_value_tokenizer.json"
 TIME_TOKENIZER_FILE_NAME = "cehrgpt_time_tokenizer.json"
 TOKEN_TO_SUB_TIME_TOKEN_MAPPING_FILE_NAME = "token_to_sub_time_token_mapping.json"
-LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.json"
+LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.pickle"
 CONCEPT_MAPPING_FILE_NAME = "concept_name_mapping.json"
+
+
+def truncated_sample(sample, standard_deviation):
+    lower_quantile = stats.norm.cdf(-standard_deviation)
+    upper_quantile = stats.norm.cdf(standard_deviation)
+    lower_bound = np.quantile(sample, lower_quantile)
+    upper_bound = np.quantile(sample, upper_quantile)
+    return [x for x in sample if lower_bound <= x <= upper_bound]
+
+
+def is_valid_valid_bin(token: str) -> bool:
+    return token.startswith("BIN:")
+
+
+def create_value_bin(bin_index: int) -> str:
+    return "BIN:" + str(bin_index)
+
+
+def create_sample_from_bins(bins, sample_size: int = 10_000) -> List[float]:
+    """
+    Generates a specified number of samples from a list of bins, each containing a fitted spline.
+
+    This function iterates over each bin, extracts the spline, and uses it to generate a set of samples
+    uniformly distributed along the x-axis defined by the spline's knots. It ensures that the total number
+    of samples generated matches the specified sample size by distributing the number of samples evenly
+    across the bins.
+
+    Parameters:
+        bins (List[Dict[str, UnivariateSpline]]): A list of dictionaries, each containing a 'spline' key
+            with a UnivariateSpline object as its value. These splines define the data distribution within
+            each bin from which samples are to be generated.
+        sample_size (int, optional): The total number of samples to generate from all bins combined.
+            Defaults to 10,000.
+
+    Returns:
+        List[float]: A list of sampled values, where each value is generated based on the spline functions
+            provided in the bins. The total number of samples in the list will be equal to `sample_size`.
+
+    Raises:
+        ValueError: If `sample_size` is less than the number of bins, as it would not be possible to generate
+            at least one sample per bin.
+
+    Example:
+        >>> x = np.linspace(0, 10, 100)
+        >>> y = np.sin(x)
+        >>> spline = UnivariateSpline(x, y, s=1)
+        >>> bins = [{'spline': spline} for _ in range(5)]
+        >>> samples = create_sample_from_bins(bins, 1000)
+        >>> len(samples)
+        1000
+
+    Note:
+        The function assumes that each bin's spline has a sufficient range of x-values (knots) to allow for
+        meaningful sampling. If the range of x-values is too narrow, the uniformity of the sample distribution
+        may be affected.
+    """
+    sample = []
+    num_of_bins = len(bins)
+    if num_of_bins > 0:
+        sample_per_bin = sample_size // num_of_bins
+        for value_bin in bins:
+            bin_spline = value_bin["spline"]
+            x = np.random.uniform(
+                bin_spline.get_knots()[0], bin_spline.get_knots()[-1], sample_per_bin
+            )
+            y = bin_spline(x)
+            sample.extend(y)
+    return sample
+
+
+def create_bins_with_spline(samples, num_bins, d_freedom=1) -> List[Dict[str, Any]]:
+    """
+    Divides a list of numeric samples into a specified number of bins and fits a spline to the data in each bin.
+
+    This function first sorts the list of samples, then partitions the sorted list into `num_bins` bins. For each bin,
+    a UnivariateSpline is fitted to the data within the bin, using the specified degrees of freedom. The function
+    handles edge cases by assigning infinity to the bounds of the first and last bins.
+
+    Parameters:
+        samples (List[float]): A list of sample data points, which are real numbers.
+        num_bins (int): The number of bins to divide the sample data into. It is assumed that there are enough samples to at least fill the bins to the minimum required for spline fitting.
+        d_freedom (int, optional): The degree of freedom for the spline. Default is 1, which fits a linear spline.
+
+    Returns:
+        List[Dict[str, Any]]: A list of dictionaries, each representing a bin. Each dictionary contains:
+            - 'bin_index' (int): The index of the bin.
+            - 'start_val' (float): The starting value of the bin, with the first bin starting at negative infinity.
+            - 'end_val' (float): The ending value of the bin, with the last bin ending at positive infinity.
+            - 'spline' (UnivariateSpline): The spline object fitted to the data within the bin.
+
+    Raises:
+        ValueError: If `num_bins` is less than 1 or if there are insufficient samples to create the specified number of bins with the required minimum data points per bin.
+
+    Example:
+        >>> samples = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        >>> bins = create_bins_with_spline(samples, 2)
+        >>> for b in bins:
+        ...     print(b['bin_index'], b['start_val'], b['end_val'])
+        ...
+        0 -inf 5.5
+        1 5.5 inf
+
+    Note:
+        The function assumes that each bin will have at least `d_freedom + 1` samples to fit the spline. If the total number of samples is less than `num_bins * (d_freedom + 1)`, no bins will be created.
+    """
+    samples.sort()
+    bins = []
+    if len(samples) >= num_bins * (d_freedom + 1):
+        samples_per_bin = len(samples) // num_bins
+        for bin_index in range(0, num_bins):
+            if bin_index == 0:
+                start_val = float("-inf")
+            else:
+                start_val = samples[bin_index * samples_per_bin]
+
+            if bin_index == num_bins - 1:
+                end_val = float("inf")
+            else:
+                end_val = samples[(bin_index + 1) * samples_per_bin]
+            x = range(bin_index * samples_per_bin, (bin_index + 1) * samples_per_bin)
+            y = samples[bin_index * samples_per_bin : (bin_index + 1) * samples_per_bin]
+            spline = UnivariateSpline(x, y, s=0.1, k=d_freedom)
+            bins.append(
+                {
+                    "bin_index": bin_index,
+                    "start_val": start_val,
+                    "end_val": end_val,
+                    "spline": spline,
+                }
+            )
+    return bins
+
+
+def map_statistics(batch: Dict[str, Any], size=10_000) -> Dict[str, Any]:
+    if "units" in batch:
+        batch_value_units = batch["units"]
+    else:
+        batch_value_units = [[NA for _ in cons] for cons in batch["concept_ids"]]
+
+    if "number_as_values" not in batch:
+        batched_number_as_values = [
+            [value if isinstance(value, float) else None for value in concept_values]
+            for concept_values in batch["concept_values"]
+        ]
+    else:
+        batched_number_as_values = batch["number_as_values"]
+
+    if "concept_as_values" not in batch:
+        batched_concept_as_values = [
+            [value if isinstance(value, str) else None for value in concept_values]
+            for concept_values in batch["concept_values"]
+        ]
+    else:
+        batched_concept_as_values = batch["concept_as_values"]
+
+    numeric_stats_by_lab = collections.defaultdict(partial(ReservoirSampler, size=size))
+    categorical_stats_by_lab = collections.defaultdict(int)
+    for (
+        concept_ids,
+        number_as_values,
+        concept_as_values,
+        concept_value_indicators,
+        units,
+    ) in zip(
+        batch["concept_ids"],
+        batched_number_as_values,
+        batched_concept_as_values,
+        batch["concept_value_masks"],
+        batch_value_units,
+    ):
+        for (
+            concept_id,
+            number_as_value,
+            concept_as_value,
+            concept_value_indicator,
+            unit,
+        ) in zip(
+            concept_ids,
+            number_as_values,
+            concept_as_values,
+            concept_value_indicators,
+            units,
+        ):
+            if concept_value_indicator == 1:
+                if number_as_value:
+                    numeric_stats_by_lab[(concept_id, unit)].add(number_as_value, 1)
+                if concept_as_value:
+                    categorical_stats_by_lab[(concept_id, concept_as_value)] += 1
+
+    return {
+        "numeric_stats_by_lab": numeric_stats_by_lab,
+        "categorical_stats_by_lab": categorical_stats_by_lab,
+    }
 
 
 def create_numeric_concept_unit_mapping(
@@ -75,8 +275,7 @@ class NumericEventStatistics:
                 "mean": lab_stat["mean"],
                 "std": lab_stat["std"],
                 "value_outlier_std": lab_stat["value_outlier_std"],
-                "lower_bound": lab_stat["lower_bound"],
-                "upper_bound": lab_stat["upper_bound"],
+                "bins": lab_stat["bins"],
             }
             for lab_stat in lab_stats
         }
@@ -95,31 +294,46 @@ class NumericEventStatistics:
             )
         return NA
 
-    def normalize(self, concept_id: str, unit: str, concept_value: float) -> float:
-        if (concept_id, unit) in self._lab_stats_mapping:
-            concept_unit_stats = self._lab_stats_mapping[(concept_id, unit)]
-            mean_ = concept_value - concept_unit_stats["mean"]
-            std = concept_unit_stats["std"]
-            if std > 0:
-                value_outlier_std = concept_unit_stats["value_outlier_std"]
-                normalized_value = mean_ / std
-                # Clip the value between the lower and upper bounds of the corresponding lab
-                normalized_value = max(
-                    -value_outlier_std, min(value_outlier_std, normalized_value)
-                )
-            else:
-                # If there is not a valid standard deviation,
-                # we just the normalized value to the mean of the standard normal
-                normalized_value = 0.0
-            return normalized_value
-        return concept_value
+    def normalize(
+        self, concept_id: str, unit: str, concept_value: Union[float, str]
+    ) -> str:
+        if isinstance(concept_value, float):
+            if (concept_id, unit) in self._lab_stats_mapping:
+                concept_unit_stats = self._lab_stats_mapping[(concept_id, unit)]
+                bins = concept_unit_stats["bins"]
+                if bins:
+                    for each_bin in bins:
+                        if (
+                            each_bin["start_val"]
+                            <= concept_value
+                            <= each_bin["end_val"]
+                        ):
+                            return create_value_bin(each_bin["bin_index"])
+        return UNKNOWN_BIN
 
-    def denormalize(self, concept_id: str, value: float) -> Tuple[float, str]:
+    def denormalize(
+        self, concept_id: str, value_bin: str
+    ) -> Tuple[Optional[Union[float, str]], str]:
         unit = self.get_random_unit(concept_id)
-        if (concept_id, unit) in self._lab_stats_mapping:
-            stats = self._lab_stats_mapping[(concept_id, unit)]
-            value = value * stats["std"] + stats["mean"]
-        return value, unit
+        concept_value = value_bin
+        if (
+            is_valid_valid_bin(value_bin)
+            and (concept_id, unit) in self._lab_stats_mapping
+        ):
+            lab_stats = self._lab_stats_mapping[(concept_id, unit)]
+            bin_index = value_bin.split(":")[1]
+            if bin_index.isnumeric():
+                bin_index = int(bin_index)
+                # There are rare cases during sequence generation where bin_index could be out of range
+                # when there are no bins for (concept_id, unit) due to the small number of values in the source data
+                if len(lab_stats["bins"]) > bin_index:
+                    assert bin_index == lab_stats["bins"][bin_index]["bin_index"]
+                    bin_spline = lab_stats["bins"][bin_index]["spline"]
+                    x = np.random.uniform(
+                        bin_spline.get_knots()[0], bin_spline.get_knots()[-1]
+                    )
+                    concept_value = bin_spline(x).item()
+        return concept_value, unit
 
 
 class CehrGptTokenizer(PreTrainedTokenizer):
@@ -127,21 +341,32 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     def __init__(
         self,
         tokenizer: Tokenizer,
+        value_tokenizer: Tokenizer,
         att_tokenizer: Tokenizer,
         token_to_sub_time_token_mapping: Dict[str, List[str]],
-        lab_stats: List[Dict[str, Any]],
+        numeric_lab_stats: List[Dict[str, Any]],
+        categorical_lab_stats: Dict[Tuple[str, str], int],
         concept_name_mapping: Dict[str, str],
     ):
         self._tokenizer = tokenizer
+        self._value_tokenizer = value_tokenizer
         self._att_tokenizer = att_tokenizer
         self._token_to_sub_time_token_mapping = token_to_sub_time_token_mapping
-        self._lab_stats = lab_stats
-        self._numeric_event_statistics = NumericEventStatistics(lab_stats)
+        self._numeric_lab_stats = numeric_lab_stats
+        self._numeric_event_statistics = NumericEventStatistics(numeric_lab_stats)
+        self._categorical_lab_stats = categorical_lab_stats
         self._concept_name_mapping = concept_name_mapping
         self._oov_token_id = self._tokenizer.token_to_id(OUT_OF_VOCABULARY_TOKEN)
         self._padding_token_id = self._tokenizer.token_to_id(PAD_TOKEN)
         self._start_token_id = self._tokenizer.token_to_id(START_TOKEN)
         self._end_token_id = self._tokenizer.token_to_id(END_TOKEN)
+        self._numeric_concept_ids = (
+            self._numeric_event_statistics.get_numeric_concept_ids()
+        )
+        self._categorical_concept_ids = list(
+            {t[0] for t in self._categorical_lab_stats.keys()}
+        )
+        self._padding_value_token_id = self._value_tokenizer.token_to_id(PAD_TOKEN)
 
         super().__init__()
 
@@ -150,8 +375,16 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         return self._tokenizer.get_vocab_size()
 
     @property
+    def value_vocab_size(self) -> int:
+        return self._value_tokenizer.get_vocab_size()
+
+    @property
     def time_token_vocab_size(self) -> int:
         return self._att_tokenizer.get_vocab_size()
+
+    @property
+    def pad_value_token_id(self):
+        return self._padding_value_token_id
 
     @property
     def start_token_id(self):
@@ -181,13 +414,22 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     def pad_token(self):
         return PAD_TOKEN
 
+    def numeric_concept_ids(self):
+        return self._numeric_concept_ids
+
+    @property
+    def categorical_concept_ids(self):
+        return self._categorical_concept_ids
+
+
     @property
     def lab_token_ids(self):
         reserved_tokens = [START_TOKEN, PAD_TOKEN, END_TOKEN, OUT_OF_VOCABULARY_TOKEN]
         return self.encode(
             [
                 concept_id
-                for concept_id in self._numeric_event_statistics.get_numeric_concept_ids()
+                for concept_id in self._numeric_concept_ids
+                + self._categorical_concept_ids
                 if concept_id not in reserved_tokens
             ]
         )
@@ -217,6 +459,17 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     ) -> List[str]:
         return self._tokenizer.decode(
             concept_token_ids, skip_special_tokens=skip_special_tokens
+        ).split(" ")
+
+    def encode_value(self, concept_values: Sequence[str]) -> Sequence[int]:
+        encoded = self._value_tokenizer.encode(concept_values, is_pretokenized=True)
+        return encoded.ids
+
+    def decode_value(
+        self, concept_value_token_ids: List[int], skip_special_tokens: bool = True
+    ) -> List[str]:
+        return self._value_tokenizer.decode(
+            concept_value_token_ids, skip_special_tokens=skip_special_tokens
         ).split(" ")
 
     def _convert_token_to_id(self, token):
@@ -269,6 +522,10 @@ class CehrGptTokenizer(PreTrainedTokenizer):
 
         self._tokenizer.save(os.path.join(save_directory, TOKENIZER_FILE_NAME))
 
+        self._value_tokenizer.save(
+            os.path.join(save_directory, VALUE_TOKENIZER_FILE_NAME)
+        )
+
         self._att_tokenizer.save(os.path.join(save_directory, TIME_TOKENIZER_FILE_NAME))
 
         with open(
@@ -276,8 +533,12 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         ) as f:
             json.dump(self._token_to_sub_time_token_mapping, f)
 
-        with open(os.path.join(save_directory, LAB_STATS_FILE_NAME), "w") as f:
-            json.dump(self._lab_stats, f)
+        with open(os.path.join(save_directory, LAB_STATS_FILE_NAME), "wb") as f:
+            lab_stats = {
+                "numeric_lab_stats": self._numeric_lab_stats,
+                "categorical_lab_stats": self._categorical_lab_stats,
+            }
+            pickle.dump(lab_stats, f)
 
         with open(os.path.join(save_directory, CONCEPT_MAPPING_FILE_NAME), "w") as f:
             json.dump(self._concept_name_mapping, f)
@@ -314,23 +575,31 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             A CehrBert Tokenizer
         """
 
+        # Load the concept tokenizer
         tokenizer_file = transformers.utils.hub.cached_file(
             pretrained_model_name_or_path, TOKENIZER_FILE_NAME, **kwargs
         )
-
         if not tokenizer_file:
             return None
-
         tokenizer = Tokenizer.from_file(tokenizer_file)
 
+        # Load the concept_value_tokenizer
+        value_tokenizer_file = transformers.utils.hub.cached_file(
+            pretrained_model_name_or_path, VALUE_TOKENIZER_FILE_NAME, **kwargs
+        )
+        if not value_tokenizer_file:
+            return None
+        value_tokenizer = Tokenizer.from_file(value_tokenizer_file)
+
+        # Load the ttt tokenizer
         att_tokenizer_file = transformers.utils.hub.cached_file(
             pretrained_model_name_or_path, TIME_TOKENIZER_FILE_NAME, **kwargs
         )
         if not att_tokenizer_file:
             return None
-
         att_tokenizer = Tokenizer.from_file(att_tokenizer_file)
 
+        # Load the sub time token json file
         token_to_sub_time_token_mapping_file = transformers.utils.hub.cached_file(
             pretrained_model_name_or_path,
             TOKEN_TO_SUB_TIME_TOKEN_MAPPING_FILE_NAME,
@@ -338,32 +607,34 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         )
         if not token_to_sub_time_token_mapping_file:
             return None
+        token_to_sub_time_token_mapping = load_json_file(
+            token_to_sub_time_token_mapping_file
+        )
 
+        # Load the lab stats pickle file
         lab_stats_file = transformers.utils.hub.cached_file(
             pretrained_model_name_or_path, LAB_STATS_FILE_NAME, **kwargs
         )
         if not lab_stats_file:
             return None
+        with open(lab_stats_file, "rb") as file:
+            lab_stats = pickle.load(file)
 
+        # Load the concept_name json file
         concept_name_mapping_file = transformers.utils.hub.cached_file(
             pretrained_model_name_or_path, CONCEPT_MAPPING_FILE_NAME, **kwargs
         )
         if not concept_name_mapping_file:
             return None
-
-        token_to_sub_time_token_mapping = load_json_file(
-            token_to_sub_time_token_mapping_file
-        )
-
         concept_name_mapping = load_json_file(concept_name_mapping_file)
-
-        lab_stats = load_json_file(lab_stats_file)
 
         return CehrGptTokenizer(
             tokenizer,
+            value_tokenizer,
             att_tokenizer,
             token_to_sub_time_token_mapping,
-            lab_stats,
+            lab_stats["numeric_lab_stats"],
+            lab_stats["categorical_lab_stats"],
             concept_name_mapping,
         )
 
@@ -372,7 +643,6 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         cls,
         cehrgpt_tokenizer,
         dataset: Union[Dataset, DatasetDict],
-        feature_names: List[str],
         concept_name_mapping: Dict[str, str],
         data_args: DataTrainingArguments,
     ):
@@ -385,17 +655,18 @@ class CehrGptTokenizer(PreTrainedTokenizer):
 
         new_tokenizer = CehrGptTokenizer.train_tokenizer(
             dataset=dataset,
-            feature_names=feature_names,
             concept_name_mapping=concept_name_mapping,
             data_args=data_args,
         )
 
         new_tokens = list(new_tokenizer._tokenizer.get_vocab().keys())
+        new_value_tokens = list(new_tokenizer._value_tokenizer.get_vocab().keys())
         new_att_tokens = list(new_tokenizer._att_tokenizer.get_vocab().keys())
         new_token_to_sub_time_token_mapping = (
             new_tokenizer._token_to_sub_time_token_mapping
         )
-        new_lab_stats = new_tokenizer._lab_stats
+        new_numeric_lab_stats = new_tokenizer._numeric_lab_stats
+        new_categorical_lab_stats = new_tokenizer._categorical_lab_stats
         new_concept_name_mapping = new_tokenizer._concept_name_mapping
 
         # Add new tokens to the existing tokenizer
@@ -403,6 +674,13 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             [
                 AddedToken(token, single_word=True, normalized=False)
                 for token in new_tokens
+            ]
+        )
+        # Add new tokens to the existing value tokenizer
+        cehrgpt_tokenizer_copy._value_tokenizer.add_tokens(
+            [
+                AddedToken(token, single_word=True, normalized=False)
+                for token in new_value_tokens
             ]
         )
         # Add new time tokens to the existing att tokenizer
@@ -422,10 +700,15 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                     sub_time_tokens
                 )
 
-        # Merge lab_stats
-        cehrgpt_tokenizer_copy._lab_stats = cls.merge_lab_stats(
-            cehrgpt_tokenizer_copy._lab_stats,
-            new_lab_stats,
+        # Merge numeric lab_stats
+        cehrgpt_tokenizer_copy._numeric_lab_stats = cls.merge_numeric_lab_stats(
+            cehrgpt_tokenizer_copy._numeric_lab_stats,
+            new_numeric_lab_stats,
+        )
+        # Merge categorical lab_stats
+        cehrgpt_tokenizer_copy._categorical_lab_stats = cls.merge_categorical_lab_stats(
+            cehrgpt_tokenizer_copy._categorical_lab_stats,
+            new_categorical_lab_stats,
         )
 
         # Merge concept_name_mapping
@@ -435,14 +718,16 @@ class CehrGptTokenizer(PreTrainedTokenizer):
 
         return CehrGptTokenizer(
             tokenizer=cehrgpt_tokenizer_copy._tokenizer,
+            value_tokenizer=cehrgpt_tokenizer_copy._value_tokenizer,
             att_tokenizer=cehrgpt_tokenizer_copy._att_tokenizer,
             token_to_sub_time_token_mapping=cehrgpt_tokenizer_copy._token_to_sub_time_token_mapping,
-            lab_stats=cehrgpt_tokenizer_copy._lab_stats,
+            numeric_lab_stats=cehrgpt_tokenizer_copy._numeric_lab_stats,
+            categorical_lab_stats=cehrgpt_tokenizer_copy._categorical_lab_stats,
             concept_name_mapping=cehrgpt_tokenizer_copy._concept_name_mapping,
         )
 
     @classmethod
-    def merge_lab_stats(
+    def merge_numeric_lab_stats(
         cls,
         lab_stats_existing: List[Dict[str, Any]],
         lab_stats_new: List[Dict[str, Any]],
@@ -474,14 +759,15 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                     "std"
                 ] = existing.standard_deviation()
                 lab_stats_existing_mapping[concept_unit_pair]["count"] = existing.count
-                lab_stats_existing_mapping[concept_unit_pair]["lower_bound"] = min(
-                    lab_stats_existing_mapping[concept_unit_pair]["lower_bound"],
-                    lab_stat["lower_bound"],
+                # recreate the bins
+                sample = create_sample_from_bins(
+                    lab_stats_existing_mapping[concept_unit_pair]["bins"]
                 )
-                lab_stats_existing_mapping[concept_unit_pair]["upper_bound"] = max(
-                    lab_stats_existing_mapping[concept_unit_pair]["upper_bound"],
-                    lab_stat["upper_bound"],
+                sample.extend(create_sample_from_bins(lab_stat["bins"]))
+                lab_stats_existing_mapping[concept_unit_pair]["bins"] = (
+                    create_bins_with_spline(sample, NUM_OF_BINS, DEGREE_OF_FREEDOM)
                 )
+
             else:
                 if lab_stat["count"] > 0:
                     lab_stats_existing_mapping[concept_unit_pair] = lab_stat
@@ -489,10 +775,21 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         return list(lab_stats_existing_mapping.values())
 
     @classmethod
+    def merge_categorical_lab_stats(
+        cls,
+        categorical_lab_stats_existing: Dict[Tuple[str, str], int],
+        categorical_lab_stats_new: Dict[Tuple[str, str], int],
+    ) -> Dict[Tuple[str, str], int]:
+        for (concept_id, concept_as_value), count in categorical_lab_stats_new.items():
+            if (concept_id, concept_as_value) not in categorical_lab_stats_new:
+                categorical_lab_stats_existing[(concept_id, concept_as_value)] = 0
+            categorical_lab_stats_existing[(concept_id, concept_as_value)] += count
+        return categorical_lab_stats_existing
+
+    @classmethod
     def train_tokenizer(
         cls,
         dataset: Union[Dataset, DatasetDict],
-        feature_names: List[str],
         concept_name_mapping: Dict[str, str],
         data_args: DataTrainingArguments,
     ):
@@ -506,106 +803,88 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         if isinstance(dataset, DatasetDict):
             dataset = dataset["train"]
 
-        lab_stats = []
-        # Use the Fast Tokenizer from the Huggingface tokenizers Rust implementation.
-        # https://github.com/huggingface/tokenizers
-        concept_tokenizer = Tokenizer(
-            WordLevel(unk_token=OUT_OF_VOCABULARY_TOKEN, vocab=dict())
-        )
-        concept_tokenizer.pre_tokenizer = WhitespaceSplit()
-        concept_trainer = WordLevelTrainer(
+        concept_tokenizer = cls.train_concept_tokenizer(
+            dataset,
+            feature_name="concept_ids",
             special_tokens=[PAD_TOKEN, OUT_OF_VOCABULARY_TOKEN, START_TOKEN, END_TOKEN],
-            vocab_size=data_args.vocab_size,
-            min_frequency=data_args.min_frequency,
-            show_progress=True,
+            unk_token=OUT_OF_VOCABULARY_TOKEN,
+            data_args=data_args,
         )
-        for feature_name in feature_names:
-            batch_concat_concepts_partial_func = partial(
-                cls.batch_concat_concepts, feature_name=feature_name
+        concept_value_column = "concept_as_values"
+        for row in dataset:
+            if concept_value_column not in row:
+                concept_value_column = "concept_values"
+            break
+        value_tokenizer = cls.train_concept_tokenizer(
+            dataset,
+            feature_name=concept_value_column,
+            special_tokens=[OUT_OF_VOCABULARY_TOKEN, PAD_TOKEN],
+            unk_token=OUT_OF_VOCABULARY_TOKEN,
+            data_args=data_args,
+        )
+        value_tokenizer.add_tokens(
+            [
+                AddedToken(_, single_word=True, normalized=False)
+                for _ in [create_value_bin(_) for _ in range(NUM_OF_BINS)]
+                + [UNKNOWN_BIN, NONE_BIN]
+            ]
+        )
+
+        map_statistics_partial = partial(map_statistics, size=SAMPLE_SIZE)
+
+        if data_args.streaming:
+            parts = dataset.map(
+                partial(agg_helper, map_func=map_statistics_partial),
+                batched=True,
+                batch_size=data_args.preprocessing_batch_size,
+                keep_in_memory=True,
+                new_fingerprint="invalid",
+                remove_columns=dataset.column_names,
             )
-            if data_args.streaming:
-                concatenated_features = dataset.map(
-                    batch_concat_concepts_partial_func,
-                    batched=True,
-                    batch_size=data_args.preprocessing_batch_size,
-                )
-
-                def batched_generator():
-                    iterator = iter(concatenated_features)
-                    while True:
-                        batch = list(
-                            islice(iterator, data_args.preprocessing_batch_size)
-                        )
-                        if not batch:
-                            break
-                        yield [example[feature_name] for example in batch]
-
-                # We pass a generator of list of texts (concatenated concept_ids) to train_from_iterator
-                # for efficient training
-                generator = batched_generator()
-            else:
-                concatenated_features = dataset.map(
-                    batch_concat_concepts_partial_func,
-                    num_proc=data_args.preprocessing_num_workers,
-                    batched=True,
-                    batch_size=data_args.preprocessing_batch_size,
-                    remove_columns=dataset.column_names,
-                )
-                generator = concatenated_features[feature_name]
-
-            concept_tokenizer.train_from_iterator(generator, trainer=concept_trainer)
-
-            map_statistics_partial = partial(
-                map_statistics,
-                capacity=data_args.offline_stats_capacity,
-                value_outlier_std=data_args.value_outlier_std,
+        else:
+            parts = dataset.map(
+                partial(agg_helper, map_func=map_statistics_partial),
+                batched=True,
+                batch_size=data_args.preprocessing_batch_size,
+                remove_columns=dataset.column_names,
+                num_proc=data_args.preprocessing_num_workers,
+                keep_in_memory=True,
+                new_fingerprint="invalid",
             )
-
-            if data_args.streaming:
-                parts = dataset.map(
-                    partial(agg_helper, map_func=map_statistics_partial),
-                    batched=True,
-                    batch_size=data_args.preprocessing_batch_size,
-                    keep_in_memory=True,
-                    new_fingerprint="invalid",
-                    remove_columns=dataset.column_names,
-                )
+        current = None
+        for stat in tqdm(parts, desc="Aggregating the lab statistics"):
+            fixed_stat = pickle.loads(stat["data"])
+            if current is None:
+                current = fixed_stat
             else:
-                parts = dataset.map(
-                    partial(agg_helper, map_func=map_statistics_partial),
-                    batched=True,
-                    batch_size=data_args.preprocessing_batch_size,
-                    remove_columns=dataset.column_names,
-                    num_proc=data_args.preprocessing_num_workers,
-                    keep_in_memory=True,
-                    new_fingerprint="invalid",
-                )
-            current = None
-            for stat in tqdm(parts, desc="Aggregating the lab statistics"):
-                fixed_stat = pickle.loads(stat["data"])
-                if current is None:
-                    current = fixed_stat
-                else:
-                    current = agg_statistics(current, fixed_stat)
+                current = agg_statistics(current, fixed_stat)
 
-            lab_stats = [
+        numeric_lab_stats = []
+        for (concept_id, unit), online_stats in current["numeric_stats_by_lab"].items():
+            # The lab needs to have a sample of num_of_bins times 2 values to be included
+            if len(online_stats.samples) < NUM_OF_BINS * 2:
+                continue
+            samples = truncated_sample(
+                online_stats.samples, data_args.value_outlier_std
+            )
+            bins = create_bins_with_spline(samples, NUM_OF_BINS, DEGREE_OF_FREEDOM)
+            numeric_lab_stats.append(
                 {
                     "concept_id": concept_id,
                     "unit": unit,
-                    "mean": online_stats.mean(),
-                    "std": online_stats.standard_deviation(),
-                    "count": online_stats.count,
+                    "mean": np.mean(samples),
+                    "std": np.std(samples),
+                    "count": len(online_stats.samples),
                     "value_outlier_std": data_args.value_outlier_std,
-                    "lower_bound": online_stats.mean()
-                    - data_args.value_outlier_std * online_stats.standard_deviation(),
-                    "upper_bound": online_stats.mean()
-                    + data_args.value_outlier_std * online_stats.standard_deviation(),
+                    "bins": bins,
                 }
-                for (concept_id, unit), online_stats in current[
-                    "numeric_stats_by_lab"
-                ].items()
-                if online_stats.count > 0
-            ]
+            )
+
+        categorical_lab_stats = collections.defaultdict(int)
+        for (concept_id, value_as_concept), count in current[
+            "categorical_stats_by_lab"
+        ].items():
+            categorical_lab_stats[(concept_id, value_as_concept)] += count
 
         # We will train a tokenizer specifically for time intervals
         sub_time_token_data = []
@@ -633,20 +912,81 @@ class CehrGptTokenizer(PreTrainedTokenizer):
 
         return CehrGptTokenizer(
             concept_tokenizer,
+            value_tokenizer,
             att_tokenizer,
             token_to_sub_time_token_mapping,
-            lab_stats,
+            numeric_lab_stats,
+            categorical_lab_stats,
             concept_name_mapping,
         )
 
-    def normalize(self, concept_id: str, unit: str, concept_value: float) -> float:
+    @classmethod
+    def train_concept_tokenizer(
+        cls,
+        dataset,
+        feature_name,
+        special_tokens: List[str],
+        unk_token,
+        data_args,
+    ):
+        # Use the Fast Tokenizer from the Huggingface tokenizers Rust implementation.
+        # https://github.com/huggingface/tokenizers
+        concept_tokenizer = Tokenizer(WordLevel(unk_token=unk_token, vocab=dict()))
+        concept_tokenizer.pre_tokenizer = WhitespaceSplit()
+        concept_trainer = WordLevelTrainer(
+            special_tokens=special_tokens,
+            vocab_size=data_args.vocab_size,
+            min_frequency=data_args.min_frequency,
+            show_progress=True,
+        )
+        batch_concat_concepts_partial_func = partial(
+            cls.batch_concat_concepts, feature_name=feature_name
+        )
+        if data_args.streaming:
+            concatenated_features = dataset.map(
+                batch_concat_concepts_partial_func,
+                batched=True,
+                batch_size=data_args.preprocessing_batch_size,
+            )
+
+            def batched_generator():
+                iterator = iter(concatenated_features)
+                while True:
+                    batch = list(islice(iterator, data_args.preprocessing_batch_size))
+                    if not batch:
+                        break
+                    yield [example[feature_name] for example in batch]
+
+            # We pass a generator of list of texts (concatenated concept_ids) to train_from_iterator
+            # for efficient training
+            generator = batched_generator()
+        else:
+            concatenated_features = dataset.map(
+                batch_concat_concepts_partial_func,
+                num_proc=data_args.preprocessing_num_workers,
+                batched=True,
+                batch_size=data_args.preprocessing_batch_size,
+                remove_columns=dataset.column_names,
+            )
+            generator = concatenated_features[feature_name]
+        concept_tokenizer.train_from_iterator(generator, trainer=concept_trainer)
+        return concept_tokenizer
+
+    def normalize(self, concept_id: str, unit: str, concept_value: float) -> str:
         return self._numeric_event_statistics.normalize(concept_id, unit, concept_value)
 
-    def denormalize(self, concept_id: str, value: float) -> Tuple[float, str]:
-        return self._numeric_event_statistics.denormalize(concept_id, value)
+    def denormalize(self, concept_id: str, value_bin: str) -> Tuple[float, str]:
+        return self._numeric_event_statistics.denormalize(concept_id, value_bin)
 
     @classmethod
     def batch_concat_concepts(
         cls, records: Dict[str, List], feature_name
     ) -> Dict[str, List]:
-        return {feature_name: [" ".join(map(str, _)) for _ in records[feature_name]]}
+        return {
+            feature_name: [
+                " ".join(
+                    [token for token in tokens if token and isinstance(token, str)]
+                )
+                for tokens in records[feature_name]
+            ]
+        }

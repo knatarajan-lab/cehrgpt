@@ -278,29 +278,13 @@ class WeibullModel(nn.Module):
         return lambda_param, k_param
 
 
-class ConceptValuePredictionLayer(nn.Module):
-    def __init__(self, embedding_size):
-        super(ConceptValuePredictionLayer, self).__init__()
-        self.embedding_size = embedding_size
-        self.concept_value_decoder_layer = nn.Sequential(
-            nn.Linear(embedding_size, embedding_size // 2),
-            gelu_new,
-            nn.Linear(embedding_size // 2, 1),
-        )
-
-    def forward(self, hidden_states: Optional[torch.FloatTensor]):
-        # (batch_size, context_window, 1)
-        concept_vals = self.concept_value_decoder_layer(hidden_states)
-        return concept_vals
-
-
 class ConceptValueTransformationLayer(nn.Module):
     def __init__(self, embedding_size):
         super(ConceptValueTransformationLayer, self).__init__()
         self.embedding_size = embedding_size
         self.merge_value_transformation_layer = nn.Sequential(
             nn.Linear(
-                embedding_size + 1, embedding_size
+                2 * embedding_size, embedding_size
             )  # +1 for the concept_values concatenation
         )
 
@@ -308,17 +292,13 @@ class ConceptValueTransformationLayer(nn.Module):
         self,
         concept_embeddings: Optional[torch.FloatTensor],
         value_indicators: Optional[torch.BoolTensor] = None,
-        concept_values: Optional[torch.FloatTensor] = None,
+        value_embeddings: Optional[torch.FloatTensor] = None,
     ):
-        if value_indicators is None or concept_values is None:
-            return concept_embeddings
-        # Expand dimensions for concept_values and concept_value_masks
-        concept_values = concept_values.unsqueeze(-1)
         value_indicators = value_indicators.unsqueeze(-1)
 
         # Concatenate concept_embeddings and concept_values
         concept_embeddings_with_val = torch.cat(
-            [concept_embeddings, concept_values], dim=-1
+            [concept_embeddings, value_embeddings], dim=-1
         )
 
         # Transform concatenated embeddings back to embedding_size
@@ -385,6 +365,133 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
                     ),
                 )
 
+    def tie_weights(self):
+        super().tie_weights()
+        if getattr(self.config, "tie_word_embeddings", True):
+            output_value_embeddings = self.get_value_output_embeddings()
+            if output_value_embeddings is not None:
+                self._tie_or_clone_weights(
+                    output_value_embeddings, self.get_value_input_embeddings()
+                )
+
+    def resize_value_embeddings(
+        self,
+        new_num_tokens: Optional[int] = None,
+        pad_to_multiple_of: Optional[int] = None,
+    ) -> nn.Embedding:
+        """
+        Resizes value token embeddings matrix of the model if `new_num_tokens != config.value_vocab_size`.
+
+        Takes care of tying weights embeddings afterwards if the model class has a `tie_weights()` method.
+
+        Arguments:
+            new_num_tokens (`int`, *optional*):
+                The new number of tokens in the embedding matrix. Increasing the size will add newly initialized
+                vectors at the end. Reducing the size will remove vectors from the end. If not provided or `None`, just
+                returns a pointer to the input tokens `torch.nn.Embedding` module of the model without doing anything.
+            pad_to_multiple_of (`int`, *optional*):
+                If set will pad the embedding matrix to a multiple of the provided value.If `new_num_tokens` is set to
+                `None` will just pad the embedding to a multiple of `pad_to_multiple_of`.
+
+                This is especially useful to enable the use of Tensor Cores on NVIDIA hardware with compute capability
+                `>= 7.5` (Volta), or on TPUs which benefit from having sequence lengths be a multiple of 128. For more
+                details about this, or help on choosing the correct value for resizing, refer to this guide:
+                https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html#requirements-tc
+
+        Return:
+            `torch.nn.Embedding`: Pointer to the input tokens Embeddings Module of the model.
+        """
+        from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
+
+        # check if the value vocab_size is less than the number of tokens
+        # we need to resize the value_embeddings if necessary
+        if self.config.value_vocab_size < new_num_tokens:
+            # Update the embedding size
+            old_value_embeddings = self.get_value_input_embeddings()
+            new_value_embeddings = self._get_resized_embeddings(
+                old_value_embeddings, new_num_tokens, pad_to_multiple_of
+            )
+            old_embeddings_requires_grad = old_value_embeddings.weight.requires_grad
+            new_value_embeddings.requires_grad_(old_embeddings_requires_grad)
+            self.set_value_input_embeddings(new_value_embeddings)
+            is_quantized = (
+                hasattr(self, "hf_quantizer") and self.hf_quantizer is not None
+            )
+            # Update new_num_tokens with the actual size of new_value_embeddings
+            if pad_to_multiple_of is not None:
+                if is_deepspeed_zero3_enabled() and not is_quantized:
+                    import deepspeed
+
+                    with deepspeed.zero.GatheredParameters(
+                        new_value_embeddings.weight, modifier_rank=None
+                    ):
+                        new_num_tokens = new_value_embeddings.weight.shape[0]
+                else:
+                    new_num_tokens = new_value_embeddings.weight.shape[0]
+
+            # make sure that lm head is resized as well
+            if (
+                self.get_value_output_embeddings() is not None
+                and not self.config.tie_word_embeddings
+            ):
+                old_value_head = self.get_value_output_embeddings()
+                new_value_head = self._get_resized_lm_head(
+                    old_value_head, new_num_tokens
+                )
+                old_value_head_requires_grad = old_value_head.weight.requires_grad
+                new_value_head.requires_grad_(old_value_head_requires_grad)
+                self.set_value_output_embeddings(new_value_head)
+            # Update base model and current model config
+            self.config.value_vocab_size = (
+                self.get_value_input_embeddings().weight.shape[0]
+            )
+
+        # Return the input value embeddings
+        return self.get_value_input_embeddings()
+
+    def get_value_input_embeddings(self) -> nn.Embedding:
+        """
+        Returns the model's input embeddings.
+
+        Returns:
+            `nn.Module`: A torch module mapping vocabulary to hidden states.
+        """
+        base_model = getattr(self, self.base_model_prefix, self)
+        if base_model is not self:
+            return base_model.get_value_input_embeddings()
+        else:
+            raise NotImplementedError
+
+    def set_value_input_embeddings(self, value: nn.Embedding):
+        """
+        Set model's input embeddings.
+
+        Args:
+            value (`nn.Module`): A module mapping vocabulary to hidden states.
+        """
+        base_model = getattr(self, self.base_model_prefix, self)
+        if base_model is not self:
+            base_model.set_value_input_embeddings(value)
+        else:
+            raise NotImplementedError
+
+    def get_value_output_embeddings(self) -> Optional[nn.Linear]:
+        """
+        Returns the model's output embeddings.
+
+        Returns:
+            `nn.Module`: A torch module mapping hidden states to vocabulary.
+        """
+        return None  # Overwrite for models with output embeddings
+
+    def set_value_output_embeddings(self, output_embeddings: nn.Module) -> None:
+        """
+        Returns the model's output embeddings.
+
+        Returns:
+            `nn.Module`: A torch module mapping hidden states to vocabulary.
+        """
+
 
 class CEHRGPT2Model(CEHRGPTPreTrainedModel):
     def __init__(self, config: CEHRGPTConfig):
@@ -397,6 +504,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
 
         self.wte = nn.Embedding(config.vocab_size, self.embed_dim)
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
+        self.vte = nn.Embedding(config.value_vocab_size, self.embed_dim)
         self.concept_value_transformation_layer = ConceptValueTransformationLayer(
             self.embed_dim
         )
@@ -443,7 +551,11 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         )
         self.last_device = "cuda:" + str(max(self.device_map.keys()))
         self.wte = self.wte.to(self.first_device)
+        self.vte = self.vte.to(self.first_device)
         self.wpe = self.wpe.to(self.first_device)
+        self.concept_value_transformation_layer = (
+            self.concept_value_transformation_layer.to(self.first_device)
+        )
         # Load onto devices
         for k, v in self.device_map.items():
             for block in v:
@@ -463,10 +575,20 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.last_device = "cpu"
         self.wte = self.wte.to("cpu")
         self.wpe = self.wpe.to("cpu")
+        self.vte = self.vte.to("cpu")
+        self.concept_value_transformation_layer = (
+            self.concept_value_transformation_layer.to("cpu")
+        )
         for index in range(len(self.h)):
             self.h[index] = self.h[index].to("cpu")
         self.ln_f = self.ln_f.to("cpu")
         torch.cuda.empty_cache()
+
+    def get_value_input_embeddings(self) -> nn.Module:
+        return self.vte
+
+    def set_value_input_embeddings(self, value: nn.Module):
+        self.vte = value
 
     def get_input_embeddings(self):
         return self.wte
@@ -487,7 +609,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self,
         input_ids: Optional[torch.LongTensor],
         value_indicators: Optional[torch.BoolTensor],
-        values: Optional[torch.FloatTensor],
+        values: Optional[torch.LongTensor],
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -570,11 +692,12 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         input_embeddings = self.wte(input_ids)
 
         if self.include_values:
+            value_embeddings = self.vte(values)
             # Combine the value and concept embeddings together
             input_embeddings = self.concept_value_transformation_layer(
                 concept_embeddings=input_embeddings,
                 value_indicators=value_indicators,
-                concept_values=values,
+                value_embeddings=value_embeddings,
             )
 
         if not self.exclude_position_ids:
@@ -686,11 +809,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
     def __init__(self, config: CEHRGPTConfig):
         super().__init__(config)
         self.cehrgpt = CEHRGPT2Model(config)
-        if self.config.include_values:
-            self.concept_value_decoder_layer = ConceptValuePredictionLayer(
-                config.n_embd
-            )
-
         if self.config.include_ttv_prediction:
             self.tte_head = WeibullModel(config.n_embd)
 
@@ -700,6 +818,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             )
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        if self.config.include_values:
+            self.value_head = nn.Linear(
+                config.n_embd, config.value_vocab_size, bias=False
+            )
 
         # Model parallel
         self.model_parallel = False
@@ -725,9 +847,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         self.cehrgpt.parallelize(self.device_map)
         self.lm_head = self.lm_head.to(self.cehrgpt.first_device)
         if self.config.include_values:
-            self.concept_value_decoder_layer = self.concept_value_decoder_layer.to(
-                self.cehrgpt.first_device
-            )
+            self.value_head = self.value_head.to(self.cehrgpt.first_device)
         if self.config.include_ttv_prediction:
             self.tte_head = self.tte_head.to(self.cehrgpt.first_device)
         self.model_parallel = True
@@ -741,9 +861,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         self.cehrgpt = self.cehrgpt.to("cpu")
         self.lm_head = self.lm_head.to("cpu")
         if self.config.include_values:
-            self.concept_value_decoder_layer = self.concept_value_decoder_layer.to(
-                "cpu"
-            )
+            self.value_head = self.value_head.to("cpu")
         if self.config.include_ttv_prediction:
             self.tte_head = self.tte_head.to("cpu")
         self.model_parallel = False
@@ -755,8 +873,19 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
     def set_output_embeddings(self, new_embeddings):
         self.lm_head = new_embeddings
 
+    def get_value_output_embeddings(self):
+        return self.value_head
+
+    def set_value_output_embeddings(self, new_embeddings):
+        self.value_head = new_embeddings
+
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs
+        self,
+        input_ids,
+        past_key_values=None,
+        inputs_embeds=None,
+        lab_token_ids=None,
+        **kwargs,
     ):
 
         # Omit tokens covered by past_key_values
@@ -798,9 +927,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 "values",
                 torch.zeros_like(
                     input_ids,
-                    dtype=(
-                        torch.bfloat16 if is_flash_attn_2_available() else torch.float32
-                    ),
+                    dtype=torch.int32,
                 ),
             )
             # Omit tokens covered by past_key_values
@@ -834,14 +961,14 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         self,
         input_ids: Optional[torch.LongTensor] = None,
         value_indicators: Optional[torch.BoolTensor] = None,
-        values: Optional[torch.FloatTensor] = None,
+        values: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         true_value_indicators: Optional[torch.BoolTensor] = None,
-        true_values: Optional[torch.FloatTensor] = None,
+        true_values: Optional[torch.LongTensor] = None,
         time_to_visits: Optional[torch.FloatTensor] = None,
         time_token_indicators: Optional[torch.BoolTensor] = None,
         sub_time_tokens: Optional[torch.LongTensor] = None,
@@ -880,12 +1007,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             torch.cuda.set_device(self.cehrgpt.first_device)
             hidden_states = hidden_states.to(self.lm_head.weight.device)
 
+        lm_logits = self.lm_head(hidden_states)
         if self.cehrgpt.include_values:
-            lm_logits = self.lm_head(hidden_states)
-            value_preds = self.concept_value_decoder_layer(hidden_states)
+            value_logits = self.value_head(hidden_states)
         else:
-            lm_logits = self.lm_head(hidden_states)
-            value_preds = None
+            value_logits = None
 
         loss = None
         if labels is not None:
@@ -894,11 +1020,42 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # Shift so that tokens < n predict n
             shift_logits = lm_logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
+
+            weights = None
+            if self.cehrgpt.config.token_frequency_penalty:
+                # Flatten the batch to a 1D tensor of all token IDs
+                flattened_tokens = shift_labels.flatten()
+                # Count occurrences of each token ID in the batch
+                unique_tokens, counts = torch.unique(
+                    flattened_tokens, return_counts=True
+                )
+                # Initialize weights for all tokens in the vocabulary
+                weights = (
+                    torch.zeros(self.cehrgpt.config.vocab_size, dtype=torch.float)
+                    + 1e-8
+                ).to(shift_labels.device)
+                # Compute total number of tokens in the batch
+                total_tokens = flattened_tokens.size(0)
+                # Assign weights to tokens present in the batch
+                weights[unique_tokens] = counts.float() / total_tokens
+                # Normalize weights to ensure they sum to the vocabulary size
+                weights = weights * (self.cehrgpt.config.vocab_size / weights.sum())
+
             # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
+            loss_fct = CrossEntropyLoss(weights)
             loss = loss_fct(
                 shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
             )
+
+            if self.cehrgpt.config.entropy_penalty:
+                # Compute probabilities using softmax
+                probs = torch.softmax(lm_logits, dim=-1)
+                # Compute negative entropy: sum(p * log(p))
+                entropy = torch.sum(
+                    probs * torch.log(probs + 1e-9), dim=-1
+                )  # Add epsilon for numerical stability
+                # Regularization term: mean entropy scaled by alpha
+                loss += self.cehrgpt.config.entropy_penalty_alpha * entropy.mean()
 
             # We add another loss term when use_sub_time_tokenization is enabled, we need to recover the sub time token
             # predictions for year/month/token
@@ -955,22 +1112,19 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             loss += -log_probs.mean() * self.config.time_to_visit_loss_weight
 
         if true_values is not None and true_value_indicators is not None:
-            true_values = true_values.to(value_preds.device)
-            shift_value_preds = value_preds.squeeze(-1)[..., :-1].contiguous()
+            true_values = true_values.to(value_logits.device)
+            shift_value_logits = value_logits[..., :-1, :].contiguous()
             shift_value_indicators = true_value_indicators[..., :-1].contiguous()
             shift_next_values = true_values[..., 1:].contiguous()
-            num_items = (
-                torch.sum(shift_value_indicators.to(hidden_states.dtype), dim=-1) + 1e-6
+            shift_next_values = torch.where(
+                shift_value_indicators, shift_next_values, -100
             )
-            masked_mse = (
-                torch.sum(
-                    (shift_next_values - shift_value_preds) ** 2
-                    * shift_value_indicators,
-                    dim=-1,
-                )
-                / num_items
+            value_loss_fct = CrossEntropyLoss()
+            val_loss = value_loss_fct(
+                shift_value_logits.view(-1, shift_value_logits.size(-1)),
+                shift_next_values.view(-1),
             )
-            loss += torch.mean(masked_mse)
+            loss += val_loss
 
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]
@@ -979,7 +1133,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         return CehrGptCausalLMOutput(
             loss=loss,
             logits=lm_logits,
-            next_values=value_preds,
+            value_indicators=value_indicators,
+            next_value_logits=value_logits,
             past_key_values=transformer_outputs.past_key_values,
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
@@ -1107,14 +1262,21 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             batch_size, dtype=torch.long, device=input_ids.device
         )
         model_kwargs["cache_position"] = torch.arange(cur_len, device=input_ids.device)
-        lab_token_ids = torch.tensor(
-            [] if self.config.lab_token_ids is None else self.config.lab_token_ids,
-            dtype=torch.int32,
-        )
+        # Use the lab_token_ids in the argument, otherwise default to the configuration token_ids
+        if "lab_token_ids" in model_kwargs:
+            lab_token_ids = torch.tensor(
+                model_kwargs["lab_token_ids"],
+                dtype=torch.int32,
+            )
+        else:
+            lab_token_ids = torch.tensor(
+                [] if self.config.lab_token_ids is None else self.config.lab_token_ids,
+                dtype=torch.int32,
+            )
         value_indicators = torch.zeros_like(input_ids).to(torch.bool)
         values = torch.zeros_like(
             input_ids,
-            dtype=torch.bfloat16 if is_flash_attn_2_available() else torch.float32,
+            dtype=torch.int32,
         )
         model_kwargs["value_indicators"] = value_indicators
         model_kwargs["values"] = values
@@ -1184,7 +1346,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 next_value_indicators = torch.isin(
                     next_tokens, lab_token_ids.to(next_tokens.device)
                 )
-                next_values = outputs.next_values[:, -1]
+                next_value_logits = outputs.next_value_logits[:, -1]
+                # sample
+                next_value_probs = nn.functional.softmax(next_value_logits, dim=-1)
+                next_value_tokens = torch.multinomial(next_value_probs, num_samples=1)
 
                 # update value_indicators
                 value_indicators = torch.cat(
@@ -1192,7 +1357,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 )
 
                 # update values
-                values = torch.cat([values, next_values], dim=-1)
+                values = torch.cat([values, next_value_tokens], dim=-1)
 
                 model_kwargs["value_indicators"] = value_indicators
                 model_kwargs["values"] = values
@@ -1294,7 +1459,7 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
         age_at_index: torch.FloatTensor,
         classifier_label: Optional[torch.FloatTensor],
         value_indicators: Optional[torch.BoolTensor] = None,
-        values: Optional[torch.FloatTensor] = None,
+        values: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,

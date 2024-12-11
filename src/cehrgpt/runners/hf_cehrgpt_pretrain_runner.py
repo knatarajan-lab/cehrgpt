@@ -45,7 +45,7 @@ def load_and_create_tokenizer(
     dataset: Optional[Union[Dataset, DatasetDict]] = None,
 ) -> CehrGptTokenizer:
     # Try to load the pretrained tokenizer
-    tokenizer_abspath = os.path.abspath(model_args.tokenizer_name_or_path)
+    tokenizer_abspath = os.path.expanduser(model_args.tokenizer_name_or_path)
     try:
         tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_abspath)
     except Exception as e:
@@ -56,9 +56,7 @@ def load_and_create_tokenizer(
                 f"Tried to create the tokenizer, however the dataset is not provided."
             )
 
-        tokenizer = CehrGptTokenizer.train_tokenizer(
-            dataset, ["concept_ids"], {}, data_args
-        )
+        tokenizer = CehrGptTokenizer.train_tokenizer(dataset, {}, data_args)
         tokenizer.save_pretrained(tokenizer_abspath)
 
     return tokenizer
@@ -92,12 +90,16 @@ def load_and_create_model(
         LOG.warning(e)
         model_config = CEHRGPTConfig(
             vocab_size=tokenizer.vocab_size,
+            value_vocab_size=tokenizer.value_vocab_size,
             time_token_vocab_size=tokenizer.time_token_vocab_size,
             bos_token_id=tokenizer.end_token_id,
             eos_token_id=tokenizer.end_token_id,
             lab_token_ids=tokenizer.lab_token_ids,
             token_to_time_token_mapping=tokenizer.token_to_time_token_mapping,
             attn_implementation=attn_implementation,
+            token_frequency_penalty=cehrgpt_args.token_frequency_penalty,
+            entropy_penalty=cehrgpt_args.entropy_penalty,
+            entropy_penalty_alpha=cehrgpt_args.entropy_penalty_alpha,
             **model_args.as_dict(),
         )
     return CEHRGPT2LMHeadModel(model_config)
@@ -151,7 +153,7 @@ def main():
         cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_name_or_path)
     else:
         # If the data is in the MEDS format, we need to convert it to the CEHR-BERT format
-        if data_args.is_data_in_med:
+        if data_args.is_data_in_meds:
             meds_extension_path = get_meds_extension_path(
                 data_folder=data_args.data_folder,
                 dataset_prepared_path=data_args.dataset_prepared_path,
@@ -285,9 +287,9 @@ def main():
             tokenizer=cehrgpt_tokenizer,
             max_length=model_args.max_position_embeddings,
             shuffle_records=data_args.shuffle_records,
-            include_values=model_args.include_values,
             include_ttv_prediction=model_args.include_ttv_prediction,
             use_sub_time_tokenization=model_args.use_sub_time_tokenization,
+            include_values=model_args.include_values,
         ),
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
