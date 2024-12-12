@@ -205,19 +205,10 @@ def main(args):
         ):
             query_tensors.append(torch.tensor(cehrgpt_tokenizer.encode(sequence[:4])))
             response_tensors.append(
-                torch.tensor(
-                    cehrgpt_tokenizer.encode(
-                        sequence[4:] + [cehrgpt_tokenizer.eos_token]
-                    )
-                )
+                torch.tensor(cehrgpt_tokenizer.encode(sequence[4:]))
             )
-            value_tensors.append(
-                torch.tensor(
-                    cehrgpt_tokenizer.encode_value(values)
-                    + [cehrgpt_tokenizer.pad_value_token_id]
-                )
-            )
-            value_indicator_tensors.append(torch.tensor(value_indicators + [False]))
+            value_tensors.append(torch.tensor(cehrgpt_tokenizer.encode_value(values)))
+            value_indicator_tensors.append(torch.tensor(value_indicators))
             rewards.append(reward)
 
         train_stats = ppo_trainer.step(
