@@ -837,7 +837,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
 
 
 class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = ["lm_head.weight", "value_head.weight"]
 
     def __init__(self, config: CEHRGPTConfig):
         super().__init__(config)
