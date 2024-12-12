@@ -43,14 +43,14 @@ class CehrGptPPODataCollator:
             batch["input_ids"].shape[1] <= self.max_length
         ), f"Invalid input_ids length: {batch['input_ids'].shape[1]}"
 
-        if "value_indicators" in batch:
+        if "value_indicators" in examples[0]:
             batch["value_indicators"] = pad_sequence(
                 [example["value_indicators"] for example in examples],
                 batch_first=True,
                 padding_value=False,
             )
 
-        if "values" in batch:
+        if "values" in examples[0]:
             batch["values"] = pad_sequence(
                 [example["values"] for example in examples],
                 batch_first=True,
