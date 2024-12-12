@@ -182,7 +182,9 @@ class CehrGptPPOTrainer(PPOTrainer):
 
         t = time.time()
 
-        model_inputs = self.prepare_model_inputs(queries, responses)
+        model_inputs = self.prepare_model_inputs(
+            queries, responses, values, value_indicators
+        )
 
         if self.is_distributed:
             pad_first = self.tokenizer.padding_side == "left"
