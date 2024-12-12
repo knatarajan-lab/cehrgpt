@@ -136,7 +136,7 @@ class CehrGptPPOTrainer(PPOTrainer):
             elif score.dim() == 1:
                 scores[i] = score.squeeze()
 
-        return queries, responses, scores, masks, values, value_indicators
+        return queries, responses, scores, values, value_indicators, masks
 
     @PPODecorators.empty_device_cache()
     def step(
