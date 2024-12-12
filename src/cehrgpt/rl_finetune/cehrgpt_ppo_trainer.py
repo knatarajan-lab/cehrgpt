@@ -28,23 +28,30 @@ class CehrGptPPODataCollator:
 
         # Pad sequences to the max length in the batch
         batch["input_ids"] = pad_sequence(
-            batch["input_ids"],
+            [example["input_ids"] for example in examples],
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id,
         ).to(torch.int64)
 
         batch["attention_mask"] = pad_sequence(
-            batch["attention_mask"], batch_first=True, padding_value=0.0
+            [example["attention_mask"] for example in examples],
+            batch_first=True,
+            padding_value=0.0,
         )
+
+        assert batch["input_ids"].shape[1] <= self.max_length
+        assert batch["attention_mask"].shape[1] <= self.max_length
 
         if "value_indicators" in batch:
             batch["value_indicators"] = pad_sequence(
-                batch["value_indicators"], batch_first=True, padding_value=False
+                [example["value_indicators"] for example in examples],
+                batch_first=True,
+                padding_value=False,
             )
 
         if "values" in batch:
             batch["values"] = pad_sequence(
-                batch["values"],
+                [example["values"] for example in examples],
                 batch_first=True,
                 padding_value=self.tokenizer.pad_value_token_id,
             )
@@ -441,10 +448,12 @@ class CehrGptPPOTrainer(PPOTrainer):
                     {
                         "input_ids": ids,
                         "attention_mask": torch.ones_like(ids),
-                        "values": values,
-                        "value_indicators": value_indicators,
+                        "values": v_s,
+                        "value_indicators": v_indicators,
                     }
-                    for ids in input_ids
+                    for ids, v_s, v_indicators in zip(
+                        input_ids, values, value_indicators
+                    )
                 ]
             ).to(self.current_device)
 
