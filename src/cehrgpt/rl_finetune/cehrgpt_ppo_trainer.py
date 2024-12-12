@@ -456,7 +456,6 @@ class CehrGptPPOTrainer(PPOTrainer):
                         input_ids, values, value_indicators
                     )
                 ]
-            ).to(self.current_device)
-
+            )
         input_data.pop("labels", None)  # we don't want to compute LM losses
         return input_data
