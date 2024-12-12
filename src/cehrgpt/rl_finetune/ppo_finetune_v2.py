@@ -9,6 +9,9 @@ import numpy as np
 import torch
 from cehrbert.models.hf_models.tokenization_utils import agg_helper
 from cehrbert.runners.runner_util import load_parquet_as_dataset
+from tensorflow.python.eager.polymorphic_function.atomic_function import (
+    RUNTIME_FUNCTION_REFS,
+)
 from tqdm import tqdm
 from transformers.utils import is_flash_attn_2_available, logging
 from trl import AutoModelForCausalLMWithValueHead, PPOConfig, create_reference_model
@@ -203,6 +206,20 @@ def main(args):
         for sequence, values, value_indicators in zip(
             batched_sequences, batched_values, batched_value_indicators
         ):
+            # Convert sequence to a NumPy array if it's not already one
+            sequence_array = np.asarray(sequence)
+            # Find the end token
+            condition_array = sequence_array == cehrgpt_tokenizer.end_token
+            end_index = (
+                np.argmax(condition_array)
+                if condition_array.any()
+                else len(sequence_array) - 1
+            )
+
+            sequence = sequence[: end_index + 1]
+            values = values[: end_index + 1]
+            value_indicators = value_indicators[: end_index + 1]
+
             query_tensors.append(torch.tensor(cehrgpt_tokenizer.encode(sequence[:4])))
             response_tensors.append(
                 torch.tensor(cehrgpt_tokenizer.encode(sequence[4:]))
