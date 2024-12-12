@@ -182,6 +182,7 @@ def main(args):
                 num_beams=args.num_beams,
                 num_beam_groups=args.num_beam_groups,
                 epsilon_cutoff=args.epsilon_cutoff,
+                device=device,
             )
             # Clear the cache
             torch.cuda.empty_cache()
@@ -218,6 +219,7 @@ def main(args):
             )
             value_indicator_tensors.append(torch.tensor(value_indicators + [False]))
             rewards.append(reward)
+
         train_stats = ppo_trainer.step(
             query_tensors,
             response_tensors,
