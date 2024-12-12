@@ -107,7 +107,7 @@ def main(args):
         ref_model=ref_model,
         tokenizer=cehrgpt_tokenizer,
         training_data_collator=CehrGptPPODataCollator(
-            cehrgpt_tokenizer, max_length=model.pretrained_model.config.n_positions
+            cehrgpt_tokenizer, max_length=args.context_window
         ),
     )
 

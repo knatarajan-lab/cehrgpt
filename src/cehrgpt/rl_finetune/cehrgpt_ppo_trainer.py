@@ -39,8 +39,9 @@ class CehrGptPPODataCollator:
             padding_value=0.0,
         )
 
-        assert batch["input_ids"].shape[1] <= self.max_length
-        assert batch["attention_mask"].shape[1] <= self.max_length
+        assert (
+            batch["input_ids"].shape[1] <= self.max_length
+        ), f"Invalid input_ids length: {batch['input_ids'].shape[1]}"
 
         if "value_indicators" in batch:
             batch["value_indicators"] = pad_sequence(
