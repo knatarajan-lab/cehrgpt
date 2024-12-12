@@ -10,19 +10,18 @@ import torch
 from cehrbert.models.hf_models.tokenization_utils import agg_helper
 from cehrbert.runners.runner_util import load_parquet_as_dataset
 from tqdm import tqdm
-from transformers import GenerationConfig
 from transformers.utils import is_flash_attn_2_available, logging
-from trl import (
-    AutoModelForCausalLMWithValueHead,
-    PPOConfig,
-    PPOTrainer,
-    create_reference_model,
-)
+from trl import AutoModelForCausalLMWithValueHead, PPOConfig, create_reference_model
 
 from cehrgpt.cehrgpt_args import create_inference_base_arg_parser
+from cehrgpt.generation.generate_batch_hf_gpt_sequence import generate_single_batch
 from cehrgpt.gpt_utils import get_cehrgpt_output_folder
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.rl_finetune.cehrgpt_ppo_trainer import (
+    CehrGptPPODataCollator,
+    CehrGptPPOTrainer,
+)
 
 LOG = logging.get_logger("transformers")
 
@@ -34,49 +33,6 @@ def extract_concept_frequency(records: Dict[str, Any]) -> Dict[str, int]:
         for concept_id, cnt in dict(Counter(concept_ids[4:])).items():
             outputs[concept_id] += cnt
     return outputs
-
-
-def generate_single_batch(
-    model,
-    tokenizer,
-    batched_prompts,
-    max_new_tokens=512,
-    mini_num_of_concepts=1,
-    top_p=0.95,
-    top_k=50,
-    temperature=1.0,
-    repetition_penalty=1.0,
-    num_beams=1,
-    num_beam_groups=1,
-    epsilon_cutoff=0.0,
-) -> List[List[str]]:
-    with torch.no_grad():
-        generation_config = GenerationConfig(
-            repetition_penalty=repetition_penalty,
-            max_length=max_new_tokens,
-            min_length=mini_num_of_concepts,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            bos_token_id=tokenizer.end_token_id,
-            eos_token_id=tokenizer.end_token_id,
-            pad_token_id=tokenizer.pad_token_id,
-            do_sample=True,
-            use_cache=True,
-            return_dict_in_generate=True,
-            output_attentions=False,
-            output_hidden_states=False,
-            output_scores=False,
-            renormalize_logits=True,
-            num_beams=num_beams,
-            num_beam_groups=num_beam_groups,
-            epsilon_cutoff=epsilon_cutoff,
-        )
-        results = model.generate(
-            inputs=batched_prompts, generation_config=generation_config
-        )
-
-    return [tokenizer.decode(seq.cpu().numpy()) for seq in results.sequences]
 
 
 def main(args):
@@ -138,7 +94,7 @@ def main(args):
     ref_model = create_reference_model(model).to(device)
 
     # create a ppo trainer
-    ppo_trainer = PPOTrainer(
+    ppo_trainer = CehrGptPPOTrainer(
         config=PPOConfig(
             batch_size=args.batch_size,
             mini_batch_size=args.mini_batch_size,
@@ -150,6 +106,9 @@ def main(args):
         model=model,
         ref_model=ref_model,
         tokenizer=cehrgpt_tokenizer,
+        training_data_collator=CehrGptPPODataCollator(
+            cehrgpt_tokenizer, max_length=model.pretrained_model.config.n_positions
+        ),
     )
 
     LOG.info(f"Loading tokenizer at {args.model_folder}")
@@ -197,18 +156,19 @@ def main(args):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
         random_prompts = []
         batched_sequences = []
+        batched_values = []
+        batched_value_indicators = []
         for _ in range(num_of_micro_batches):
             random_indices = np.random.randint(0, total_rows, args.mini_batch_size)
             random_prompts_micro_batch = [
                 record["concept_ids"][:4] for record in dataset.select(random_indices)
             ]
             random_prompts.extend(random_prompts_micro_batch)
-            micro_batched_prompts = torch.tensor(
-                [
-                    cehrgpt_tokenizer.encode(random_prompt)
-                    for random_prompt in random_prompts_micro_batch
-                ]
-            ).to(device)
+            micro_batched_prompts = [
+                cehrgpt_tokenizer.encode(random_prompt)
+                for random_prompt in random_prompts_micro_batch
+            ]
+
             micro_batched_sequences = generate_single_batch(
                 cehrgpt_model,
                 cehrgpt_tokenizer,
@@ -225,7 +185,9 @@ def main(args):
             )
             # Clear the cache
             torch.cuda.empty_cache()
-            batched_sequences.extend(micro_batched_sequences)
+            batched_sequences.extend(micro_batched_sequences["sequences"])
+            batched_values.extend(micro_batched_sequences["values"])
+            batched_value_indicators.extend(micro_batched_sequences["value_indicators"])
 
         LOG.info(f"{datetime.datetime.now()}: Batch {i} sequence generated")
         reward = compute_marginal_dist_reward(
@@ -234,8 +196,12 @@ def main(args):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} KL divergence reward: {reward}")
         query_tensors = []
         response_tensors = []
+        value_tensors = []
+        value_indicator_tensors = []
         rewards = []
-        for sequence in batched_sequences:
+        for sequence, values, value_indicators in zip(
+            batched_sequences, batched_values, batched_value_indicators
+        ):
             query_tensors.append(torch.tensor(cehrgpt_tokenizer.encode(sequence[:4])))
             response_tensors.append(
                 torch.tensor(
@@ -244,8 +210,21 @@ def main(args):
                     )
                 )
             )
+            value_tensors.append(
+                torch.tensor(
+                    cehrgpt_tokenizer.encode_value(values)
+                    + [cehrgpt_tokenizer.pad_value_token_id]
+                )
+            )
+            value_indicator_tensors.append(torch.tensor(value_indicators + [False]))
             rewards.append(reward)
-        train_stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
+        train_stats = ppo_trainer.step(
+            query_tensors,
+            response_tensors,
+            rewards,
+            value_tensors,
+            value_indicator_tensors,
+        )
         LOG.info(f"{datetime.datetime.now()}: Batch {i} stats: {train_stats}")
         logs.append(reward)
         ppo_trainer.log_stats(stats=train_stats, batch={}, rewards=rewards)
