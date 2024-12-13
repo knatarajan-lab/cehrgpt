@@ -88,6 +88,14 @@ class CEHRGPTConfig(PretrainedConfig):
         "num_hidden_layers": "n_layer",
     }
 
+    @property
+    def token_to_time_token_mapping(self) -> Dict[int, List[int]]:
+        # The saved _token_to_time_token_mapping converts the key to string, so we need to convert it back to int
+        return {
+            int(token): list(map(int, sub_tokens))
+            for token, sub_tokens in self._token_to_time_token_mapping.items()
+        }
+
     def __init__(
         self,
         vocab_size=50257,
@@ -125,7 +133,8 @@ class CEHRGPTConfig(PretrainedConfig):
         token_to_time_token_mapping: Dict[int, List] = None,
         causal_sfm=False,
         demographics_size=4,
-        token_frequency_penalty=False,
+        lab_token_penalty=False,
+        lab_token_loss_weight=0.9,
         entropy_penalty=False,
         entropy_penalty_alpha=0.01,
         **kwargs,
@@ -171,16 +180,13 @@ class CEHRGPTConfig(PretrainedConfig):
         self.causal_sfm = causal_sfm
         self.demographics_size = demographics_size
 
-        self.token_frequency_penalty = token_frequency_penalty
+        self.lab_token_penalty = lab_token_penalty
+        self.lab_token_loss_weight = lab_token_loss_weight
         self.entropy_penalty = entropy_penalty
         self.entropy_penalty_alpha = entropy_penalty_alpha
 
         super().__init__(bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
 
     @property
-    def token_to_time_token_mapping(self) -> Dict[int, List[int]]:
-        # The saved _token_to_time_token_mapping converts the key to string, so we need to convert it back to int
-        return {
-            int(token): list(map(int, sub_tokens))
-            for token, sub_tokens in self._token_to_time_token_mapping.items()
-        }
+    def lab_token_exists(self) -> bool:
+        return self.lab_token_ids is not None and len(self.lab_token_ids) > 0

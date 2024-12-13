@@ -1084,32 +1084,28 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # Shift so that tokens < n predict n
             shift_logits = lm_logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-
-            weights = None
-            if self.cehrgpt.config.token_frequency_penalty:
-                # Flatten the batch to a 1D tensor of all token IDs
-                flattened_tokens = shift_labels.flatten()
-                # Count occurrences of each token ID in the batch
-                unique_tokens, counts = torch.unique(
-                    flattened_tokens, return_counts=True
+            if (
+                self.cehrgpt.config.lab_token_penalty
+                and self.cehrgpt.config.lab_token_exists
+            ):
+                lab_index = torch.isin(
+                    shift_labels.view(-1),
+                    self.cehrgpt.config.lab_token_ids.to(lm_logits.device),
                 )
-                # Initialize weights for all tokens in the vocabulary
-                weights = (
-                    torch.zeros(self.cehrgpt.config.vocab_size, dtype=torch.float)
-                    + 1e-8
-                ).to(shift_labels.device)
-                # Compute total number of tokens in the batch
-                total_tokens = flattened_tokens.size(0)
-                # Assign weights to tokens present in the batch
-                weights[unique_tokens] = counts.float() / total_tokens
-                # Normalize weights to ensure they sum to the vocabulary size
-                weights = weights * (self.cehrgpt.config.vocab_size / weights.sum())
-
-            # Flatten the tokens
-            loss_fct = CrossEntropyLoss(weights)
-            loss = loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
-            )
+                # Flatten the tokens
+                loss_fct = CrossEntropyLoss(reduction="none")
+                loss = loss_fct(
+                    shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+                )
+                loss = torch.where(
+                    lab_index, loss * self.cehrgpt.config.lab_token_loss_weight, loss
+                ).mean()
+            else:
+                # Flatten the tokens
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(
+                    shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+                )
 
             if self.cehrgpt.config.entropy_penalty:
                 # Compute probabilities using softmax

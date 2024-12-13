@@ -65,7 +65,7 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "false",
             "--include_values",
             "true",
-            "--token_frequency_penalty",
+            "--lab_token_penalty",
             "true",
             "--entropy_penalty",
             "true",
