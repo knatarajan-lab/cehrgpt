@@ -9,9 +9,6 @@ import numpy as np
 import torch
 from cehrbert.models.hf_models.tokenization_utils import agg_helper
 from cehrbert.runners.runner_util import load_parquet_as_dataset
-from tensorflow.python.eager.polymorphic_function.atomic_function import (
-    RUNTIME_FUNCTION_REFS,
-)
 from tqdm import tqdm
 from transformers.utils import is_flash_attn_2_available, logging
 from trl import AutoModelForCausalLMWithValueHead, PPOConfig, create_reference_model
@@ -105,6 +102,7 @@ def main(args):
             vf_coef=args.vf_coef,
             kl_penalty=args.kl_penalty,
             gamma=args.gamma,
+            use_score_scaling=args.use_score_scaling,
         ),
         model=model,
         ref_model=ref_model,
@@ -361,6 +359,11 @@ def create_arg_parser():
     base_arg_parser.add_argument(
         "--restore_from_checkpoint",
         dest="restore_from_checkpoint",
+        action="store_true",
+    )
+    base_arg_parser.add_argument(
+        "--use_score_scaling",
+        dest="use_score_scaling",
         action="store_true",
     )
     return base_arg_parser
