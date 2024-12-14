@@ -130,7 +130,8 @@ def main(args):
 
     dataset = load_parquet_as_dataset(args.demographic_data_path).filter(
         lambda batched: [
-            num_of_concepts > 4 for num_of_concepts in batched["num_of_concepts"]
+            model.config.n_positions >= num_of_concepts > args.min_num_tokens
+            for num_of_concepts in batched["num_of_concepts"]
         ],
         batched=True,
     )
@@ -340,6 +341,14 @@ def create_arg_parser():
         action="store",
         type=int,
         default=1028,
+        required=False,
+    )
+    base_arg_parser.add_argument(
+        "--min_num_tokens",
+        dest="min_num_tokens",
+        action="store",
+        type=int,
+        default=4,
         required=False,
     )
     base_arg_parser.add_argument(
