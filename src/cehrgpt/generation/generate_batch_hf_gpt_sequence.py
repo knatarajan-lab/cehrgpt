@@ -192,7 +192,7 @@ def main(args):
     LOG.info(f"Top K {args.top_k}")
     LOG.info(f"Loading demographic_info at {args.demographic_data_path}")
 
-    dataset = load_parquet_as_dataset(args.sequence_data_path)
+    dataset = load_parquet_as_dataset(args.demographic_data_path)
     total_rows = len(dataset)
 
     num_of_batches = args.num_of_patients // args.batch_size + 1
