@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 import torch
+from cehrbert.runners.runner_util import load_parquet_as_dataset
 from transformers import GenerationConfig
 from transformers.utils import is_flash_attn_2_available, logging
 
@@ -183,22 +184,38 @@ def main(args):
     LOG.info(f"Top K {args.top_k}")
     LOG.info(f"Loading demographic_info at {args.demographic_data_path}")
 
-    data = pd.read_parquet(args.demographic_data_path)
-    demographic_info = data.concept_ids.apply(
-        lambda concept_list: concept_list[: START_TOKEN_SIZE + 1]
+    dataset = load_parquet_as_dataset(args.sequence_data_path)
+    total_rows = len(dataset)
+    # Determine whether we will use the demographics with the long sequences
+    max_seq_allowed = (
+        cehrgpt_model.config.n_positions
+        if args.drop_long_sequences
+        else np.iinfo(np.int32).max
     )
-    demographic_info = [cehrgpt_tokenizer.encode(_) for _ in demographic_info]
-
     num_of_batches = args.num_of_patients // args.batch_size + 1
     sequence_to_flush = []
     current_person_id = 1
     for i in range(num_of_batches):
-        print(f"{datetime.datetime.now()}: Batch {i} started")
-        random_prompts = random.sample(demographic_info, args.batch_size)
+        LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
+
+        # Randomly pick demographics from the existing population
+        random_prompts = []
+        while len(random_prompts) < args.batch_size:
+            for row in dataset.select(
+                random.sample(range(total_rows), k=args.batch_size)
+            ):
+                if (
+                    args.min_num_of_concepts
+                    <= len(row["concept_ids"])
+                    <= max_seq_allowed
+                ):
+                    random_prompts.append(row["concept_ids"][:START_TOKEN_SIZE])
+
+        # Make sure the batch does not exceed batch_size
         batch_sequences = generate_single_batch(
             cehrgpt_model,
             cehrgpt_tokenizer,
-            random_prompts,
+            random_prompts[: args.batch_size],
             max_new_tokens=args.context_window,
             mini_num_of_concepts=args.min_num_of_concepts,
             top_p=args.top_p,
@@ -242,7 +259,7 @@ def main(args):
             current_person_id += 1
 
         if len(sequence_to_flush) >= args.buffer_size:
-            print(f"{datetime.datetime.now()}: Flushing to the Disk at Batch {i}")
+            LOG.info(f"{datetime.datetime.now()}: Flushing to the Disk at Batch {i}")
             pd.DataFrame(
                 sequence_to_flush,
                 columns=[
@@ -258,7 +275,7 @@ def main(args):
             sequence_to_flush.clear()
 
     if len(sequence_to_flush) > 0:
-        print(f"{datetime.datetime.now()}: Flushing to the Disk at Final Batch")
+        LOG.info(f"{datetime.datetime.now()}: Flushing to the Disk at Final Batch")
         pd.DataFrame(
             sequence_to_flush,
             columns=[
@@ -278,6 +295,14 @@ def create_arg_parser():
         description="Arguments for generating patient sequences"
     )
     base_arg_parser.add_argument(
+        "--num_proc",
+        dest="num_proc",
+        action="store",
+        type=int,
+        required=False,
+        default=4,
+    )
+    base_arg_parser.add_argument(
         "--num_of_patients",
         dest="num_of_patients",
         action="store",
@@ -285,13 +310,17 @@ def create_arg_parser():
         help="The number of patients that will be generated",
         required=True,
     )
-
     base_arg_parser.add_argument(
         "--demographic_data_path",
         dest="demographic_data_path",
         action="store",
         help="The path for your concept_path",
         required=True,
+    )
+    base_arg_parser.add_argument(
+        "--drop_long_sequences",
+        dest="drop_long_sequences",
+        action="store_true",
     )
     return base_arg_parser
 
