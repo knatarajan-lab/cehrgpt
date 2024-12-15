@@ -247,7 +247,13 @@ def main():
             processed_dataset.save_to_disk(prepared_ds_path)
 
     def filter_func(examples):
-        return [_ >= data_args.min_num_tokens for _ in examples["num_of_concepts"]]
+        if cehrgpt_args.drop_long_sequences:
+            return [
+                model_args.max_position_embeddings >= _ >= data_args.min_num_tokens
+                for _ in examples["num_of_concepts"]
+            ]
+        else:
+            return [_ >= data_args.min_num_tokens for _ in examples["num_of_concepts"]]
 
     # Create the args for batched filtering
     filter_args = {"batched": True, "batch_size": data_args.preprocessing_batch_size}

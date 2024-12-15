@@ -85,6 +85,12 @@ class CehrGPTArguments:
             "It defaults to 4, assuming the demographics tokens follow this pattern [Year][Age][Gender][Race]"
         },
     )
+    drop_long_sequences: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "The lower bound of the learning rate range for hyperparameter tuning."
+        },
+    )
     lab_token_penalty: Optional[bool] = dataclasses.field(
         default=False,
         metadata={
