@@ -724,7 +724,36 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         head_mask = self.get_head_mask(head_mask, self.config.n_layer)
         input_embeddings = self.wte(input_ids)
 
+        if self.config.causal_sfm and input_shape[1] >= self.config.demographics_size:
+            demographic_embeddings = input_embeddings[
+                :, : self.config.demographics_size
+            ]
+            medical_event_embeddings = input_embeddings[
+                :, self.config.demographics_size :
+            ]
+            if random_vectors is None:
+                random_vectors = torch.rand_like(input_embeddings[:, :1])
+            input_embeddings = torch.concat(
+                [demographic_embeddings, random_vectors, medical_event_embeddings],
+                dim=1,
+            )
+
         if self.include_values:
+            if (
+                self.config.causal_sfm
+                and input_shape[1] >= self.config.demographics_size
+            ):
+                values = torch.concat(
+                    [torch.zeros_like(values[:, :1], dtype=torch.int32), values],
+                    dim=1,
+                )
+                value_indicators = torch.concat(
+                    [
+                        torch.zeros_like(value_indicators[:, :1]).to(torch.bool),
+                        value_indicators,
+                    ],
+                    dim=1,
+                )
             value_embeddings = self.vte(values)
             # Combine the value and concept embeddings together
             input_embeddings = self.concept_value_transformation_layer(
@@ -907,10 +936,13 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         self.lm_head = new_embeddings
 
     def get_value_output_embeddings(self):
-        return self.value_head
+        if self.config.include_values:
+            return self.value_head
+        return None
 
     def set_value_output_embeddings(self, new_embeddings):
-        self.value_head = new_embeddings
+        if self.config.include_values:
+            self.value_head = new_embeddings
 
     def prepare_inputs_for_generation(
         self,
@@ -1338,6 +1370,17 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             input_ids,
             dtype=torch.int32,
         )
+        # Generate initial random_vectors
+        if self.cehrgpt.config.causal_sfm:
+            model_kwargs["random_vectors"] = torch.rand(
+                [batch_size, 1, self.cehrgpt.embed_dim],
+                dtype=(
+                    torch.bfloat16 if is_flash_attn_2_available() else torch.float32
+                ),
+                device=input_ids.device,
+            )
+        else:
+            model_kwargs["random_vectors"] = None
         model_kwargs["value_indicators"] = value_indicators
         model_kwargs["values"] = values
         while self._has_unfinished_sequences(

@@ -4,6 +4,7 @@ import random
 import uuid
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
 import pandas as pd
 import torch
 from transformers import GenerationConfig
@@ -117,14 +118,22 @@ def generate_single_batch(
         tokenizer.decode(seq.cpu().numpy(), skip_special_tokens=False)
         for seq in results.sequences
     ]
-    values = [
-        tokenizer.decode_value(values.cpu().numpy(), skip_special_tokens=False)
-        for values in results.sequence_vals
-    ]
+    if results.sequence_vals is not None:
+        values = [
+            tokenizer.decode_value(values.cpu().numpy(), skip_special_tokens=False)
+            for values in results.sequence_vals
+        ]
+    else:
+        values = np.zeros_like(sequences)
+        values.fill(NA)
+    if results.sequence_val_masks is not None:
+        value_indicators = results.sequence_val_masks.cpu().numpy()
+    else:
+        value_indicators = np.zeros_like(sequences, dtype=np.int32).astype(bool)
     return {
         "sequences": sequences,
         "values": values,
-        "value_indicators": results.sequence_val_masks.cpu().numpy(),
+        "value_indicators": value_indicators,
     }
 
 
