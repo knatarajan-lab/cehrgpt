@@ -170,10 +170,18 @@ def main(args):
     if not os.path.exists(output_folder_name):
         os.makedirs(output_folder_name)
 
+    # Determine whether we will use the demographics with the long sequences
+    max_seq_allowed = (
+        cehrgpt_model.config.n_positions
+        if args.drop_long_sequences
+        else np.iinfo(np.int32).max
+    )
+
     LOG.info(f"Loading tokenizer at {args.model_folder}")
     LOG.info(f"Loading model at {args.model_folder}")
     LOG.info(f"Write sequences to {output_folder_name}")
     LOG.info(f"Context window {args.context_window}")
+    LOG.info(f"Max sequence allowed {max_seq_allowed}")
     LOG.info(f"Temperature {args.temperature}")
     LOG.info(f"Repetition Penalty {args.repetition_penalty}")
     LOG.info(f"Sampling Strategy {args.sampling_strategy}")
@@ -186,12 +194,7 @@ def main(args):
 
     dataset = load_parquet_as_dataset(args.sequence_data_path)
     total_rows = len(dataset)
-    # Determine whether we will use the demographics with the long sequences
-    max_seq_allowed = (
-        cehrgpt_model.config.n_positions
-        if args.drop_long_sequences
-        else np.iinfo(np.int32).max
-    )
+
     num_of_batches = args.num_of_patients // args.batch_size + 1
     sequence_to_flush = []
     current_person_id = 1
@@ -293,14 +296,6 @@ def main(args):
 def create_arg_parser():
     base_arg_parser = create_inference_base_arg_parser(
         description="Arguments for generating patient sequences"
-    )
-    base_arg_parser.add_argument(
-        "--num_proc",
-        dest="num_proc",
-        action="store",
-        type=int,
-        required=False,
-        default=4,
     )
     base_arg_parser.add_argument(
         "--num_of_patients",
