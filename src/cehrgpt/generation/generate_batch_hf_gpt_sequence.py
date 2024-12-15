@@ -212,7 +212,9 @@ def main(args):
                     <= len(row["concept_ids"])
                     <= max_seq_allowed
                 ):
-                    random_prompts.append(row["concept_ids"][:START_TOKEN_SIZE])
+                    random_prompts.append(
+                        cehrgpt_tokenizer.encode(row["concept_ids"][:START_TOKEN_SIZE])
+                    )
 
         # Make sure the batch does not exceed batch_size
         batch_sequences = generate_single_batch(
