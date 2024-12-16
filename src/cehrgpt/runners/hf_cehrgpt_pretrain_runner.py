@@ -198,14 +198,11 @@ def main():
                 dataset = dataset.shuffle(buffer_size=10_000, seed=training_args.seed)
                 train_set = dataset.skip(data_args.validation_split_num)
                 val_set = dataset.take(data_args.validation_split_num)
-                dataset = DatasetDict({"train": train_set, "validation": val_set})
+                dataset = DatasetDict({"train": train_set, "test": val_set})
             elif data_args.validation_split_percentage:
                 dataset = dataset.train_test_split(
                     test_size=data_args.validation_split_percentage,
                     seed=training_args.seed,
-                )
-                dataset = DatasetDict(
-                    {"train": dataset["train"], "validation": dataset["test"]}
                 )
             else:
                 raise RuntimeError(
@@ -298,7 +295,7 @@ def main():
             include_values=model_args.include_values,
         ),
         train_dataset=processed_dataset["train"],
-        eval_dataset=processed_dataset["validation"],
+        eval_dataset=processed_dataset["test"],
         args=training_args,
     )
 
