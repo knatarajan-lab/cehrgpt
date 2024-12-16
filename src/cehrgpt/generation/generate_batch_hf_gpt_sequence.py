@@ -85,7 +85,6 @@ def generate_single_batch(
     epsilon_cutoff=0.0,
     device: Any = "cpu",
 ) -> Dict[str, Any]:
-
     with torch.no_grad():
         generation_config = GenerationConfig(
             repetition_penalty=repetition_penalty,
@@ -203,6 +202,7 @@ def main(args):
 
         # Randomly pick demographics from the existing population
         random_prompts = []
+        iter = 0
         while len(random_prompts) < args.batch_size:
             for row in dataset.select(
                 random.sample(range(total_rows), k=args.batch_size)
@@ -214,6 +214,11 @@ def main(args):
                 ):
                     random_prompts.append(
                         cehrgpt_tokenizer.encode(row["concept_ids"][:START_TOKEN_SIZE])
+                    )
+                iter += 1
+                if not random_prompts and iter > 5:
+                    raise RuntimeError(
+                        f"The length of concept_ids in {args.demographic_data_path} does not qualify!"
                     )
 
         # Make sure the batch does not exceed batch_size
