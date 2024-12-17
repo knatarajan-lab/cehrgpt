@@ -414,13 +414,13 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     def pad_token(self):
         return PAD_TOKEN
 
+    @property
     def numeric_concept_ids(self):
         return self._numeric_concept_ids
 
     @property
     def categorical_concept_ids(self):
         return self._categorical_concept_ids
-
 
     @property
     def lab_token_ids(self):
