@@ -594,13 +594,11 @@ def do_predict(
     with torch.no_grad():
         for index, batch in enumerate(tqdm(test_dataloader, desc="Predicting")):
             person_ids = batch.pop("person_id").numpy().squeeze().astype(int)
-            index_dates = batch.pop("index_date").numpy().squeeze()
-            if len(index_dates.shape) == 0:
-                index_dates = [index_dates]
-            else:
-                index_dates = index_dates.tolist()
             index_dates = (
-                map(datetime.fromtimestamp, index_dates)
+                map(
+                    datetime.fromtimestamp,
+                    batch.pop("index_date").numpy().squeeze(axis=-1).tolist(),
+                )
                 if "index_date" in batch
                 else None
             )
