@@ -346,7 +346,7 @@ def main():
                 )
     else:
         # If the data is in the MEDS format, we need to convert it to the CEHR-BERT format
-        if data_args.is_data_in_med:
+        if data_args.is_data_in_meds:
             meds_extension_path = get_meds_extension_path(
                 data_folder=data_args.cohort_folder,
                 dataset_prepared_path=data_args.dataset_prepared_path,
