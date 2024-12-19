@@ -50,6 +50,7 @@ VALUE_TOKENIZER_FILE_NAME = "cehrgpt_value_tokenizer.json"
 TIME_TOKENIZER_FILE_NAME = "cehrgpt_time_tokenizer.json"
 TOKEN_TO_SUB_TIME_TOKEN_MAPPING_FILE_NAME = "token_to_sub_time_token_mapping.json"
 LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.pickle"
+LEGACY_LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.json"
 CONCEPT_MAPPING_FILE_NAME = "concept_name_mapping.json"
 
 
@@ -615,10 +616,20 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         lab_stats_file = transformers.utils.hub.cached_file(
             pretrained_model_name_or_path, LAB_STATS_FILE_NAME, **kwargs
         )
-        if not lab_stats_file:
+        legacy_lab_stats_file = transformers.utils.hub.cached_file(
+            pretrained_model_name_or_path, LEGACY_LAB_STATS_FILE_NAME, **kwargs
+        )
+        if not lab_stats_file and not legacy_lab_stats_file:
             return None
-        with open(lab_stats_file, "rb") as file:
-            lab_stats = pickle.load(file)
+        if lab_stats_file:
+            with open(lab_stats_file, "rb") as file:
+                lab_stats = pickle.load(file)
+        else:
+            # Support the old version of the numeric lab stats file
+            lab_stats = {
+                "numeric_lab_stats": load_json_file(legacy_lab_stats_file),
+                "categorical_lab_stats": [],
+            }
 
         # Load the concept_name json file
         concept_name_mapping_file = transformers.utils.hub.cached_file(
