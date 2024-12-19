@@ -631,7 +631,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             # Support the old version of the numeric lab stats file
             lab_stats = {
                 "numeric_lab_stats": load_json_file(legacy_lab_stats_file),
-                "categorical_lab_stats": [],
+                "categorical_lab_stats": dict(),
             }
         else:
             lab_stats_file = transformers.utils.hub.cached_file(
