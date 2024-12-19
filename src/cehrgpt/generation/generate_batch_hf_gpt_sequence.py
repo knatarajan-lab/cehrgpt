@@ -216,7 +216,7 @@ def main(args):
                         cehrgpt_tokenizer.encode(row["concept_ids"][:START_TOKEN_SIZE])
                     )
                 iter += 1
-                if not random_prompts and iter > 5:
+                if not random_prompts and iter > 10:
                     raise RuntimeError(
                         f"The length of concept_ids in {args.demographic_data_path} does not qualify!"
                     )
