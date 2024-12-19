@@ -665,10 +665,13 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     def is_legacy_tokenizer(
         cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs
     ):
-        legacy_lab_stats_file = transformers.utils.hub.cached_file(
-            pretrained_model_name_or_path, LEGACY_LAB_STATS_FILE_NAME, **kwargs
-        )
-        return legacy_lab_stats_file is not None
+        try:
+            legacy_lab_stats_file = transformers.utils.hub.cached_file(
+                pretrained_model_name_or_path, LEGACY_LAB_STATS_FILE_NAME, **kwargs
+            )
+            return legacy_lab_stats_file is not None
+        except Exception:
+            return False
 
     @classmethod
     def expand_trained_tokenizer(
