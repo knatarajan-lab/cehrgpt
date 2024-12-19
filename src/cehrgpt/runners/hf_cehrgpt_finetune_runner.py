@@ -660,7 +660,10 @@ def load_lora_model(
         # Expand tokenizer to adapt to the finetuning dataset
         if model.config.vocab_size < tokenizer.vocab_size:
             model.resize_token_embeddings(tokenizer.vocab_size)
-        if model.config.value_vocab_size < tokenizer.value_vocab_size:
+        if (
+            model.config.include_values
+            and model.config.value_vocab_size < tokenizer.value_vocab_size
+        ):
             model.resize_value_embeddings(tokenizer.value_vocab_size)
     LOG.info("Loading LoRA adapter from %s", training_args.output_dir)
     return PeftModel.from_pretrained(model, model_id=training_args.output_dir)

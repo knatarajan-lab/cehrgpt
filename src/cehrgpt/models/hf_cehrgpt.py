@@ -378,7 +378,7 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
         self,
         new_num_tokens: Optional[int] = None,
         pad_to_multiple_of: Optional[int] = None,
-    ) -> nn.Embedding:
+    ) -> Optional[nn.Embedding]:
         """
         Resizes value token embeddings matrix of the model if `new_num_tokens != config.value_vocab_size`.
 
@@ -402,6 +402,10 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
             `torch.nn.Embedding`: Pointer to the input tokens Embeddings Module of the model.
         """
         from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
+
+        # If the model did not include values, we don't want to resize the value embeddings
+        if not self.config.include_values:
+            return None
 
         # check if the value vocab_size is less than the number of tokens
         # we need to resize the value_embeddings if necessary
