@@ -504,10 +504,11 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
 
         self.wte = nn.Embedding(config.vocab_size, self.embed_dim)
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
-        self.vte = nn.Embedding(config.value_vocab_size, self.embed_dim)
-        self.concept_value_transformation_layer = ConceptValueTransformationLayer(
-            self.embed_dim
-        )
+        if self.include_values:
+            self.vte = nn.Embedding(config.value_vocab_size, self.embed_dim)
+            self.concept_value_transformation_layer = ConceptValueTransformationLayer(
+                self.embed_dim
+            )
 
         self.drop = nn.Dropout(config.embd_pdrop)
         gpt_blocks = []
@@ -551,11 +552,12 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         )
         self.last_device = "cuda:" + str(max(self.device_map.keys()))
         self.wte = self.wte.to(self.first_device)
-        self.vte = self.vte.to(self.first_device)
         self.wpe = self.wpe.to(self.first_device)
-        self.concept_value_transformation_layer = (
-            self.concept_value_transformation_layer.to(self.first_device)
-        )
+        if self.include_values:
+            self.vte = self.vte.to(self.first_device)
+            self.concept_value_transformation_layer = (
+                self.concept_value_transformation_layer.to(self.first_device)
+            )
         # Load onto devices
         for k, v in self.device_map.items():
             for block in v:
