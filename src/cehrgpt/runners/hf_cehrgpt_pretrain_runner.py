@@ -227,7 +227,6 @@ def main():
                 cehrgpt_tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
                     cehrgpt_tokenizer=cehrgpt_tokenizer,
                     dataset=dataset["train"],
-                    feature_names=["concept_ids"],
                     data_args=data_args,
                     concept_name_mapping={},
                 )
