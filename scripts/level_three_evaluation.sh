@@ -35,7 +35,7 @@ python -u -m cehrbert_data.prediction_cohorts.cad_cabg_cohort \
 echo "Run predictions on cad_cabg"
 create_directory_if_not_exists "$OMOP_FOLDER/evaluation_gpt/cad_cabg"
 
-if [ -n "$3" ]; then
+if [ -n "$PATIENT_SPLITS_FOLDER" ]; then
     python -m cehrbert.evaluations.evaluation \
         -a baseline_model \
         -d "$OMOP_FOLDER/cohorts/cad_cabg/cad_cabg_bow/" \
