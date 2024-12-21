@@ -98,7 +98,7 @@ class HFFineTuningMapping(DatasetMapping):
             "age_at_index": (
                 record["age"] if "age" in record else record["age_at_index"]
             ),
-            "classifier_label": record["label"],
+            "classifier_label": int(record["label"] > 0),
             "index_date": (
                 convert_date_to_posix_time(record["index_date"])
                 if "index_date" in record
