@@ -1,5 +1,6 @@
 import json
 import os
+import random
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -411,6 +412,21 @@ def main():
     set_seed(training_args.seed)
 
     processed_dataset.set_format("pt")
+
+    if cehrgpt_args.few_shot_predict:
+        # At least we need two examples to have a validation set for early stopping
+        num_shots = max(cehrgpt_args.n_shots, 2)
+        random_train_indices = random.sample(
+            range(len(processed_dataset["train"])), k=num_shots
+        )
+        test_size = max(int(num_shots * data_args.validation_split_percentage), 1)
+        few_shot_train_val_set = processed_dataset["train"].select(random_train_indices)
+        train_val = few_shot_train_val_set.train_test_split(
+            test_size=test_size, seed=training_args.seed
+        )
+        few_shot_train_set, few_shot_val_set = train_val["train"], train_val["test"]
+        processed_dataset["train"] = few_shot_train_set
+        processed_dataset["validation"] = few_shot_val_set
 
     config = CEHRGPTConfig.from_pretrained(model_args.model_name_or_path)
     # We suppress the additional learning objectives in fine-tuning

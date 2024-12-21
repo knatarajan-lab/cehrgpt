@@ -24,6 +24,16 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether we want to expand the tokenizer for fine-tuning."
         },
     )
+    few_shot_predict: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to use a few shots to train the model"
+        },
+    )
+    n_shots: Optional[int] = dataclasses.field(
+        default=128,
+        metadata={"help": "The number of examples from the training set."},
+    )
     hyperparameter_tuning_percentage: Optional[float] = dataclasses.field(
         default=0.1,
         metadata={
