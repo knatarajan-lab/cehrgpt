@@ -110,7 +110,7 @@ def main(args):
 
     # Train/Validation Split
     causal_train_split = demographics_for_sampling.sample(
-        1000000, replace=False, weights="adjusted_prob", random_state=1
+        args.num_patients, replace=False, weights="adjusted_prob", random_state=1
     )
     causal_train_split["split"] = "train"
     causal_val_split = demographics_for_sampling[
@@ -130,10 +130,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Arguments for a causal patient split by age groups"
     )
-
     parser.add_argument(
         "--patient_sequence",
         required=True,
+    )
+    parser.add_argument(
+        "--num_patients",
+        default=1_000_000,
+        type=int,
+        required=False,
     )
     parser.add_argument(
         "--output_folder",
