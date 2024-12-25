@@ -208,7 +208,10 @@ class CehrGptPPOTrainer(PPOTrainer):
             )
             if values is not None:
                 model_inputs["values"] = self.accelerator.pad_across_processes(
-                    model_inputs["values"], dim=1, pad_index=0.0, pad_first=pad_first
+                    model_inputs["values"],
+                    dim=1,
+                    pad_index=self.tokenizer.pad_value_token_id,
+                    pad_first=pad_first,
                 )
             if value_indicators is not None:
                 model_inputs["value_indicators"] = (
