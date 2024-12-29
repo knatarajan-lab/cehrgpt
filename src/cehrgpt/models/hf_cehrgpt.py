@@ -1116,6 +1116,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             value_logits = None
 
         loss = None
+        token_loss = None
+        time_loss = None
+        time_to_visit_loss = None
+        value_loss = None
         if labels is not None:
             # move labels to correct device to enable model parallelism
             labels = labels.to(lm_logits.device)
@@ -1144,6 +1148,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 loss = loss_fct(
                     shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
                 )
+            token_loss = loss
 
             if self.cehrgpt.config.entropy_penalty:
                 # Compute probabilities using softmax
@@ -1183,6 +1188,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     -1, 3
                 ) * shifted_time_token_indicators.view(-1, 1).to(hidden_states.dtype)
                 time_token_loss = time_token_loss.sum(-1)
+                time_loss = (
+                    torch.mean(time_token_loss) * self.config.time_token_loss_weight
+                )
                 loss += torch.mean(time_token_loss) * self.config.time_token_loss_weight
 
         if time_to_visits is not None:
@@ -1205,7 +1213,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # Compute log-probs and apply the time_to_visit_indicator
             log_probs = dist.log_prob(torch.clamp(shift_time_to_visits, min=0.0) + 1e-6)
             log_probs *= time_to_visit_indicator
-
+            time_to_visit_loss = (
+                -log_probs.mean() * self.config.time_to_visit_loss_weight
+            )
             # Compute the loss
             loss += -log_probs.mean() * self.config.time_to_visit_loss_weight
 
@@ -1222,6 +1232,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 shift_value_logits.view(-1, shift_value_logits.size(-1)),
                 shift_next_values.view(-1),
             )
+            value_loss = val_loss
             loss += val_loss
 
         if not return_dict:
@@ -1236,6 +1247,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             past_key_values=transformer_outputs.past_key_values,
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
+            token_loss=token_loss,
+            time_loss=time_loss,
+            time_to_visit_loss=time_to_visit_loss,
+            value_loss=value_loss,
         )
 
     @staticmethod
