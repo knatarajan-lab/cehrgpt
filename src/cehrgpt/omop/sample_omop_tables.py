@@ -6,6 +6,7 @@ from pyspark.sql import SparkSession
 # Define timestamp column for filtering based on the folder name
 omop_tables = [
     "person",
+    "death",
     "visit_occurrence",
     "condition_occurrence",
     "procedure_occurrence",
@@ -13,6 +14,8 @@ omop_tables = [
     "measurement",
     "observation",
     "observation_period",
+    "condition_era",
+    "drug_era",
 ]
 
 
