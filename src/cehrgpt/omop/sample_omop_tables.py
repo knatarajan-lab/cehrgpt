@@ -31,11 +31,21 @@ def main(args):
     )
     patient_sample = spark.read.parquet(args.person_sample)
     for omop_table in omop_tables:
-        omop_dataframe = spark.read.parquet(os.path.join(args.omop_folder, omop_table))
+        omop_table_input = os.path.join(args.omop_folder, omop_table)
+        omop_table_output = os.path.join(args.output_folder, omop_table)
+        # If the input does not exist, let's skip
+        if not os.path.exists(omop_table_input):
+            continue
+        # If the output already exists, and overwrite is not set to True, let's skip it
+        if os.path.exists(omop_table_output) and not args.overwrite:
+            continue
+        omop_dataframe = spark.read.parquet(omop_table_input)
         sub_omop_dataframe = omop_dataframe.join(
             patient_sample.select("person_id"), "person_id"
         )
-        sub_omop_dataframe.write.parquet(os.path.join(args.output_folder, omop_table))
+        sub_omop_dataframe.write.mode("overwrite" if args.overwrite else None).parquet(
+            omop_table_output
+        )
 
 
 # Argument parsing moved under __name__ == "__main__"
@@ -52,6 +62,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output_folder",
         required=True,
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
     )
     # Call the main function with parsed arguments
     main(parser.parse_args())
