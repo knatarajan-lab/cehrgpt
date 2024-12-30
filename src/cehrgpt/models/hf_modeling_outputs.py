@@ -82,9 +82,9 @@ class CehrGptCausalLMOutput(ModelOutput):
     hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
     token_loss: Optional[torch.FloatTensor] = None
-    time_loss: Optional[torch.FloatTensor] = None
+    time_token_loss: Optional[torch.FloatTensor] = None
     time_to_visit_loss: Optional[torch.FloatTensor] = None
-    value_loss: Optional[torch.FloatTensor] = None
+    token_value_loss: Optional[torch.FloatTensor] = None
 
 
 @dataclass

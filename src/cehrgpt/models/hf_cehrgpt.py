@@ -1117,9 +1117,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         loss = None
         token_loss = None
-        time_loss = None
+        time_token_loss = None
         time_to_visit_loss = None
-        value_loss = None
+        token_value_loss = None
         if labels is not None:
             # move labels to correct device to enable model parallelism
             labels = labels.to(lm_logits.device)
@@ -1136,19 +1136,21 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 )
                 # Flatten the tokens
                 loss_fct = CrossEntropyLoss(reduction="none")
-                loss = loss_fct(
+                token_loss = loss_fct(
                     shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
                 )
-                loss = torch.where(
-                    lab_index, loss * self.cehrgpt.config.lab_token_loss_weight, loss
+                token_loss = torch.where(
+                    lab_index,
+                    token_loss * self.cehrgpt.config.lab_token_loss_weight,
+                    token_loss,
                 ).mean()
             else:
                 # Flatten the tokens
                 loss_fct = CrossEntropyLoss()
-                loss = loss_fct(
+                token_loss = loss_fct(
                     shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
                 )
-            token_loss = loss
+            loss = token_loss
 
             if self.cehrgpt.config.entropy_penalty:
                 # Compute probabilities using softmax
@@ -1188,10 +1190,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     -1, 3
                 ) * shifted_time_token_indicators.view(-1, 1).to(hidden_states.dtype)
                 time_token_loss = time_token_loss.sum(-1)
-                time_loss = (
+                time_token_loss = (
                     torch.mean(time_token_loss) * self.config.time_token_loss_weight
                 )
-                loss += torch.mean(time_token_loss) * self.config.time_token_loss_weight
+                loss += time_token_loss
 
         if time_to_visits is not None:
             # Get lambda and k parameters
@@ -1217,7 +1219,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 -log_probs.mean() * self.config.time_to_visit_loss_weight
             )
             # Compute the loss
-            loss += -log_probs.mean() * self.config.time_to_visit_loss_weight
+            loss += time_to_visit_loss
 
         if true_values is not None and true_value_indicators is not None:
             true_values = true_values.to(value_logits.device)
@@ -1228,12 +1230,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 shift_value_indicators, shift_next_values, -100
             )
             value_loss_fct = CrossEntropyLoss()
-            val_loss = value_loss_fct(
+            token_value_loss = value_loss_fct(
                 shift_value_logits.view(-1, shift_value_logits.size(-1)),
                 shift_next_values.view(-1),
             )
-            value_loss = val_loss
-            loss += val_loss
+            loss += token_value_loss
 
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]
@@ -1248,9 +1249,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
             token_loss=token_loss,
-            time_loss=time_loss,
+            time_token_loss=time_token_loss,
             time_to_visit_loss=time_to_visit_loss,
-            value_loss=value_loss,
+            token_value_loss=token_value_loss,
         )
 
     @staticmethod
