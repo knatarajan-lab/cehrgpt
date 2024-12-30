@@ -31,7 +31,7 @@ def main(args):
     )
     patient_sample = spark.read.parquet(args.person_sample)
     for omop_table in omop_tables:
-        omop_dataframe = spark.read.parquet(os.path.join(args.omop_table, omop_table))
+        omop_dataframe = spark.read.parquet(os.path.join(args.omop_folder, omop_table))
         sub_omop_dataframe = omop_dataframe.join(
             patient_sample.select("person_id"), "person_id"
         )
