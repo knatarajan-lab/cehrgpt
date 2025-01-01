@@ -432,7 +432,11 @@ def main():
     # We suppress the additional learning objectives in fine-tuning
     data_collator = CehrGptDataCollator(
         tokenizer=tokenizer,
-        max_length=config.max_position_embeddings,
+        max_length=(
+            config.max_position_embeddings - 1
+            if config.causal_sfm
+            else config.max_position_embeddings
+        ),
         include_values=model_args.include_values,
         pretraining=False,
         include_ttv_prediction=False,
