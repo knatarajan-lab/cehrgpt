@@ -1,3 +1,4 @@
+import glob
 import os.path
 
 from cehrgpt.omop.omop_argparse import create_omop_argparse
@@ -11,7 +12,9 @@ OBSERVATION_PERIOD = "observation_period"
 
 
 def main(args):
-    include_measurement = os.path.exists(os.path.join(args.input_folder, "measurement"))
+    include_measurement = (
+        len(glob.glob(os.path.join(args.input_folder, "measurement", "*.parquet"))) > 0
+    )
     dependency_list = [
         "person",
         "visit_occurrence",
