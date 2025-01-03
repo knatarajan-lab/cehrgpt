@@ -90,11 +90,12 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
         return record
 
 
-class HFFineTuningMapping(DatasetMapping):
+class HFFineTuningMapping(HFCehrGptTokenizationMapping):
     """Consider removing this transformation in the future."""
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        return {
+        record = super().transform(record)
+        record = {
             "age_at_index": (
                 record["age"] if "age" in record else record["age_at_index"]
             ),
@@ -105,6 +106,9 @@ class HFFineTuningMapping(DatasetMapping):
                 else None
             ),
         }
+        return record
 
     def remove_columns(self):
-        return ["label"]
+        columns = super().remove_columns()
+        columns.append("label")
+        return columns

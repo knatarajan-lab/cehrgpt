@@ -59,8 +59,7 @@ def create_cehrgpt_finetuning_dataset(
 ) -> Dataset:
     required_columns = TRANSFORMER_COLUMNS + CEHRGPT_COLUMNS + FINETUNING_COLUMNS
     mapping_functions = [
-        HFFineTuningMapping(),
-        HFCehrGptTokenizationMapping(cehrgpt_tokenizer),
+        HFFineTuningMapping(cehrgpt_tokenizer),
     ]
     for mapping_function in mapping_functions:
         dataset = apply_cehrbert_dataset_mapping(
