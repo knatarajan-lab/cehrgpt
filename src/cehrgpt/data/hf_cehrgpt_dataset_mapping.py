@@ -95,17 +95,19 @@ class HFFineTuningMapping(HFCehrGptTokenizationMapping):
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
         record = super().transform(record)
-        record = {
-            "age_at_index": (
-                record["age"] if "age" in record else record["age_at_index"]
-            ),
-            "classifier_label": int(record["label"] > 0),
-            "index_date": (
-                convert_date_to_posix_time(record["index_date"])
-                if "index_date" in record
-                else None
-            ),
-        }
+        record.update(
+            {
+                "age_at_index": (
+                    record["age"] if "age" in record else record["age_at_index"]
+                ),
+                "classifier_label": int(record["label"] > 0),
+                "index_date": (
+                    convert_date_to_posix_time(record["index_date"])
+                    if "index_date" in record
+                    else None
+                ),
+            }
+        )
         return record
 
     def remove_columns(self):
