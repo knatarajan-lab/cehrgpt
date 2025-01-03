@@ -40,7 +40,7 @@ from cehrgpt.models.special_tokens import (
 )
 
 NUM_OF_BINS = 10
-DEGREE_OF_FREEDOM = 2
+DEGREE_OF_FREEDOM = 3
 SAMPLE_SIZE = 10_000
 NA = "N/A"
 UNKNOWN_BIN = "BIN:unknown"
@@ -122,7 +122,7 @@ def create_sample_from_bins(bins, sample_size: int = 10_000) -> List[float]:
     return sample
 
 
-def create_bins_with_spline(samples, num_bins, d_freedom=1) -> List[Dict[str, Any]]:
+def create_bins_with_spline(samples, num_bins, d_freedom=3) -> List[Dict[str, Any]]:
     """
     Divides a list of numeric samples into a specified number of bins and fits a spline to the data in each bin.
 
@@ -173,7 +173,7 @@ def create_bins_with_spline(samples, num_bins, d_freedom=1) -> List[Dict[str, An
                 end_val = samples[(bin_index + 1) * samples_per_bin]
             x = range(bin_index * samples_per_bin, (bin_index + 1) * samples_per_bin)
             y = samples[bin_index * samples_per_bin : (bin_index + 1) * samples_per_bin]
-            spline = UnivariateSpline(x, y, s=0.1, k=d_freedom)
+            spline = UnivariateSpline(x, y, k=d_freedom)
             bins.append(
                 {
                     "bin_index": bin_index,
@@ -896,24 +896,24 @@ class CehrGptTokenizer(PreTrainedTokenizer):
 
         numeric_lab_stats = []
         for (concept_id, unit), online_stats in current["numeric_stats_by_lab"].items():
-            # The lab needs to have a sample of num_of_bins times 2 values to be included
-            if len(online_stats.samples) < NUM_OF_BINS * 2:
+            if len(online_stats.samples) == 0:
                 continue
             samples = truncated_sample(
                 online_stats.samples, data_args.value_outlier_std
             )
             bins = create_bins_with_spline(samples, NUM_OF_BINS, DEGREE_OF_FREEDOM)
-            numeric_lab_stats.append(
-                {
-                    "concept_id": concept_id,
-                    "unit": unit,
-                    "mean": np.mean(samples),
-                    "std": np.std(samples),
-                    "count": len(online_stats.samples),
-                    "value_outlier_std": data_args.value_outlier_std,
-                    "bins": bins,
-                }
-            )
+            if len(bins) > 0:
+                numeric_lab_stats.append(
+                    {
+                        "concept_id": concept_id,
+                        "unit": unit,
+                        "mean": np.mean(samples),
+                        "std": np.std(samples),
+                        "count": len(online_stats.samples),
+                        "value_outlier_std": data_args.value_outlier_std,
+                        "bins": bins,
+                    }
+                )
 
         categorical_lab_stats = collections.defaultdict(int)
         for (concept_id, value_as_concept), count in current[
