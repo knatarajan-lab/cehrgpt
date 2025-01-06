@@ -276,7 +276,6 @@ def gpt_to_omop_converter_serial(
         pt_seq_dict[person_id] = " ".join(row)
         discharged_to_concept_id = 0
         data_cursor = date(int(start_year), 1, 1)
-        att_date_delta = 0
         vo = None
         inpatient_visit_indicator = False
 
@@ -332,17 +331,26 @@ def gpt_to_omop_converter_serial(
             elif x in ATT_TIME_TOKENS:
                 if x[0] == "D":
                     att_date_delta = int(x[1:])
+                elif x.startswith("i-D"):
+                    # inpatient ATT tokens
+                    att_date_delta = int(x[3:])
                 elif x[0] == "W":
                     att_date_delta = int(x[1:]) * 7
                 elif x[0] == "M":
                     att_date_delta = int(x[1:]) * 30
                 elif x == "LT":
                     att_date_delta = 365 * 3
+                else:
+                    att_date_delta = 0
                 data_cursor = data_cursor + timedelta(days=att_date_delta)
             elif inpatient_visit_indicator and is_inpatient_att_token(x):
                 # VS\-D\d+\-VE\
                 inpatient_time_span_in_days = extract_time_interval_in_days(x)
                 data_cursor = data_cursor + timedelta(days=inpatient_time_span_in_days)
+            elif inpatient_visit_indicator and x.startswith("i-H"):
+                # Handle hour tokens differently than the day tokens
+                hour_delta = int(x[3:])
+                data_cursor = data_cursor + timedelta(hours=hour_delta)
             elif is_visit_end(x):
                 if vo is None:
                     bad_sequence = True

@@ -242,10 +242,10 @@ def is_artificial_token(token: str) -> bool:
 
 def is_inpatient_att_token(token: str):
     """
-    Check if the token is an inpatient attendance token.
+    Check if the token is an inpatient ATT token.
 
     :param token: Token to check.
-    :return: True if the token is an inpatient attendance token, False otherwise.
+    :return: True if the token is an inpatient ATT token, False otherwise.
     """
     return INPATIENT_ATT_PATTERN.match(token)
 
