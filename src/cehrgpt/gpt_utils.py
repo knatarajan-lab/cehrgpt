@@ -155,19 +155,19 @@ def get_cehrgpt_output_folder(args, cehrgpt_tokenizer) -> str:
         folder_name = f"top_k{args.top_k}"
         args.top_p = 1.0
     elif args.sampling_strategy == SamplingStrategy.TopPStrategy.value:
-        folder_name = f"top_p{int(args.top_p * 1000)}"
+        folder_name = f"top_p{int(args.top_p * 10000)}"
         args.top_k = cehrgpt_tokenizer.vocab_size
     elif args.sampling_strategy == SamplingStrategy.TopMixStrategy.value:
-        folder_name = f"top_mix_p{int(args.top_p * 1000)}_k{args.top_k}"
+        folder_name = f"top_mix_p{int(args.top_p * 10000)}_k{args.top_k}"
     else:
         raise RuntimeError(
             "sampling_strategy has to be one of the following three options [TopKStrategy, TopPStrategy, TopMixStrategy]"
         )
     if args.temperature != 1.0:
-        folder_name = f"{folder_name}_temp_{int(args.temperature * 1000)}"
+        folder_name = f"{folder_name}_temp_{int(args.temperature * 10000)}"
     if args.repetition_penalty != 1.0:
         folder_name = (
-            f"{folder_name}_repetition_penalty_{int(args.repetition_penalty * 1000)}"
+            f"{folder_name}_repetition_penalty_{int(args.repetition_penalty * 10000)}"
         )
     if args.num_beams > 1:
         folder_name = f"{folder_name}_num_beams_{int(args.num_beams)}"
