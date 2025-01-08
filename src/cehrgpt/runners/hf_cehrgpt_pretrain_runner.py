@@ -249,6 +249,9 @@ def main():
                     dataset=dataset["train"],
                     data_args=data_args,
                     concept_name_mapping={},
+                    pretrained_concept_embedding_model=PretrainedEmbeddings(
+                        cehrgpt_args.pretrained_embedding_path
+                    ),
                 )
                 cehrgpt_tokenizer.save_pretrained(
                     os.path.expanduser(training_args.output_dir)
