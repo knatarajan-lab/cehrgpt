@@ -128,9 +128,12 @@ class CEHRGPTConfig(PretrainedConfig):
         value_vocab_size=None,
         include_ttv_prediction=False,
         use_sub_time_tokenization=True,
+        token_to_time_token_mapping: Dict[int, List] = None,
+        use_pretrained_embeddings=False,
+        pretrained_embedding_dim=768,
+        pretrained_token_ids: List[int] = None,
         time_token_loss_weight=1.0,
         time_to_visit_loss_weight=1.0,
-        token_to_time_token_mapping: Dict[int, List] = None,
         causal_sfm=False,
         demographics_size=4,
         lab_token_penalty=False,
@@ -179,6 +182,10 @@ class CEHRGPTConfig(PretrainedConfig):
         self.time_to_visit_loss_weight = time_to_visit_loss_weight
         self.causal_sfm = causal_sfm
         self.demographics_size = demographics_size
+        self.use_pretrained_embeddings = use_pretrained_embeddings
+        self.pretrained_embedding_dim = pretrained_embedding_dim
+        self.pretrained_token_ids = pretrained_token_ids
+        self.tie_word_embeddings = not use_pretrained_embeddings
 
         self.lab_token_penalty = lab_token_penalty
         self.lab_token_loss_weight = lab_token_loss_weight

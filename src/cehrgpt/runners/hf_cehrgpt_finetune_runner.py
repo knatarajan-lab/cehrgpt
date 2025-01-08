@@ -303,6 +303,21 @@ def model_init(
     # Expand tokenizer to adapt to the finetuning dataset
     if model.config.vocab_size < tokenizer.vocab_size:
         model.resize_token_embeddings(tokenizer.vocab_size)
+        # Update the pretrained embedding weights if they are available
+        if model.config.pretrained_token_ids:
+            new_pretrained_token_ids = []
+            new_pretrained_embeddings = []
+            for token_id, vector in zip(
+                tokenizer.pretrained_token_ids, tokenizer.pretrained_embeddings
+            ):
+                if token_id not in model.config.pretrained_token_ids:
+                    new_pretrained_token_ids.append(token_id)
+                    new_pretrained_embeddings.append(vector)
+            if new_pretrained_token_ids:
+                model.cehrgpt.update_pretrained_embeddings(
+                    new_pretrained_token_ids, new_pretrained_embeddings
+                )
+    # Expand value tokenizer to adapt to the fine-tuning dataset
     if model.config.include_values:
         if model.config.value_vocab_size < tokenizer.value_vocab_size:
             model.resize_value_embeddings(tokenizer.value_vocab_size)

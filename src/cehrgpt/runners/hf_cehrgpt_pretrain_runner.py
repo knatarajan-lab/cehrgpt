@@ -81,7 +81,6 @@ def load_and_create_model(
                 f"and will be used to pretrain on new datasets. The CEHR-GPT checkpoint must exist at {model_abspath}"
             )
             raise e
-
     try:
         model_config = AutoConfig.from_pretrained(
             model_abspath, attn_implementation=attn_implementation
@@ -90,6 +89,10 @@ def load_and_create_model(
         LOG.warning(e)
         if cehrgpt_args.causal_sfm:
             model_args.max_position_embeddings += 1
+        if len(tokenizer.pretrained_token_ids) > 0:
+            pretrained_embedding_dim = tokenizer.pretrained_embeddings.shape[1]
+        else:
+            pretrained_embedding_dim = model_args.hidden_size
         model_config = CEHRGPTConfig(
             vocab_size=tokenizer.vocab_size,
             value_vocab_size=tokenizer.value_vocab_size,
@@ -105,9 +108,33 @@ def load_and_create_model(
             lab_token_loss_weight=cehrgpt_args.lab_token_loss_weight,
             entropy_penalty=cehrgpt_args.entropy_penalty,
             entropy_penalty_alpha=cehrgpt_args.entropy_penalty_alpha,
+            use_pretrained_embeddings=len(tokenizer.pretrained_token_ids) > 0,
+            pretrained_embedding_dim=pretrained_embedding_dim,
+            pretrained_token_ids=tokenizer.pretrained_token_ids,
             **model_args.as_dict(),
         )
-    return CEHRGPT2LMHeadModel(model_config)
+    model = CEHRGPT2LMHeadModel(model_config)
+    if tokenizer.pretrained_token_ids:
+        model.cehrgpt.update_pretrained_embeddings(
+            tokenizer.pretrained_token_ids,
+            tokenizer.pretrained_embeddings,
+        )
+        # Update the pretrained embedding weights if they are available
+        if model.config.pretrained_token_ids:
+            new_pretrained_token_ids = []
+            new_pretrained_embeddings = []
+            for token_id, vector in zip(
+                tokenizer.pretrained_token_ids, tokenizer.pretrained_embeddings
+            ):
+                if token_id not in tokenizer.pretrained_token_ids:
+                    new_pretrained_token_ids.append(token_id)
+                    new_pretrained_embeddings.append(vector)
+            if new_pretrained_token_ids:
+                model.cehrgpt.pretrained_wte[0].weight[
+                    np.asarray(new_pretrained_token_ids)
+                ] = np.asarray(new_pretrained_embeddings)
+                model.config.pretrained_token_ids.extend(new_pretrained_token_ids)
+    return model
 
 
 def main():
@@ -270,6 +297,7 @@ def main():
         processed_dataset = processed_dataset.filter(filter_func, **filter_args)
 
     model = load_and_create_model(model_args, cehrgpt_args, cehrgpt_tokenizer)
+
     # Expand tokenizer to adapt to the new pretraining dataset
     if model.config.vocab_size < cehrgpt_tokenizer.vocab_size:
         model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)

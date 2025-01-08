@@ -19,7 +19,11 @@ from transformers.generation.streamers import BaseStreamer
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.models.gpt2.modeling_gpt2 import GPT2Attention, GPT2Block
 from transformers.pytorch_utils import Conv1D
-from transformers.utils import is_flash_attn_2_available, logging
+from transformers.utils import (
+    is_accelerate_available,
+    is_flash_attn_2_available,
+    logging,
+)
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 
 from cehrgpt.models.config import CEHRGPTConfig
@@ -33,6 +37,9 @@ from cehrgpt.models.hf_modeling_outputs import (
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
+
+if is_accelerate_available():
+    from accelerate.hooks import add_hook_to_module
 
 logger = logging.get_logger(__name__)
 
@@ -367,13 +374,40 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
                 )
 
     def tie_weights(self):
-        super().tie_weights()
-        if getattr(self.config, "tie_word_embeddings", True):
-            output_value_embeddings = self.get_value_output_embeddings()
-            if output_value_embeddings is not None:
-                self._tie_or_clone_weights(
-                    output_value_embeddings, self.get_value_input_embeddings()
-                )
+        # We only want to tie weights when we DO NOT use use_pretrained_embeddings
+        if not getattr(self.config, "use_pretrained_embeddings", False):
+            super().tie_weights()
+            # We want to tie the weights for value tokens regardless of the value of use_pretrained_embeddings
+            if getattr(self.config, "tie_word_embeddings", True):
+                output_value_embeddings = self.get_value_output_embeddings()
+                if output_value_embeddings is not None:
+                    self._tie_or_clone_weights(
+                        output_value_embeddings, self.get_value_input_embeddings()
+                    )
+
+    def resize_token_embeddings(
+        self,
+        new_num_tokens: Optional[int] = None,
+        pad_to_multiple_of: Optional[int] = None,
+    ) -> nn.Embedding:
+        if getattr(self.config, "use_pretrained_embeddings", False):
+            old_embeddings = self.pretrained_embeddings[0]
+            new_embeddings = self._get_resized_embeddings(
+                old_embeddings, new_num_tokens, pad_to_multiple_of
+            )
+            old_embeddings_requires_grad = old_embeddings.weight.requires_grad
+            new_embeddings.requires_grad_(old_embeddings_requires_grad)
+            self.pretrained_embeddings[0] = new_embeddings
+        return super().resize_token_embeddings(new_num_tokens, pad_to_multiple_of)
+
+    def update_pretrained_embeddings(self, token_ids, pretrained_embeddings):
+        if getattr(self.config, "use_pretrained_embeddings", False):
+            self.pretrained_embeddings[0].weight.requires_grad = False
+            self.pretrained_embeddings[0].weight[token_ids] = torch.tensor(
+                pretrained_embeddings,
+                dtype=self.pretrained_embeddings[0].dtype,
+                device=self.pretrained_embeddings[0].device,
+            )
 
     def resize_value_embeddings(
         self,
@@ -546,7 +580,14 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.include_values = config.include_values
         self.include_ttv_prediction = config.include_ttv_prediction
         self.embed_dim = config.hidden_size
-
+        if config.use_pretrained_embeddings:
+            self.pretrained_embedding_dim = config.pretrained_embedding_dim
+            self.pretrained_wte = nn.Sequential(
+                nn.Embedding(config.vocab_size, self.pretrained_embedding_dim),
+                nn.Linear(self.pretrained_embedding_dim, self.embed_dim),
+            )
+            # Disable the weight of the pretrained embeddings
+            self.pretrained_wte[0].weight.requires_grad = False
         self.wte = nn.Embedding(config.vocab_size, self.embed_dim)
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         if self.include_values:
@@ -597,6 +638,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         )
         self.last_device = "cuda:" + str(max(self.device_map.keys()))
         self.wte = self.wte.to(self.first_device)
+        if self.config.use_pretrained_embeddings:
+            self.pretrained_wte = self.pretrained_wte.to(self.first_device)
         self.wpe = self.wpe.to(self.first_device)
         if self.include_values:
             self.vte = self.vte.to(self.first_device)
@@ -621,6 +664,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.first_device = "cpu"
         self.last_device = "cpu"
         self.wte = self.wte.to("cpu")
+        if self.config.use_pretrained_embeddings:
+            self.pretrained_wte = self.pretrained_wte.to("cpu")
         self.wpe = self.wpe.to("cpu")
         self.vte = self.vte.to("cpu")
         self.concept_value_transformation_layer = (
@@ -644,6 +689,11 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.vte = value
 
     def get_input_embeddings(self):
+        if self.config.use_pretrained_embeddings:
+            raise RuntimeError(
+                "The weight of concept embeddings cannot be tied to the lm head "
+                "when use_pretrained_embeddings is to True"
+            )
         return self.wte
 
     def set_input_embeddings(self, new_embeddings: nn.Embedding):
