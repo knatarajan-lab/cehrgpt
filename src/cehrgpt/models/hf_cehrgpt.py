@@ -582,6 +582,7 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
 
 
 class CEHRGPT2Model(CEHRGPTPreTrainedModel):
+
     def __init__(self, config: CEHRGPTConfig):
         super().__init__(config)
 
@@ -589,14 +590,12 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.include_values = config.include_values
         self.include_ttv_prediction = config.include_ttv_prediction
         self.embed_dim = config.hidden_size
+
         if config.use_pretrained_embeddings:
-            self.pretrained_embedding_dim = config.pretrained_embedding_dim
-            self.pretrained_wte = nn.Sequential(
-                nn.Embedding(config.vocab_size, self.pretrained_embedding_dim),
-                nn.Linear(self.pretrained_embedding_dim, self.embed_dim),
-            )
-            # Disable the weight of the pretrained embeddings
-            self.pretrained_wte[0].weight.requires_grad = False
+            self.initialize_pretrained_embeddings()
+        else:
+            self.pretrained_wte = None
+
         self.wte = nn.Embedding(config.vocab_size, self.embed_dim)
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         if self.include_values:
@@ -623,6 +622,14 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    def initialize_pretrained_embeddings(self):
+        self.pretrained_wte = nn.Sequential(
+            nn.Embedding(self.config.vocab_size, self.config.pretrained_embedding_dim),
+            nn.Linear(self.config.pretrained_embedding_dim, self.embed_dim),
+        )
+        # Disable the weight of the pretrained embeddings
+        self.pretrained_wte[0].weight.requires_grad = False
 
     def parallelize(self, device_map=None):
         # Check validity of device_map

@@ -305,7 +305,16 @@ def model_init(
     if model.config.vocab_size < tokenizer.vocab_size:
         model.resize_token_embeddings(tokenizer.vocab_size)
         # Update the pretrained embedding weights if they are available
-        if model.config.pretrained_token_ids:
+        if model.config.use_pretrained_embeddings:
+            model.cehrgpt.update_pretrained_embeddings(
+                tokenizer.pretrained_token_ids, tokenizer.pretrained_embeddings
+            )
+        elif tokenizer.pretrained_token_ids:
+            model.config.pretrained_embedding_dim = (
+                tokenizer.pretrained_embeddings.shape[1]
+            )
+            model.config.use_pretrained_embeddings = True
+            model.cehrgpt.initialize_pretrained_embeddings()
             model.cehrgpt.update_pretrained_embeddings(
                 tokenizer.pretrained_token_ids, tokenizer.pretrained_embeddings
             )
