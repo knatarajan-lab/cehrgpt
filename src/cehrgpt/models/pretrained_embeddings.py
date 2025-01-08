@@ -11,12 +11,14 @@ PRETRAINED_EMBEDDING_CONCEPT_FILE_NAME = "pretrained_embedding_concepts.pkl"
 class PretrainedEmbeddings:
     """A class to handle pretrained embedding vectors and their associated concepts."""
 
-    def __init__(self, model_folder: str):
-        model_path = Path(model_folder)
-        self.vector_file = model_path / PRETRAINED_EMBEDDING_VECTOR_FILE_NAME
-        self.concept_file = model_path / PRETRAINED_EMBEDDING_CONCEPT_FILE_NAME
-
-        self.exists = self.vector_file.exists() and self.concept_file.exists()
+    def __init__(self, model_folder: Optional[str]):
+        if model_folder:
+            model_path = Path(model_folder)
+            self.vector_file = model_path / PRETRAINED_EMBEDDING_VECTOR_FILE_NAME
+            self.concept_file = model_path / PRETRAINED_EMBEDDING_CONCEPT_FILE_NAME
+            self.exists = self.vector_file.exists() and self.concept_file.exists()
+        else:
+            self.exists = False
         self._initialize_embeddings() if self.exists else self._initialize_empty()
 
     def _initialize_embeddings(self):
@@ -54,11 +56,11 @@ class PretrainedEmbeddings:
         """Return the size of the vocabulary."""
         return len(self.pretrained_embeddings) if self.exists else 0
 
-    def is_concept_available(self, concept_id: int) -> bool:
+    def is_concept_available(self, concept_id: str) -> bool:
         """Check if a given concept ID is available."""
         return self.exists and concept_id in self.concept_ids
 
-    def get_concept_embeddings(self, concept_id: int) -> Optional[np.ndarray]:
+    def get_concept_embeddings(self, concept_id: str) -> Optional[np.ndarray]:
         """
         Retrieve the embedding vector for a given concept ID.
 

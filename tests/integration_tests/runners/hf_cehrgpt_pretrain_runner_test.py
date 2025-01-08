@@ -10,6 +10,10 @@ from datasets import disable_caching
 
 from cehrgpt.generation.generate_batch_hf_gpt_sequence import create_arg_parser
 from cehrgpt.generation.generate_batch_hf_gpt_sequence import main as generate_main
+from cehrgpt.models.pretrained_embeddings import (
+    PRETRAINED_EMBEDDING_CONCEPT_FILE_NAME,
+    PRETRAINED_EMBEDDING_VECTOR_FILE_NAME,
+)
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import main as train_main
 
 disable_caching()
@@ -24,6 +28,9 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
         # Get the root folder of the project
         root_folder = Path(os.path.abspath(__file__)).parent.parent.parent.parent
         cls.data_folder = os.path.join(root_folder, "sample_data", "pretrain")
+        cls.pretrained_embedding_folder = os.path.join(
+            root_folder, "sample_data", "pretrained_embeddings"
+        )
         # Create a temporary directory to store model and tokenizer
         cls.temp_dir = tempfile.mkdtemp()
         cls.model_folder_path = os.path.join(cls.temp_dir, "model")
@@ -32,6 +39,14 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
         Path(cls.dataset_prepared_path).mkdir(parents=True, exist_ok=True)
         cls.generation_folder_path = os.path.join(cls.temp_dir, "generation")
         Path(cls.generation_folder_path).mkdir(parents=True, exist_ok=True)
+        for file_name in [
+            PRETRAINED_EMBEDDING_CONCEPT_FILE_NAME,
+            PRETRAINED_EMBEDDING_VECTOR_FILE_NAME,
+        ]:
+            shutil.copy(
+                os.path.join(cls.pretrained_embedding_folder, file_name),
+                os.path.join(cls.model_folder_path, file_name),
+            )
 
     @classmethod
     def tearDownClass(cls):
@@ -51,6 +66,8 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             self.data_folder,
             "--dataset_prepared_path",
             self.dataset_prepared_path,
+            "--pretrained_embedding_path",
+            self.model_folder_path,
             "--max_steps",
             "100",
             "--save_steps",

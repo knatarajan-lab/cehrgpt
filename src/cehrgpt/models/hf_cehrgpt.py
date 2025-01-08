@@ -410,13 +410,11 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
                     new_pretrained_embeddings.append(vector)
 
             if new_pretrained_token_ids:
-                self.pretrained_embeddings[0].weight.requires_grad = False
-                self.pretrained_embeddings[0].weight[new_pretrained_token_ids] = (
-                    torch.tensor(
-                        new_pretrained_embeddings,
-                        dtype=self.pretrained_embeddings[0].dtype,
-                        device=self.pretrained_embeddings[0].device,
-                    )
+                self.pretrained_wte[0].weight.requires_grad = False
+                self.pretrained_wte[0].weight[new_pretrained_token_ids] = torch.tensor(
+                    new_pretrained_embeddings,
+                    dtype=self.pretrained_wte[0].weight.dtype,
+                    device=self.pretrained_wte[0].weight.device,
                 )
                 self.config.pretrained_token_ids.extend(new_pretrained_token_ids)
 
@@ -836,7 +834,19 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         # attention_probs has shape bsz x n_heads x N x N
         # head_mask has shape n_layer x batch x n_heads x N x N
         head_mask = self.get_head_mask(head_mask, self.config.n_layer)
-        input_embeddings = self.wte(input_ids)
+
+        if self.config.use_pretrained_embeddings:
+            pretrained_token_id_indicators = torch.isin(
+                input_ids,
+                torch.tensor(self.config.pretrained_token_ids).to(input_ids.device),
+            )
+            input_embeddings = torch.where(
+                pretrained_token_id_indicators.unsqueeze(-1),
+                self.pretrained_wte(input_ids),
+                self.wte(input_ids),
+            )
+        else:
+            input_embeddings = self.wte(input_ids)
 
         if self.config.causal_sfm and input_shape[1] >= self.config.demographics_size:
             demographic_embeddings = input_embeddings[
@@ -1240,7 +1250,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             ):
                 lab_index = torch.isin(
                     shift_labels.view(-1),
-                    self.cehrgpt.config.lab_token_ids.to(lm_logits.device),
+                    torch.tensor(self.cehrgpt.config.lab_token_ids).to(
+                        lm_logits.device
+                    ),
                 )
                 # Flatten the tokens
                 loss_fct = CrossEntropyLoss(reduction="none")

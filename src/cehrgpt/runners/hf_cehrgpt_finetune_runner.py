@@ -47,6 +47,7 @@ from cehrgpt.models.hf_cehrgpt import (
     CehrGptForClassification,
     CEHRGPTPreTrainedModel,
 )
+from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
@@ -411,6 +412,9 @@ def main():
                     dataset=final_splits["train"],
                     data_args=data_args,
                     concept_name_mapping={},
+                    pretrained_concept_embedding_model=PretrainedEmbeddings(
+                        cehrgpt_args.pretrained_embedding_path
+                    ),
                 )
                 tokenizer.save_pretrained(os.path.expanduser(training_args.output_dir))
 

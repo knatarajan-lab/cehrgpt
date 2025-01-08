@@ -12,6 +12,10 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether we want to continue to pretrain cehrgpt on the new dataset"
         },
     )
+    pretrained_embedding_path: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={"help": "The path to the concept pretrained embeddings"},
+    )
     retrain_with_full: Optional[bool] = dataclasses.field(
         default=False,
         metadata={

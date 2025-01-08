@@ -22,6 +22,7 @@ from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
+from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from src.cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
@@ -42,6 +43,7 @@ def tokenizer_exists(tokenizer_name_or_path: str) -> bool:
 def load_and_create_tokenizer(
     data_args: DataTrainingArguments,
     model_args: ModelArguments,
+    cehrgpt_args: CehrGPTArguments,
     dataset: Optional[Union[Dataset, DatasetDict]] = None,
 ) -> CehrGptTokenizer:
     # Try to load the pretrained tokenizer
@@ -55,8 +57,12 @@ def load_and_create_tokenizer(
                 f"Failed to load the tokenizer from {tokenizer_abspath} with the error \n{e}\n"
                 f"Tried to create the tokenizer, however the dataset is not provided."
             )
-
-        tokenizer = CehrGptTokenizer.train_tokenizer(dataset, {}, data_args)
+        tokenizer = CehrGptTokenizer.train_tokenizer(
+            dataset,
+            {},
+            data_args,
+            PretrainedEmbeddings(cehrgpt_args.pretrained_embedding_path),
+        )
         tokenizer.save_pretrained(tokenizer_abspath)
 
     return tokenizer
@@ -227,7 +233,10 @@ def main():
 
         # Create the CEHR-GPT tokenizer if it's not available in the output folder
         cehrgpt_tokenizer = load_and_create_tokenizer(
-            data_args=data_args, model_args=model_args, dataset=dataset
+            data_args=data_args,
+            model_args=model_args,
+            cehrgpt_args=cehrgpt_args,
+            dataset=dataset,
         )
         # Retrain the tokenizer in case we want to pretrain the model further using different datasets
         if cehrgpt_args.expand_tokenizer:

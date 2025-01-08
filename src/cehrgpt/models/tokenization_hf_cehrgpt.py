@@ -349,7 +349,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         numeric_lab_stats: List[Dict[str, Any]],
         categorical_lab_stats: Dict[Tuple[str, str], int],
         concept_name_mapping: Dict[str, str],
-        pretrained_concept_embedding_model: PretrainedEmbeddings,
+        pretrained_concept_embedding_model: PretrainedEmbeddings = None,
     ):
         self._tokenizer = tokenizer
         self._value_tokenizer = value_tokenizer
@@ -370,7 +370,11 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             {t[0] for t in self._categorical_lab_stats.keys()}
         )
         self._padding_value_token_id = self._value_tokenizer.token_to_id(PAD_TOKEN)
-        self._pretrained_concept_embedding_model = pretrained_concept_embedding_model
+        self._pretrained_concept_embedding_model = (
+            pretrained_concept_embedding_model
+            if pretrained_concept_embedding_model
+            else PretrainedEmbeddings(None)
+        )
         self._pretrained_concept_ids = [
             _
             for _ in self.get_vocab().keys()
@@ -711,6 +715,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         dataset: Union[Dataset, DatasetDict],
         concept_name_mapping: Dict[str, str],
         data_args: DataTrainingArguments,
+        pretrained_concept_embedding_model: PretrainedEmbeddings = None,
     ):
         if not isinstance(cehrgpt_tokenizer, CehrGptTokenizer):
             raise ValueError(
@@ -794,6 +799,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             numeric_lab_stats=cehrgpt_tokenizer_copy._numeric_lab_stats,
             categorical_lab_stats=cehrgpt_tokenizer_copy._categorical_lab_stats,
             concept_name_mapping=cehrgpt_tokenizer_copy._concept_name_mapping,
+            pretrained_concept_embedding_model=pretrained_concept_embedding_model,
         )
 
     @classmethod
@@ -862,7 +868,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         dataset: Union[Dataset, DatasetDict],
         concept_name_mapping: Dict[str, str],
         data_args: DataTrainingArguments,
-        pretrained_embeddings: bool = False,
+        pretrained_concept_embedding_model: PretrainedEmbeddings = None,
     ):
         """
         Train a huggingface word level tokenizer.
@@ -980,9 +986,6 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         )
         att_tokenizer.train_from_iterator(sub_time_token_data, trainer=att_trainer)
 
-        if pretrained_embeddings:
-            pass
-
         return CehrGptTokenizer(
             concept_tokenizer,
             value_tokenizer,
@@ -991,6 +994,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             numeric_lab_stats,
             categorical_lab_stats,
             concept_name_mapping,
+            pretrained_concept_embedding_model,
         )
 
     @classmethod
