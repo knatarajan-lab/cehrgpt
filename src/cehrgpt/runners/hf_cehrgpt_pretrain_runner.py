@@ -294,6 +294,22 @@ def main():
     # Expand tokenizer to adapt to the new pretraining dataset
     if model.config.vocab_size < cehrgpt_tokenizer.vocab_size:
         model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)
+        # Update the pretrained embedding weights if they are available
+        if model.config.use_pretrained_embeddings:
+            model.cehrgpt.update_pretrained_embeddings(
+                cehrgpt_tokenizer.pretrained_token_ids,
+                cehrgpt_tokenizer.pretrained_embeddings,
+            )
+        elif cehrgpt_tokenizer.pretrained_token_ids:
+            model.config.pretrained_embedding_dim = (
+                cehrgpt_tokenizer.pretrained_embeddings.shape[1]
+            )
+            model.config.use_pretrained_embeddings = True
+            model.cehrgpt.initialize_pretrained_embeddings()
+            model.cehrgpt.update_pretrained_embeddings(
+                cehrgpt_tokenizer.pretrained_token_ids,
+                cehrgpt_tokenizer.pretrained_embeddings,
+            )
 
     # Detecting last checkpoint.
     last_checkpoint = get_last_hf_checkpoint(training_args)
