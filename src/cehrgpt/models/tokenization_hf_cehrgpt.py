@@ -576,6 +576,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         with open(os.path.join(save_directory, CONCEPT_MAPPING_FILE_NAME), "w") as f:
             json.dump(self._concept_name_mapping, f)
 
+        self._pretrained_concept_embedding_model.save(save_directory)
+
         if push_to_hub:
             self._upload_modified_files(
                 save_directory,
