@@ -402,12 +402,23 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
 
     def update_pretrained_embeddings(self, token_ids, pretrained_embeddings):
         if getattr(self.config, "use_pretrained_embeddings", False):
-            self.pretrained_embeddings[0].weight.requires_grad = False
-            self.pretrained_embeddings[0].weight[token_ids] = torch.tensor(
-                pretrained_embeddings,
-                dtype=self.pretrained_embeddings[0].dtype,
-                device=self.pretrained_embeddings[0].device,
-            )
+            new_pretrained_token_ids = []
+            new_pretrained_embeddings = []
+            for token_id, vector in zip(token_ids, pretrained_embeddings):
+                if token_id not in self.config.pretrained_token_ids:
+                    new_pretrained_token_ids.append(token_id)
+                    new_pretrained_embeddings.append(vector)
+
+            if new_pretrained_token_ids:
+                self.pretrained_embeddings[0].weight.requires_grad = False
+                self.pretrained_embeddings[0].weight[new_pretrained_token_ids] = (
+                    torch.tensor(
+                        new_pretrained_embeddings,
+                        dtype=self.pretrained_embeddings[0].dtype,
+                        device=self.pretrained_embeddings[0].device,
+                    )
+                )
+                self.config.pretrained_token_ids.extend(new_pretrained_token_ids)
 
     def resize_value_embeddings(
         self,

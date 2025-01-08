@@ -110,7 +110,6 @@ def load_and_create_model(
             entropy_penalty_alpha=cehrgpt_args.entropy_penalty_alpha,
             use_pretrained_embeddings=len(tokenizer.pretrained_token_ids) > 0,
             pretrained_embedding_dim=pretrained_embedding_dim,
-            pretrained_token_ids=tokenizer.pretrained_token_ids,
             **model_args.as_dict(),
         )
     model = CEHRGPT2LMHeadModel(model_config)
@@ -119,21 +118,6 @@ def load_and_create_model(
             tokenizer.pretrained_token_ids,
             tokenizer.pretrained_embeddings,
         )
-        # Update the pretrained embedding weights if they are available
-        if model.config.pretrained_token_ids:
-            new_pretrained_token_ids = []
-            new_pretrained_embeddings = []
-            for token_id, vector in zip(
-                tokenizer.pretrained_token_ids, tokenizer.pretrained_embeddings
-            ):
-                if token_id not in tokenizer.pretrained_token_ids:
-                    new_pretrained_token_ids.append(token_id)
-                    new_pretrained_embeddings.append(vector)
-            if new_pretrained_token_ids:
-                model.cehrgpt.pretrained_wte[0].weight[
-                    np.asarray(new_pretrained_token_ids)
-                ] = np.asarray(new_pretrained_embeddings)
-                model.config.pretrained_token_ids.extend(new_pretrained_token_ids)
     return model
 
 

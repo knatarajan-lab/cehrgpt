@@ -144,6 +144,8 @@ class CEHRGPTConfig(PretrainedConfig):
     ):
         if token_to_time_token_mapping is None:
             token_to_time_token_mapping = {}
+        if pretrained_token_ids is None:
+            pretrained_token_ids = list()
         self.vocab_size = vocab_size
         self.time_token_vocab_size = time_token_vocab_size
         self.n_positions = n_positions
