@@ -426,19 +426,33 @@ class CehrGptDataCollator:
                 for i in range(start_index, end_index):
                     current_token = record["input_ids"][i]
                     if current_token == self.vs_token_id:
-                        start_index = i
+                        record["input_ids"] = record["input_ids"][i:end_index]
+                        if self.include_values:
+                            record["value_indicators"] = record["value_indicators"][
+                                i:end_index
+                            ]
+                            record["values"] = record["values"][start_index:end_index]
+                        if self.include_ttv_prediction:
+                            record["time_to_visits"] = record["time_to_visits"][
+                                i:end_index
+                            ]
                         break
-                record["input_ids"] = record["input_ids"][start_index:end_index]
+
+            # This could happen when the last visit contains more than new_max_length number of tokens
+            # We simply take the last new_max_length number of tokens from the patient sequence
+            if len(record["input_ids"]) > new_max_length:
+                record["input_ids"] = record["input_ids"][-new_max_length:]
                 if self.include_values:
                     record["value_indicators"] = record["value_indicators"][
-                        start_index:end_index
+                        -new_max_length:
                     ]
-                    record["values"] = record["values"][start_index:end_index]
+                    record["values"] = record["values"][-new_max_length:]
                 if self.include_ttv_prediction:
                     record["time_to_visits"] = record["time_to_visits"][
-                        start_index:end_index
+                        -new_max_length:
                     ]
 
+            # Finally we add the end token to the end of the sequence
             record["input_ids"] = torch.concat(
                 [
                     self._convert_to_tensor(record["input_ids"]),
