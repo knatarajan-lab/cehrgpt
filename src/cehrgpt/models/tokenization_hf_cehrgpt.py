@@ -732,13 +732,15 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             data_args=data_args,
         )
 
-        new_tokens = set(new_tokenizer._tokenizer.get_vocab().keys()) - set(
-            new_tokenizer.get_vocab().keys()
+        new_tokens = set(new_tokenizer.get_vocab().keys()) - set(
+            cehrgpt_tokenizer_copy.get_vocab().keys()
         )
-        new_value_tokens = set(new_tokenizer._value_tokenizer.get_vocab().keys()) - set(
-            new_tokenizer.get_value_vocab().keys()
+        new_value_tokens = set(new_tokenizer.get_value_vocab().keys()) - set(
+            cehrgpt_tokenizer_copy.get_value_vocab().keys()
         )
-        new_att_tokens = list(new_tokenizer._att_tokenizer.get_vocab().keys())
+        new_att_tokens = set(new_tokenizer._att_tokenizer.get_vocab().keys()) - set(
+            cehrgpt_tokenizer_copy._att_tokenizer.get_vocab().keys()
+        )
         new_token_to_sub_time_token_mapping = (
             new_tokenizer._token_to_sub_time_token_mapping
         )
