@@ -431,7 +431,7 @@ class CehrGptDataCollator:
                             record["value_indicators"] = record["value_indicators"][
                                 i:end_index
                             ]
-                            record["values"] = record["values"][start_index:end_index]
+                            record["values"] = record["values"][i:end_index]
                         if self.include_ttv_prediction:
                             record["time_to_visits"] = record["time_to_visits"][
                                 i:end_index
