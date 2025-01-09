@@ -66,18 +66,32 @@ def collect_demographic_prompts_at_visits(
 ):
     demographic_prompts_at_visits = []
     start_year, start_age, start_gender, start_race = demographic_prompt
-    start_year = int(start_year.split(":")[1])
-    start_age = int(start_age.split(":")[1])
+    try:
+        start_year = int(start_year.split(":")[1])
+        start_age = int(start_age.split(":")[1])
+        valid_prompt = True
+    except IndexError | ValueError:
+        start_year = 1900
+        start_age = 0
+        valid_prompt = False
     data_cursor = date(int(start_year), 1, 1)
     birth_date = date(start_year - start_age, 1, 1)
     for i, current_token in enumerate(patient_history):
         if is_visit_start(current_token):
+            reconstructed_year = (
+                f"year:{data_cursor.year}" if valid_prompt else "year:unknown"
+            )
+            reconstructed_age = (
+                f"age:{data_cursor.year - birth_date.year}"
+                if valid_prompt
+                else "age:unknown"
+            )
             demographic_prompts_at_visits.append(
                 (
                     i,
                     (
-                        f"year:{data_cursor.year}",
-                        f"age:{data_cursor.year - birth_date.year}",
+                        reconstructed_year,
+                        reconstructed_age,
                         start_gender,
                         start_race,
                     ),
