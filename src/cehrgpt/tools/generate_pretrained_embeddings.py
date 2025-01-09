@@ -54,20 +54,29 @@ def main(args):
         concept, how="inner", left_on="concept_id", right_on="concept_id"
     )
 
+    concept_ids = vocab_with_name["concept_id"].to_list()
     concept_names = vocab_with_name["concept_name"].to_list()
-    data_with_name = vocab_with_name[["concept_id", "concept_name"]]
     total_batches = (len(concept_names) + args.batch_size - 1) // args.batch_size
     all_embeddings = []
+    concept_dict = []
     for i in tqdm(range(0, total_batches, args.batch_size)):
-        batched_names = concept_names[i : i + args.batch_size]
+        batched_concept_names = concept_names[i : i + args.batch_size]
+        batched_concept_ids = concept_ids[i : i + args.batch_size]
         try:
             batch_embeddings = generate_embeddings_batch(
-                batched_names, tokenizer, device, model
+                batched_concept_names, tokenizer, device, model
             )
             all_embeddings.extend(batch_embeddings)
+            concept_dict.extend(
+                [
+                    {"concept_id": concept_id, "concept_name": concept_name}
+                    for concept_id, concept_name in zip(
+                        batched_concept_ids, batched_concept_names
+                    )
+                ]
+            )
         except Exception as e:
             print(f"Error processing batch: {str(e)}")
-    concept_dict = data_with_name.to_dict("records")
 
     np.save(
         os.path.join(args.output_folder_path, PRETRAINED_EMBEDDING_VECTOR_FILE_NAME),
