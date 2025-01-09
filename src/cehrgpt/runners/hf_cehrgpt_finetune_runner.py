@@ -468,6 +468,7 @@ def main():
         pretraining=False,
         include_ttv_prediction=False,
         use_sub_time_tokenization=False,
+        include_demographics=cehrgpt_args.include_demographics,
     )
 
     if training_args.do_train:

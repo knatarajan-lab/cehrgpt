@@ -6,6 +6,8 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from cehrgpt.gpt_utils import (
+    DEMOGRAPHIC_PROMPT_SIZE,
+    collect_demographic_prompts_at_visits,
     extract_time_interval_in_days,
     is_att_token,
     is_inpatient_att_token,
@@ -26,6 +28,7 @@ class CehrGptDataCollator:
         include_ttv_prediction: bool = False,
         use_sub_time_tokenization: bool = False,
         pretraining: bool = True,
+        include_demographics: bool = False,
     ):
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -44,6 +47,7 @@ class CehrGptDataCollator:
         self.include_ttv_prediction = include_ttv_prediction
         self.use_sub_time_tokenization = use_sub_time_tokenization
         self.pretraining = pretraining
+        self.include_demographics = include_demographics
 
         if self.use_sub_time_tokenization:
             token_to_time_token_mapping = tokenizer.token_to_time_token_mapping
@@ -359,26 +363,106 @@ class CehrGptDataCollator:
                     self._convert_time_to_event(concept_ids[0:end_index])
                 )
             return record
-
         else:
-            # We employ a left truncation strategy, where the most recent patient history is reserved for fine-tuning
-            start_index = seq_length - new_max_length
-            end_index = seq_length
-            for i in range(start_index, end_index):
-                current_token = record["input_ids"][i]
-                if current_token == self.vs_token_id:
-                    start_index = i
-                    break
-            record["input_ids"] = record["input_ids"][start_index:end_index]
+            if self.include_demographics:
+                # We employ a left truncation strategy, where the most recent patient history is reserved for fine-tuning
+                demographic_prompts_at_visits = collect_demographic_prompts_at_visits(
+                    concept_ids[:DEMOGRAPHIC_PROMPT_SIZE], concept_ids
+                )
+                for token_index, demographic_prompt in demographic_prompts_at_visits:
+                    if (
+                        seq_length - token_index
+                        <= new_max_length - DEMOGRAPHIC_PROMPT_SIZE
+                    ):
+                        demographic_tokens = self.tokenizer.encode(demographic_prompt)
+                        record["input_ids"] = torch.concat(
+                            [
+                                self._convert_to_tensor(demographic_tokens),
+                                self._convert_to_tensor(
+                                    record["input_ids"][token_index:seq_length]
+                                ),
+                            ]
+                        )
+                        if self.include_values:
+                            record["value_indicators"] = torch.concat(
+                                [
+                                    torch.zeros(
+                                        [DEMOGRAPHIC_PROMPT_SIZE], dtype=torch.int32
+                                    ).to(torch.bool),
+                                    self._convert_to_tensor(
+                                        record["value_indicators"][
+                                            token_index:seq_length
+                                        ]
+                                    ),
+                                ]
+                            )
+                            record["values"] = torch.concat(
+                                [
+                                    torch.zeros(
+                                        [DEMOGRAPHIC_PROMPT_SIZE], dtype=torch.int32
+                                    )
+                                    .to(torch.int32)
+                                    .fill_(self.tokenizer.pad_value_token_id),
+                                    self._convert_to_tensor(
+                                        record["values"][token_index:seq_length]
+                                    ),
+                                ]
+                            )
+                        if self.include_ttv_prediction:
+                            record["time_to_visits"] = torch.concat(
+                                [
+                                    torch.zeros(
+                                        [DEMOGRAPHIC_PROMPT_SIZE], dtype=torch.int32
+                                    )
+                                    .to(torch.float32)
+                                    .fill_(-100.0),
+                                    record["time_to_visits"][token_index:seq_length],
+                                ]
+                            )
+                        break
+            else:
+                start_index = seq_length - new_max_length
+                end_index = seq_length
+                for i in range(start_index, end_index):
+                    current_token = record["input_ids"][i]
+                    if current_token == self.vs_token_id:
+                        start_index = i
+                        break
+                record["input_ids"] = record["input_ids"][start_index:end_index]
+                if self.include_values:
+                    record["value_indicators"] = record["value_indicators"][
+                        start_index:end_index
+                    ]
+                    record["values"] = record["values"][start_index:end_index]
+                if self.include_ttv_prediction:
+                    record["time_to_visits"] = record["time_to_visits"][
+                        start_index:end_index
+                    ]
+
+            record["input_ids"] = torch.concat(
+                [
+                    self._convert_to_tensor(record["input_ids"]),
+                    self._convert_to_tensor([self.tokenizer.end_token_id]),
+                ]
+            )
             if self.include_values:
-                record["value_indicators"] = self._convert_to_tensor(
-                    record["value_indicators"][start_index:end_index]
+                record["value_indicators"] = torch.concat(
+                    [
+                        self._convert_to_tensor(record["value_indicators"]),
+                        self._convert_to_tensor([False]),
+                    ]
                 ).to(torch.bool)
-                record["values"] = self._convert_to_tensor(
-                    record["values"][start_index:end_index]
+                record["values"] = torch.concat(
+                    [
+                        self._convert_to_tensor(record["values"]),
+                        self._convert_to_tensor([self.tokenizer.pad_value_token_id]),
+                    ]
                 )
             if self.include_ttv_prediction:
-                record["time_to_visits"] = self._convert_to_tensor(
-                    self._convert_time_to_event(concept_ids[start_index:end_index])
+                record["time_to_visits"] = torch.concat(
+                    [
+                        record["time_to_visits"],
+                        self._convert_to_tensor([-100.0]),
+                    ]
                 )
             return record

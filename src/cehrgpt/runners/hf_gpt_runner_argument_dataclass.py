@@ -6,6 +6,12 @@ from typing import List, Optional
 class CehrGPTArguments:
     """Arguments pertaining to what data we are going to input our model for training and eval."""
 
+    include_demographics: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to always include the demographics for the long sequences that are longer than the model context window."
+        },
+    )
     continue_pretrain: Optional[bool] = dataclasses.field(
         default=False,
         metadata={
