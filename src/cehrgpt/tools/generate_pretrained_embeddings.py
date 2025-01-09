@@ -40,7 +40,7 @@ def main(args):
 
     print("Load cehrgpt tokenizer")
     cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer_path)
-    concept_ids = list(cehrgpt_tokenizer.get_vocab().keys())
+    concept_ids = [_ for _ in cehrgpt_tokenizer.get_vocab().keys() if _.isnumeric()]
     vocab = pd.DataFrame(concept_ids, columns=["concept_id"])
     vocab.drop_duplicates(subset=["concept_id"], inplace=True)
     vocab = vocab.astype(str)
@@ -59,7 +59,7 @@ def main(args):
     total_batches = (len(concept_names) + args.batch_size - 1) // args.batch_size
     all_embeddings = []
     concept_dict = []
-    for i in tqdm(range(0, total_batches, args.batch_size)):
+    for i in tqdm(range(0, total_batches)):
         batched_concept_names = concept_names[i : i + args.batch_size]
         batched_concept_ids = concept_ids[i : i + args.batch_size]
         try:
