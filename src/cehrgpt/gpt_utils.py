@@ -61,11 +61,11 @@ class RandomSampleCache:
         return self._cache.pop()
 
 
-def collect_demographic_prompts_at_visits(
-    demographic_prompt: List[str], patient_history: List[str]
-):
+def collect_demographic_prompts_at_visits(patient_history: List[str]):
     demographic_prompts_at_visits = []
-    start_year, start_age, start_gender, start_race = demographic_prompt
+    start_year, start_age, start_gender, start_race = patient_history[
+        :DEMOGRAPHIC_PROMPT_SIZE
+    ]
     try:
         start_year = int(start_year.split(":")[1])
         start_age = int(start_age.split(":")[1])

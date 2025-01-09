@@ -367,7 +367,7 @@ class CehrGptDataCollator:
             if self.include_demographics:
                 # We employ a left truncation strategy, where the most recent patient history is reserved for fine-tuning
                 demographic_prompts_at_visits = collect_demographic_prompts_at_visits(
-                    concept_ids[:DEMOGRAPHIC_PROMPT_SIZE], concept_ids
+                    concept_ids
                 )
                 for token_index, demographic_prompt in demographic_prompts_at_visits:
                     if (
