@@ -76,8 +76,8 @@ def collect_demographic_prompts_at_visits(
                 (
                     i,
                     (
-                        data_cursor.year,
-                        data_cursor.year - birth_date.year,
+                        f"year:{data_cursor.year}",
+                        f"age:{data_cursor.year - birth_date.year}",
                         start_gender,
                         start_race,
                     ),
