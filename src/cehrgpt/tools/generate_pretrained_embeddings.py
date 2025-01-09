@@ -1,7 +1,6 @@
 import argparse
 import os
 import pickle
-from typing import Generator, List
 
 import numpy as np
 import pandas as pd
@@ -10,7 +9,6 @@ from sklearn.preprocessing import normalize
 from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer
 
-from build.lib.cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
 from cehrgpt.models.pretrained_embeddings import (
     PRETRAINED_EMBEDDING_CONCEPT_FILE_NAME,
     PRETRAINED_EMBEDDING_VECTOR_FILE_NAME,
@@ -28,14 +26,6 @@ def generate_embeddings_batch(texts, tokenizer, device, model):
         outputs = model(**input)
     embeddings = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
     return normalize(embeddings)
-
-
-def create_batches(
-    texts: List[str], batch_size: int
-) -> Generator[List[str], None, None]:
-    """Generate batches of texts."""
-    for i in range(0, len(texts), batch_size):
-        yield texts[i : i + batch_size]
 
 
 def main(args):
@@ -66,21 +56,18 @@ def main(args):
 
     concept_names = vocab_with_name["concept_name"].to_list()
     data_with_name = vocab_with_name[["concept_id", "concept_name"]]
-
     total_batches = (len(concept_names) + args.batch_size - 1) // args.batch_size
-
     all_embeddings = []
-
-    with tqdm(total=total_batches, desc="Processing batches") as pbar:
-        for batch in create_batches(concept_names, args.batch_size):
+    with tqdm(total=total_batches, desc="Processing batches"):
+        for i in range(0, len(concept_names), args.batch_size):
+            batched_names = concept_names[i : i + args.batch_size]
             try:
                 batch_embeddings = generate_embeddings_batch(
-                    batch, tokenizer, device, model
+                    batched_names, tokenizer, device, model
                 )
                 all_embeddings.extend(batch_embeddings)
             except Exception as e:
                 print(f"Error processing batch: {str(e)}")
-
     concept_dict = data_with_name.to_dict("records")
 
     np.save(
