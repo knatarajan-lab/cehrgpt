@@ -10,10 +10,12 @@ from sklearn.preprocessing import normalize
 from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer
 
+from build.lib.cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
 from cehrgpt.models.pretrained_embeddings import (
     PRETRAINED_EMBEDDING_CONCEPT_FILE_NAME,
     PRETRAINED_EMBEDDING_VECTOR_FILE_NAME,
 )
+from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 
 def generate_embeddings_batch(texts, tokenizer, device, model):
@@ -46,15 +48,18 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
-    vocab = pd.read_json(args.vocab_json_file_path, typ="series").reset_index()
-    vocab.columns = ["concept_id", "idx"]
-
+    print("Load cehrgpt tokenizer")
+    cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer_path)
+    concept_ids = list(cehrgpt_tokenizer.get_vocab().keys())
+    vocab = pd.DataFrame(concept_ids, columns=["concept_id"])
     vocab.drop_duplicates(subset=["concept_id"], inplace=True)
     vocab = vocab.astype(str)
 
+    print("Load concept dataframe")
     concept = pd.read_parquet(args.concept_parquet_file_path)
     concept = concept.astype(str)
 
+    print("Merge concept ids and concept names")
     vocab_with_name = vocab.merge(
         concept, how="inner", left_on="concept_id", right_on="concept_id"
     )
@@ -93,8 +98,8 @@ def main(args):
 def create_arg_parser():
     parser = argparse.ArgumentParser(description="Create pretrained embeddings")
     parser.add_argument(
-        "--vocab_json_file_path",
-        dest="vocab_json_file_path",
+        "--tokenizer_path",
+        dest="tokenizer_path",
         action="store",
         help="The path for the vocabulary json file",
         required=True,
