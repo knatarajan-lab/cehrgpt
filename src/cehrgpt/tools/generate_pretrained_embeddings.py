@@ -56,10 +56,11 @@ def main(args):
 
     concept_ids = vocab_with_name["concept_id"].to_list()
     concept_names = vocab_with_name["concept_name"].to_list()
-    total_batches = (len(concept_names) + args.batch_size - 1) // args.batch_size
     all_embeddings = []
     concept_dict = []
-    for i in tqdm(range(0, total_batches)):
+    for i in tqdm(
+        range(0, (len(concept_names) + args.batch_size - 1), args.batch_size)
+    ):
         batched_concept_names = concept_names[i : i + args.batch_size]
         batched_concept_ids = concept_ids[i : i + args.batch_size]
         try:
