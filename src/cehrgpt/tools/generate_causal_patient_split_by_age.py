@@ -1,5 +1,3 @@
-import argparse
-
 import numpy as np
 import pandas as pd
 
@@ -121,7 +119,7 @@ def main(args):
     causal_train_val_split = pd.concat([causal_train_split, causal_val_split])
 
     # Save outputs
-    causal_train_val_split.to_csv(args.output_folder, index=False)
+    causal_train_val_split.to_parquet(args.output_folder, index=False)
 
 
 if __name__ == "__main__":
