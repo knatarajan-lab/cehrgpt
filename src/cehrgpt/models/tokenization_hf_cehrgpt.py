@@ -477,6 +477,10 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         )
         return default_mapping
 
+    @property
+    def pretrained_concept_embedding_model(self):
+        return self._pretrained_concept_embedding_model
+
     def get_vocab(self) -> Dict[str, int]:
         return self._tokenizer.get_vocab()
 

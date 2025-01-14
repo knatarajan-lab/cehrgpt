@@ -416,14 +416,21 @@ def main():
             try:
                 tokenizer = CehrGptTokenizer.from_pretrained(new_tokenizer_path)
             except Exception:
+                # Try to use the defined pretrained embeddings if exists,
+                # Otherwise we default to the pretrained model embedded in the pretrained model
+                pretrained_concept_embedding_model = PretrainedEmbeddings(
+                    cehrgpt_args.pretrained_embedding_path
+                )
+                if not pretrained_concept_embedding_model.exists:
+                    pretrained_concept_embedding_model = (
+                        tokenizer.pretrained_concept_embedding_model
+                    )
                 tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
                     cehrgpt_tokenizer=tokenizer,
                     dataset=final_splits["train"],
                     data_args=data_args,
                     concept_name_mapping={},
-                    pretrained_concept_embedding_model=PretrainedEmbeddings(
-                        cehrgpt_args.pretrained_embedding_path
-                    ),
+                    pretrained_concept_embedding_model=pretrained_concept_embedding_model,
                 )
                 tokenizer.save_pretrained(os.path.expanduser(training_args.output_dir))
 
