@@ -391,13 +391,17 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
         pad_to_multiple_of: Optional[int] = None,
     ) -> nn.Embedding:
         if getattr(self.config, "use_pretrained_embeddings", False):
-            old_embeddings = self.pretrained_embeddings[0]
-            new_embeddings = self._get_resized_embeddings(
-                old_embeddings, new_num_tokens, pad_to_multiple_of
-            )
-            old_embeddings_requires_grad = old_embeddings.weight.requires_grad
-            new_embeddings.requires_grad_(old_embeddings_requires_grad)
-            self.pretrained_embeddings[0] = new_embeddings
+            base_model = getattr(self, self.base_model_prefix, self)
+            if base_model is not self:
+                old_embeddings = base_model.pretrained_wte[0]
+                new_embeddings = self._get_resized_embeddings(
+                    old_embeddings, new_num_tokens, pad_to_multiple_of
+                )
+                old_embeddings_requires_grad = old_embeddings.weight.requires_grad
+                new_embeddings.requires_grad_(old_embeddings_requires_grad)
+                base_model.pretrained_wte[0] = new_embeddings
+            else:
+                raise NotImplementedError
         return super().resize_token_embeddings(new_num_tokens, pad_to_multiple_of)
 
     def update_pretrained_embeddings(self, token_ids, pretrained_embeddings):
