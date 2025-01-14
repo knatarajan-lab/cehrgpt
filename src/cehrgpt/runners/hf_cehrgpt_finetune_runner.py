@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import shutil
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -356,6 +357,8 @@ def main():
     prepared_ds_path = generate_prepared_ds_path(
         data_args, model_args, data_folder=data_args.cohort_folder
     )
+
+    processed_dataset = None
     if any(prepared_ds_path.glob("*")):
         LOG.info(f"Loading prepared dataset from disk at {prepared_ds_path}...")
         processed_dataset = load_from_disk(str(prepared_ds_path))
@@ -364,12 +367,15 @@ def main():
             try:
                 tokenizer = CehrGptTokenizer.from_pretrained(training_args.output_dir)
             except Exception:
-                raise RuntimeError(
+                LOG.warning(
                     f"CehrGptTokenizer must exist in {training_args.output_dir} "
                     f"when the dataset has been processed and expand_tokenizer is set to True. "
                     f"Please delete the processed dataset at {prepared_ds_path}."
                 )
-    else:
+                processed_dataset = None
+                shutil.rmtree(prepared_ds_path)
+
+    if processed_dataset is None:
         # If the data is in the MEDS format, we need to convert it to the CEHR-BERT format
         if data_args.is_data_in_meds:
             meds_extension_path = get_meds_extension_path(
