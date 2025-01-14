@@ -366,7 +366,8 @@ def main():
             except Exception:
                 raise RuntimeError(
                     f"CehrGptTokenizer must exist in {training_args.output_dir} "
-                    f"when the dataset has been processed and expand_tokenizer is set to True"
+                    f"when the dataset has been processed and expand_tokenizer is set to True. "
+                    f"Please delete the processed dataset at {prepared_ds_path}."
                 )
     else:
         # If the data is in the MEDS format, we need to convert it to the CEHR-BERT format
