@@ -709,11 +709,6 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.vte = value
 
     def get_input_embeddings(self):
-        if self.config.use_pretrained_embeddings:
-            raise RuntimeError(
-                "The weight of concept embeddings cannot be tied to the lm head "
-                "when use_pretrained_embeddings is to True"
-            )
         return self.wte
 
     def set_input_embeddings(self, new_embeddings: nn.Embedding):
