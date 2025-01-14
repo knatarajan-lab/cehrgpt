@@ -187,12 +187,14 @@ class CEHRGPTConfig(PretrainedConfig):
         self.use_pretrained_embeddings = use_pretrained_embeddings
         self.pretrained_embedding_dim = pretrained_embedding_dim
         self.pretrained_token_ids = pretrained_token_ids
-        self.tie_word_embeddings = not use_pretrained_embeddings
+        # self.tie_word_embeddings = not use_pretrained_embeddings
 
         self.lab_token_penalty = lab_token_penalty
         self.lab_token_loss_weight = lab_token_loss_weight
         self.entropy_penalty = entropy_penalty
         self.entropy_penalty_alpha = entropy_penalty_alpha
+
+        kwargs["tie_word_embeddings"] = not use_pretrained_embeddings
 
         super().__init__(bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
 
