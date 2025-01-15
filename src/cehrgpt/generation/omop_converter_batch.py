@@ -169,7 +169,7 @@ def _is_none(x):
     return x is None or np.isnan(x)
 
 
-def gpt_to_omop_converter_serial(
+def gpt_to_omop_converter_batch(
     const: int,
     patient_sequence_parquet_files: List[str],
     domain_map: Dict[int, str],
@@ -238,15 +238,15 @@ def gpt_to_omop_converter_serial(
             continue
 
         is_numeric_types = (
-            None if is_numeric_types else is_numeric_types[START_TOKEN_SIZE:]
+            is_numeric_types[START_TOKEN_SIZE:] if is_numeric_types else None
         )
         number_as_values = (
-            None if number_as_values is None else number_as_values[START_TOKEN_SIZE:]
+            number_as_values[START_TOKEN_SIZE:] if number_as_values else None
         )
         concept_as_values = (
-            None if concept_as_values is None else concept_as_values[START_TOKEN_SIZE:]
+            concept_as_values[START_TOKEN_SIZE:] if concept_as_values else None
         )
-        units = None if units is None else units[START_TOKEN_SIZE:]
+        units = units[START_TOKEN_SIZE:] if units else None
 
         # TODO:Need to decode if the input is tokenized
         [start_year, start_age, start_gender, start_race] = concept_ids[
@@ -529,6 +529,9 @@ def main(args):
     if len(all_parquet_files) == 0:
         raise RuntimeError(f"No parquet files found in {args.patient_sequence_path}")
 
+    print(
+        f"There are total {len(all_parquet_files)} parquet files detected in {args.patient_sequence_path}."
+    )
     if not os.path.exists(args.output_folder):
         Path(args.output_folder).mkdir(parents=True, exist_ok=True)
 
@@ -552,7 +555,7 @@ def main(args):
         )
 
     with Pool(processes=args.cpu_cores) as p:
-        p.starmap(gpt_to_omop_converter_serial, pool_tuples)
+        p.starmap(gpt_to_omop_converter_batch, pool_tuples)
         p.close()
         p.join()
 
