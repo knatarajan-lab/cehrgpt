@@ -532,14 +532,14 @@ def main(args):
     if not os.path.exists(args.output_folder):
         Path(args.output_folder).mkdir(parents=True, exist_ok=True)
 
-    batched_parquet_files = np.array_split(all_parquet_files, args.num_of_cores)
+    batched_parquet_files = np.array_split(all_parquet_files, args.cpu_cores)
     concept_pd = pd.read_parquet(args.concept_path)
     domain_map = generate_omop_concept_domain(concept_pd)
 
     pool_tuples = []
     # TODO: Need to make this dynamic
     const = 10000000
-    for i in range(1, args.num_of_cores + 1):
+    for i in range(1, args.cpu_cores + 1):
         pool_tuples.append(
             (
                 const * i,
@@ -551,7 +551,7 @@ def main(args):
             )
         )
 
-    with Pool(processes=args.num_of_cores) as p:
+    with Pool(processes=args.cpu_cores) as p:
         p.starmap(gpt_to_omop_converter_serial, pool_tuples)
         p.close()
         p.join()
