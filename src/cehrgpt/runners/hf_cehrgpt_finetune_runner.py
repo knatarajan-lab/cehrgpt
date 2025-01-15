@@ -293,6 +293,7 @@ def model_init(
             f"Increase model.config.max_position_embeddings to {model_args.max_position_embeddings}"
         )
         model.config.max_position_embeddings = model_args.max_position_embeddings
+        model.resize_position_embeddings(model_args.max_position_embeddings)
     # Enable include_values when include_values is set to be False during pre-training
     if model_args.include_values and not model.cehrgpt.include_values:
         model.cehrgpt.include_values = True
