@@ -552,8 +552,14 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
             f"overwrite this method in the class {self.__class__} in `modeling_{self.__class__.__module__}.py`"
         )
 
+    def update_attn_bias(self, new_num_position_embeddings: Optional[int]) -> None:
+        raise NotImplementedError(
+            f"`update_attn_bias` is not implemented for {self.__class__}`. To implement it, you should "
+            f"overwrite this method in the class {self.__class__} in `modeling_{self.__class__.__module__}.py`"
+        )
+
     def resize_position_embeddings(self, new_num_position_embeddings: Optional[int]):
-        if new_num_position_embeddings:
+        if new_num_position_embeddings is not None:
             is_quantized = (
                 hasattr(self, "hf_quantizer") and self.hf_quantizer is not None
             )
@@ -583,6 +589,7 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
                     ]
                 self.set_position_embeddings(new_embeddings)
                 self.config.max_position_embeddings = new_num_position_embeddings
+                self.update_attn_bias(new_num_position_embeddings)
 
 
 class CEHRGPT2Model(CEHRGPTPreTrainedModel):
@@ -695,6 +702,19 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             self.h[index] = self.h[index].to("cpu")
         self.ln_f = self.ln_f.to("cpu")
         torch.cuda.empty_cache()
+
+    def update_attn_bias(self, max_position_embeddings: int):
+        for i in range(len(self.h)):
+            self.h[i].attn.register_buffer(
+                "bias",
+                torch.tril(
+                    torch.ones(
+                        (max_position_embeddings, max_position_embeddings),
+                        dtype=torch.bool,
+                    )
+                ).view(1, 1, max_position_embeddings, max_position_embeddings),
+                persistent=False,
+            )
 
     def get_position_embeddings(self) -> Union[nn.Embedding, Tuple[nn.Embedding]]:
         return self.wpe
