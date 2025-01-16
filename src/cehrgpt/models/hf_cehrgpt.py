@@ -16,6 +16,7 @@ from transformers.generation.stopping_criteria import (
     validate_stopping_criteria,
 )
 from transformers.generation.streamers import BaseStreamer
+from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.models.gpt2.modeling_gpt2 import GPT2Attention, GPT2Block
 from transformers.pytorch_utils import Conv1D
 from transformers.utils import is_flash_attn_2_available, logging
@@ -496,6 +497,46 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
             `nn.Module`: A torch module mapping hidden states to vocabulary.
         """
 
+    def set_position_embeddings(
+        self, position_embeddings: Union[nn.Embedding, Tuple[nn.Embedding]]
+    ) -> None:
+        raise NotImplementedError(
+            f"`set_position_embeddings` is not implemented for {self.__class__}`. To implement it, you should "
+            f"overwrite this method in the class {self.__class__} in `modeling_{self.__class__.__module__}.py`"
+        )
+
+    def resize_position_embeddings(self, new_num_position_embeddings: Optional[int]):
+        if new_num_position_embeddings:
+            is_quantized = (
+                hasattr(self, "hf_quantizer") and self.hf_quantizer is not None
+            )
+            wpe = self.get_position_embeddings()
+            max_position, embed_dim = wpe.weight.shape
+            if new_num_position_embeddings > max_position:
+                new_embeddings = nn.Embedding(
+                    new_num_position_embeddings,
+                    embed_dim,
+                    device=wpe.weight.device,
+                    dtype=wpe.weight.dtype,
+                )
+
+                # initialize all new embeddings (in particular added tokens)
+                self._init_weights(new_embeddings)
+                if is_deepspeed_zero3_enabled() and not is_quantized:
+                    import deepspeed
+
+                    params = [wpe.weight, new_embeddings.weight]
+                    with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
+                        new_embeddings.weight.data[:max_position, :] = wpe.weight.data[
+                            :max_position, :
+                        ]
+                else:
+                    new_embeddings.weight.data[:max_position, :] = wpe.weight.data[
+                        :max_position, :
+                    ]
+                self.set_position_embeddings(new_embeddings)
+                self.config.max_position_embeddings = new_num_position_embeddings
+
 
 class CEHRGPT2Model(CEHRGPTPreTrainedModel):
     def __init__(self, config: CEHRGPTConfig):
@@ -589,6 +630,12 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             self.h[index] = self.h[index].to("cpu")
         self.ln_f = self.ln_f.to("cpu")
         torch.cuda.empty_cache()
+
+    def get_position_embeddings(self) -> Union[nn.Embedding, Tuple[nn.Embedding]]:
+        return self.wpe
+
+    def set_position_embeddings(self, new_embeddings: nn.Embedding):
+        self.wpe = new_embeddings
 
     def get_value_input_embeddings(self) -> nn.Module:
         return self.vte
@@ -1543,6 +1590,9 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    def resize_position_embeddings(self, new_num_position_embeddings: Optional[int]):
+        return self.cehrgpt.resize_position_embeddings(new_num_position_embeddings)
 
     def _apply_age_norm(
         self,
