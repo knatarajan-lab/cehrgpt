@@ -8,6 +8,7 @@ from multiprocessing import Pool
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import dask.dataframe as dd
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -169,6 +170,13 @@ def _is_none(x):
     return x is None or np.isnan(x)
 
 
+def record_generator(file_paths):
+    for file_path in file_paths:
+        df = pd.read_parquet(file_path)
+        for record in df.itertuples():
+            yield record
+
+
 def gpt_to_omop_converter_batch(
     const: int,
     patient_sequence_parquet_files: List[str],
@@ -177,11 +185,6 @@ def gpt_to_omop_converter_batch(
     buffer_size: int,
     use_original_person_id: bool,
 ):
-    patient_sequences = pd.concat(
-        [pd.read_parquet(f) for f in patient_sequence_parquet_files],
-        ignore_index=True,
-    )
-
     omop_export_dict = {}
     error_dict = {}
     export_error = {}
@@ -201,9 +204,9 @@ def gpt_to_omop_converter_batch(
     # Default the person_id
     person_id: int = const + 1
 
-    for index, record in tqdm(
-        enumerate(patient_sequences.itertuples()), total=len(patient_sequences)
-    ):
+    patient_record_generator = record_generator(patient_sequence_parquet_files)
+
+    for index, record in tqdm(enumerate(patient_record_generator)):
         bad_sequence = False
         # If original_person_id is set to true, we retrieve it from the record.
         # If person_id doest not exist in the record, we use the default_person_id
