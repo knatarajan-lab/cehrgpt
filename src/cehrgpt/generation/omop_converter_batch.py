@@ -3,7 +3,7 @@ import datetime
 import glob
 import os
 import uuid
-from datetime import date, timedelta
+from datetime import timedelta
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -280,7 +280,7 @@ def gpt_to_omop_converter_batch(
         id_mappings_dict["person"][person_id] = person_id
         pt_seq_dict[person_id] = " ".join(concept_ids)
         discharged_to_concept_id = 0
-        data_cursor = date(int(start_year), 1, 1)
+        data_cursor = datetime.datetime(year=int(start_year), month=1, day=1)
         vo = None
         inpatient_visit_indicator = False
 
@@ -325,6 +325,14 @@ def gpt_to_omop_converter_batch(
                         error_dict[person_id]["error"] = "Wrong visit concept id"
                         bad_sequence = True
                         continue
+
+                    # We need to set the hour/min/sec to zero for inpatient visits because we inserted an hour token
+                    # at the beginning of the inpatient visit to indicate the number of hours since the midnight
+                    if inpatient_visit_indicator:
+                        data_cursor = data_cursor.replace(
+                            hour=0, minute=0, second=0, microsecond=0
+                        )
+
                     vo = VisitOccurrence(
                         visit_occurrence_id, visit_concept_id, data_cursor, p
                     )
@@ -336,9 +344,6 @@ def gpt_to_omop_converter_batch(
             elif event in ATT_TIME_TOKENS:
                 if event[0] == "D":
                     att_date_delta = int(event[1:])
-                elif event.startswith("i-D"):
-                    # inpatient ATT tokens
-                    att_date_delta = int(event[3:])
                 elif event[0] == "W":
                     att_date_delta = int(event[1:]) * 7
                 elif event[0] == "M":
@@ -347,17 +352,23 @@ def gpt_to_omop_converter_batch(
                     att_date_delta = 365 * 3
                 else:
                     att_date_delta = 0
+                # Between visits, the date delta is simply calculated as the date difference, even if they are
+                data_cursor = data_cursor.replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
                 data_cursor = data_cursor + timedelta(days=att_date_delta)
             elif inpatient_visit_indicator and is_inpatient_att_token(event):
-                # VS\-D\d+\-VE\
                 inpatient_time_span_in_days = extract_time_interval_in_days(event)
+                # When we switch from an hour token to a day token, we need to remove the hour/min/second/microsecond
+                # components from the date cursor, otherwise we expand the patient timeline
+                data_cursor = data_cursor.replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
                 data_cursor = data_cursor + timedelta(days=inpatient_time_span_in_days)
             elif inpatient_visit_indicator and event.startswith("i-H"):
                 # Handle hour tokens differently than the day tokens
-                # hour_delta = int(event[3:])
-                # data_cursor = data_cursor + timedelta(hours=hour_delta)
-                # We do nothing for hour tokens
-                pass
+                hour_delta = int(event[3:])
+                data_cursor = data_cursor + timedelta(hours=hour_delta)
             elif is_visit_end(event):
                 if vo is None:
                     bad_sequence = True
@@ -366,7 +377,6 @@ def gpt_to_omop_converter_batch(
                 if inpatient_visit_indicator:
                     vo.set_discharged_to_concept_id(discharged_to_concept_id)
                     vo.set_visit_end_date(data_cursor)
-
                     # if the discharged_to_concept_id patient had died, the death record is created
                     if discharged_to_concept_id == 4216643:
                         death = Death(p, data_cursor, death_type_concept_id=32823)
