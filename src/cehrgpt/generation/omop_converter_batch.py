@@ -170,6 +170,14 @@ def _is_none(x):
     return x is None or np.isnan(x)
 
 
+def count_records(file_paths):
+    total = 0
+    for file_path in file_paths:
+        df = pd.read_parquet(file_path)
+        total += len(df)
+    return total
+
+
 def record_generator(file_paths):
     for file_path in file_paths:
         df = pd.read_parquet(file_path)
@@ -205,8 +213,9 @@ def gpt_to_omop_converter_batch(
     person_id: int = const + 1
 
     patient_record_generator = record_generator(patient_sequence_parquet_files)
+    total_record = count_records(patient_sequence_parquet_files)
 
-    for index, record in tqdm(enumerate(patient_record_generator)):
+    for index, record in tqdm(enumerate(patient_record_generator), total=total_record):
         bad_sequence = False
         # If original_person_id is set to true, we retrieve it from the record.
         # If person_id doest not exist in the record, we use the default_person_id
