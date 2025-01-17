@@ -354,8 +354,10 @@ def gpt_to_omop_converter_batch(
                 data_cursor = data_cursor + timedelta(days=inpatient_time_span_in_days)
             elif inpatient_visit_indicator and event.startswith("i-H"):
                 # Handle hour tokens differently than the day tokens
-                hour_delta = int(event[3:])
-                data_cursor = data_cursor + timedelta(hours=hour_delta)
+                # hour_delta = int(event[3:])
+                # data_cursor = data_cursor + timedelta(hours=hour_delta)
+                # We do nothing for hour tokens
+                pass
             elif is_visit_end(event):
                 if vo is None:
                     bad_sequence = True
