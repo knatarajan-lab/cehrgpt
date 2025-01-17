@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from datetime import date, datetime
+from typing import Union
 
 
 def fill_datetime(year: int) -> str:
@@ -7,14 +8,22 @@ def fill_datetime(year: int) -> str:
     return datetime.strptime(f"{year}-01-01", "%Y-%m-%d").isoformat()
 
 
-def fill_start_datetime(d: date) -> str:
+def fill_start_datetime(d: Union[date, datetime]) -> str:
     """Helper function to create an ISO 8601 string at 00:00:00 (start of day)."""
-    return datetime.combine(d, datetime.min.time()).isoformat()
+    if isinstance(d, datetime):
+        return d.isoformat()
+    elif isinstance(d, date):
+        return datetime.combine(d, datetime.min.time()).isoformat()
+    raise RuntimeError(f"{type(d)} is not supported by this function.")
 
 
-def fill_end_datetime(d: date) -> str:
+def fill_end_datetime(d: Union[date, datetime]) -> str:
     """Helper function to create an ISO 8601 string at 23:59:59.999999 (end of day)."""
-    return datetime.combine(d, datetime.max.time()).isoformat()
+    if isinstance(d, datetime):
+        return d.isoformat()
+    elif isinstance(d, date):
+        return datetime.combine(d, datetime.max.time()).isoformat()
+    raise RuntimeError(f"{type(d)} is not supported by this function.")
 
 
 class OmopEntity(ABC):
@@ -115,9 +124,9 @@ class VisitOccurrence(OmopEntity):
         self._visit_occurrence_id = visit_occurrence_id
         self._visit_concept_id = visit_concept_id
         self._visit_start_date = visit_start_datetime.date()
-        self._visit_start_datetime = visit_start_datetime
+        self._visit_start_datetime = fill_start_datetime(visit_start_datetime)
         self._visit_end_date = visit_start_datetime.date()
-        self._visit_end_datetime = fill_end_datetime(self._visit_end_date)
+        self._visit_end_datetime = fill_end_datetime(visit_start_datetime)
         self._person = person
         self._discharged_to_concept_id = discharged_to_concept_id
 
@@ -180,7 +189,7 @@ class VisitOccurrence(OmopEntity):
 
     def set_visit_end_date(self, visit_end_datetime: datetime):
         self._visit_end_date = visit_end_datetime.date()
-        self._visit_end_datetime = visit_end_datetime
+        self._visit_end_datetime = fill_end_datetime(visit_end_datetime)
 
 
 # -----------------------------------------------------------------------------
@@ -199,9 +208,9 @@ class ConditionOccurrence(OmopEntity):
         self._condition_concept_id = condition_concept_id
         self._visit_occurrence = visit_occurrence
         self._condition_start_date = condition_datetime.date()
-        self._condition_start_datetime = condition_datetime
+        self._condition_start_datetime = fill_start_datetime(condition_datetime)
         self._condition_end_date = condition_datetime.date()
-        self._condition_end_datetime = condition_datetime
+        self._condition_end_datetime = fill_start_datetime(condition_datetime)
 
     def export_as_json(self):
         return {
@@ -264,9 +273,9 @@ class DrugExposure(OmopEntity):
         self._drug_concept_id = drug_concept_id
         self._visit_occurrence = visit_occurrence
         self._drug_exposure_start_date = drug_datetime.date()
-        self._drug_exposure_start_datetime = drug_datetime
+        self._drug_exposure_start_datetime = fill_start_datetime(drug_datetime)
         self._drug_exposure_end_date = drug_datetime.date()
-        self._drug_exposure_end_datetime = drug_datetime
+        self._drug_exposure_end_datetime = fill_start_datetime(drug_datetime)
 
     def export_as_json(self):
         return {
@@ -343,7 +352,7 @@ class ProcedureOccurrence(OmopEntity):
         self._procedure_concept_id = procedure_concept_id
         self._visit_occurrence = visit_occurrence
         self._procedure_date = procedure_datetime.date()
-        self._procedure_datetime = procedure_datetime
+        self._procedure_datetime = fill_start_datetime(procedure_datetime)
 
     def export_as_json(self):
         return {
@@ -451,7 +460,7 @@ class Measurement(OmopEntity):
         self._value_as_concept_id = value_as_concept_id
         self._visit_occurrence = visit_occurrence
         self._measurement_date = measurement_datetime.date()
-        self._measurement_datetime = measurement_datetime
+        self._measurement_datetime = fill_start_datetime(measurement_datetime)
         self._operator_concept_id = 4172703 if is_numeric_type == 1 else 0
         self._unit_source_value = unit_source_value
 
