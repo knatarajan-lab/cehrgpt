@@ -8,9 +8,9 @@ from multiprocessing import Pool
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import dask.dataframe as dd
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 from tqdm import tqdm
 
 from cehrgpt.generation.omop_entity import (
@@ -170,16 +170,16 @@ def _is_none(x):
     return x is None or np.isnan(x)
 
 
-def count_records(file_paths):
+def get_num_records(parquet_files: List[str]):
     total = 0
-    for file_path in file_paths:
-        df = pd.read_parquet(file_path)
-        total += len(df)
+    for file_path in parquet_files:
+        parquet_file = pq.ParquetFile(file_path)
+        total += parquet_file.metadata.num_rows
     return total
 
 
-def record_generator(file_paths):
-    for file_path in file_paths:
+def record_generator(parquet_files):
+    for file_path in parquet_files:
         df = pd.read_parquet(file_path)
         for record in df.itertuples():
             yield record
@@ -213,7 +213,7 @@ def gpt_to_omop_converter_batch(
     person_id: int = const + 1
 
     patient_record_generator = record_generator(patient_sequence_parquet_files)
-    total_record = count_records(patient_sequence_parquet_files)
+    total_record = get_num_records(patient_sequence_parquet_files)
 
     for index, record in tqdm(enumerate(patient_record_generator), total=total_record):
         bad_sequence = False
