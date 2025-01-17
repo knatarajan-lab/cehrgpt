@@ -108,15 +108,15 @@ class VisitOccurrence(OmopEntity):
         self,
         visit_occurrence_id: int,
         visit_concept_id: int,
-        visit_start_date: date,
+        visit_start_datetime: datetime,
         person: Person,
         discharged_to_concept_id: int = 0,
     ):
         self._visit_occurrence_id = visit_occurrence_id
         self._visit_concept_id = visit_concept_id
-        self._visit_start_date = visit_start_date
-        self._visit_start_datetime = fill_start_datetime(self._visit_start_date)
-        self._visit_end_date = visit_start_date
+        self._visit_start_date = visit_start_datetime.date()
+        self._visit_start_datetime = visit_start_datetime
+        self._visit_end_date = visit_start_datetime.date()
         self._visit_end_datetime = fill_end_datetime(self._visit_end_date)
         self._person = person
         self._discharged_to_concept_id = discharged_to_concept_id
@@ -178,9 +178,9 @@ class VisitOccurrence(OmopEntity):
     def set_discharged_to_concept_id(self, discharged_to_concept_id: int):
         self._discharged_to_concept_id = discharged_to_concept_id
 
-    def set_visit_end_date(self, visit_end_date: date):
-        self._visit_end_date = visit_end_date
-        self._visit_end_datetime = fill_end_datetime(visit_end_date)
+    def set_visit_end_date(self, visit_end_datetime: datetime):
+        self._visit_end_date = visit_end_datetime.date()
+        self._visit_end_datetime = visit_end_datetime
 
 
 # -----------------------------------------------------------------------------
@@ -193,15 +193,15 @@ class ConditionOccurrence(OmopEntity):
         condition_occurrence_id: int,
         condition_concept_id: int,
         visit_occurrence: VisitOccurrence,
-        condition_date: date,
+        condition_datetime: datetime,
     ):
         self._condition_occurrence_id = condition_occurrence_id
         self._condition_concept_id = condition_concept_id
         self._visit_occurrence = visit_occurrence
-        self._condition_start_date = condition_date
-        self._condition_start_datetime = fill_start_datetime(condition_date)
-        self._condition_end_date = condition_date
-        self._condition_end_datetime = fill_end_datetime(condition_date)
+        self._condition_start_date = condition_datetime.date()
+        self._condition_start_datetime = condition_datetime
+        self._condition_end_date = condition_datetime.date()
+        self._condition_end_datetime = condition_datetime
 
     def export_as_json(self):
         return {
@@ -258,15 +258,15 @@ class DrugExposure(OmopEntity):
         drug_exposure_id: int,
         drug_concept_id: int,
         visit_occurrence: VisitOccurrence,
-        drug_date: date,
+        drug_datetime: datetime,
     ):
         self._drug_exposure_id = drug_exposure_id
         self._drug_concept_id = drug_concept_id
         self._visit_occurrence = visit_occurrence
-        self._drug_exposure_start_date = drug_date
-        self._drug_exposure_start_datetime = fill_start_datetime(drug_date)
-        self._drug_exposure_end_date = drug_date
-        self._drug_exposure_end_datetime = fill_end_datetime(drug_date)
+        self._drug_exposure_start_date = drug_datetime.date()
+        self._drug_exposure_start_datetime = drug_datetime
+        self._drug_exposure_end_date = drug_datetime.date()
+        self._drug_exposure_end_datetime = drug_datetime
 
     def export_as_json(self):
         return {
@@ -337,13 +337,13 @@ class ProcedureOccurrence(OmopEntity):
         procedure_occurrence_id: int,
         procedure_concept_id: int,
         visit_occurrence: VisitOccurrence,
-        procedure_date: date,
+        procedure_datetime: datetime,
     ):
         self._procedure_occurrence_id = procedure_occurrence_id
         self._procedure_concept_id = procedure_concept_id
         self._visit_occurrence = visit_occurrence
-        self._procedure_date = procedure_date
-        self._procedure_datetime = fill_start_datetime(procedure_date)
+        self._procedure_date = procedure_datetime.date()
+        self._procedure_datetime = procedure_datetime
 
     def export_as_json(self):
         return {
@@ -442,7 +442,7 @@ class Measurement(OmopEntity):
         is_numeric_type,
         value_as_concept_id,
         visit_occurrence: VisitOccurrence,
-        measurement_date: date,
+        measurement_datetime: datetime,
         unit_source_value,
     ):
         self._measurement_id = measurement_id
@@ -450,8 +450,8 @@ class Measurement(OmopEntity):
         self._value_as_number = value_as_number
         self._value_as_concept_id = value_as_concept_id
         self._visit_occurrence = visit_occurrence
-        self._measurement_date = measurement_date
-        self._measurement_datetime = fill_start_datetime(measurement_date)
+        self._measurement_date = measurement_datetime.date()
+        self._measurement_datetime = measurement_datetime
         self._operator_concept_id = 4172703 if is_numeric_type == 1 else 0
         self._unit_source_value = unit_source_value
 

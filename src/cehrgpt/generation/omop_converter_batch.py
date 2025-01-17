@@ -280,7 +280,7 @@ def gpt_to_omop_converter_batch(
         id_mappings_dict["person"][person_id] = person_id
         pt_seq_dict[person_id] = " ".join(concept_ids)
         discharged_to_concept_id = 0
-        data_cursor = datetime.datetime(year=int(start_year), month=1, day=1)
+        date_cursor = datetime.datetime(year=int(start_year), month=1, day=1)
         vo = None
         inpatient_visit_indicator = False
 
@@ -296,7 +296,7 @@ def gpt_to_omop_converter_batch(
                     if event_idx + 2 != len(clinical_events) - 1:
                         bad_sequence = True
                         break
-                    death = Death(p, data_cursor)
+                    death = Death(p, date_cursor.date())
                     append_to_dict(omop_export_dict, death, person_id)
                     id_mappings_dict["death"][person_id] = person_id
                 else:
@@ -327,7 +327,7 @@ def gpt_to_omop_converter_batch(
                         continue
 
                     vo = VisitOccurrence(
-                        visit_occurrence_id, visit_concept_id, data_cursor, p
+                        visit_occurrence_id, visit_concept_id, date_cursor, p
                     )
                     append_to_dict(omop_export_dict, vo, visit_occurrence_id)
                     id_mappings_dict["visit_occurrence"][
@@ -346,17 +346,17 @@ def gpt_to_omop_converter_batch(
                 else:
                     att_date_delta = 0
                 # Between visits, the date delta is simply calculated as the date difference
-                data_cursor = data_cursor.replace(
+                date_cursor = date_cursor.replace(
                     hour=0, minute=0, second=0, microsecond=0
                 )
-                data_cursor = data_cursor + timedelta(days=att_date_delta)
+                date_cursor = date_cursor + timedelta(days=att_date_delta)
             elif inpatient_visit_indicator and is_inpatient_att_token(event):
                 inpatient_time_span_in_days = extract_time_interval_in_days(event)
-                data_cursor = data_cursor + timedelta(days=inpatient_time_span_in_days)
+                date_cursor = date_cursor + timedelta(days=inpatient_time_span_in_days)
             elif inpatient_visit_indicator and event.startswith("i-H"):
                 # Handle hour tokens differently than the day tokens
                 hour_delta = int(event[3:])
-                data_cursor = data_cursor + timedelta(hours=hour_delta)
+                date_cursor = date_cursor + timedelta(hours=hour_delta)
             elif is_visit_end(event):
                 if vo is None:
                     bad_sequence = True
@@ -364,10 +364,12 @@ def gpt_to_omop_converter_batch(
                 # If it's a VE token, nothing needs to be updated because it just means the visit ended
                 if inpatient_visit_indicator:
                     vo.set_discharged_to_concept_id(discharged_to_concept_id)
-                    vo.set_visit_end_date(data_cursor)
+                    vo.set_visit_end_date(date_cursor)
                     # if the discharged_to_concept_id patient had died, the death record is created
                     if discharged_to_concept_id == 4216643:
-                        death = Death(p, data_cursor, death_type_concept_id=32823)
+                        death = Death(
+                            p, date_cursor.date(), death_type_concept_id=32823
+                        )
                         append_to_dict(omop_export_dict, death, person_id)
                         id_mappings_dict["death"][person_id] = person_id
                         # If death record is generated, we need to stop the sequence conversion
@@ -431,7 +433,7 @@ def gpt_to_omop_converter_batch(
                             discharged_to_concept_id = concept_id
                         elif domain == "Condition":
                             co = ConditionOccurrence(
-                                condition_occurrence_id, concept_id, vo, data_cursor
+                                condition_occurrence_id, concept_id, vo, date_cursor
                             )
                             append_to_dict(
                                 omop_export_dict, co, condition_occurrence_id
@@ -442,7 +444,7 @@ def gpt_to_omop_converter_batch(
                             condition_occurrence_id += 1
                         elif domain == "Procedure":
                             po = ProcedureOccurrence(
-                                procedure_occurrence_id, concept_id, vo, data_cursor
+                                procedure_occurrence_id, concept_id, vo, date_cursor
                             )
                             append_to_dict(
                                 omop_export_dict, po, procedure_occurrence_id
@@ -453,7 +455,7 @@ def gpt_to_omop_converter_batch(
                             procedure_occurrence_id += 1
                         elif domain == "Drug":
                             de = DrugExposure(
-                                drug_exposure_id, concept_id, vo, data_cursor
+                                drug_exposure_id, concept_id, vo, date_cursor
                             )
                             append_to_dict(omop_export_dict, de, drug_exposure_id)
                             id_mappings_dict["drug_exposure"][
@@ -484,7 +486,7 @@ def gpt_to_omop_converter_batch(
                                 value_as_number=number_as_value,
                                 value_as_concept_id=concept_as_value,
                                 visit_occurrence=vo,
-                                measurement_date=data_cursor,
+                                measurement_datetime=date_cursor,
                                 unit_source_value=unit,
                             )
                             append_to_dict(omop_export_dict, m, measurement_id)
