@@ -326,13 +326,6 @@ def gpt_to_omop_converter_batch(
                         bad_sequence = True
                         continue
 
-                    # We need to set the hour/min/sec to zero for inpatient visits because we inserted an hour token
-                    # at the beginning of the inpatient visit to indicate the number of hours since the midnight
-                    if inpatient_visit_indicator:
-                        data_cursor = data_cursor.replace(
-                            hour=0, minute=0, second=0, microsecond=0
-                        )
-
                     vo = VisitOccurrence(
                         visit_occurrence_id, visit_concept_id, data_cursor, p
                     )
@@ -352,18 +345,13 @@ def gpt_to_omop_converter_batch(
                     att_date_delta = 365 * 3
                 else:
                     att_date_delta = 0
-                # Between visits, the date delta is simply calculated as the date difference, even if they are
+                # Between visits, the date delta is simply calculated as the date difference
                 data_cursor = data_cursor.replace(
                     hour=0, minute=0, second=0, microsecond=0
                 )
                 data_cursor = data_cursor + timedelta(days=att_date_delta)
             elif inpatient_visit_indicator and is_inpatient_att_token(event):
                 inpatient_time_span_in_days = extract_time_interval_in_days(event)
-                # When we switch from an hour token to a day token, we need to remove the hour/min/second/microsecond
-                # components from the date cursor, otherwise we expand the patient timeline
-                data_cursor = data_cursor.replace(
-                    hour=0, minute=0, second=0, microsecond=0
-                )
                 data_cursor = data_cursor + timedelta(days=inpatient_time_span_in_days)
             elif inpatient_visit_indicator and event.startswith("i-H"):
                 # Handle hour tokens differently than the day tokens
