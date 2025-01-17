@@ -220,13 +220,13 @@ def gpt_to_omop_converter_batch(
         # Skip the start token if it is the first token
         if "start" in concept_ids[0].lower():
             concept_ids = concept_ids[1:]
-            if is_numeric_types is None:
+            if is_numeric_types is not None:
                 is_numeric_types = is_numeric_types[1:]
-            if number_as_values is None:
+            if number_as_values is not None:
                 number_as_values = number_as_values[1:]
-            if concept_as_values is None:
+            if concept_as_values is not None:
                 concept_as_values = concept_as_values[1:]
-            if units is None:
+            if units is not None:
                 units = units[1:]
 
         clinical_events = concept_ids[START_TOKEN_SIZE:]
@@ -238,15 +238,21 @@ def gpt_to_omop_converter_batch(
             continue
 
         is_numeric_types = (
-            is_numeric_types[START_TOKEN_SIZE:] if is_numeric_types else None
+            is_numeric_types[START_TOKEN_SIZE:]
+            if is_numeric_types is not None
+            else None
         )
         number_as_values = (
-            number_as_values[START_TOKEN_SIZE:] if number_as_values else None
+            number_as_values[START_TOKEN_SIZE:]
+            if number_as_values is not None
+            else None
         )
         concept_as_values = (
-            concept_as_values[START_TOKEN_SIZE:] if concept_as_values else None
+            concept_as_values[START_TOKEN_SIZE:]
+            if concept_as_values is not None
+            else None
         )
-        units = units[START_TOKEN_SIZE:] if units else None
+        units = units[START_TOKEN_SIZE:] if units is not None else None
 
         # TODO:Need to decode if the input is tokenized
         [start_year, start_age, start_gender, start_race] = concept_ids[
