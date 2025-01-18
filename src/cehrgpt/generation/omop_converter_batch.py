@@ -364,6 +364,8 @@ def gpt_to_omop_converter_batch(
                 date_cursor = date_cursor + timedelta(days=att_date_delta)
             elif inpatient_visit_indicator and is_inpatient_att_token(event):
                 inpatient_time_span_in_days = extract_time_interval_in_days(event)
+                # Reset the data cursor to the start of the day before adding the num of days parsed out from the token
+                date_cursor = date_cursor.replace(hour=0, minute=0, second=0)
                 date_cursor = date_cursor + timedelta(days=inpatient_time_span_in_days)
             elif inpatient_visit_indicator and event.startswith("i-H"):
                 # Handle hour tokens differently than the day tokens
