@@ -141,7 +141,7 @@ def load_finetuned_model(
     attn_implementation = (
         "flash_attention_2" if is_flash_attn_2_available() else "eager"
     )
-    torch_dtype = torch.float16 if is_flash_attn_2_available() else torch.float32
+    torch_dtype = torch.bfloat16 if is_flash_attn_2_available() else torch.float32
     # Try to create a new model based on the base model
     try:
         return finetune_model_cls.from_pretrained(
@@ -355,8 +355,6 @@ def model_init(
 
 def main():
     cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
-    if is_flash_attn_2_available():
-        training_args.fp16 = True
     tokenizer = load_pretrained_tokenizer(model_args)
     prepared_ds_path = generate_prepared_ds_path(
         data_args, model_args, data_folder=data_args.cohort_folder
@@ -675,8 +673,10 @@ def do_predict(
             test_losses.append(output.loss.item())
 
             # Collect logits and labels for prediction
-            logits = output.logits.cpu().numpy().squeeze()
-            labels = batch["classifier_label"].cpu().numpy().squeeze().astype(bool)
+            logits = output.logits.float().cpu().numpy().squeeze()
+            labels = (
+                batch["classifier_label"].float().cpu().numpy().squeeze().astype(bool)
+            )
             probabilities = sigmoid(logits)
             # Save predictions to parquet file
             test_prediction_pd = pd.DataFrame(

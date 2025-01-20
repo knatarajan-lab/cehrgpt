@@ -1678,6 +1678,10 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
         self.cehrgpt = CEHRGPT2Model(config)
         self.age_batch_norm = torch.nn.BatchNorm1d(1)
 
+        # Workaround
+        self.age_batch_norm.weight.data = self.age_batch_norm.weight.data.float()
+        self.age_batch_norm.bias.data = self.age_batch_norm.bias.data.float()
+
         self.dropout = nn.Dropout(config.summary_first_dropout)
         self.dense_layer = nn.Linear(config.hidden_size + 1, config.hidden_size // 2)
         self.dense_dropout = nn.Dropout(config.summary_first_dropout)
@@ -1696,8 +1700,8 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
 
     def _apply_age_norm(
         self,
-        age_at_index: torch.FloatTensor,
-    ) -> torch.FloatTensor:
+        age_at_index: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Applies batch normalization to the input age tensor.
 
@@ -1721,7 +1725,7 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
             with (
                 torch.no_grad(),
             ):  # Prevent tracking gradients, since we don't want to update anything
-                normalized_age = self.age_batch_norm(age_at_index.float())
+                normalized_age = self.age_batch_norm(age_at_index)
             # Optionally, set the layer back to training mode if needed later
             self.age_batch_norm.train()
         return normalized_age
@@ -1742,21 +1746,27 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> CehrGptSequenceClassifierOutput:
-        with torch.cuda.amp.autocast():
+        cehrgpt_output = self.cehrgpt(
+            input_ids=input_ids,
+            value_indicators=value_indicators,
+            values=values,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        # Disable autocasting for precision-sensitive operations
+        with torch.autocast(device_type="cuda", enabled=False):
             normalized_age = self._apply_age_norm(age_at_index)
-            cehrgpt_output = self.cehrgpt(
-                input_ids=input_ids,
-                value_indicators=value_indicators,
-                values=values,
-                past_key_values=past_key_values,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                head_mask=head_mask,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-            )
+
+        # In case the model is in bfloat16
+        if cehrgpt_output.last_hidden_state.dtype != normalized_age.dtype:
+            normalized_age = normalized_age.to(cehrgpt_output.last_hidden_state.dtype)
 
         # In fine-tuning, the sequences are left-padded, so we use the last element as the pooler
         output_pooler = cehrgpt_output.last_hidden_state[..., -1, :]
