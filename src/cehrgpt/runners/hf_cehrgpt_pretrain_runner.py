@@ -1,6 +1,7 @@
 import os
 from typing import Optional, Union
 
+import torch
 from cehrbert.data_generators.hf_data_generator.meds_utils import (
     create_dataset_from_meds_reader,
 )
@@ -15,7 +16,7 @@ from cehrbert.runners.runner_util import (
     load_parquet_as_dataset,
 )
 from datasets import Dataset, DatasetDict, IterableDatasetDict, load_from_disk
-from transformers import AutoConfig, Trainer, set_seed
+from transformers import AutoConfig, Trainer, TrainingArguments, set_seed
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset
@@ -71,16 +72,21 @@ def load_and_create_tokenizer(
 def load_and_create_model(
     model_args: ModelArguments,
     cehrgpt_args: CehrGPTArguments,
+    training_args: TrainingArguments,
     tokenizer: CehrGptTokenizer,
 ) -> CEHRGPT2LMHeadModel:
     attn_implementation = (
         "flash_attention_2" if is_flash_attn_2_available() else "eager"
     )
-
+    torch_dtype = torch.bfloat16 if training_args.bf16 else torch.float32
     model_abspath = os.path.expanduser(model_args.model_name_or_path)
     if cehrgpt_args.continue_pretrain:
         try:
-            return CEHRGPT2LMHeadModel.from_pretrained(model_abspath)
+            return CEHRGPT2LMHeadModel.from_pretrained(
+                model_abspath,
+                attn_implementation=attn_implementation,
+                torch_dtype=torch_dtype,
+            )
         except Exception as e:
             LOG.error(
                 f"When continue_pretrain is set to True, it assumes that CEHR-GPT has been trained "
@@ -116,6 +122,8 @@ def load_and_create_model(
             entropy_penalty_alpha=cehrgpt_args.entropy_penalty_alpha,
             use_pretrained_embeddings=len(tokenizer.pretrained_token_ids) > 0,
             pretrained_embedding_dim=pretrained_embedding_dim,
+            torch_dtype=torch_dtype,
+            use_bfloat16=training_args.fp16,
             **model_args.as_dict(),
         )
     model = CEHRGPT2LMHeadModel(model_config)
@@ -292,7 +300,9 @@ def main():
     else:
         processed_dataset = processed_dataset.filter(filter_func, **filter_args)
 
-    model = load_and_create_model(model_args, cehrgpt_args, cehrgpt_tokenizer)
+    model = load_and_create_model(
+        model_args, cehrgpt_args, training_args, cehrgpt_tokenizer
+    )
 
     # Expand tokenizer to adapt to the new pretraining dataset
     if model.config.vocab_size < cehrgpt_tokenizer.vocab_size:
