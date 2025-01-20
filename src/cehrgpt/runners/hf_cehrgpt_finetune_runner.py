@@ -143,11 +143,7 @@ def load_finetuned_model(
     attn_implementation = (
         "flash_attention_2" if is_flash_attn_2_available() else "eager"
     )
-    torch_dtype = (
-        torch.bfloat16
-        if is_flash_attn_2_available() and training_args.bf16
-        else torch.float32
-    )
+    torch_dtype = torch.bfloat16 if training_args.bf16 else torch.float32
     # Try to create a new model based on the base model
     try:
         return finetune_model_cls.from_pretrained(
@@ -650,7 +646,7 @@ def do_predict(
 
     # Load model and LoRA adapters if applicable
     model = (
-        load_finetuned_model(model_args, training_args.output_dir)
+        load_finetuned_model(model_args, training_args, training_args.output_dir)
         if not model_args.use_lora
         else load_lora_model(model_args, training_args, cehrgpt_args)
     )
@@ -723,7 +719,9 @@ def load_lora_model(
     cehrgpt_args: CehrGPTArguments,
 ) -> PeftModel:
     LOG.info("Loading base model from %s", model_args.model_name_or_path)
-    model = load_finetuned_model(model_args, model_args.model_name_or_path)
+    model = load_finetuned_model(
+        model_args, training_args, model_args.model_name_or_path
+    )
     # Enable include_values when include_values is set to be False during pre-training
     if model_args.include_values and not model.cehrgpt.include_values:
         model.cehrgpt.include_values = True

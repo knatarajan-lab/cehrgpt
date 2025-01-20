@@ -122,8 +122,6 @@ def load_and_create_model(
             entropy_penalty_alpha=cehrgpt_args.entropy_penalty_alpha,
             use_pretrained_embeddings=len(tokenizer.pretrained_token_ids) > 0,
             pretrained_embedding_dim=pretrained_embedding_dim,
-            torch_dtype=torch_dtype,
-            use_bfloat16=training_args.fp16,
             **model_args.as_dict(),
         )
     model = CEHRGPT2LMHeadModel(model_config)
