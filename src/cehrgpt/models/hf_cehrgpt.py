@@ -1670,6 +1670,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
 
 class CehrGptForClassification(CEHRGPTPreTrainedModel):
+    _keep_in_fp32_modules = ["age_batch_norm", "dense_layer", "classifier"]
 
     def __init__(self, config: CEHRGPTConfig):
         super().__init__(config)
@@ -1713,14 +1714,14 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
             torch.FloatTensor: A tensor with the normalized age values.
         """
         if age_at_index.shape[0] > 1:
-            normalized_age = self.age_batch_norm(age_at_index)
+            normalized_age = self.age_batch_norm(age_at_index.float())
         else:
             self.age_batch_norm.eval()
             # Apply batch norm without updating running stats
             with (
-                torch.no_grad()
+                torch.no_grad(),
             ):  # Prevent tracking gradients, since we don't want to update anything
-                normalized_age = self.age_batch_norm(age_at_index)
+                normalized_age = self.age_batch_norm(age_at_index.float())
             # Optionally, set the layer back to training mode if needed later
             self.age_batch_norm.train()
         return normalized_age
@@ -1741,21 +1742,21 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> CehrGptSequenceClassifierOutput:
-
-        normalized_age = self._apply_age_norm(age_at_index)
-        cehrgpt_output = self.cehrgpt(
-            input_ids=input_ids,
-            value_indicators=value_indicators,
-            values=values,
-            past_key_values=past_key_values,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            head_mask=head_mask,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
+        with torch.cuda.amp.autocast():
+            normalized_age = self._apply_age_norm(age_at_index)
+            cehrgpt_output = self.cehrgpt(
+                input_ids=input_ids,
+                value_indicators=value_indicators,
+                values=values,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                head_mask=head_mask,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
 
         # In fine-tuning, the sequences are left-padded, so we use the last element as the pooler
         output_pooler = cehrgpt_output.last_hidden_state[..., -1, :]

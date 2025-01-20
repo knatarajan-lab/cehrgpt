@@ -141,10 +141,13 @@ def load_finetuned_model(
     attn_implementation = (
         "flash_attention_2" if is_flash_attn_2_available() else "eager"
     )
+    torch_dtype = torch.float16 if is_flash_attn_2_available() else torch.float32
     # Try to create a new model based on the base model
     try:
         return finetune_model_cls.from_pretrained(
-            model_name_or_path, attn_implementation=attn_implementation
+            model_name_or_path,
+            attn_implementation=attn_implementation,
+            torch_dtype=torch_dtype,
         )
     except ValueError:
         raise ValueError(f"Can not load the finetuned model from {model_name_or_path}")
@@ -352,7 +355,8 @@ def model_init(
 
 def main():
     cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
-
+    if is_flash_attn_2_available():
+        training_args.fp16 = True
     tokenizer = load_pretrained_tokenizer(model_args)
     prepared_ds_path = generate_prepared_ds_path(
         data_args, model_args, data_folder=data_args.cohort_folder
