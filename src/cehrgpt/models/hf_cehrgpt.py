@@ -2,6 +2,7 @@ import math
 import warnings
 from typing import List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch.nn.functional as f
 from torch import nn
@@ -416,7 +417,7 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
             if new_pretrained_token_ids:
                 self.pretrained_wte[0].weight.requires_grad = False
                 self.pretrained_wte[0].weight[new_pretrained_token_ids] = torch.tensor(
-                    new_pretrained_embeddings,
+                    np.asarray(new_pretrained_embeddings),
                     dtype=self.pretrained_wte[0].weight.dtype,
                     device=self.pretrained_wte[0].weight.device,
                 )
