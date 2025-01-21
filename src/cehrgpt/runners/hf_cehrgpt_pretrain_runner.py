@@ -130,6 +130,10 @@ def load_and_create_model(
             tokenizer.pretrained_token_ids,
             tokenizer.pretrained_embeddings,
         )
+    if model.config.torch_dtype == torch.bfloat16:
+        return model.bfloat16()
+    elif model.config.torch_dtype == torch.float16:
+        return model.half()
     return model
 
 
