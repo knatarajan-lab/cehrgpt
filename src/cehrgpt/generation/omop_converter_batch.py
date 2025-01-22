@@ -369,8 +369,16 @@ def gpt_to_omop_converter_batch(
                 date_cursor = date_cursor + timedelta(days=inpatient_time_span_in_days)
             elif inpatient_visit_indicator and event.startswith("i-H"):
                 # Handle hour tokens differently than the day tokens
+                # The way we construct the inpatient hour tokens is that the sum of the consecutive
+                # hour tokens cannot exceed the current day, so the data_cursor is bounded by a
+                # theoretical upper limit
+                upper_bound = date_cursor.replace(
+                    hour=0, minute=0, second=0
+                ) + timedelta(hours=23, minutes=59, seconds=59)
                 hour_delta = int(event[3:])
                 date_cursor = date_cursor + timedelta(hours=hour_delta)
+                if date_cursor > upper_bound:
+                    date_cursor = upper_bound
             elif is_visit_end(event):
                 if vo is None:
                     bad_sequence = True
