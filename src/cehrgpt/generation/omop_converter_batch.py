@@ -437,10 +437,9 @@ def gpt_to_omop_converter_batch(
                             #     bad_sequence = True
                             #     continue
                             # we also enforce the rule where the sequence has to end on a VE token
-                            if (
-                                event_idx + 1 < len(clinical_events)
-                                and clinical_events[event_idx + 1] != "VE"
-                            ):
+                            if event_idx + 1 < len(
+                                clinical_events
+                            ) and not is_visit_end(clinical_events[event_idx + 1]):
                                 bad_sequence = True
                                 continue
 
