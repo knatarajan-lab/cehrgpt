@@ -639,6 +639,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.pretrained_wte = nn.Sequential(
             nn.Embedding(self.config.vocab_size, self.config.pretrained_embedding_dim),
             nn.Linear(self.config.pretrained_embedding_dim, self.embed_dim),
+            gelu_new,
         )
         # Disable the weight of the pretrained embeddings
         self.pretrained_wte[0].weight.requires_grad = False
