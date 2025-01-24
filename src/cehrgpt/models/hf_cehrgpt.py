@@ -637,12 +637,14 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
 
     def initialize_pretrained_embeddings(self):
         layers = [
-            nn.Embedding(self.config.vocab_size, self.config.pretrained_embedding_dim)
+            nn.Embedding(self.config.vocab_size, self.config.pretrained_embedding_dim),
+            nn.Linear(self.config.pretrained_embedding_dim, self.embed_dim),
+            gelu_new,
         ]
-        for _ in range(self.config.n_pretrained_embeddings_layers):
+        for _ in range(self.config.n_pretrained_embeddings_layers - 1):
             layers.extend(
                 [
-                    nn.Linear(self.config.pretrained_embedding_dim, self.embed_dim),
+                    nn.Linear(self.embed_dim, self.embed_dim),
                     gelu_new,
                 ]
             )
