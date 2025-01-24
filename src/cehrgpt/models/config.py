@@ -130,6 +130,7 @@ class CEHRGPTConfig(PretrainedConfig):
         use_sub_time_tokenization=True,
         token_to_time_token_mapping: Dict[int, List] = None,
         use_pretrained_embeddings=False,
+        n_pretrained_embeddings_layers=2,
         pretrained_embedding_dim=768,
         pretrained_token_ids: List[int] = None,
         time_token_loss_weight=1.0,
@@ -187,6 +188,7 @@ class CEHRGPTConfig(PretrainedConfig):
         self.use_pretrained_embeddings = use_pretrained_embeddings
         self.pretrained_embedding_dim = pretrained_embedding_dim
         self.pretrained_token_ids = pretrained_token_ids
+        self.n_pretrained_embeddings_layers = n_pretrained_embeddings_layers
         # self.tie_word_embeddings = not use_pretrained_embeddings
 
         self.lab_token_penalty = lab_token_penalty

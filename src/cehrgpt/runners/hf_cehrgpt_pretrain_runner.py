@@ -120,6 +120,7 @@ def load_and_create_model(
             lab_token_loss_weight=cehrgpt_args.lab_token_loss_weight,
             entropy_penalty=cehrgpt_args.entropy_penalty,
             entropy_penalty_alpha=cehrgpt_args.entropy_penalty_alpha,
+            n_pretrained_embeddings_layers=cehrgpt_args.n_pretrained_embeddings_layers,
             use_pretrained_embeddings=len(tokenizer.pretrained_token_ids) > 0,
             pretrained_embedding_dim=pretrained_embedding_dim,
             **model_args.as_dict(),

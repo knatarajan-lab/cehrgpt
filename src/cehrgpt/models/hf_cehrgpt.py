@@ -636,11 +636,17 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.post_init()
 
     def initialize_pretrained_embeddings(self):
-        self.pretrained_wte = nn.Sequential(
-            nn.Embedding(self.config.vocab_size, self.config.pretrained_embedding_dim),
-            nn.Linear(self.config.pretrained_embedding_dim, self.embed_dim),
-            gelu_new,
-        )
+        layers = [
+            nn.Embedding(self.config.vocab_size, self.config.pretrained_embedding_dim)
+        ]
+        for _ in range(self.config.n_pretrained_embeddings_layers):
+            layers.extend(
+                [
+                    nn.Linear(self.config.pretrained_embedding_dim, self.embed_dim),
+                    gelu_new,
+                ]
+            )
+        self.pretrained_wte = nn.Sequential(*layers)
         # Disable the weight of the pretrained embeddings
         self.pretrained_wte[0].weight.requires_grad = False
 

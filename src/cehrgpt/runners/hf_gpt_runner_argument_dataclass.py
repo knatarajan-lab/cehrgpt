@@ -129,3 +129,9 @@ class CehrGPTArguments:
         default=0.01,
         metadata={"help": "Entropy penalty co-efficient"},
     )
+    n_pretrained_embeddings_layers: Optional[int] = dataclasses.field(
+        default=2,
+        metadata={
+            "help": "The number of feed forward layers for transforming pretrained embeddings to internal embeddings"
+        },
+    )
