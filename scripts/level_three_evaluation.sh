@@ -26,7 +26,7 @@ python -u -m cehrbert_data.prediction_cohorts.cad_cabg_cohort \
     -c cad_cabg_bow \
     -i "$OMOP_FOLDER" \
     -o "$OMOP_FOLDER/cohorts/cad_cabg/" \
-    -dl 1985-01-01 -du 2023-05-01 \
+    -dl 1985-01-01 -du 2023-12-31 \
     -l 18 -u 100 -ow 360 -ps 0 -pw 360 -f \
     --att_type cehr_bert \
     --ehr_table_list condition_occurrence procedure_occurrence drug_exposure -iv
