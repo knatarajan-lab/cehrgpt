@@ -33,10 +33,9 @@ def create_time_to_event(
     time_buckets = [time_month_token(_) for _ in time_intervals]
     time_bucket_counter = Counter(time_buckets)
     most_common_item = time_bucket_counter.most_common(1)[0][0]
-    total_count = sum(time_bucket_counter.values())
     # Generate the probability table
     probability_table = {
-        item: count / total_count for item, count in time_bucket_counter.items()
+        item: count / num_of_simulations for item, count in time_bucket_counter.items()
     }
     sorted_probability_table = [
         {"time_interval": k, "probability": v}
