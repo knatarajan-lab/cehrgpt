@@ -18,7 +18,7 @@ class TimeToEvent:
     average_time: float
     median_time: float
     standard_deviation: float
-    most_likely_time: int
+    most_likely_time: str
     num_of_simulations: int
     time_intervals: List[int]
     outcome_events: List[str]
@@ -137,6 +137,7 @@ class TimeToEventModel:
                     visit_counter > future_visit_end != -1
                     or time_delta > prediction_window_end != -1
                 ):
+                    time_event_tuples.append(("0", time_delta))
                     break
                 if is_att_token(next_token):
                     time_delta += extract_time_interval_in_days(next_token)
@@ -145,6 +146,7 @@ class TimeToEventModel:
                     and time_delta >= prediction_window_start
                 ) and self.is_outcome_event(next_token):
                     time_event_tuples.append((next_token, time_delta))
+                    break
 
         # Count the occurrences of each time tokens for each concept
         return (
