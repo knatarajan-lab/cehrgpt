@@ -1,0 +1,8 @@
+task_name: "30_day_readmission_prediction"
+outcome_events: ["9201", "262", "8971", "8920"]
+include_descendants: false
+future_visit_start: 0
+future_visit_end: -1
+prediction_window_start: 0
+prediction_window_end: 30
+max_new_tokens: 128
