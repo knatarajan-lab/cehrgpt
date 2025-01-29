@@ -151,7 +151,9 @@ def main(args):
                 "flash_attention_2" if is_flash_attn_2_available() else "eager"
             ),
             torch_dtype=(
-                torch.bfloat16 if is_flash_attn_2_available() else torch.float32
+                torch.bfloat16
+                if is_flash_attn_2_available() and args.use_bfloat16
+                else torch.float32
             ),
         )
         .eval()

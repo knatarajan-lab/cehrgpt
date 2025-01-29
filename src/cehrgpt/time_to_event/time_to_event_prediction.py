@@ -322,11 +322,6 @@ def create_arg_parser():
         "--concept_ancestor", dest="concept_ancestor", action="store", required=False
     )
     base_arg_parser.add_argument(
-        "--use_bfloat16",
-        dest="use_bfloat16",
-        action="store_true",
-    )
-    base_arg_parser.add_argument(
         "--debug",
         dest="debug",
         action="store_true",

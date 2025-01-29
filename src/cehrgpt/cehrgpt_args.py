@@ -134,4 +134,9 @@ def create_inference_base_arg_parser(
         type=float,
         required=False,
     )
+    parser.add_argument(
+        "--use_bfloat16",
+        dest="use_bfloat16",
+        action="store_true",
+    )
     return parser
