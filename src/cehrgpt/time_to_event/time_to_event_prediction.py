@@ -181,6 +181,7 @@ def main(args):
             task_config.prediction_window_start,
             task_config.prediction_window_end,
             args.debug,
+            args.max_n_trial,
         )
         visit_counter = sum([int(is_visit_end(_)) for _ in partial_history])
         tte_outputs.append(
@@ -325,6 +326,14 @@ def create_arg_parser():
         "--debug",
         dest="debug",
         action="store_true",
+    )
+    base_arg_parser.add_argument(
+        "--max_n_trial",
+        dest="max_n_trial",
+        action="store",
+        type=int,
+        default=2,
+        required=False,
     )
     return base_arg_parser
 

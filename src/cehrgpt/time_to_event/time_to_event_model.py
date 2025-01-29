@@ -128,37 +128,51 @@ class TimeToEventModel:
         prediction_window_start: int = 0,
         prediction_window_end: int = 365,
         debug: bool = False,
+        max_n_trial: int = 2,
     ) -> Optional[TimeToEvent]:
-
         patient_history_length = len(partial_history)
-        simulated_seqs = self.simulate(partial_history)
-
         time_event_tuples = []
         seqs_failed_to_convert = []
-        for seq in simulated_seqs:
-            visit_counter = 0
-            time_delta = 0
-            success = False
-            for next_token in seq[patient_history_length:]:
-                visit_counter += int(is_visit_start(next_token))
-                if (
-                    visit_counter > future_visit_end != -1
-                    or time_delta > prediction_window_end != -1
-                ):
-                    time_event_tuples.append(("0", time_delta))
-                    success = True
-                    break
-                if is_att_token(next_token):
-                    time_delta += extract_time_interval_in_days(next_token)
-                elif (
-                    visit_counter >= future_visit_start
-                    and time_delta >= prediction_window_start
-                ) and self.is_outcome_event(next_token):
-                    time_event_tuples.append((next_token, time_delta))
-                    success = True
-                    break
-            if not success:
-                seqs_failed_to_convert.append(seq[patient_history_length:])
+        n_trial = 0
+        num_return_sequences = self.generation_config.num_return_sequences
+        max_new_tokens = self.generation_config.max_new_tokens
+        while (
+            len(time_event_tuples) < self.generation_config.num_return_sequences
+            and n_trial < max_n_trial
+        ):
+            self.generation_config.num_return_sequences = num_return_sequences - len(
+                time_event_tuples
+            )
+            self.generation_config.max_new_tokens = max_new_tokens * (n_trial + 1)
+            simulated_seqs = self.simulate(partial_history)
+            n_trial += 1
+            for seq in simulated_seqs:
+                visit_counter = 0
+                time_delta = 0
+                success = False
+                for next_token in seq[patient_history_length:]:
+                    visit_counter += int(is_visit_start(next_token))
+                    if (
+                        visit_counter > future_visit_end != -1
+                        or time_delta > prediction_window_end != -1
+                    ):
+                        time_event_tuples.append(("0", time_delta))
+                        success = True
+                        break
+                    if is_att_token(next_token):
+                        time_delta += extract_time_interval_in_days(next_token)
+                    elif (
+                        visit_counter >= future_visit_start
+                        and time_delta >= prediction_window_start
+                    ) and self.is_outcome_event(next_token):
+                        time_event_tuples.append((next_token, time_delta))
+                        success = True
+                        break
+                if not success:
+                    seqs_failed_to_convert.append(seq[patient_history_length:])
+
+        self.generation_config.num_return_sequences = num_return_sequences
+        self.generation_config.max_new_tokens = max_new_tokens
 
         if debug:
             print(f"seqs_failed_to_convert: {seqs_failed_to_convert}")
