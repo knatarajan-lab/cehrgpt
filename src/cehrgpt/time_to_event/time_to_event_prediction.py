@@ -59,7 +59,11 @@ def main(args):
             attn_implementation=(
                 "flash_attention_2" if is_flash_attn_2_available() else "eager"
             ),
-            torch_dtype=torch.bfloat16 if is_flash_attn_2_available() else "auto",
+            torch_dtype=(
+                torch.bfloat16
+                if is_flash_attn_2_available() and args.use_bfloat16
+                else "auto"
+            ),
         )
         .eval()
         .to(get_device())
@@ -176,6 +180,7 @@ def main(args):
             task_config.future_visit_end,
             task_config.prediction_window_start,
             task_config.prediction_window_end,
+            args.debug,
         )
         visit_counter = sum([int(is_visit_end(_)) for _ in partial_history])
         tte_outputs.append(
@@ -315,6 +320,16 @@ def create_arg_parser():
     )
     base_arg_parser.add_argument(
         "--concept_ancestor", dest="concept_ancestor", action="store", required=False
+    )
+    base_arg_parser.add_argument(
+        "--use_bfloat16",
+        dest="use_bfloat16",
+        action="store_true",
+    )
+    base_arg_parser.add_argument(
+        "--debug",
+        dest="debug",
+        action="store_true",
     )
     return base_arg_parser
 

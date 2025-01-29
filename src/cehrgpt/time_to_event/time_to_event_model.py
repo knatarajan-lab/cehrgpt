@@ -8,6 +8,7 @@ import torch
 from cehrbert_data.decorators.patient_event_decorator_base import time_month_token
 from transformers import GenerationConfig
 
+from cehrgpt.data.gpt_utils import is_visit_start
 from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token, is_visit_end
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
@@ -122,22 +123,26 @@ class TimeToEventModel:
         future_visit_end: int = -1,
         prediction_window_start: int = 0,
         prediction_window_end: int = 365,
+        debug: bool = False,
     ) -> Optional[TimeToEvent]:
 
         patient_history_length = len(partial_history)
         simulated_seqs = self.simulate(partial_history)
 
         time_event_tuples = []
+        seqs_failed_to_convert = []
         for seq in simulated_seqs:
             visit_counter = 0
             time_delta = 0
+            success = False
             for next_token in seq[patient_history_length:]:
-                visit_counter += int(is_visit_end(next_token))
+                visit_counter += int(is_visit_start(next_token))
                 if (
                     visit_counter > future_visit_end != -1
                     or time_delta > prediction_window_end != -1
                 ):
                     time_event_tuples.append(("0", time_delta))
+                    success = True
                     break
                 if is_att_token(next_token):
                     time_delta += extract_time_interval_in_days(next_token)
@@ -146,7 +151,13 @@ class TimeToEventModel:
                     and time_delta >= prediction_window_start
                 ) and self.is_outcome_event(next_token):
                     time_event_tuples.append((next_token, time_delta))
+                    success = True
                     break
+            if not success:
+                seqs_failed_to_convert.append(seq[patient_history_length:])
+
+        if debug:
+            print(f"seqs_failed_to_convert: {seqs_failed_to_convert}")
 
         # Count the occurrences of each time tokens for each concept
         return (
