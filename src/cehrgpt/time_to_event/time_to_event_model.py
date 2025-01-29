@@ -109,9 +109,13 @@ class TimeToEventModel:
                 )
                 # Clear the cache
                 torch.cuda.empty_cache()
-            simulated_sequences.extend(
-                [self.tokenizer.decode(seq.cpu().numpy()) for seq in results.sequences]
-            )
+                # Add the sequences to the result array
+                simulated_sequences.extend(
+                    [
+                        self.tokenizer.decode(seq.cpu().numpy())
+                        for seq in results.sequences
+                    ]
+                )
 
         self.generation_config.num_return_sequences = old_num_return_sequences
         return simulated_sequences
