@@ -1,9 +1,9 @@
 import datetime
+import glob
 import os
 import shutil
 import uuid
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -255,11 +255,10 @@ def acquire_lock_or_skip_if_already_exist(output_folder: str, sample_id: str):
 def filter_out_existing_results(
     test_dataset: Dataset, prediction_output_folder_name: str
 ):
-    if any(Path(prediction_output_folder_name).glob("*parquet")):
+    parquet_files = glob.glob(os.path.join(prediction_output_folder_name, "*parquet"))
+    if parquet_files:
         cohort_members = set()
-        results_dataframe = pd.read_parquet(prediction_output_folder_name)[
-            ["person_id", "index_date"]
-        ]
+        results_dataframe = pd.read_parquet(parquet_files)[["person_id", "index_date"]]
         for row in results_dataframe.itertuples():
             cohort_members.add((row.person_id, row.index_date.strftime("%Y-%m-%d")))
 
