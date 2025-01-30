@@ -142,6 +142,7 @@ def main(args):
         return [_ >= args.min_num_of_concepts for _ in examples["num_of_concepts"]]
 
     test_dataset = dataset.filter(filter_func, batched=True, batch_size=1000)
+    test_dataset = test_dataset.shuffle(seed=42)
 
     # Filter out the records for which the predictions have been generated previously
     test_dataset = filter_out_existing_results(
