@@ -179,7 +179,7 @@ class TimeToEventModel:
 
         # Count the occurrences of each time tokens for each concept
         return (
-            create_time_to_event(time_event_tuples, len(simulated_seqs))
+            create_time_to_event(time_event_tuples, len(time_event_tuples))
             if len(time_event_tuples) > 0
             else None
         )
