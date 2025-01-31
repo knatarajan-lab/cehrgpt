@@ -147,7 +147,7 @@ class TimeToEventModel:
             self.generation_config.num_return_sequences = num_return_sequences - len(
                 time_event_tuples
             )
-            self.generation_config.max_new_tokens = max_new_tokens * (n_trial + 1)
+            # self.generation_config.max_new_tokens = max_new_tokens * (n_trial + 1)
             simulated_seqs = self.simulate(partial_history)
             n_trial += 1
             for seq in simulated_seqs:
