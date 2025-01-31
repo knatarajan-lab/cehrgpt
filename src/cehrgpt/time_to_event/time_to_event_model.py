@@ -8,8 +8,12 @@ import torch
 from cehrbert_data.decorators.patient_event_decorator_base import time_month_token
 from transformers import GenerationConfig
 
-from cehrgpt.data.gpt_utils import is_visit_start
-from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token, is_visit_end
+from cehrgpt.gpt_utils import (
+    extract_time_interval_in_days,
+    is_att_token,
+    is_visit_end,
+    is_visit_start,
+)
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
