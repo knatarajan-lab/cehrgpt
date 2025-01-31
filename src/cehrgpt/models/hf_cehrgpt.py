@@ -1104,6 +1104,15 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         if self.config.include_values:
             self.value_head = new_embeddings
 
+    def get_position_embeddings(self) -> Union[nn.Embedding, Tuple[nn.Embedding]]:
+        return self.cehrgpt.get_position_embeddings()
+
+    def set_position_embeddings(self, new_embeddings: nn.Embedding):
+        self.cehrgpt.set_position_embeddings(new_embeddings)
+
+    def update_attn_bias(self, max_position_embeddings: int):
+        self.cehrgpt.update_attn_bias(max_position_embeddings)
+
     def prepare_inputs_for_generation(
         self,
         input_ids,
