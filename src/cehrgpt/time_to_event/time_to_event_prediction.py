@@ -110,11 +110,16 @@ def main(args):
     LOG.info(f"Loading dataset_folder at {args.dataset_folder}")
     LOG.info(f"Write time sensitive predictions to {prediction_output_folder_name}")
     LOG.info(f"Context window {args.context_window}")
+    LOG.info(f"Number of new tokens {task_config.max_new_tokens}")
     LOG.info(f"Temperature {args.temperature}")
     LOG.info(f"Repetition Penalty {args.repetition_penalty}")
     LOG.info(f"Sampling Strategy {args.sampling_strategy}")
     LOG.info(f"Epsilon cutoff {args.epsilon_cutoff}")
     LOG.info(f"Top P {args.top_p}")
+
+    cehrgpt_model.resize_position_embeddings(
+        cehrgpt_model.config.max_position_embeddings + task_config.max_new_tokens
+    )
     LOG.info(f"Top K {args.top_k}")
 
     generation_config = TimeToEventModel.get_generation_config(
