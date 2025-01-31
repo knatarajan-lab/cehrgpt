@@ -116,11 +116,11 @@ def main(args):
     LOG.info(f"Sampling Strategy {args.sampling_strategy}")
     LOG.info(f"Epsilon cutoff {args.epsilon_cutoff}")
     LOG.info(f"Top P {args.top_p}")
+    LOG.info(f"Top K {args.top_k}")
 
     cehrgpt_model.resize_position_embeddings(
         cehrgpt_model.config.max_position_embeddings + task_config.max_new_tokens
     )
-    LOG.info(f"Top K {args.top_k}")
 
     generation_config = TimeToEventModel.get_generation_config(
         tokenizer=cehrgpt_tokenizer,

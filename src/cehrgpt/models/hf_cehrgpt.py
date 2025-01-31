@@ -722,7 +722,9 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                         (max_position_embeddings, max_position_embeddings),
                         dtype=torch.bool,
                     )
-                ).view(1, 1, max_position_embeddings, max_position_embeddings),
+                )
+                .view(1, 1, max_position_embeddings, max_position_embeddings)
+                .to(self.h[i].attn.bias.device),
                 persistent=False,
             )
 
