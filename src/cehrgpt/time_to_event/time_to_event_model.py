@@ -173,7 +173,11 @@ class TimeToEventModel:
                         success = True
                         break
                 if not success:
-                    seqs_failed_to_convert.append(seq[patient_history_length:])
+                    # This indicates the generated sequence did not satisfy the criteria
+                    if future_visit_end != -1 or prediction_window_end != -1:
+                        seqs_failed_to_convert.append(seq[patient_history_length:])
+                    else:
+                        time_event_tuples.append(("0", time_delta))
 
         self.generation_config.num_return_sequences = num_return_sequences
         self.generation_config.max_new_tokens = max_new_tokens

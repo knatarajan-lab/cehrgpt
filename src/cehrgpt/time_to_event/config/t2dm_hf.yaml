@@ -4,5 +4,5 @@ future_visit_start: 0
 future_visit_end: -1
 prediction_window_start: 30
 prediction_window_end: -1
-max_new_tokens: 128
+max_new_tokens: 512
 include_descendants: true
