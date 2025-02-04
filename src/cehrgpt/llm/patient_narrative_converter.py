@@ -84,6 +84,8 @@ def convert_concepts_to_patient_narrative(
                     concept_mapping[clinical_event]
                 )
 
+    start_gender = concept_mapping.get(start_gender, start_gender)
+    start_race = concept_mapping.get(start_race, start_race)
     narrative = (
         f"Patient Demographics:\n\tGender: {start_gender}\n\tRace: {start_race}\n"
     )
