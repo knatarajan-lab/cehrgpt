@@ -114,18 +114,20 @@ def main(args):
         num_proc=args.num_proc,
         streaming=args.streaming,
     )
-    for batched_dataset_df in transformed_pat_seq_dataset.to_pandas(
-        batch_size=args.batch_size, batched=True
+    for i, batched_dataset_df in enumerate(
+        transformed_pat_seq_dataset.to_pandas(batch_size=args.batch_size, batched=True)
     ):
         batched_dataset_df.to_parquet(
-            os.path.join(args.output_path, str(uuid.uuid4()), ".parquet")
+            os.path.join(args.output_dir, f"{str(uuid.uuid4())}.parquet")
         )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Generate patient narratives")
     parser.add_argument(
-        "--patient_sequence_dir", required=True, help="The patient sequence data dir"
+        "--patient_sequence_dir",
+        required=True,
+        help="The patient sequence data dir",
     )
     parser.add_argument(
         "--concept_dir",
