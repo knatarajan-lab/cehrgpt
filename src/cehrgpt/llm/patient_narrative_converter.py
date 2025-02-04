@@ -3,11 +3,11 @@ import datetime
 import os
 import uuid
 from collections import defaultdict
-from copy import deepcopy
 from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 from cehrbert.runners.runner_util import load_parquet_as_dataset
+from tqdm import tqdm
 
 from cehrgpt.data.hf_cehrgpt_dataset import apply_cehrbert_dataset_mapping
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import DatasetMapping
@@ -53,7 +53,7 @@ def generate_concept_map(concept_pd: pd.DataFrame) -> Dict[str, str]:
 def convert_concepts_to_patient_narrative(
     concept_ids: List[str], concept_mapping: Dict[str, str], context_window: int
 ) -> Tuple[str, int, int]:
-    pat_seq = deepcopy(concept_ids)
+    pat_seq = list(concept_ids)
     starting_index = 0
     end_index = len(concept_ids)
     if len(concept_ids) > context_window:
