@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 from cehrbert.runners.runner_util import load_parquet_as_dataset
-from pandas import DataFrame
 
 from cehrgpt.data.hf_cehrgpt_dataset import apply_cehrbert_dataset_mapping
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import DatasetMapping
@@ -104,7 +103,7 @@ def convert_concepts_to_patient_narrative(
 
 def main(args):
     pat_seq_dataset = load_parquet_as_dataset(args.patient_sequence_dir)
-    concept_pd = pd.read_parquet(args.concept_sequence_dir)
+    concept_pd = pd.read_parquet(args.concept_dir)
     concept_mapping = generate_concept_map(concept_pd)
 
     transformed_pat_seq_dataset = apply_cehrbert_dataset_mapping(
