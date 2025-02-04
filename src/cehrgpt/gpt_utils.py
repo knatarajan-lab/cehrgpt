@@ -155,7 +155,7 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
             )
         ):
             current_token = concept_ids[i]
-            if current_token == "VE":
+            if is_visit_end(current_token):
                 random_end_index = i
                 break
         return random_starting_index, random_end_index, demographic_tokens

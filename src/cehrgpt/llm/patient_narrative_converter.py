@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 from cehrbert.runners.runner_util import load_parquet_as_dataset
-from tqdm import tqdm
 
 from cehrgpt.data.hf_cehrgpt_dataset import apply_cehrbert_dataset_mapping
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import DatasetMapping
