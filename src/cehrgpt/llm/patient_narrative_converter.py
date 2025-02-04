@@ -59,7 +59,7 @@ def convert_concepts_to_patient_narrative(
         starting_index, end_index, demographic_tokens = random_slice_gpt_sequence(
             concept_ids=concept_ids, max_seq_len=context_window
         )
-        pat_seq = demographic_tokens + concept_ids[starting_index:end_index]
+        pat_seq = demographic_tokens + pat_seq[starting_index:end_index]
 
     [start_year, start_age, start_gender, start_race] = pat_seq[:START_TOKEN_SIZE]
 
