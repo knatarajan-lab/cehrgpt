@@ -137,9 +137,14 @@ class VisitEndValidationRule(ValidationRule):
         if not pre_token:
             return False
 
+        # If DEATH token occurs before [VE], there can not be any events after [VE]
+        if pre_token.type == TokenType.DEATH and next_token:
+            return False
+
         # Enforce the patterns: 1) [clinical_event or discharge_event] [VE] [ATT]; 2) [DEATH] [VE]
         if next_token and next_token.type != TokenType.ATT:
             return False
+
         pre_token_validation = (
             pre_token.type in clinical_token_types
             or pre_token.type in [TokenType.VISIT_DISCHARGE, TokenType.DEATH]
