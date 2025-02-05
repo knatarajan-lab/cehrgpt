@@ -99,7 +99,7 @@ class TimeSensitivePredictionModel:
         sequence_is_demographics = len(partial_history) == 4 and partial_history[
             0
         ].startswith("year")
-        sequence_ends_ve = partial_history[-1] == "VE"
+        sequence_ends_ve = is_visit_end(partial_history[-1])
 
         if not (sequence_is_demographics | sequence_ends_ve):
             raise ValueError(
@@ -226,7 +226,7 @@ class TimeSensitivePredictionModel:
         all_concepts = []
         for seq in simulated_seqs:
             for next_token in seq[patient_history_length:]:
-                if only_next_visit and next_token == "VE":
+                if only_next_visit and is_visit_end(next_token):
                     break
                 if not is_artificial_token(next_token) and next_token.isnumeric():
                     all_concepts.append(next_token)

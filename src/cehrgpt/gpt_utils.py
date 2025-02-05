@@ -208,6 +208,14 @@ def is_seq_end(token: str) -> bool:
     return token in ["END", "[END]", END_TOKEN]
 
 
+def is_year_token(token: str) -> bool:
+    return token.upper().startswith("YEAR")
+
+
+def is_age_token(token: str) -> bool:
+    return token.upper().startswith("AGE")
+
+
 def is_visit_start(token: str):
     """
     Check if the token indicates the start of a visit.
@@ -243,11 +251,7 @@ def is_att_token(token: str):
         return True
     elif token == "LT":
         return True
-    elif token[:3] == "VS-":  # VS-D7-VE
-        return True
-    elif token[:2] == "i-" and not token.startswith(
-        "i-H"
-    ):  # i-D7 and exclude hour tokens
+    elif is_inpatient_att_token(token):
         return True
     return False
 

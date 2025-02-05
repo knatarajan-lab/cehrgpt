@@ -36,12 +36,38 @@ VISIT_CONCEPT_LIST = [
     "8782",
 ]
 
-# TODO: add race concepts
-RACE_CONCEPT_LIST = []
+# TODO: complete the list of race concepts
+RACE_CONCEPT_LIST = [
+    "0",
+    "8507",
+    "8532",
+]
 
-# TODO: add gender concepts
-GENDER_CONCEPT_LIST = []
-DISCHARGE_CONCEPT_LIST = [8536, 4216643, 4021968, 4146681, 4161979]
+# TODO: complete the list of gender concepts
+GENDER_CONCEPT_LIST = [
+    "0",
+    "8515",
+    "8516",
+    "8522",
+    "8527",
+    "8552",
+    "8557",
+    "8657",
+    "38003574",
+    "38003579",
+    "38003581",
+    "38003583",
+    "38003584",
+    "38003585",
+    "38003586",
+    "38003591",
+    "38003595",
+    "38003610",
+    "38003613",
+    "44814649",
+    "44814653",
+]
+DISCHARGE_CONCEPT_LIST = ["8536", "4216643", "4021968", "4146681", "4161979"]
 OOV_CONCEPT_MAP = {
     1525734: "Drug",
     779414: "Drug",
