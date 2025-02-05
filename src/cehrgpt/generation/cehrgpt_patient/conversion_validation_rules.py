@@ -16,7 +16,7 @@ class ValidationRule(ABC):
     @abstractmethod
     def is_required(self, token: CEHRGPTToken) -> bool:
         # function of index or value (e.g. check VS validation rule if index = 0)
-        # if this is true, meaning it's always required no matter which index this token is
+        # if this is true, meaning it's always required no matter which index this token has
         pass
 
     @abstractmethod
@@ -28,66 +28,16 @@ class ValidationRule(ABC):
     ) -> bool:
         pass
 
+    @staticmethod
     def get_validation_error_message(
-        self,
-        start_index: int,
         token: CEHRGPTToken,
         pre_token: Optional[CEHRGPTToken] = None,
         next_token: Optional[CEHRGPTToken] = None,
     ):
         return (
-            f"Token at index {start_index + token.index} is not valid {token.type} token: {token.name} between "
+            f"Token at index {token.index} is not valid {token.type} token: {token.name} between "
             f"previous token {pre_token.name if pre_token else None} at {pre_token.index if pre_token else None} "
             f"and next token {next_token.name if next_token else None} at {next_token.index if next_token else None}"
-        )
-
-
-class AttValidationRule(ValidationRule):
-    def is_required(self, token: CEHRGPTToken):
-        return token.type == TokenType.ATT
-
-    def validate(
-        self,
-        token: CEHRGPTToken,
-        pre_token: Optional[CEHRGPTToken] = None,
-        next_token: Optional[CEHRGPTToken] = None,
-    ) -> bool:
-        if not pre_token or not next_token:
-            return False
-        # Enforce the pattern [VS] [ATT] [VE]
-        return (
-            pre_token.type == TokenType.VS
-            and token.type == TokenType.ATT
-            and next_token.type == TokenType.VE
-        )
-
-
-class InpatientAttValidationRule(ValidationRule):
-    def is_required(self, token: CEHRGPTToken):
-        return token.type == TokenType.INPATIENT_ATT
-
-    def validate(
-        self,
-        token: CEHRGPTToken,
-        pre_token: Optional[CEHRGPTToken] = None,
-        next_token: Optional[CEHRGPTToken] = None,
-    ):
-        if not pre_token or not next_token:
-            return False
-
-        # Enforce the patterns: 1). [clinical_event] [i-D1] [i-H1]; 2). [clinical_event] [i-D1] [clinical_event]
-        pre_token_validation = (
-            pre_token.type in clinical_token_types
-            or pre_token.type in [TokenType.VISIT, TokenType.INPATIENT_VISIT]
-        )
-        next_token_validation = (
-            next_token.type == TokenType.INPATIENT_HOUR
-            or next_token.type in clinical_token_types
-        )
-        return (
-            pre_token_validation
-            and token.type == TokenType.INPATIENT_ATT
-            and next_token_validation
         )
 
 
@@ -149,7 +99,7 @@ class RaceValidationRule(ValidationRule):
 
 class VisitStartValidationRule(ValidationRule):
     def is_required(self, token: CEHRGPTToken):
-        return token.index == 0
+        return token.type == TokenType.VS
 
     def validate(
         self,
@@ -175,11 +125,8 @@ class VisitStartValidationRule(ValidationRule):
 
 
 class VisitEndValidationRule(ValidationRule):
-    def __init__(self, visit_block_length: int):
-        self.token_length = visit_block_length
-
     def is_required(self, token: CEHRGPTToken):
-        return token.index == self.token_length - 1
+        return token.type == TokenType.VE
 
     def validate(
         self,
@@ -202,7 +149,7 @@ class VisitEndValidationRule(ValidationRule):
 
 class VisitTypeValidationRule(ValidationRule):
     def is_required(self, token: CEHRGPTToken):
-        return token.index == 1
+        return token.type in [TokenType.VISIT, TokenType.INPATIENT_VISIT]
 
     def validate(
         self,
@@ -222,6 +169,56 @@ class VisitTypeValidationRule(ValidationRule):
         return (
             pre_token.type == TokenType.VS
             and token_validation
+            and next_token_validation
+        )
+
+
+class AttValidationRule(ValidationRule):
+    def is_required(self, token: CEHRGPTToken):
+        return token.type == TokenType.ATT
+
+    def validate(
+        self,
+        token: CEHRGPTToken,
+        pre_token: Optional[CEHRGPTToken] = None,
+        next_token: Optional[CEHRGPTToken] = None,
+    ) -> bool:
+        if not pre_token or not next_token:
+            return False
+        # Enforce the pattern [VS] [ATT] [VE]
+        return (
+            pre_token.type == TokenType.VS
+            and token.type == TokenType.ATT
+            and next_token.type == TokenType.VE
+        )
+
+
+class InpatientAttValidationRule(ValidationRule):
+    def is_required(self, token: CEHRGPTToken):
+        return token.type == TokenType.INPATIENT_ATT
+
+    def validate(
+        self,
+        token: CEHRGPTToken,
+        pre_token: Optional[CEHRGPTToken] = None,
+        next_token: Optional[CEHRGPTToken] = None,
+    ):
+        if not pre_token or not next_token:
+            return False
+
+        # Enforce the patterns: [clinical_event] [i-D1] [i-H1 or clinical_event or discharge]
+        pre_token_validation = (
+            pre_token.type in clinical_token_types
+            or pre_token.type in [TokenType.VISIT, TokenType.INPATIENT_VISIT]
+        )
+        next_token_validation = (
+            next_token.type == TokenType.INPATIENT_HOUR
+            or next_token.type in clinical_token_types
+            or next_token.type in [TokenType.VISIT_DISCHARGE]
+        )
+        return (
+            pre_token_validation
+            and token.type == TokenType.INPATIENT_ATT
             and next_token_validation
         )
 
@@ -267,11 +264,8 @@ class InpatientConceptValidationRule(ValidationRule):
 
 
 class DischargeValidationRule(ValidationRule):
-    def __init__(self, token_length: int):
-        self.token_length = token_length
-
     def is_required(self, token: CEHRGPTToken):
-        return token.index == self.token_length - 2
+        return token.type == TokenType.VISIT_DISCHARGE
 
     def validate(
         self,
