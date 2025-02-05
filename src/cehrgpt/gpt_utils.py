@@ -7,6 +7,8 @@ from cehrgpt.cehrgpt_args import SamplingStrategy
 from cehrgpt.models.special_tokens import (
     DISCHARGE_CONCEPT_IDS,
     END_TOKEN,
+    INPATIENT_VISIT_CONCEPT_IDS,
+    START_TOKEN,
     VISIT_CONCEPT_IDS,
 )
 
@@ -198,6 +200,14 @@ def is_clinical_event(token: str) -> bool:
     return token.isnumeric()
 
 
+def is_seq_start(token: str) -> bool:
+    return token in ["START", "[START]", START_TOKEN]
+
+
+def is_seq_end(token: str) -> bool:
+    return token in ["END", "[END]", END_TOKEN]
+
+
 def is_visit_start(token: str):
     """
     Check if the token indicates the start of a visit.
@@ -210,6 +220,10 @@ def is_visit_start(token: str):
 
 def is_visit_end(token: str) -> bool:
     return token in ["VE", "[VE]"]
+
+
+def is_inpatient_visit(token: str) -> bool:
+    return token in INPATIENT_VISIT_CONCEPT_IDS
 
 
 def is_att_token(token: str):
@@ -262,6 +276,16 @@ def is_inpatient_att_token(token: str):
     :return: True if the token is an inpatient ATT token, False otherwise.
     """
     return INPATIENT_ATT_PATTERN.match(token)
+
+
+def is_inpatient_hour_token(token: str):
+    """
+    Check if the token is an inpatient hour token.
+
+    :param token: Token to check.
+    :return: True if the token is an inpatient hour token, False otherwise.
+    """
+    return token.startswith("i-H")
 
 
 def extract_time_interval_in_days(token: str):

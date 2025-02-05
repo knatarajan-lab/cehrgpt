@@ -16,7 +16,7 @@ from tqdm import tqdm
 from transformers import GenerationConfig
 from transformers.utils import is_flash_attn_2_available, logging
 
-from src.cehrgpt.models.special_tokens import VISIT_CONCEPT_IDS
+from src.cehrgpt.models.special_tokens import VISIT_CONCEPT_LIST
 
 from ..cehrgpt_args import SamplingStrategy, create_inference_base_arg_parser
 from ..gpt_utils import (
@@ -211,7 +211,7 @@ class TimeSensitivePredictionModel:
         next_visit_type_tokens = []
         for seq in simulated_seqs:
             for next_token in seq[len(partial_history) :]:
-                if next_token in VISIT_CONCEPT_IDS:
+                if next_token in VISIT_CONCEPT_LIST:
                     next_visit_type_tokens.append(next_token)
                     break
         return convert_to_concept_probabilities(next_visit_type_tokens)

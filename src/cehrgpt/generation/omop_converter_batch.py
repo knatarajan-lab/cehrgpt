@@ -30,12 +30,12 @@ from cehrgpt.gpt_utils import (
     is_visit_end,
     is_visit_start,
 )
-from cehrgpt.models.tokenization_hf_cehrgpt import END_TOKEN
+from cehrgpt.models.special_tokens import (
+    DISCHARGE_CONCEPT_LIST,
+    OOV_CONCEPT_MAP,
+    STOP_TOKENS,
+)
 
-# TODO: move these to cehrbert_data
-STOP_TOKENS = ["VE", "[VE]", END_TOKEN]
-
-CURRENT_PATH = Path(__file__).parent
 START_TOKEN_SIZE = 4
 ATT_TIME_TOKENS = generate_artificial_time_tokens()
 TABLE_LIST = [
@@ -47,16 +47,6 @@ TABLE_LIST = [
     "death",
     "measurement",
 ]
-DISCHARGE_CONCEPT_LIST = [4216643, 4021968, 4146681, 4161979]
-OOV_CONCEPT_MAP = {
-    1525734: "Drug",
-    779414: "Drug",
-    722117: "Drug",
-    722118: "Drug",
-    722119: "Drug",
-    905420: "Drug",
-    1525543: "Drug",
-}
 
 
 def create_folder_if_not_exists(output_folder, table_name):
