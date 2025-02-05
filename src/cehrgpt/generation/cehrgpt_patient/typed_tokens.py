@@ -3,11 +3,14 @@ from enum import Enum, auto
 from typing import Dict, List, Optional, Union
 
 from cehrgpt.gpt_utils import (
+    extract_time_interval_in_days,
     is_age_token,
     is_discharge_type_token,
     is_gender_token,
     is_inpatient_att_token,
     is_inpatient_hour_token,
+    is_inpatient_visit_type_token,
+    is_outpatient_visit_type_token,
     is_race_token,
     is_seq_end,
     is_seq_start,
@@ -31,7 +34,7 @@ class TokenType(Enum):
     AGE = auto()
     GENDER = auto()
     RACE = auto()
-    VISIT = auto()
+    OUTPATIENT_VISIT = auto()
     DRUG = auto()
     CONDITION = auto()
     PROCEDURE = auto()
@@ -62,6 +65,8 @@ class CEHRGPTToken:
     def get_name(self) -> Union[int, str]:
         if self.type in [TokenType.YEAR, TokenType.AGE]:
             return int(self.name.split(":")[1])
+        elif self.type in [TokenType.INPATIENT_ATT]:
+            return
         return self.name
 
 
@@ -115,6 +120,10 @@ def make_cehrgpt_token(
         token_type = TokenType.VS
     elif is_visit_end(token):
         token_type = TokenType.VE
+    elif is_inpatient_visit_type_token(token):
+        token_type = TokenType.INPATIENT_VISIT
+    elif is_outpatient_visit_type_token(token):
+        token_type = TokenType.OUTPATIENT_VISIT
     elif is_visit_att_tokens(token):
         token_type = TokenType.ATT
     elif is_inpatient_att_token(token):

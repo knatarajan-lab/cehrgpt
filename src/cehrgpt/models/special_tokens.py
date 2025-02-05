@@ -13,14 +13,12 @@ INPATIENT_VISIT_CONCEPT_LIST = [
     "8920",
 ]
 
-# TODO: complete the list of visit concepts
-VISIT_CONCEPT_LIST = [
+# TODO: complete the list of outpatient visit concepts
+OUTPATIENT_VISIT_CONCEPT_LIST = [
     "9202",
     "9203",
     "581477",
-    "9201",
     "5083",
-    "262",
     "38004250",
     "0",
     "8883",
@@ -30,7 +28,6 @@ VISIT_CONCEPT_LIST = [
     "38004268",
     "38004228",
     "32693",
-    "8971",
     "38004269",
     "38004193",
     "32036",

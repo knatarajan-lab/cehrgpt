@@ -9,9 +9,9 @@ from cehrgpt.models.special_tokens import (
     END_TOKEN,
     GENDER_CONCEPT_LIST,
     INPATIENT_VISIT_CONCEPT_LIST,
+    OUTPATIENT_VISIT_CONCEPT_LIST,
     RACE_CONCEPT_LIST,
     START_TOKEN,
-    VISIT_CONCEPT_LIST,
 )
 
 # Regular expression pattern to match inpatient attendance tokens
@@ -240,12 +240,16 @@ def is_visit_end(token: str) -> bool:
     return token in ["VE", "[VE]"]
 
 
-def is_visit_type_token(token: str) -> bool:
-    return token in VISIT_CONCEPT_LIST
+def is_outpatient_visit_type_token(token: str) -> bool:
+    return token in OUTPATIENT_VISIT_CONCEPT_LIST
 
 
 def is_inpatient_visit_type_token(token: str) -> bool:
     return token in INPATIENT_VISIT_CONCEPT_LIST
+
+
+def is_visit_type_token(token: str) -> bool:
+    return is_inpatient_visit_type_token(token) | is_outpatient_visit_type_token(token)
 
 
 def is_discharge_type_token(token: str) -> bool:
@@ -307,7 +311,9 @@ def is_att_token(token: str):
 
 
 def is_artificial_token(token: str) -> bool:
-    if is_visit_type_token(token):
+    if is_inpatient_att_token(token):
+        return True
+    if is_outpatient_visit_type_token(token):
         return True
     if is_discharge_type_token(token):
         return True
@@ -322,7 +328,14 @@ def is_artificial_token(token: str) -> bool:
     return False
 
 
-def extract_time_interval_in_days(token: str):
+def extract_hours_from_hour_token(token: str) -> int:
+    # event.startswith("i-H")
+    if is_inpatient_hour_token(token):
+        return int(token[3:])
+    raise ValueError(f"Invalid inpatient hour token {token}")
+
+
+def extract_time_interval_in_days(token: str) -> int:
     """
     Extract the time interval in days from a token.
 
@@ -345,12 +358,14 @@ def extract_time_interval_in_days(token: str):
             part = token.split("-")[1]
             if part.startswith("LT"):
                 return 365 * 3
-            return int(part[1:])
+            # recursively call itself
+            return extract_time_interval_in_days(part)
         elif token[:2] == "i-":  # i-D7
             part = token.split("-")[1]
             if part.startswith("LT"):
                 return 365 * 3
-            return int(token.split("-")[1][1:])
+            # recursively call itself
+            return extract_time_interval_in_days(part)
     except Exception:
         raise ValueError(f"Invalid time token: {token}")
     raise ValueError(f"Invalid time token: {token}")

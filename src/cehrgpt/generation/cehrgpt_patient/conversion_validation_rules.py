@@ -117,7 +117,7 @@ class VisitStartValidationRule(ValidationRule):
             return False
         # Enforce the patterns: [ATT or GENDER or RACE] [VS] [VT or DEATH]
         next_token_validation = next_token.type in [
-            TokenType.VISIT,
+            TokenType.OUTPATIENT_VISIT,
             TokenType.INPATIENT_VISIT,
             TokenType.DEATH,
         ]
@@ -149,7 +149,7 @@ class VisitEndValidationRule(ValidationRule):
 
 class VisitTypeValidationRule(ValidationRule):
     def is_required(self, token: CEHRGPTToken):
-        return token.type in [TokenType.VISIT, TokenType.INPATIENT_VISIT]
+        return token.type in [TokenType.OUTPATIENT_VISIT, TokenType.INPATIENT_VISIT]
 
     def validate(
         self,
@@ -161,7 +161,10 @@ class VisitTypeValidationRule(ValidationRule):
             return False
 
         # Patterns: [VS] [VT] [clinical_event or i-D1 or i-h1]
-        token_validation = token.type in [TokenType.VISIT, TokenType.INPATIENT_VISIT]
+        token_validation = token.type in [
+            TokenType.OUTPATIENT_VISIT,
+            TokenType.INPATIENT_VISIT,
+        ]
         next_token_validation = (
             next_token.type in clinical_token_types
             or next_token.type in [TokenType.INPATIENT_HOUR, TokenType.INPATIENT_ATT]
@@ -209,7 +212,7 @@ class InpatientAttValidationRule(ValidationRule):
         # Enforce the patterns: [clinical_event] [i-D1] [i-H1 or clinical_event or discharge]
         pre_token_validation = (
             pre_token.type in clinical_token_types
-            or pre_token.type in [TokenType.VISIT, TokenType.INPATIENT_VISIT]
+            or pre_token.type in [TokenType.OUTPATIENT_VISIT, TokenType.INPATIENT_VISIT]
         )
         next_token_validation = (
             next_token.type == TokenType.INPATIENT_HOUR
@@ -229,7 +232,7 @@ class InpatientConceptValidationRule(ValidationRule):
         return token.type not in [
             TokenType.VS,
             TokenType.VE,
-            TokenType.VISIT,
+            TokenType.OUTPATIENT_VISIT,
             TokenType.INPATIENT_VISIT,
             TokenType.INPATIENT_ATT,
             TokenType.INPATIENT_HOUR,
@@ -290,7 +293,11 @@ class DischargeValidationRule(ValidationRule):
 class ConceptValidationRule(ValidationRule):
     def is_required(self, token: CEHRGPTToken):
         # We skip the other artificial tokens, all other tokens need to be validated
-        return token.type not in [TokenType.VS, TokenType.VE, TokenType.VISIT]
+        return token.type not in [
+            TokenType.VS,
+            TokenType.VE,
+            TokenType.OUTPATIENT_VISIT,
+        ]
 
     def validate(
         self,
@@ -302,7 +309,8 @@ class ConceptValidationRule(ValidationRule):
             return False
             # Patterns: [clinical_event or visit_type] [clinical_event] [clinical_event or VE]
         pre_token_validation = (
-            pre_token.type in clinical_token_types or pre_token.type == TokenType.VISIT
+            pre_token.type in clinical_token_types
+            or pre_token.type == TokenType.OUTPATIENT_VISIT
         )
         next_token_validation = (
             next_token.type in clinical_token_types or next_token.type == TokenType.VE
