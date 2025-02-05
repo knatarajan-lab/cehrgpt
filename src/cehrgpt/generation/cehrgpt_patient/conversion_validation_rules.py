@@ -1,6 +1,6 @@
 import datetime
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import List, Optional
 
 from .typed_tokens import CEHRGPTToken, TokenType
 
@@ -333,3 +333,8 @@ class DeathValidationRule(ValidationRule):
             and token.type == TokenType.DEATH
             and next_token.type == TokenType.VE
         )
+
+
+def get_validation_rules() -> List[ValidationRule]:
+    """Recursively find all subclasses of a given class."""
+    return [_() for _ in ValidationRule.__subclasses__()]
