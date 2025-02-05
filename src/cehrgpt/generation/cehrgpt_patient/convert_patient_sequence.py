@@ -221,6 +221,7 @@ class PatientSequenceConverter:
         self.tokens = tokens
         self.error_messages = []
         self.id_generator = id_generator
+        self.validation_rules = get_validation_rules()
         self.validate()
         self.person_id = (
             original_person_id
@@ -292,7 +293,7 @@ class PatientSequenceConverter:
         pre_token: Optional[CEHRGPTToken] = None,
         next_token: Optional[CEHRGPTToken] = None,
     ) -> None:
-        for validation_rule in get_validation_rules():
+        for validation_rule in self.validation_rules:
             if validation_rule.is_required(token):
                 if not validation_rule.validate(token, pre_token, next_token):
                     self.error_messages.append(
@@ -327,7 +328,7 @@ class PatientSequenceConverter:
                 datetime_cursor.add_days(extract_time_interval_in_days(token.name))
             elif token.type == TokenType.INPATIENT_HOUR:
                 datetime_cursor.add_hours(extract_hours_from_hour_token(token.name))
-            elif token.type in clinical_token_types:
+            elif token.type in clinical_token_types or token.type == TokenType.DEATH:
                 domain = domain_map.get(token.name, None)
                 record_id = self.id_generator.get_next_id_by_domain(domain)
                 events.append(

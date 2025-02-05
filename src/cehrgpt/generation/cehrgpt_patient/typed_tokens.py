@@ -3,7 +3,6 @@ from enum import Enum, auto
 from typing import Dict, List, Optional, Union
 
 from cehrgpt.gpt_utils import (
-    extract_time_interval_in_days,
     is_age_token,
     is_discharge_type_token,
     is_gender_token,
@@ -65,8 +64,6 @@ class CEHRGPTToken:
     def get_name(self) -> Union[int, str]:
         if self.type in [TokenType.YEAR, TokenType.AGE]:
             return int(self.name.split(":")[1])
-        elif self.type in [TokenType.INPATIENT_ATT]:
-            return
         return self.name
 
 
