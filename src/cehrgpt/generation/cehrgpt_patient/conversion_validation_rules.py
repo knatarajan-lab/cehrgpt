@@ -165,7 +165,7 @@ class VisitStartValidationRule(ValidationRule):
             return False
         if not next_token:
             return False
-        # Enforce the patterns: [ATT or GENDER or RANCE] [VS] [VT or DEATH]
+        # Enforce the patterns: [ATT or GENDER or RACE] [VS] [VT or DEATH]
         next_token_validation = next_token.type in [
             TokenType.VISIT,
             TokenType.INPATIENT_VISIT,
@@ -335,7 +335,7 @@ class DeathValidationRule(ValidationRule):
             return False
         # Pattern: [VS][DEATH][VE]
         return (
-            token.type == TokenType.DEATH
-            and pre_token.type == TokenType.VS
+            pre_token.type == TokenType.VS
+            and token.type == TokenType.DEATH
             and next_token.type == TokenType.VE
         )

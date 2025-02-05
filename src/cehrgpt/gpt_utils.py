@@ -5,11 +5,11 @@ from typing import List, Sequence, Tuple
 
 from cehrgpt.cehrgpt_args import SamplingStrategy
 from cehrgpt.models.special_tokens import (
-    DISCHARGE_CONCEPT_IDS,
+    DISCHARGE_CONCEPT_LIST,
     END_TOKEN,
     INPATIENT_VISIT_CONCEPT_IDS,
     START_TOKEN,
-    VISIT_CONCEPT_IDS,
+    VISIT_CONCEPT_LIST,
 )
 
 # Regular expression pattern to match inpatient attendance tokens
@@ -253,9 +253,9 @@ def is_att_token(token: str):
 
 
 def is_artificial_token(token: str) -> bool:
-    if token in VISIT_CONCEPT_IDS:
+    if token in VISIT_CONCEPT_LIST:
         return True
-    if token in DISCHARGE_CONCEPT_IDS:
+    if token in DISCHARGE_CONCEPT_LIST:
         return True
     if is_visit_start(token):
         return True
