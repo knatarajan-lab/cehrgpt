@@ -1,9 +1,15 @@
 import datetime
 from abc import ABC, abstractmethod
-
-from cehrgpt.gpt_utils import is_visit_end, is_visit_start
+from typing import Optional
 
 from .typed_tokens import CEHRGPTToken, TokenType
+
+clinical_token_types = [
+    TokenType.CONDITION,
+    TokenType.PROCEDURE,
+    TokenType.CONDITION,
+    TokenType.MEASUREMENT,
+]
 
 
 class ValidationRule(ABC):
@@ -14,23 +20,75 @@ class ValidationRule(ABC):
         pass
 
     @abstractmethod
-    def validate(self, token: CEHRGPTToken) -> bool:
+    def validate(
+        self,
+        token: CEHRGPTToken,
+        pre_token: Optional[CEHRGPTToken] = None,
+        next_token: Optional[CEHRGPTToken] = None,
+    ) -> bool:
         pass
 
-    @abstractmethod
-    def get_validation_error_message(self, start_index: int, token: CEHRGPTToken):
-        pass
+    def get_validation_error_message(
+        self,
+        start_index: int,
+        token: CEHRGPTToken,
+        pre_token: Optional[CEHRGPTToken] = None,
+        next_token: Optional[CEHRGPTToken] = None,
+    ):
+        return (
+            f"Token at index {start_index + token.index} is not valid {token.type} token: {token.name} between "
+            f"previous token {pre_token.name if pre_token else None} at {pre_token.index if pre_token else None} "
+            f"and next token {next_token.name if next_token else None} at {next_token.index if next_token else None}"
+        )
 
 
 class AttValidationRule(ValidationRule):
     def is_required(self, token: CEHRGPTToken):
-        return True
-
-    def validate(self, token: CEHRGPTToken):
         return token.type == TokenType.ATT
 
-    def get_validation_error_message(self, start_index: int, token: CEHRGPTToken):
-        return f"Token at index {start_index + token.index} is not valid ATT token: {token.name}"
+    def validate(
+        self,
+        token: CEHRGPTToken,
+        pre_token: Optional[CEHRGPTToken] = None,
+        next_token: Optional[CEHRGPTToken] = None,
+    ) -> bool:
+        if not pre_token or not next_token:
+            return False
+        # Enforce the pattern [VS] [ATT] [VE]
+        return (
+            pre_token.type == TokenType.VS
+            and token.type == TokenType.ATT
+            and next_token.type == TokenType.VE
+        )
+
+
+class InpatientAttValidationRule(ValidationRule):
+    def is_required(self, token: CEHRGPTToken):
+        return token.type == TokenType.INPATIENT_ATT
+
+    def validate(
+        self,
+        token: CEHRGPTToken,
+        pre_token: Optional[CEHRGPTToken] = None,
+        next_token: Optional[CEHRGPTToken] = None,
+    ):
+        if not pre_token or not next_token:
+            return False
+
+        # Enforce the patterns: 1). [clinical_event] [i-D1] [i-H1]; 2). [clinical_event] [i-D1] [clinical_event]
+        pre_token_validation = (
+            pre_token.type in clinical_token_types
+            or pre_token.type in [TokenType.VISIT, TokenType.INPATIENT_VISIT]
+        )
+        next_token_validation = (
+            next_token.type == TokenType.INPATIENT_HOUR
+            or next_token.type in clinical_token_types
+        )
+        return (
+            pre_token_validation
+            and token.type == TokenType.INPATIENT_ATT
+            and next_token_validation
+        )
 
 
 class YearValidationRule(ValidationRule):
@@ -38,58 +96,82 @@ class YearValidationRule(ValidationRule):
         # The validation rule needs to be called only if it's the first token in the demographic block
         return token.index == 0
 
-    def validate(self, token: CEHRGPTToken):
+    def validate(
+        self,
+        token: CEHRGPTToken,
+        pre_token: Optional[CEHRGPTToken] = None,
+        next_token: Optional[CEHRGPTToken] = None,
+    ):
         return (
             token.type == TokenType.YEAR
             and 1900 < int(token.name) < datetime.date.today().year
         )
-
-    def get_validation_error_message(self, start_index: int, token: CEHRGPTToken):
-        return f"Token at index {start_index + token.index} is not valid YEAR token: {token.name}"
 
 
 class AgeValidationRule(ValidationRule):
     def is_required(self, token: CEHRGPTToken):
         return token.index == 1
 
-    def validate(self, token: CEHRGPTToken):
+    def validate(
+        self,
+        token: CEHRGPTToken,
+        pre_token: Optional[CEHRGPTToken] = None,
+        next_token: Optional[CEHRGPTToken] = None,
+    ):
         return token.type == TokenType.AGE and 0 <= int(token.name) <= 100
-
-    def get_validation_error_message(self, start_index: int, token: CEHRGPTToken):
-        return f"Token at index {start_index + token.index} is not valid AGE token: {token.name}"
 
 
 class GenderValidationRule(ValidationRule):
     def is_required(self, token: CEHRGPTToken):
         return token.index == 2
 
-    def validate(self, token: CEHRGPTToken):
+    def validate(
+        self,
+        token: CEHRGPTToken,
+        pre_token: Optional[CEHRGPTToken] = None,
+        next_token: Optional[CEHRGPTToken] = None,
+    ):
         return token.type == TokenType.GENDER
-
-    def get_validation_error_message(self, start_index: int, token: CEHRGPTToken):
-        return f"Token at index {start_index + token.index} is not valid GENDER token: {token.name}"
 
 
 class RaceValidationRule(ValidationRule):
     def is_required(self, token: CEHRGPTToken):
         return token.index == 3
 
-    def validate(self, token: CEHRGPTToken):
+    def validate(
+        self,
+        token: CEHRGPTToken,
+        pre_token: Optional[CEHRGPTToken] = None,
+        next_token: Optional[CEHRGPTToken] = None,
+    ):
         return token.type == TokenType.RACE
-
-    def get_validation_error_message(self, start_index: int, token: CEHRGPTToken):
-        return f"Token at index {start_index + token.index} is not valid RACE token: {token.name}"
 
 
 class VisitStartValidationRule(ValidationRule):
     def is_required(self, token: CEHRGPTToken):
         return token.index == 0
 
-    def validate(self, token: CEHRGPTToken):
-        return token.type == TokenType.VS
-
-    def get_validation_error_message(self, start_index: int, token: CEHRGPTToken):
-        return f"Token at index {start_index + token.index} is not valid VS token: {token.name}"
+    def validate(
+        self,
+        token: CEHRGPTToken,
+        pre_token: Optional[CEHRGPTToken] = None,
+        next_token: Optional[CEHRGPTToken] = None,
+    ):
+        if pre_token and pre_token.type not in [
+            TokenType.ATT,
+            TokenType.RACE,
+            TokenType.GENDER,
+        ]:
+            return False
+        if not next_token:
+            return False
+        # Enforce the patterns: [ATT or GENDER or RANCE] [VS] [VT or DEATH]
+        next_token_validation = next_token.type in [
+            TokenType.VISIT,
+            TokenType.INPATIENT_VISIT,
+            TokenType.DEATH,
+        ]
+        return token.type == TokenType.VS and next_token_validation
 
 
 class VisitEndValidationRule(ValidationRule):
@@ -99,43 +181,89 @@ class VisitEndValidationRule(ValidationRule):
     def is_required(self, token: CEHRGPTToken):
         return token.index == self.token_length - 1
 
-    def validate(self, token: CEHRGPTToken):
-        return token.type == TokenType.VE
+    def validate(
+        self,
+        token: CEHRGPTToken,
+        pre_token: Optional[CEHRGPTToken] = None,
+        next_token: Optional[CEHRGPTToken] = None,
+    ):
+        if not pre_token:
+            return False
 
-    def get_validation_error_message(self, start_index: int, token: CEHRGPTToken):
-        return f"Token at index {start_index + token.index} is not valid VE token: {token.name}"
+        # Enforce the patterns: 1) [clinical_event or discharge_event] [VE] [ATT]; 2) [DEATH] [VE]
+        if next_token and next_token.type != TokenType.ATT:
+            return False
+        pre_token_validation = (
+            pre_token.type in clinical_token_types
+            or pre_token.type in [TokenType.VISIT_DISCHARGE, TokenType.DEATH]
+        )
+        return pre_token_validation and token.type == TokenType.VE
 
 
 class VisitTypeValidationRule(ValidationRule):
     def is_required(self, token: CEHRGPTToken):
         return token.index == 1
 
-    def validate(self, token: CEHRGPTToken):
-        return token.type == TokenType.VISIT
+    def validate(
+        self,
+        token: CEHRGPTToken,
+        pre_token: Optional[CEHRGPTToken] = None,
+        next_token: Optional[CEHRGPTToken] = None,
+    ):
+        if not pre_token or not next_token:
+            return False
 
-    def get_validation_error_message(self, start_index: int, token: CEHRGPTToken):
-        return f"Token at index {start_index + token.index} is not valid VISIT token: {token.name}"
+        # Patterns: [VS] [VT] [clinical_event or i-D1 or i-h1]
+        token_validation = token.type in [TokenType.VISIT, TokenType.INPATIENT_VISIT]
+        next_token_validation = (
+            next_token.type in clinical_token_types
+            or next_token.type in [TokenType.INPATIENT_HOUR, TokenType.INPATIENT_ATT]
+        )
+        return (
+            pre_token.type == TokenType.VS
+            and token_validation
+            and next_token_validation
+        )
 
 
 class InpatientConceptValidationRule(ValidationRule):
-
-    def __init__(self, token_length: int):
-        self.token_length = token_length
-
     def is_required(self, token: CEHRGPTToken):
-        return 1 < token.index < self.token_length - 2
-
-    def validate(self, token: CEHRGPTToken):
-        return token.type in [
-            TokenType.CONDITION,
-            TokenType.DRUG,
-            TokenType.PROCEDURE,
-            TokenType.MEASUREMENT,
-            TokenType.DEATH,
+        # We skip the other artificial tokens, all other tokens need to be validated
+        return token.type not in [
+            TokenType.VS,
+            TokenType.VE,
+            TokenType.VISIT,
+            TokenType.INPATIENT_VISIT,
+            TokenType.INPATIENT_ATT,
+            TokenType.INPATIENT_HOUR,
+            TokenType.VISIT_DISCHARGE,
         ]
 
-    def get_validation_error_message(self, start_index: int, token: CEHRGPTToken):
-        return f"Token at index {start_index + token.index} is not valid INPATIENT token: {token.name}"
+    def validate(
+        self,
+        token: CEHRGPTToken,
+        pre_token: Optional[CEHRGPTToken] = None,
+        next_token: Optional[CEHRGPTToken] = None,
+    ):
+        if not pre_token or not next_token:
+            return False
+
+        # Patterns: [i-D1 or i-H1 or clinical_event] [clinical_event] [clinical_event or i-D1 or i-H1 or discharge]
+        pre_token_validation = (
+            pre_token.type in clinical_token_types
+            or pre_token.type in [TokenType.INPATIENT_HOUR, TokenType.INPATIENT_ATT]
+        )
+        token_validation = token.type in clinical_token_types
+        next_token_validation = (
+            next_token.type in clinical_token_types
+            or next_token.type
+            in [
+                TokenType.INPATIENT_HOUR,
+                TokenType.INPATIENT_ATT,
+                TokenType.VISIT_DISCHARGE,
+            ]
+        )
+        return pre_token_validation and token_validation and next_token_validation
 
 
 class DischargeValidationRule(ValidationRule):
@@ -145,28 +273,69 @@ class DischargeValidationRule(ValidationRule):
     def is_required(self, token: CEHRGPTToken):
         return token.index == self.token_length - 2
 
-    def validate(self, token: CEHRGPTToken):
-        return token.type == TokenType.VISIT_DISCHARGE
-
-    def get_validation_error_message(self, start_index: int, token: CEHRGPTToken):
-        return f"Token at index {start_index + token.index} is not valid INPATIENT DISCHARGE token: {token.name}"
+    def validate(
+        self,
+        token: CEHRGPTToken,
+        pre_token: Optional[CEHRGPTToken] = None,
+        next_token: Optional[CEHRGPTToken] = None,
+    ):
+        if not pre_token or not next_token:
+            return False
+        # Patterns: [clinical_event or i-D1 or i-H1] [discharge] [VE]
+        pre_token_validation = (
+            pre_token.type in clinical_token_types
+            or pre_token.type in [TokenType.INPATIENT_HOUR, TokenType.INPATIENT_ATT]
+        )
+        return (
+            pre_token_validation
+            and token.type == TokenType.VISIT_DISCHARGE
+            and next_token.type == TokenType.VE
+        )
 
 
 class ConceptValidationRule(ValidationRule):
-
-    def __init__(self, token_length: int):
-        self.token_length = token_length
-
     def is_required(self, token: CEHRGPTToken):
-        return 1 < token.index < self.token_length - 1
+        # We skip the other artificial tokens, all other tokens need to be validated
+        return token.type not in [TokenType.VS, TokenType.VE, TokenType.VISIT]
 
-    def validate(self, token: CEHRGPTToken):
-        return token.type in [
-            TokenType.CONDITION,
-            TokenType.DRUG,
-            TokenType.PROCEDURE,
-            TokenType.MEASUREMENT,
-        ]
+    def validate(
+        self,
+        token: CEHRGPTToken,
+        pre_token: Optional[CEHRGPTToken] = None,
+        next_token: Optional[CEHRGPTToken] = None,
+    ):
+        if not pre_token or not next_token:
+            return False
+            # Patterns: [clinical_event or visit_type] [clinical_event] [clinical_event or VE]
+        pre_token_validation = (
+            pre_token.type in clinical_token_types or pre_token.type == TokenType.VISIT
+        )
+        next_token_validation = (
+            next_token.type in clinical_token_types or next_token.type == TokenType.VE
+        )
+        return (
+            pre_token_validation
+            and token.type in clinical_token_types
+            and next_token_validation
+        )
 
-    def get_validation_error_message(self, start_index: int, token: CEHRGPTToken):
-        return f"Token at index {start_index + token.index} is not valid CONCEPT token: {token.name}"
+
+class DeathValidationRule(ValidationRule):
+    def is_required(self, token: CEHRGPTToken):
+        # We skip the other artificial tokens, all other tokens need to be validated
+        return token.type == TokenType.DEATH
+
+    def validate(
+        self,
+        token: CEHRGPTToken,
+        pre_token: Optional[CEHRGPTToken] = None,
+        next_token: Optional[CEHRGPTToken] = None,
+    ):
+        if not pre_token or not next_token:
+            return False
+        # Pattern: [VS][DEATH][VE]
+        return (
+            token.type == TokenType.DEATH
+            and pre_token.type == TokenType.VS
+            and next_token.type == TokenType.VE
+        )
