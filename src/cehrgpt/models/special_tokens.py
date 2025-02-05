@@ -5,14 +5,15 @@ PAD_TOKEN = "[PAD]"
 OUT_OF_VOCABULARY_TOKEN = "[OOV]"
 STOP_TOKENS = ["VE", "[VE]", END_TOKEN]
 
-INPATIENT_VISIT_CONCEPT_IDS = [
+# TODO: complete the list of inpatient visit concepts
+INPATIENT_VISIT_CONCEPT_LIST = [
     "9201",
     "262",
     "8971",
     "8920",
 ]
 
-# OMOP CONCEPT IDs
+# TODO: complete the list of visit concepts
 VISIT_CONCEPT_LIST = [
     "9202",
     "9203",
@@ -35,7 +36,6 @@ VISIT_CONCEPT_LIST = [
     "32036",
     "8782",
 ]
-
 # TODO: complete the list of race concepts
 RACE_CONCEPT_LIST = [
     "0",
@@ -67,13 +67,15 @@ GENDER_CONCEPT_LIST = [
     "44814649",
     "44814653",
 ]
+# TODO: complete the list of discharge concepts
 DISCHARGE_CONCEPT_LIST = ["8536", "4216643", "4021968", "4146681", "4161979"]
+# TODO: complete the list of OOV concepts
 OOV_CONCEPT_MAP = {
-    1525734: "Drug",
-    779414: "Drug",
-    722117: "Drug",
-    722118: "Drug",
-    722119: "Drug",
-    905420: "Drug",
-    1525543: "Drug",
+    "1525734": "Drug",
+    "779414": "Drug",
+    "722117": "Drug",
+    "722118": "Drug",
+    "722119": "Drug",
+    "905420": "Drug",
+    "1525543": "Drug",
 }

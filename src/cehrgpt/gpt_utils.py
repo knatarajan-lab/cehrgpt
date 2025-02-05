@@ -7,7 +7,9 @@ from cehrgpt.cehrgpt_args import SamplingStrategy
 from cehrgpt.models.special_tokens import (
     DISCHARGE_CONCEPT_LIST,
     END_TOKEN,
-    INPATIENT_VISIT_CONCEPT_IDS,
+    GENDER_CONCEPT_LIST,
+    INPATIENT_VISIT_CONCEPT_LIST,
+    RACE_CONCEPT_LIST,
     START_TOKEN,
     VISIT_CONCEPT_LIST,
 )
@@ -216,6 +218,14 @@ def is_age_token(token: str) -> bool:
     return token.upper().startswith("AGE")
 
 
+def is_gender_token(token: str) -> bool:
+    return token in GENDER_CONCEPT_LIST
+
+
+def is_race_token(token: str) -> bool:
+    return token in RACE_CONCEPT_LIST
+
+
 def is_visit_start(token: str):
     """
     Check if the token indicates the start of a visit.
@@ -230,16 +240,24 @@ def is_visit_end(token: str) -> bool:
     return token in ["VE", "[VE]"]
 
 
-def is_inpatient_visit(token: str) -> bool:
-    return token in INPATIENT_VISIT_CONCEPT_IDS
+def is_visit_type_token(token: str) -> bool:
+    return token in VISIT_CONCEPT_LIST
 
 
-def is_att_token(token: str):
+def is_inpatient_visit_type_token(token: str) -> bool:
+    return token in INPATIENT_VISIT_CONCEPT_LIST
+
+
+def is_discharge_type_token(token: str) -> bool:
+    return token in DISCHARGE_CONCEPT_LIST
+
+
+def is_visit_att_tokens(token: str) -> bool:
     """
-    Check if the token is an attention token.
+    Check if the token is a between visit ATT token.
 
     :param token: Token to check.
-    :return: True if the token is an attention token, False otherwise.
+    :return: True if the token is an ATT token, False otherwise.
     """
     if bool(re.match(r"^D\d+", token)):  # day tokens
         return True
@@ -250,24 +268,6 @@ def is_att_token(token: str):
     elif bool(re.match(r"^Y\d+", token)):  # year tokens
         return True
     elif token == "LT":
-        return True
-    elif is_inpatient_att_token(token):
-        return True
-    return False
-
-
-def is_artificial_token(token: str) -> bool:
-    if token in VISIT_CONCEPT_LIST:
-        return True
-    if token in DISCHARGE_CONCEPT_LIST:
-        return True
-    if is_visit_start(token):
-        return True
-    if is_visit_end(token):
-        return True
-    if is_att_token(token):
-        return True
-    if token == END_TOKEN:
         return True
     return False
 
@@ -290,6 +290,36 @@ def is_inpatient_hour_token(token: str):
     :return: True if the token is an inpatient hour token, False otherwise.
     """
     return token.startswith("i-H")
+
+
+def is_att_token(token: str):
+    """
+    Check if the token is an ATT token including inpatient and between visit ATT tokens.
+
+    :param token: Token to check.
+    :return: True if the token is an ATT token, False otherwise.
+    """
+    if is_visit_att_tokens(token):  # day tokens
+        return True
+    elif is_inpatient_att_token(token):
+        return True
+    return False
+
+
+def is_artificial_token(token: str) -> bool:
+    if is_visit_type_token(token):
+        return True
+    if is_discharge_type_token(token):
+        return True
+    if is_visit_start(token):
+        return True
+    if is_visit_end(token):
+        return True
+    if is_att_token(token):
+        return True
+    if token == END_TOKEN:
+        return True
+    return False
 
 
 def extract_time_interval_in_days(token: str):
