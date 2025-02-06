@@ -339,15 +339,13 @@ class InpatientConceptValidationRule(ValidationRule):
             ]
         )
         token_validation = token.type in clinical_token_types
-        next_token_validation = (
-            next_token.type in clinical_token_types
-            or next_token.type
-            in [
-                TokenType.INPATIENT_HOUR,
-                TokenType.INPATIENT_ATT,
-                TokenType.VISIT_DISCHARGE,
-            ]
-        )
+        next_token_validation = next_token.type in clinical_token_types or next_token.type in [
+            TokenType.INPATIENT_HOUR,
+            TokenType.INPATIENT_ATT,
+            TokenType.VISIT_DISCHARGE,
+            # TODO: there could be cases where discharge_to_concept_id is NONE
+            TokenType.VE,
+        ]
         return pre_token_validation and token_validation and next_token_validation
 
 

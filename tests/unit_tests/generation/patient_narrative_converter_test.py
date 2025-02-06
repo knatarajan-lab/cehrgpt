@@ -1,6 +1,6 @@
 import unittest
 
-from cehrgpt.generation.cehrgpt_patient.patient_narrative_converter import (
+from cehrgpt.generation.cehrgpt_patient.patient_narrative_generator import (
     convert_concepts_to_patient_narrative,
 )
 
