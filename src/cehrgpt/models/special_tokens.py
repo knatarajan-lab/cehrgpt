@@ -65,7 +65,26 @@ RACE_CONCEPT_LIST = [
     "44814653",
 ]
 # TODO: complete the list of discharge concepts
-DISCHARGE_CONCEPT_LIST = ["8536", "4216643", "4021968", "4146681", "4161979"]
+DISCHARGE_CONCEPT_LIST = [
+    "8536",
+    "8546",
+    "8676",
+    "8717",
+    "8827",
+    "8863",
+    "8870",
+    "8920",
+    "8970",
+    "8971",
+    "4021968",
+    "4146681",
+    "4161979",
+    "4216643",
+    "38003619",
+    "38004519",
+    "44814649",
+    "44814650",
+]
 # TODO: complete the list of OOV concepts
 OOV_CONCEPT_MAP = {
     "1525734": "Drug",
