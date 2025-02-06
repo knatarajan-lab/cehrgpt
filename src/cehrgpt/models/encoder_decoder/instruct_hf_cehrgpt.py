@@ -8,10 +8,9 @@ from transformers.generation.stopping_criteria import StoppingCriteriaList
 from transformers.models.encoder_decoder import EncoderDecoderModel
 
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
-from cehrgpt.models.hf_modeling_outputs import (
-    CehrGptGenerateDecoderOnlyOutput,
-    InstructCehrGptCausalLMOutput,
-)
+from cehrgpt.models.hf_modeling_outputs import CehrGptGenerateDecoderOnlyOutput
+
+from .instruct_hf_modeling_outputs import InstructCehrGptCausalLMOutput
 
 
 class InstructCEHRGPTModel(EncoderDecoderModel):

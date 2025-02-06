@@ -89,11 +89,6 @@ class CehrGptCausalLMOutput(ModelOutput):
     token_value_loss: Optional[torch.FloatTensor] = None
 
 
-class InstructCehrGptCausalLMOutput(CehrGptCausalLMOutput):
-    encoder_last_hidden_state: Optional[torch.FloatTensor] = None
-    encoder_attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
-
-
 @dataclass
 class CehrGptGenerateDecoderOnlyOutput(ModelOutput):
     """
