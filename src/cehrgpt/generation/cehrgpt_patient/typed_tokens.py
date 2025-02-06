@@ -124,7 +124,7 @@ def make_cehrgpt_token(
         token_type = TokenType.VS
     elif is_visit_end(token):
         token_type = TokenType.VE
-    elif is_outpatient_visit_type_token(token):
+    elif is_outpatient_visit_type_token(token) and is_visit_start(pre_token):
         token_type = TokenType.OUTPATIENT_VISIT
     # TODO: it's important to put discharge before inpatient_visit because they share concept ids
     elif is_inpatient_visit_type_token(token) and is_visit_start(pre_token):

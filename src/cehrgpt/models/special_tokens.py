@@ -6,12 +6,7 @@ OUT_OF_VOCABULARY_TOKEN = "[OOV]"
 STOP_TOKENS = ["VE", "[VE]", END_TOKEN]
 
 # TODO: complete the list of inpatient visit concepts
-INPATIENT_VISIT_CONCEPT_LIST = [
-    "9201",
-    "262",
-    "8971",
-    "8920",
-]
+INPATIENT_VISIT_CONCEPT_LIST = ["9201", "262", "8971", "8920", "38004311"]
 
 # TODO: complete the list of outpatient visit concepts
 OUTPATIENT_VISIT_CONCEPT_LIST = [
@@ -32,6 +27,8 @@ OUTPATIENT_VISIT_CONCEPT_LIST = [
     "38004193",
     "32036",
     "8782",
+    # TODO: Home Visit, consider separating this out from the outpatient visits
+    "581476",
 ]
 # TODO: complete the list of gender concepts
 GENDER_CONCEPT_LIST = [
