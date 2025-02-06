@@ -6,7 +6,7 @@ import uuid
 from datetime import timedelta
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -173,12 +173,12 @@ def record_generator(parquet_files):
 
 
 def gpt_to_omop_converter_batch(
-    const: int,
     patient_sequence_parquet_files: List[str],
     domain_map: Dict[str, str],
     output_folder: str,
     buffer_size: int,
     use_original_person_id: bool,
+    const: int,
 ):
     omop_export_dict = {}
     error_dict = {}
@@ -515,7 +515,12 @@ def gpt_to_omop_converter_batch(
         f.write(str(export_error))
 
 
-def main(args):
+def main_parallel(
+    args,
+    function: Callable[
+        [List[str], Dict[str, str], str, int, bool, Optional[int]], None
+    ] = gpt_to_omop_converter_batch,
+):
     all_parquet_files = glob.glob(
         os.path.join(args.patient_sequence_path, "*parquet"), recursive=True
     )
@@ -538,24 +543,24 @@ def main(args):
     for i in range(1, args.cpu_cores + 1):
         pool_tuples.append(
             (
-                const * i,
                 batched_parquet_files[i - 1],
                 domain_map,
                 args.output_folder,
                 args.buffer_size,
                 args.use_original_person_id,
+                const * i,
             )
         )
 
     with Pool(processes=args.cpu_cores) as p:
-        p.starmap(gpt_to_omop_converter_batch, pool_tuples)
+        p.starmap(function, pool_tuples)
         p.close()
         p.join()
 
     return print("Done")
 
 
-if __name__ == "__main__":
+def create_arg_parser():
     parser = argparse.ArgumentParser(
         description="Arguments for converting patient sequences to OMOP"
     )
@@ -604,5 +609,8 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether or not to use the original person id",
     )
+    return parser.parse_args()
 
-    main(parser.parse_args())
+
+if __name__ == "__main__":
+    main_parallel(create_arg_parser())
