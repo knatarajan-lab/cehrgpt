@@ -10,7 +10,7 @@ clinical_token_types = [
     TokenType.DRUG,
     TokenType.MEASUREMENT,
     TokenType.OBSERVATION,
-    TokenType.DEATH,
+    TokenType.DEVICE,
 ]
 
 

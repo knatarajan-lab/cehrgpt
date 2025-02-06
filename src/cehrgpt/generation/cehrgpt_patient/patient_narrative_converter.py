@@ -39,6 +39,7 @@ class GeneratePatientNarrativeMapping(DatasetMapping):
                 record.get("number_as_values", None),
                 record.get("concept_as_values", None),
                 record.get("numeric", None),
+                record.get("person_id", None),
             )
         )
         record["patient_narrative"] = {
@@ -107,6 +108,7 @@ def convert_concepts_to_patient_narrative(
     numeric_values: Optional[List[float]] = None,
     text_values: Optional[List[str]] = None,
     units: Optional[List[str]] = None,
+    person_id: Optional[int] = None,
 ) -> Tuple[str, int, int]:
     pat_seq = list(concept_ids)
     starting_index = 0
@@ -131,7 +133,11 @@ def convert_concepts_to_patient_narrative(
         )
         narrative = patient.get_narrative()
     else:
-        logger.error(patient_sequence_converter.get_error_messages())
+        logger.error(
+            "person_id: %s, error: %s",
+            person_id,
+            patient_sequence_converter.get_error_messages(),
+        )
         narrative = None
     return narrative, starting_index, end_index
 
