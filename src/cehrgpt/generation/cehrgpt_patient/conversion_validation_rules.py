@@ -7,7 +7,7 @@ from .typed_tokens import CEHRGPTToken, TokenType
 clinical_token_types = [
     TokenType.CONDITION,
     TokenType.PROCEDURE,
-    TokenType.CONDITION,
+    TokenType.DRUG,
     TokenType.MEASUREMENT,
 ]
 

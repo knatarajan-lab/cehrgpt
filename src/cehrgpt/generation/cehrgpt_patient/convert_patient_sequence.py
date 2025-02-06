@@ -238,46 +238,47 @@ class PatientSequenceConverter:
         self,
         domain_map: Dict[str, str],
         concept_map: Dict[str, str],
-    ) -> CehrGptPatient:
-
-        year_token, age_token, gender_token, race_token = self.tokens[
-            :DEMOGRAPHIC_PROMPT_SIZE
-        ]
-        datetime_cursor = DateTimeCursor(
-            current_datetime=datetime.datetime(
-                year=int(year_token.get_name()), month=1, day=1
-            )
-        )
-        vs_index = 0
-        clinical_tokens = self.tokens[DEMOGRAPHIC_PROMPT_SIZE:]
-        visits = []
-        for token_index, token in enumerate(clinical_tokens):
-            if token.type == TokenType.VS:
-                vs_index = token_index
-            elif token.type == TokenType.VE:
-                visits.append(
-                    self.process_visit_block(
-                        visit_tokens=clinical_tokens[vs_index : token_index + 1],
-                        datetime_cursor=datetime_cursor,
-                        domain_map=domain_map,
-                        concept_map=concept_map,
-                    )
+    ) -> Optional[CehrGptPatient]:
+        if self.is_validation_passed:
+            year_token, age_token, gender_token, race_token = self.tokens[
+                :DEMOGRAPHIC_PROMPT_SIZE
+            ]
+            datetime_cursor = DateTimeCursor(
+                current_datetime=datetime.datetime(
+                    year=int(year_token.get_name()), month=1, day=1
                 )
-            elif token.type == TokenType.ATT:
-                datetime_cursor.add_days(extract_time_interval_in_days(token.name))
+            )
+            vs_index = 0
+            clinical_tokens = self.tokens[DEMOGRAPHIC_PROMPT_SIZE:]
+            visits = []
+            for token_index, token in enumerate(clinical_tokens):
+                if token.type == TokenType.VS:
+                    vs_index = token_index
+                elif token.type == TokenType.VE:
+                    visits.append(
+                        self.process_visit_block(
+                            visit_tokens=clinical_tokens[vs_index : token_index + 1],
+                            datetime_cursor=datetime_cursor,
+                            domain_map=domain_map,
+                            concept_map=concept_map,
+                        )
+                    )
+                elif token.type == TokenType.ATT:
+                    datetime_cursor.add_days(extract_time_interval_in_days(token.name))
 
-        birth_datetime = datetime.datetime(
-            int(year_token.get_name()) - int(age_token.get_name()), 1, 1
-        )
-        return CehrGptPatient(
-            patient_id=self.person_id,
-            birth_datetime=birth_datetime,
-            gender_concept_id=int(gender_token.name),
-            gender=concept_map.get(gender_token.name, None),
-            race_concept_id=int(race_token.get_name()),
-            race=concept_map.get(race_token.name, None),
-            visits=visits,
-        )
+            birth_datetime = datetime.datetime(
+                int(year_token.get_name()) - int(age_token.get_name()), 1, 1
+            )
+            return CehrGptPatient(
+                patient_id=self.person_id,
+                birth_datetime=birth_datetime,
+                gender_concept_id=int(gender_token.name),
+                gender=concept_map.get(gender_token.name, None),
+                race_concept_id=int(race_token.get_name()),
+                race=concept_map.get(race_token.name, None),
+                visits=visits,
+            )
+        return None
 
     def get_error_messages(self) -> List[str]:
         return self.error_messages

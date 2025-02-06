@@ -1,4 +1,5 @@
 import datetime
+import itertools
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -78,3 +79,6 @@ class CehrGptPatient:
         for visit in self.visits:
             narrative += visit.get_narrative(self.birth_datetime)
         return narrative
+
+    def get_events(self) -> List[CehrGptEvent]:
+        return itertools.chain.from_iterable(visit.events for visit in self.visits)
