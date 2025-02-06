@@ -120,6 +120,9 @@ def make_cehrgpt_token(
         token_type = TokenType.VS
     elif is_visit_end(token):
         token_type = TokenType.VE
+    # TODO: it's important to put discharge before inpatient_visit because they share concept ids
+    elif is_discharge_type_token(token):
+        token_type = TokenType.VISIT_DISCHARGE
     elif is_inpatient_visit_type_token(token):
         token_type = TokenType.INPATIENT_VISIT
     elif is_outpatient_visit_type_token(token):
@@ -130,8 +133,6 @@ def make_cehrgpt_token(
         token_type = TokenType.INPATIENT_ATT
     elif is_inpatient_hour_token(token):
         token_type = TokenType.INPATIENT_HOUR
-    elif is_discharge_type_token(token):
-        token_type = TokenType.VISIT_DISCHARGE
     elif is_death_token(token):
         token_type = TokenType.DEATH
     elif token in domain_map:
