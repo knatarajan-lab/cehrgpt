@@ -40,10 +40,11 @@ def validation_patient(
                 }
             )
         if index != 0 and index % buffer_size == 0:
-            pd.DataFrame(
-                error_messages, columns=["person_id", "error_messages"]
-            ).to_parquet(os.path.join(output_folder, f"batch_{index}.parquet"))
-            error_messages.clear()
+            if error_messages:
+                pd.DataFrame(
+                    error_messages, columns=["person_id", "error_messages"]
+                ).to_parquet(os.path.join(output_folder, f"batch_{index}.parquet"))
+                error_messages.clear()
 
     # Final flush to the disk if there are still records in the cache
     if error_messages:
