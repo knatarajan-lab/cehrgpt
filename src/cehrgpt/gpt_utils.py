@@ -1,7 +1,7 @@
 import random
 import re
 from datetime import date, timedelta
-from typing import List, Sequence, Tuple, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
 from cehrgpt.cehrgpt_args import SamplingStrategy
 from cehrgpt.models.special_tokens import (
@@ -226,18 +226,18 @@ def is_race_token(token: str) -> bool:
     return token in RACE_CONCEPT_LIST
 
 
-def is_visit_start(token: str):
+def is_visit_start(token: Optional[str]):
     """
     Check if the token indicates the start of a visit.
 
     :param token: Token to check.
     :return: True if the token is a visit start token, False otherwise.
     """
-    return token in ["VS", "[VS]"]
+    return token is not None and token in ["VS", "[VS]"]
 
 
-def is_visit_end(token: str) -> bool:
-    return token in ["VE", "[VE]"]
+def is_visit_end(token: Optional[str]) -> bool:
+    return token is not None and token in ["VE", "[VE]"]
 
 
 def is_death_token(token: str) -> bool:

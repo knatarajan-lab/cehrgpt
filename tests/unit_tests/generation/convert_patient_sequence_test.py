@@ -58,6 +58,28 @@ class TestConvertPatientSequence(unittest.TestCase):
             ).is_validation_passed
         )
 
+        # 8971 is being used as the inpatient_visit concept id as well as the discharge concept id
+        # This should pass because we have additional logic the where 8971 is by looking at the
+        # previous token
+        concept_ids = [
+            "year:2021",
+            "age:50",
+            "0",
+            "8527",
+            "[VS]",
+            "8971",
+            "concept1",
+            "i-D1",
+            "concept1",
+            "8971",
+            "[VE]",
+        ]
+        self.assertTrue(
+            PatientSequenceConverter(
+                translate_to_cehrgpt_tokens(concept_ids, domain_mapping)
+            ).is_validation_passed
+        )
+
     def test_failure_cases(self):
         """Test the function with typical input."""
         domain_mapping = {"concept1": "Condition", "concept2": "Condition"}

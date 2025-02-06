@@ -77,6 +77,7 @@ def make_cehrgpt_token(
     numeric_value: Optional[float] = None,
     text_value: Optional[str] = None,
     unit: Optional[str] = None,
+    prev_token: Optional[str] = None,
 ) -> CEHRGPTToken:
     """
     Creates a CEHRGPTToken instance with specific attributes based on the given input token and its properties.
@@ -92,6 +93,7 @@ def make_cehrgpt_token(
         numeric_value (Optional[float]): An optional numeric value associated with the token, default is None.
         text_value (Optional[str]): An optional text value associated with the token, default is None.
         unit (Optional[str]): An optional unit of measure associated with the token, default is None.
+        prev_token (Optional[str]):
 
     Returns:
         CEHRGPTToken: An instance of CEHRGPTToken that contains the token's name, type, index, and optionally,
@@ -121,10 +123,10 @@ def make_cehrgpt_token(
     elif is_visit_end(token):
         token_type = TokenType.VE
     # TODO: it's important to put discharge before inpatient_visit because they share concept ids
+    elif is_inpatient_visit_type_token(token) and is_visit_start(prev_token):
+        token_type = TokenType.INPATIENT_VISIT
     elif is_discharge_type_token(token):
         token_type = TokenType.VISIT_DISCHARGE
-    elif is_inpatient_visit_type_token(token):
-        token_type = TokenType.INPATIENT_VISIT
     elif is_outpatient_visit_type_token(token):
         token_type = TokenType.OUTPATIENT_VISIT
     elif is_visit_att_tokens(token):
@@ -161,6 +163,7 @@ def translate_to_cehrgpt_tokens(
 ) -> List[CEHRGPTToken]:
     cehrgpt_tokens: List[CEHRGPTToken] = []
     for event_index, event in enumerate(concept_ids):
+        prev_event = concept_ids[event_index - 1] if event_index > 0 else None
         numeric_value = (
             numeric_values[event_index] if numeric_values is not None else None
         )
@@ -174,6 +177,7 @@ def translate_to_cehrgpt_tokens(
                 numeric_value,
                 text_value,
                 unit,
+                prev_event,
             )
         )
     return cehrgpt_tokens
