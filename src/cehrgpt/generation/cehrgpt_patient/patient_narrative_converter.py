@@ -4,7 +4,7 @@ import os
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
-import pandas as pd
+import polars as pl
 from cehrbert.runners.runner_util import load_parquet_as_dataset
 
 from cehrgpt.data.hf_cehrgpt_dataset import apply_cehrbert_dataset_mapping
@@ -49,14 +49,53 @@ class GeneratePatientNarrativeMapping(DatasetMapping):
         return record
 
 
-def generate_concept_map(
-    concept_pd: pd.DataFrame,
+def generate_concept_maps(
+    concept_pl: pl.DataFrame,
 ) -> Tuple[Dict[str, str], Dict[str, str]]:
-    concept_map = {}
-    concept_domain = {}
-    for i in concept_pd.itertuples():
-        concept_map[str(i.concept_id)] = i.concept_name
-        concept_domain[str(i.concept_id)] = i.domain_id
+    """
+    Generate mappings from concept IDs to concept names and domain IDs using a Polars DataFrame.
+
+    This function takes a Polars DataFrame containing at least the columns 'concept_id', 'concept_name', and 'domain_id'.
+    It returns two dictionaries: one mapping concept IDs to their corresponding names and another mapping concept IDs to their domain IDs.
+
+    Parameters:
+    - concept_pl (pl.DataFrame): A Polars DataFrame with columns 'concept_id', 'concept_name', and 'domain_id'.
+        'concept_id' should be unique identifiers for the concepts.
+        'concept_name' is the descriptive name associated with each concept ID.
+        'domain_id' refers to the domain classification of each concept ID.
+
+    Returns:
+    - Tuple[Dict[str, str], Dict[str, str]]: A tuple of two dictionaries. The first dictionary maps concept IDs to concept names,
+      and the second maps concept IDs to domain IDs.
+
+    Example:
+    --------
+    >>> concept_pl = pl.DataFrame({
+    ...     "concept_id": [1, 2, 3],
+    ...     "concept_name": ["Name1", "Name2", "Name3"],
+    ...     "domain_id": ["Domain1", "Domain2", "Domain3"]
+    ... })
+    >>> concept_map, concept_domain = generate_concept_maps(concept_pl)
+    >>> print(concept_map)
+    {'1': 'Name1', '2': 'Name2', '3': 'Name3'}
+    >>> print(concept_domain)
+    {'1': 'Domain1', '2': 'Domain2', '3': 'Domain3'}
+    """
+    # Convert DataFrame columns to dictionaries
+    concept_map = concept_pl.select(
+        [pl.col("concept_id").cast(str), pl.col("concept_name")]
+    ).to_dict(as_series=False)
+
+    concept_domain = concept_pl.select(
+        [pl.col("concept_id").cast(str), pl.col("domain_id")]
+    ).to_dict(as_series=False)
+
+    # Convert list of values to single dictionary per column pair
+    concept_map = dict(zip(concept_map["concept_id"], concept_map["concept_name"]))
+    concept_domain = dict(
+        zip(concept_domain["concept_id"], concept_domain["domain_id"])
+    )
+
     return concept_map, concept_domain
 
 
@@ -99,8 +138,10 @@ def convert_concepts_to_patient_narrative(
 
 def main(args):
     pat_seq_dataset = load_parquet_as_dataset(args.patient_sequence_dir)
-    concept_pd = pd.read_parquet(args.concept_dir)
-    concept_name_mapping, concept_domain_mapping = generate_concept_map(concept_pd)
+    concept_dataframe = pl.read_parquet(os.path.join(args.concept_dir, "*parquet"))
+    concept_name_mapping, concept_domain_mapping = generate_concept_maps(
+        concept_dataframe
+    )
 
     transformed_pat_seq_dataset = apply_cehrbert_dataset_mapping(
         pat_seq_dataset,

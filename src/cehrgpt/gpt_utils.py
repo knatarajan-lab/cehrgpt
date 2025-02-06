@@ -240,6 +240,10 @@ def is_visit_end(token: str) -> bool:
     return token in ["VE", "[VE]"]
 
 
+def is_death_token(token: str) -> bool:
+    return token == "[DEATH]"
+
+
 def is_outpatient_visit_type_token(token: Union[str, int]) -> bool:
     return str(token) in OUTPATIENT_VISIT_CONCEPT_LIST
 

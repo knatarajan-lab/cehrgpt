@@ -35,6 +35,7 @@ dependencies = [
     "tokenizers==0.19",
     "trl==0.11.4",
     "networkx==3.2.1",
+    "polars"
 ]
 
 [tool.setuptools_scm]

@@ -99,7 +99,7 @@ class GenderValidationRule(ValidationRule):
         pre_token: Optional[CEHRGPTToken] = None,
         next_token: Optional[CEHRGPTToken] = None,
     ):
-        return token.type == TokenType.GENDER
+        return token.type in [TokenType.GENDER, TokenType.UNKNOWN]
 
 
 class RaceValidationRule(ValidationRule):
@@ -116,7 +116,7 @@ class RaceValidationRule(ValidationRule):
         pre_token: Optional[CEHRGPTToken] = None,
         next_token: Optional[CEHRGPTToken] = None,
     ):
-        return token.type == TokenType.RACE
+        return token.type in [TokenType.RACE, TokenType.UNKNOWN]
 
 
 class VisitStartValidationRule(ValidationRule):
@@ -137,6 +137,7 @@ class VisitStartValidationRule(ValidationRule):
             TokenType.ATT,
             TokenType.RACE,
             TokenType.GENDER,
+            TokenType.UNKNOWN,
         ]:
             return False
         if not next_token:

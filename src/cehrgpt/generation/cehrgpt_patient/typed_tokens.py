@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Union
 
 from cehrgpt.gpt_utils import (
     is_age_token,
+    is_death_token,
     is_discharge_type_token,
     is_gender_token,
     is_inpatient_att_token,
@@ -109,10 +110,10 @@ def make_cehrgpt_token(
         token_type = TokenType.YEAR
     elif is_age_token(token):
         token_type = TokenType.AGE
-    elif is_gender_token(token):
-        token_type = TokenType.GENDER
-    elif is_race_token(token):
+    elif is_race_token(token) and token_index == 3:
         token_type = TokenType.RACE
+    elif is_gender_token(token) and token_index == 2:
+        token_type = TokenType.GENDER
     elif is_visit_start(token):
         token_type = TokenType.VS
     elif is_visit_end(token):
@@ -129,6 +130,8 @@ def make_cehrgpt_token(
         token_type = TokenType.INPATIENT_HOUR
     elif is_discharge_type_token(token):
         token_type = TokenType.VISIT_DISCHARGE
+    elif is_death_token(token):
+        token_type = TokenType.DEATH
     elif token in domain_map:
         token_type = TokenType.from_value(domain_map[token].upper())
     elif token in OOV_CONCEPT_MAP:

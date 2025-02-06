@@ -3,12 +3,37 @@ from collections import defaultdict
 from typing import Dict, List, Optional
 
 import networkx
+import polars as pl
 
 from cehrgpt.generation.cehrgpt_patient.cehrgpt_patient_schema import CehrGptEvent
 from cehrgpt.generation.cehrgpt_patient.patient_narrative_converter import (
     PatientSequenceConverter,
 )
 from cehrgpt.generation.cehrgpt_patient.typed_tokens import translate_to_cehrgpt_tokens
+
+
+def create_drug_ingredient_to_brand_drug_map(
+    concept: pl.DataFrame, concept_ancestor: pl.DataFrame
+) -> Dict[int, List[int]]:
+
+    drug_ingredient = concept.filter(
+        (pl.col("domain_id") == "Drug") & (pl.col("concept_class_id") == "Ingredient")
+    ).select(pl.col("concept_id").alias("ingredient_concept_id"))
+    # Join with concept_ancestor where drug_concept_id matches ancestor_concept_id
+    ingredient_drug_map = drug_ingredient.join(
+        concept_ancestor,
+        left_on="ingredient_concept_id",
+        right_on="ancestor_concept_id",
+    ).select(
+        pl.col("ingredient_concept_id"),
+        pl.col("descendant_concept_id").alias("drug_concept_id"),
+    )
+    drug_ingredient_to_brand_drug_map = defaultdict(list)
+    for index, row in ingredient_drug_map.to_pandas().iterrows():
+        ingredient_id = row["ingredient_concept_id"]
+        drug_id = row["drug_concept_id"]
+        drug_ingredient_to_brand_drug_map[ingredient_id].append(drug_id)
+    return drug_ingredient_to_brand_drug_map
 
 
 class ConditionDrugKnowledgeGraph:
