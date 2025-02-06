@@ -26,8 +26,8 @@ def validation_patient(
     patient_record_generator = record_generator(patient_sequence_parquet_files)
     total_record = get_num_records(patient_sequence_parquet_files)
     for index, record in tqdm(enumerate(patient_record_generator), total=total_record):
-        concept_ids = record.get("concept_ids")
-        person_id = record.get("person_id")
+        concept_ids = getattr(record, "concept_ids")
+        person_id = getattr(record, "person_id", None)
         patient_converter = get_cehrgpt_patient_converter(
             concept_ids=concept_ids,
             concept_domain_mapping=domain_map,
@@ -49,7 +49,7 @@ def validation_patient(
     if error_messages:
         pd.DataFrame(
             error_messages, columns=["person_id", "error_messages"]
-        ).to_parquet(os.path.join(output_folder, f"batch_{index}.parquet"))
+        ).to_parquet(os.path.join(output_folder, f"batch_final.parquet"))
         error_messages.clear()
 
 
