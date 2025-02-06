@@ -101,7 +101,7 @@ class GenderValidationRule(ValidationRule):
         pre_token: Optional[CEHRGPTToken] = None,
         next_token: Optional[CEHRGPTToken] = None,
     ):
-        return token.type in [TokenType.GENDER, TokenType.UNKNOWN]
+        return token.type == TokenType.GENDER
 
 
 class RaceValidationRule(ValidationRule):
@@ -118,7 +118,7 @@ class RaceValidationRule(ValidationRule):
         pre_token: Optional[CEHRGPTToken] = None,
         next_token: Optional[CEHRGPTToken] = None,
     ):
-        return token.type in [TokenType.RACE, TokenType.UNKNOWN]
+        return token.type == TokenType.RACE
 
 
 class VisitStartValidationRule(ValidationRule):
@@ -185,13 +185,40 @@ class VisitEndValidationRule(ValidationRule):
         return pre_token_validation and token.type == TokenType.VE
 
 
-class VisitTypeValidationRule(ValidationRule):
+class OutpatientVisitTypeValidationRule(ValidationRule):
     def is_required(
         self,
         token: CEHRGPTToken,
         current_visit_type: Optional[CEHRGPTToken] = None,
     ):
-        return token.type in [TokenType.OUTPATIENT_VISIT, TokenType.INPATIENT_VISIT]
+        return token.type == TokenType.OUTPATIENT_VISIT
+
+    def validate(
+        self,
+        token: CEHRGPTToken,
+        pre_token: Optional[CEHRGPTToken] = None,
+        next_token: Optional[CEHRGPTToken] = None,
+    ):
+        if not pre_token or not next_token:
+            return False
+
+        # Patterns: [VS] [VT] [clinical_event]
+        token_validation = token.type == TokenType.OUTPATIENT_VISIT
+        next_token_validation = next_token.type in clinical_token_types
+        return (
+            pre_token.type == TokenType.VS
+            and token_validation
+            and next_token_validation
+        )
+
+
+class InpatientVisitTypeValidationRule(ValidationRule):
+    def is_required(
+        self,
+        token: CEHRGPTToken,
+        current_visit_type: Optional[CEHRGPTToken] = None,
+    ):
+        return token.type == TokenType.INPATIENT_VISIT
 
     def validate(
         self,
@@ -203,10 +230,7 @@ class VisitTypeValidationRule(ValidationRule):
             return False
 
         # Patterns: [VS] [VT] [clinical_event or i-D1 or i-h1]
-        token_validation = token.type in [
-            TokenType.OUTPATIENT_VISIT,
-            TokenType.INPATIENT_VISIT,
-        ]
+        token_validation = token.type == TokenType.INPATIENT_VISIT
         next_token_validation = (
             next_token.type in clinical_token_types
             or next_token.type in [TokenType.INPATIENT_HOUR, TokenType.INPATIENT_ATT]

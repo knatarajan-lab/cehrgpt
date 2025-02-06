@@ -122,6 +122,47 @@ class TestConvertPatientSequence(unittest.TestCase):
             ).is_validation_passed
         )
 
+        concept_ids = [
+            "year:2021",
+            "age:50",
+            "0",
+            "8527",
+            "[VS]",
+            "9202",
+            "i-D1",
+            "concept1",
+            "[VE]",
+            "D500",
+            "[VS]",
+            "[DEATH]",
+        ]
+        self.assertFalse(
+            PatientSequenceConverter(
+                translate_to_cehrgpt_tokens(concept_ids, domain_mapping)
+            ).is_validation_passed
+        )
+
+        concept_ids = [
+            "year:2021",
+            "age:50",
+            "0",
+            "8527",
+            "[VS]",
+            "9202",
+            "concept1",
+            "i-D1",
+            "concept1",
+            "[VE]",
+            "D500",
+            "[VS]",
+            "[DEATH]",
+        ]
+        self.assertFalse(
+            PatientSequenceConverter(
+                translate_to_cehrgpt_tokens(concept_ids, domain_mapping)
+            ).is_validation_passed
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
