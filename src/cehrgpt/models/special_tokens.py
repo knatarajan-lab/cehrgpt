@@ -84,6 +84,7 @@ DISCHARGE_CONCEPT_LIST = [
     "38004519",
     "44814649",
     "44814650",
+    "0",
 ]
 # TODO: complete the list of OOV concepts
 OOV_CONCEPT_MAP = {

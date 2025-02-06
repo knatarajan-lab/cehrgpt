@@ -12,7 +12,6 @@ from cehrgpt.data.hf_cehrgpt_dataset_mapping import DatasetMapping
 from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
     get_cehrgpt_patient_converter,
 )
-from cehrgpt.generation.cehrgpt_patient.typed_tokens import translate_to_cehrgpt_tokens
 from cehrgpt.gpt_utils import random_slice_gpt_sequence
 
 logger = logging.getLogger(__name__)
@@ -36,9 +35,6 @@ class GeneratePatientNarrativeMapping(DatasetMapping):
                 self.concept_name_mapping,
                 self.concept_domain_mapping,
                 self.context_window,
-                record.get("number_as_values", None),
-                record.get("concept_as_values", None),
-                record.get("numeric", None),
                 record.get("person_id", None),
             )
         )
