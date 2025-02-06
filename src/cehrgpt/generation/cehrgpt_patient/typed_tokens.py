@@ -39,6 +39,8 @@ class TokenType(Enum):
     CONDITION = auto()
     PROCEDURE = auto()
     MEASUREMENT = auto()
+    OBSERVATION = auto()
+    DEVICE = auto()
     DEATH = auto()
     INPATIENT_VISIT = auto()
     VISIT_DISCHARGE = auto()
