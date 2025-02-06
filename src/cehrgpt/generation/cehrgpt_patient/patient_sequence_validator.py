@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 from typing import Dict, List
 
 import pandas as pd
@@ -23,8 +22,6 @@ def validation_patient(
     buffer_size: int,
     *args,
 ) -> None:
-    # Create the folder if it does not exist
-    Path(output_folder).mkdir(parents=True, exist_ok=True)
     error_messages = []
     patient_record_generator = record_generator(patient_sequence_parquet_files)
     total_record = get_num_records(patient_sequence_parquet_files)
@@ -57,5 +54,4 @@ def validation_patient(
 
 
 if __name__ == "__main__":
-    parser = create_arg_parser()
-    main_parallel(parser, validation_patient)
+    main_parallel(create_arg_parser(), validation_patient)
