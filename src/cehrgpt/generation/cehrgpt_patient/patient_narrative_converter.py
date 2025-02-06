@@ -10,7 +10,7 @@ from cehrbert.runners.runner_util import load_parquet_as_dataset
 from cehrgpt.data.hf_cehrgpt_dataset import apply_cehrbert_dataset_mapping
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import DatasetMapping
 from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
-    PatientSequenceConverter,
+    get_cehrgpt_patient_converter,
 )
 from cehrgpt.generation.cehrgpt_patient.typed_tokens import translate_to_cehrgpt_tokens
 from cehrgpt.gpt_utils import random_slice_gpt_sequence
@@ -105,9 +105,6 @@ def convert_concepts_to_patient_narrative(
     concept_name_mapping: Dict[str, str],
     concept_domain_mapping: Dict[str, str],
     context_window: int,
-    numeric_values: Optional[List[float]] = None,
-    text_values: Optional[List[str]] = None,
-    units: Optional[List[str]] = None,
     person_id: Optional[int] = None,
 ) -> Tuple[str, int, int]:
     pat_seq = list(concept_ids)
@@ -118,15 +115,9 @@ def convert_concepts_to_patient_narrative(
             concept_ids=concept_ids, max_seq_len=context_window
         )
         pat_seq = demographic_tokens + pat_seq[starting_index:end_index]
-
-    cehrgpt_tokens = translate_to_cehrgpt_tokens(
-        concept_ids=pat_seq,
-        concept_domain_mapping=concept_domain_mapping,
-        numeric_values=numeric_values,
-        text_values=text_values,
-        units=units,
+    patient_sequence_converter = get_cehrgpt_patient_converter(
+        concept_ids=pat_seq, concept_domain_mapping=concept_domain_mapping
     )
-    patient_sequence_converter = PatientSequenceConverter(tokens=cehrgpt_tokens)
     if patient_sequence_converter.is_validation_passed:
         patient = patient_sequence_converter.get_patient(
             domain_map=concept_domain_mapping, concept_map=concept_name_mapping
@@ -134,8 +125,9 @@ def convert_concepts_to_patient_narrative(
         narrative = patient.get_narrative()
     else:
         logger.error(
-            "person_id: %s, error: %s",
+            "person_id: %s, starting_index: %s, error: %s",
             person_id,
+            starting_index,
             patient_sequence_converter.get_error_messages(),
         )
         narrative = None

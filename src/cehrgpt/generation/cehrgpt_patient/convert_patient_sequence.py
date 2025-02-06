@@ -11,22 +11,16 @@ from cehrgpt.generation.cehrgpt_patient.conversion_validation_rules import (
     clinical_token_types,
     get_validation_rules,
 )
-from cehrgpt.generation.cehrgpt_patient.typed_tokens import CEHRGPTToken, TokenType
+from cehrgpt.generation.cehrgpt_patient.typed_tokens import (
+    CEHRGPTToken,
+    TokenType,
+    translate_to_cehrgpt_tokens,
+)
 from cehrgpt.gpt_utils import (
     DEMOGRAPHIC_PROMPT_SIZE,
     extract_hours_from_hour_token,
     extract_time_interval_in_days,
-    is_inpatient_visit_type_token,
 )
-
-TABLE_LIST = [
-    "person",
-    "visit_occurrence",
-    "condition_occurrence",
-    "procedure_occurrence",
-    "drug_exposure",
-    "death",
-]
 
 
 class IdGenerator:
@@ -385,3 +379,20 @@ class PatientSequenceConverter:
             discharge_to_concept_id=discharge_to_concept_id,
             events=events,
         )
+
+
+def get_cehrgpt_patient_converter(
+    concept_ids: List[str],
+    concept_domain_mapping: Dict[str, str],
+    numeric_values: Optional[List[float]] = None,
+    text_values: Optional[List[str]] = None,
+    units: Optional[List[str]] = None,
+) -> PatientSequenceConverter:
+    cehrgpt_tokens = translate_to_cehrgpt_tokens(
+        concept_ids=concept_ids,
+        concept_domain_mapping=concept_domain_mapping,
+        numeric_values=numeric_values,
+        text_values=text_values,
+        units=units,
+    )
+    return PatientSequenceConverter(tokens=cehrgpt_tokens)

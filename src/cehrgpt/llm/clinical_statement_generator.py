@@ -6,16 +6,14 @@ import networkx
 import polars as pl
 
 from cehrgpt.generation.cehrgpt_patient.cehrgpt_patient_schema import CehrGptEvent
-from cehrgpt.generation.cehrgpt_patient.patient_narrative_converter import (
-    PatientSequenceConverter,
+from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
+    get_cehrgpt_patient_converter,
 )
-from cehrgpt.generation.cehrgpt_patient.typed_tokens import translate_to_cehrgpt_tokens
 
 
 def create_drug_ingredient_to_brand_drug_map(
     concept: pl.DataFrame, concept_ancestor: pl.DataFrame
 ) -> Dict[int, List[int]]:
-
     drug_ingredient = concept.filter(
         (pl.col("domain_id") == "Drug") & (pl.col("concept_class_id") == "Ingredient")
     ).select(pl.col("concept_id").alias("ingredient_concept_id"))
@@ -90,11 +88,10 @@ class ClinicalStatementGenerator:
         concept_domain_mapping: Dict[str, str],
     ) -> Optional[str]:
         clinical_statement = None
-        cehrgpt_tokens = translate_to_cehrgpt_tokens(
+        patient_sequence_converter = get_cehrgpt_patient_converter(
             concept_ids=concept_ids,
             concept_domain_mapping=concept_domain_mapping,
         )
-        patient_sequence_converter = PatientSequenceConverter(tokens=cehrgpt_tokens)
         if patient_sequence_converter.is_validation_passed:
             cehrgpt_patient = patient_sequence_converter.get_patient(
                 domain_map=concept_domain_mapping, concept_map=concept_name_mapping
