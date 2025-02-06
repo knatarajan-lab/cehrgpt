@@ -1,56 +1,73 @@
 import argparse
-import datetime
+import logging
 import os
 import uuid
-from collections import defaultdict
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 from cehrbert.runners.runner_util import load_parquet_as_dataset
 
 from cehrgpt.data.hf_cehrgpt_dataset import apply_cehrbert_dataset_mapping
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import DatasetMapping
-from cehrgpt.generation.omop_converter_batch import START_TOKEN_SIZE
-from cehrgpt.gpt_utils import (
-    extract_time_interval_in_days,
-    is_att_token,
-    is_inpatient_att_token,
-    random_slice_gpt_sequence,
+from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
+    PatientSequenceConverter,
 )
+from cehrgpt.generation.cehrgpt_patient.typed_tokens import translate_to_cehrgpt_tokens
+from cehrgpt.gpt_utils import random_slice_gpt_sequence
+
+logger = logging.getLogger(__name__)
 
 
 class GeneratePatientNarrativeMapping(DatasetMapping):
     def __init__(
         self,
         context_window: int,
-        concept_mapping: Dict[str, str],
+        concept_name_mapping: Dict[str, str],
+        concept_domain_mapping: Dict[str, str],
     ):
         self.context_window = context_window
-        self.concept_mapping = concept_mapping
+        self.concept_name_mapping = concept_name_mapping
+        self.concept_domain_mapping = concept_domain_mapping
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
         patient_narrative, start_index, end_index = (
             convert_concepts_to_patient_narrative(
-                record["concept_ids"], self.concept_mapping, self.context_window
+                record["concept_ids"],
+                self.concept_name_mapping,
+                self.concept_domain_mapping,
+                self.context_window,
+                record.get("number_as_values", None),
+                record.get("concept_as_values", None),
+                record.get("numeric", None),
             )
         )
         record["patient_narrative"] = {
-            "patient_narrative": patient_narrative,
+            "narrative": patient_narrative,
             "start_index": start_index,
             "end_index": end_index,
         }
         return record
 
 
-def generate_concept_map(concept_pd: pd.DataFrame) -> Dict[str, str]:
+def generate_concept_map(
+    concept_pd: pd.DataFrame,
+) -> Tuple[Dict[str, str], Dict[str, str]]:
     concept_map = {}
+    concept_domain = {}
     for i in concept_pd.itertuples():
         concept_map[str(i.concept_id)] = i.concept_name
-    return concept_map
+        concept_domain[str(i.concept_id)] = i.domain_id
+    return concept_map, concept_domain
 
 
 def convert_concepts_to_patient_narrative(
-    concept_ids: List[str], concept_mapping: Dict[str, str], context_window: int
+    concept_ids: List[str],
+    concept_name_mapping: Dict[str, str],
+    concept_domain_mapping: Dict[str, str],
+    context_window: int,
+    numeric_values: Optional[List[float]] = None,
+    text_values: Optional[List[str]] = None,
+    units: Optional[List[str]] = None,
 ) -> Tuple[str, int, int]:
     pat_seq = list(concept_ids)
     starting_index = 0
@@ -61,56 +78,36 @@ def convert_concepts_to_patient_narrative(
         )
         pat_seq = demographic_tokens + pat_seq[starting_index:end_index]
 
-    [start_year, start_age, start_gender, start_race] = pat_seq[:START_TOKEN_SIZE]
-
-    try:
-        start_year = int(start_year.split(":")[1])
-        start_age = int(start_age.split(":")[1])
-        birth_year = start_year - start_age
-    except Exception as e:
-        raise RuntimeError(
-            f"Failed to convert {pat_seq[:START_TOKEN_SIZE]} due to {e}, skipping to the next record"
-        )
-
-    group_events_by_date = defaultdict(list)
-    date_cursor = datetime.date(year=start_year, month=1, day=1)
-    for clinical_event in pat_seq[START_TOKEN_SIZE:]:
-        if is_att_token(clinical_event) or is_inpatient_att_token(clinical_event):
-            day_delta = extract_time_interval_in_days(clinical_event)
-            date_cursor += datetime.timedelta(days=day_delta)
-        else:
-            if clinical_event in concept_mapping:
-                group_events_by_date[date_cursor].append(
-                    concept_mapping[clinical_event]
-                )
-
-    start_gender = concept_mapping.get(start_gender, start_gender)
-    start_race = concept_mapping.get(start_race, start_race)
-    narrative = (
-        f"Patient Demographics:\n\tGender: {start_gender}\n\tRace: {start_race}\n"
+    cehrgpt_tokens = translate_to_cehrgpt_tokens(
+        concept_ids=pat_seq,
+        concept_domain_mapping=concept_domain_mapping,
+        numeric_values=numeric_values,
+        text_values=text_values,
+        units=units,
     )
-    starting_date = datetime.date(year=int(start_year), month=1, day=1)
-    for current_date in sorted(group_events_by_date):
-        age = current_date.year - birth_year
-        narrative += f"\nOn day {(current_date - starting_date).days} (Date: {current_date}) (Age: {age})\n"
-        narrative += "\n".join(
-            [
-                f"\t{i + 1}. {event}"
-                for i, event in enumerate(group_events_by_date[current_date])
-            ]
+    patient_sequence_converter = PatientSequenceConverter(tokens=cehrgpt_tokens)
+    if patient_sequence_converter.is_validation_passed:
+        patient = patient_sequence_converter.get_patient(
+            domain_map=concept_domain_mapping, concept_map=concept_name_mapping
         )
+        narrative = patient.get_narrative()
+    else:
+        logger.error(patient_sequence_converter.get_error_messages())
+        narrative = None
     return narrative, starting_index, end_index
 
 
 def main(args):
     pat_seq_dataset = load_parquet_as_dataset(args.patient_sequence_dir)
     concept_pd = pd.read_parquet(args.concept_dir)
-    concept_mapping = generate_concept_map(concept_pd)
+    concept_name_mapping, concept_domain_mapping = generate_concept_map(concept_pd)
 
     transformed_pat_seq_dataset = apply_cehrbert_dataset_mapping(
         pat_seq_dataset,
         mapping_function=GeneratePatientNarrativeMapping(
-            context_window=args.context_window, concept_mapping=concept_mapping
+            context_window=args.context_window,
+            concept_name_mapping=concept_name_mapping,
+            concept_domain_mapping=concept_domain_mapping,
         ),
         batch_size=args.batch_size,
         num_proc=args.num_proc,

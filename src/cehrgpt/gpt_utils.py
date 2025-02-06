@@ -1,7 +1,7 @@
 import random
 import re
 from datetime import date, timedelta
-from typing import List, Sequence, Tuple
+from typing import List, Sequence, Tuple, Union
 
 from cehrgpt.cehrgpt_args import SamplingStrategy
 from cehrgpt.models.special_tokens import (
@@ -240,20 +240,20 @@ def is_visit_end(token: str) -> bool:
     return token in ["VE", "[VE]"]
 
 
-def is_outpatient_visit_type_token(token: str) -> bool:
-    return token in OUTPATIENT_VISIT_CONCEPT_LIST
+def is_outpatient_visit_type_token(token: Union[str, int]) -> bool:
+    return str(token) in OUTPATIENT_VISIT_CONCEPT_LIST
 
 
-def is_inpatient_visit_type_token(token: str) -> bool:
-    return token in INPATIENT_VISIT_CONCEPT_LIST
+def is_inpatient_visit_type_token(token: Union[str, int]) -> bool:
+    return str(token) in INPATIENT_VISIT_CONCEPT_LIST
 
 
-def is_visit_type_token(token: str) -> bool:
+def is_visit_type_token(token: Union[str, int]) -> bool:
     return is_inpatient_visit_type_token(token) | is_outpatient_visit_type_token(token)
 
 
-def is_discharge_type_token(token: str) -> bool:
-    return token in DISCHARGE_CONCEPT_LIST
+def is_discharge_type_token(token: Union[str, int]) -> bool:
+    return str(token) in DISCHARGE_CONCEPT_LIST
 
 
 def is_visit_att_tokens(token: str) -> bool:

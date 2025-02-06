@@ -33,15 +33,15 @@ OUTPATIENT_VISIT_CONCEPT_LIST = [
     "32036",
     "8782",
 ]
-# TODO: complete the list of race concepts
-RACE_CONCEPT_LIST = [
+# TODO: complete the list of gender concepts
+GENDER_CONCEPT_LIST = [
     "0",
     "8507",
     "8532",
 ]
 
-# TODO: complete the list of gender concepts
-GENDER_CONCEPT_LIST = [
+# TODO: complete the list of race concepts
+RACE_CONCEPT_LIST = [
     "0",
     "8515",
     "8516",

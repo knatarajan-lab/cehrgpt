@@ -16,6 +16,7 @@ from cehrgpt.gpt_utils import (
     DEMOGRAPHIC_PROMPT_SIZE,
     extract_hours_from_hour_token,
     extract_time_interval_in_days,
+    is_inpatient_visit_type_token,
 )
 
 TABLE_LIST = [
@@ -215,7 +216,7 @@ class PatientSequenceConverter:
     def __init__(
         self,
         tokens: List[CEHRGPTToken],
-        id_generator: IdGenerator,
+        id_generator: Optional[IdGenerator] = None,
         original_person_id: Optional[int] = None,
     ):
         self.tokens = tokens
@@ -226,7 +227,7 @@ class PatientSequenceConverter:
         self.person_id = (
             original_person_id
             if original_person_id
-            else id_generator.get_next_person_id()
+            else id_generator.get_next_person_id() if id_generator else None
         )
 
     @property
@@ -236,7 +237,7 @@ class PatientSequenceConverter:
     def get_patient(
         self,
         domain_map: Dict[str, str],
-        concept_map: Dict[int, str],
+        concept_map: Dict[str, str],
     ) -> CehrGptPatient:
 
         year_token, age_token, gender_token, race_token = self.tokens[
@@ -272,9 +273,9 @@ class PatientSequenceConverter:
             patient_id=self.person_id,
             birth_datetime=birth_datetime,
             gender_concept_id=int(gender_token.name),
-            gender=concept_map.get(int(gender_token.name), None),
+            gender=concept_map.get(gender_token.name, None),
             race_concept_id=int(race_token.get_name()),
-            race=concept_map.get(int(race_token.name), None),
+            race=concept_map.get(race_token.name, None),
             visits=visits,
         )
 
@@ -282,36 +283,50 @@ class PatientSequenceConverter:
         return self.error_messages
 
     def validate(self) -> None:
+        current_visit_token = None
         for i, token in enumerate(self.tokens):
+            if token.type in [TokenType.INPATIENT_VISIT, TokenType.OUTPATIENT_VISIT]:
+                current_visit_token = token
+            if token.type == TokenType.VE:
+                current_visit_token = None
             pre_token = self.tokens[i - 1] if i > 0 else None
             next_token = self.tokens[i + 1] if i < len(self.tokens) - 1 else None
-            self._validate_token(token, pre_token, next_token)
+            self._validate_token(token, pre_token, next_token, current_visit_token)
 
     def _validate_token(
         self,
         token: CEHRGPTToken,
         pre_token: Optional[CEHRGPTToken] = None,
         next_token: Optional[CEHRGPTToken] = None,
+        current_visit_token: Optional[CEHRGPTToken] = None,
     ) -> None:
+        is_validated = False
         for validation_rule in self.validation_rules:
-            if validation_rule.is_required(token):
+            if validation_rule.is_required(token, current_visit_token):
+                is_validated = True
                 if not validation_rule.validate(token, pre_token, next_token):
                     self.error_messages.append(
                         validation_rule.get_validation_error_message(
                             token, pre_token, next_token
                         )
                     )
+            if is_validated:
+                break
 
     def process_visit_block(
         self,
         visit_tokens: List[CEHRGPTToken],
         datetime_cursor: DateTimeCursor,
         domain_map: Dict[str, str],
-        concept_map: Dict[int, str],
+        concept_map: Dict[str, str],
     ) -> CehrGptVisit:
         visit_concept_id = 0
         discharge_to_concept_id = None
-        visit_id = self.id_generator.get_next_visit_occurrence_id()
+        visit_id = (
+            self.id_generator.get_next_visit_occurrence_id()
+            if self.id_generator
+            else None
+        )
         visit_start_datetime: Optional[datetime.datetime] = None
         visit_end_datetime: Optional[datetime.datetime] = None
         events = []
@@ -330,11 +345,16 @@ class PatientSequenceConverter:
                 datetime_cursor.add_hours(extract_hours_from_hour_token(token.name))
             elif token.type in clinical_token_types or token.type == TokenType.DEATH:
                 domain = domain_map.get(token.name, None)
-                record_id = self.id_generator.get_next_id_by_domain(domain)
+                record_id = (
+                    self.id_generator.get_next_id_by_domain(domain)
+                    if self.id_generator
+                    else None
+                )
                 events.append(
                     CehrGptEvent(
                         time=datetime_cursor.current_datetime,
                         code=token.name,
+                        code_label=concept_map.get(token.name, None),
                         text_value=token.text_value,
                         numeric_value=token.numeric_value,
                         unit=token.unit,
@@ -349,14 +369,18 @@ class PatientSequenceConverter:
         if visit_end_datetime is None:
             visit_start_datetime = events[-1].get("time")
 
+        visit_type = concept_map.get(str(visit_concept_id), None)
+        discharge_facility = concept_map.get(
+            str(discharge_to_concept_id) if discharge_to_concept_id else None, None
+        )
         return CehrGptVisit(
             patient_id=self.person_id,
             visit_id=visit_id,
-            visit_type=concept_map.get(visit_concept_id, None),
+            visit_type=visit_type,
             visit_concept_id=visit_concept_id,
             visit_start_datetime=visit_start_datetime,
             visit_end_datetime=visit_end_datetime,
-            discharge_facility=concept_map.get(discharge_to_concept_id, None),
+            discharge_facility=discharge_facility,
             discharge_to_concept_id=discharge_to_concept_id,
             events=events,
         )
