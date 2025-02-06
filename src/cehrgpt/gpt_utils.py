@@ -1,13 +1,17 @@
 import random
 import re
 from datetime import date, timedelta
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple, Union
 
 from cehrgpt.cehrgpt_args import SamplingStrategy
 from cehrgpt.models.special_tokens import (
-    DISCHARGE_CONCEPT_IDS,
+    DISCHARGE_CONCEPT_LIST,
     END_TOKEN,
-    VISIT_CONCEPT_IDS,
+    GENDER_CONCEPT_LIST,
+    INPATIENT_VISIT_CONCEPT_LIST,
+    OUTPATIENT_VISIT_CONCEPT_LIST,
+    RACE_CONCEPT_LIST,
+    START_TOKEN,
 )
 
 # Regular expression pattern to match inpatient attendance tokens
@@ -155,7 +159,7 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
             )
         ):
             current_token = concept_ids[i]
-            if current_token == "VE":
+            if is_visit_end(current_token):
                 random_end_index = i
                 break
         return random_starting_index, random_end_index, demographic_tokens
@@ -198,26 +202,70 @@ def is_clinical_event(token: str) -> bool:
     return token.isnumeric()
 
 
-def is_visit_start(token: str):
+def is_seq_start(token: str) -> bool:
+    return token in ["START", "[START]", START_TOKEN]
+
+
+def is_seq_end(token: str) -> bool:
+    return token in ["END", "[END]", END_TOKEN]
+
+
+def is_year_token(token: str) -> bool:
+    return token.upper().startswith("YEAR")
+
+
+def is_age_token(token: str) -> bool:
+    return token.upper().startswith("AGE")
+
+
+def is_gender_token(token: str) -> bool:
+    return token in GENDER_CONCEPT_LIST
+
+
+def is_race_token(token: str) -> bool:
+    return token in RACE_CONCEPT_LIST
+
+
+def is_visit_start(token: Optional[str]):
     """
     Check if the token indicates the start of a visit.
 
     :param token: Token to check.
     :return: True if the token is a visit start token, False otherwise.
     """
-    return token in ["VS", "[VS]"]
+    return token is not None and token in ["VS", "[VS]"]
 
 
-def is_visit_end(token: str) -> bool:
-    return token in ["VE", "[VE]"]
+def is_visit_end(token: Optional[str]) -> bool:
+    return token is not None and token in ["VE", "[VE]"]
 
 
-def is_att_token(token: str):
+def is_death_token(token: str) -> bool:
+    return token == "[DEATH]"
+
+
+def is_outpatient_visit_type_token(token: Union[str, int]) -> bool:
+    return str(token) in OUTPATIENT_VISIT_CONCEPT_LIST
+
+
+def is_inpatient_visit_type_token(token: Union[str, int]) -> bool:
+    return str(token) in INPATIENT_VISIT_CONCEPT_LIST
+
+
+def is_visit_type_token(token: Union[str, int]) -> bool:
+    return is_inpatient_visit_type_token(token) | is_outpatient_visit_type_token(token)
+
+
+def is_discharge_type_token(token: Union[str, int]) -> bool:
+    return str(token) in DISCHARGE_CONCEPT_LIST
+
+
+def is_visit_att_tokens(token: str) -> bool:
     """
-    Check if the token is an attention token.
+    Check if the token is a between visit ATT token.
 
     :param token: Token to check.
-    :return: True if the token is an attention token, False otherwise.
+    :return: True if the token is an ATT token, False otherwise.
     """
     if bool(re.match(r"^D\d+", token)):  # day tokens
         return True
@@ -229,19 +277,53 @@ def is_att_token(token: str):
         return True
     elif token == "LT":
         return True
-    elif token[:3] == "VS-":  # VS-D7-VE
+    return False
+
+
+def is_inpatient_att_token(token: str):
+    """
+    Check if the token is an inpatient ATT token.
+
+    :param token: Token to check.
+    :return: True if the token is an inpatient ATT token, False otherwise.
+    """
+    return (
+        INPATIENT_ATT_PATTERN.match(token)
+        or token.startswith("i-LT")
+        or token.startswith("VS-LT")
+    )
+
+
+def is_inpatient_hour_token(token: str):
+    """
+    Check if the token is an inpatient hour token.
+
+    :param token: Token to check.
+    :return: True if the token is an inpatient hour token, False otherwise.
+    """
+    return token.startswith("i-H")
+
+
+def is_att_token(token: str):
+    """
+    Check if the token is an ATT token including inpatient and between visit ATT tokens.
+
+    :param token: Token to check.
+    :return: True if the token is an ATT token, False otherwise.
+    """
+    if is_visit_att_tokens(token):  # day tokens
         return True
-    elif token[:2] == "i-" and not token.startswith(
-        "i-H"
-    ):  # i-D7 and exclude hour tokens
+    elif is_inpatient_att_token(token):
         return True
     return False
 
 
 def is_artificial_token(token: str) -> bool:
-    if token in VISIT_CONCEPT_IDS:
+    if is_inpatient_att_token(token):
         return True
-    if token in DISCHARGE_CONCEPT_IDS:
+    if is_outpatient_visit_type_token(token):
+        return True
+    if is_discharge_type_token(token):
         return True
     if is_visit_start(token):
         return True
@@ -254,17 +336,14 @@ def is_artificial_token(token: str) -> bool:
     return False
 
 
-def is_inpatient_att_token(token: str):
-    """
-    Check if the token is an inpatient ATT token.
-
-    :param token: Token to check.
-    :return: True if the token is an inpatient ATT token, False otherwise.
-    """
-    return INPATIENT_ATT_PATTERN.match(token)
+def extract_hours_from_hour_token(token: str) -> int:
+    # event.startswith("i-H")
+    if is_inpatient_hour_token(token):
+        return int(token[3:])
+    raise ValueError(f"Invalid inpatient hour token {token}")
 
 
-def extract_time_interval_in_days(token: str):
+def extract_time_interval_in_days(token: str) -> int:
     """
     Extract the time interval in days from a token.
 
@@ -287,12 +366,14 @@ def extract_time_interval_in_days(token: str):
             part = token.split("-")[1]
             if part.startswith("LT"):
                 return 365 * 3
-            return int(part[1:])
+            # recursively call itself
+            return extract_time_interval_in_days(part)
         elif token[:2] == "i-":  # i-D7
             part = token.split("-")[1]
             if part.startswith("LT"):
                 return 365 * 3
-            return int(token.split("-")[1][1:])
+            # recursively call itself
+            return extract_time_interval_in_days(part)
     except Exception:
         raise ValueError(f"Invalid time token: {token}")
     raise ValueError(f"Invalid time token: {token}")
