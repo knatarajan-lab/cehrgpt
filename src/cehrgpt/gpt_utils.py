@@ -287,7 +287,11 @@ def is_inpatient_att_token(token: str):
     :param token: Token to check.
     :return: True if the token is an inpatient ATT token, False otherwise.
     """
-    return INPATIENT_ATT_PATTERN.match(token)
+    return (
+        INPATIENT_ATT_PATTERN.match(token)
+        or token.startswith("i-LT")
+        or token.startswith("VS-LT")
+    )
 
 
 def is_inpatient_hour_token(token: str):
