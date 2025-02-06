@@ -6,7 +6,7 @@ import uuid
 from datetime import timedelta
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -25,19 +25,16 @@ from cehrgpt.generation.omop_entity import (
 )
 from cehrgpt.gpt_utils import (
     extract_time_interval_in_days,
-    generate_artificial_time_tokens,
+    is_discharge_type_token,
     is_inpatient_att_token,
+    is_inpatient_visit_type_token,
+    is_visit_att_tokens,
     is_visit_end,
     is_visit_start,
 )
-from cehrgpt.models.tokenization_hf_cehrgpt import END_TOKEN
+from cehrgpt.models.special_tokens import OOV_CONCEPT_MAP, STOP_TOKENS
 
-# TODO: move these to cehrbert_data
-STOP_TOKENS = ["VE", "[VE]", END_TOKEN]
-
-CURRENT_PATH = Path(__file__).parent
 START_TOKEN_SIZE = 4
-ATT_TIME_TOKENS = generate_artificial_time_tokens()
 TABLE_LIST = [
     "person",
     "visit_occurrence",
@@ -47,16 +44,6 @@ TABLE_LIST = [
     "death",
     "measurement",
 ]
-DISCHARGE_CONCEPT_LIST = [4216643, 4021968, 4146681, 4161979]
-OOV_CONCEPT_MAP = {
-    1525734: "Drug",
-    779414: "Drug",
-    722117: "Drug",
-    722118: "Drug",
-    722119: "Drug",
-    905420: "Drug",
-    1525543: "Drug",
-}
 
 
 def create_folder_if_not_exists(output_folder, table_name):
@@ -64,7 +51,7 @@ def create_folder_if_not_exists(output_folder, table_name):
         os.mkdir(Path(output_folder) / table_name)
 
 
-def generate_omop_concept_domain(concept_parquet) -> Dict[int, str]:
+def generate_omop_concept_domain(concept_parquet) -> Dict[str, str]:
     """
     Generate a dictionary of concept_id to domain_id.
 
@@ -73,7 +60,7 @@ def generate_omop_concept_domain(concept_parquet) -> Dict[int, str]:
     """
     domain_dict = {}
     for i in concept_parquet.itertuples():
-        domain_dict[i.concept_id] = i.domain_id
+        domain_dict[str(i.concept_id)] = i.domain_id
     return domain_dict
 
 
@@ -186,12 +173,12 @@ def record_generator(parquet_files):
 
 
 def gpt_to_omop_converter_batch(
-    const: int,
     patient_sequence_parquet_files: List[str],
-    domain_map: Dict[int, str],
+    domain_map: Dict[str, str],
     output_folder: str,
     buffer_size: int,
     use_original_person_id: bool,
+    const: int,
 ):
     omop_export_dict = {}
     error_dict = {}
@@ -313,21 +300,14 @@ def gpt_to_omop_converter_batch(
                     id_mappings_dict["death"][person_id] = person_id
                 else:
                     try:
-                        visit_concept_id = int(clinical_events[event_idx + 1])
-                        inpatient_visit_indicator = visit_concept_id in [
-                            9201,
-                            262,
-                            8971,
-                            8920,
-                        ]
-                        if visit_concept_id in domain_map:
-                            if (
-                                domain_map[visit_concept_id] != "Visit"
-                                and visit_concept_id != 0
-                            ):
-                                bad_sequence = True
-                                break
-                        else:
+                        next_token = clinical_events[event_idx + 1]
+                        inpatient_visit_indicator = is_inpatient_visit_type_token(
+                            next_token
+                        )
+                        next_token_domain = domain_map.get(next_token, None)
+                        if next_token_domain is None or (
+                            next_token_domain != "Visit" and next_token != "0"
+                        ):
                             bad_sequence = True
                             break
 
@@ -339,14 +319,14 @@ def gpt_to_omop_converter_batch(
                         continue
 
                     vo = VisitOccurrence(
-                        visit_occurrence_id, visit_concept_id, date_cursor, p
+                        visit_occurrence_id, int(next_token), date_cursor, p
                     )
                     append_to_dict(omop_export_dict, vo, visit_occurrence_id)
                     id_mappings_dict["visit_occurrence"][
                         visit_occurrence_id
                     ] = person_id
                     visit_occurrence_id += 1
-            elif event in ATT_TIME_TOKENS:
+            elif is_visit_att_tokens(event):
                 if event[0] == "D":
                     att_date_delta = int(event[1:])
                 elif event[0] == "W":
@@ -410,19 +390,15 @@ def gpt_to_omop_converter_batch(
                 pass
             else:
                 try:
-                    concept_id = int(event)
-                    if (
-                        concept_id not in domain_map
-                        and concept_id not in OOV_CONCEPT_MAP
-                    ):
+                    if event not in domain_map and event not in OOV_CONCEPT_MAP:
                         error_dict[person_id] = {}
                         error_dict[person_id]["concept_ids"] = " ".join(concept_ids)
-                        error_dict[person_id][
-                            "error"
-                        ] = f"No concept id found: {concept_id}"
+                        error_dict[person_id]["error"] = f"No concept id found: {event}"
                         bad_sequence = True
                         continue
                     else:
+                        concept_id = int(event)
+                        domain = domain_map.get(event, OOV_CONCEPT_MAP.get(event, None))
                         # If the current concept_id is 'Patient Died', this means it can only occur in the
                         # discharged_to_concept_id field, which indicates the current visit has to be an inpatient
                         # visit, this concept_id can only appear at the second last position
@@ -431,11 +407,6 @@ def gpt_to_omop_converter_batch(
                             if not inpatient_visit_indicator:
                                 bad_sequence = True
                                 continue
-                            # # If the current token is not the second last one of the sequence, reject because
-                            # # death can only appear at the end of the sequence
-                            # if idx + 1 != len(tokens_generated) - 1:
-                            #     bad_sequence = True
-                            #     continue
                             # we also enforce the rule where the sequence has to end on a VE token
                             if event_idx + 1 < len(
                                 clinical_events
@@ -443,14 +414,7 @@ def gpt_to_omop_converter_batch(
                                 bad_sequence = True
                                 continue
 
-                        if concept_id in domain_map:
-                            domain = domain_map[concept_id]
-                        elif concept_id in OOV_CONCEPT_MAP:
-                            domain = OOV_CONCEPT_MAP[concept_id]
-                        else:
-                            domain = None
-
-                        if domain == "Visit" or concept_id in DISCHARGE_CONCEPT_LIST:
+                        if domain == "Visit" or is_discharge_type_token(event):
                             discharged_to_concept_id = concept_id
                         elif domain == "Condition":
                             co = ConditionOccurrence(
@@ -551,7 +515,12 @@ def gpt_to_omop_converter_batch(
         f.write(str(export_error))
 
 
-def main(args):
+def main_parallel(
+    args,
+    function: Callable[
+        [List[str], Dict[str, str], str, int, bool, Optional[int]], None
+    ] = gpt_to_omop_converter_batch,
+):
     all_parquet_files = glob.glob(
         os.path.join(args.patient_sequence_path, "*parquet"), recursive=True
     )
@@ -574,24 +543,24 @@ def main(args):
     for i in range(1, args.cpu_cores + 1):
         pool_tuples.append(
             (
-                const * i,
                 batched_parquet_files[i - 1],
                 domain_map,
                 args.output_folder,
                 args.buffer_size,
                 args.use_original_person_id,
+                const * i,
             )
         )
 
     with Pool(processes=args.cpu_cores) as p:
-        p.starmap(gpt_to_omop_converter_batch, pool_tuples)
+        p.starmap(function, pool_tuples)
         p.close()
         p.join()
 
     return print("Done")
 
 
-if __name__ == "__main__":
+def create_arg_parser():
     parser = argparse.ArgumentParser(
         description="Arguments for converting patient sequences to OMOP"
     )
@@ -640,5 +609,8 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether or not to use the original person id",
     )
+    return parser.parse_args()
 
-    main(parser.parse_args())
+
+if __name__ == "__main__":
+    main_parallel(create_arg_parser())

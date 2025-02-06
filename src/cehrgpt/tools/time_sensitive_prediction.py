@@ -11,12 +11,10 @@ import numpy as np
 import pandas as pd
 import torch
 from cehrbert.runners.runner_util import load_parquet_as_dataset
-from cehrbert_data.decorators.patient_event_decorator import time_month_token
+from cehrbert_data.decorators.patient_event_decorator_base import time_month_token
 from tqdm import tqdm
 from transformers import GenerationConfig
 from transformers.utils import is_flash_attn_2_available, logging
-
-from src.cehrgpt.models.special_tokens import VISIT_CONCEPT_IDS
 
 from ..cehrgpt_args import SamplingStrategy, create_inference_base_arg_parser
 from ..gpt_utils import (
@@ -25,6 +23,7 @@ from ..gpt_utils import (
     is_att_token,
     is_visit_end,
     is_visit_start,
+    is_visit_type_token,
 )
 from ..models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from ..models.tokenization_hf_cehrgpt import CehrGptTokenizer
@@ -99,7 +98,7 @@ class TimeSensitivePredictionModel:
         sequence_is_demographics = len(partial_history) == 4 and partial_history[
             0
         ].startswith("year")
-        sequence_ends_ve = partial_history[-1] == "VE"
+        sequence_ends_ve = is_visit_end(partial_history[-1])
 
         if not (sequence_is_demographics | sequence_ends_ve):
             raise ValueError(
@@ -211,7 +210,7 @@ class TimeSensitivePredictionModel:
         next_visit_type_tokens = []
         for seq in simulated_seqs:
             for next_token in seq[len(partial_history) :]:
-                if next_token in VISIT_CONCEPT_IDS:
+                if is_visit_type_token(next_token):
                     next_visit_type_tokens.append(next_token)
                     break
         return convert_to_concept_probabilities(next_visit_type_tokens)
@@ -226,7 +225,7 @@ class TimeSensitivePredictionModel:
         all_concepts = []
         for seq in simulated_seqs:
             for next_token in seq[patient_history_length:]:
-                if only_next_visit and next_token == "VE":
+                if only_next_visit and is_visit_end(next_token):
                     break
                 if not is_artificial_token(next_token) and next_token.isnumeric():
                     all_concepts.append(next_token)
