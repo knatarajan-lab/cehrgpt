@@ -118,10 +118,10 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
         model.decoder.generation_config.bos_token_id = cehrgpt_tokenizer.end_token_id
 
         query = """Race: White
-        Gender: MALE
+Gender: MALE
 
-        1. Diagnosis age 31
-        1. Condition: 4172829"""
+1. Diagnosis age 9
+1. Condition: Acute bronchitis"""
 
         encoder_inputs = encoder_tokenizer(query, return_tensors="pt")
         encoder_input_ids = encoder_inputs["input_ids"]

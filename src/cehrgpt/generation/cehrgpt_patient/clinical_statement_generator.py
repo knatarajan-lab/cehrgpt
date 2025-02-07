@@ -153,7 +153,9 @@ class ClinicalStatementGenerator:
                 if age:
                     clinical_statement += f"\n{i + 1}. Diagnosis age {age}\n"
                 if condition:
-                    clinical_statement += f"{i + 1}. Condition: {condition}\n"
+                    clinical_statement += f"{i + 1}. Condition: {concept_name_mapping.get(str(condition), condition)}\n"
                 if drug:
-                    clinical_statement += f"{i + 1}. Drug: {drug}\n"
+                    clinical_statement += (
+                        f"{i + 1}. Drug: {concept_name_mapping.get(str(drug), drugs)}\n"
+                    )
         return clinical_statement
