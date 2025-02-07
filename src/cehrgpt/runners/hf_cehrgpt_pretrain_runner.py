@@ -399,9 +399,11 @@ def main():
         )
         with open(cehrgpt_args.knowledge_graph_path, "rb") as f:
             knowledge_graph = pickle.load(f)
-        concept = pl.read_parquet(os.path.join(cehrgpt_args.vocabulary_dir, "concept"))
+        concept = pl.read_parquet(
+            os.path.join(cehrgpt_args.vocabulary_dir, "concept", "*parquet")
+        )
         concept_ancestor = pl.read_parquet(
-            os.path.join(cehrgpt_args.vocabulary_dir, "concept_ancestor")
+            os.path.join(cehrgpt_args.vocabulary_dir, "concept_ancestor", "*parquet")
         )
         drug_ingredient_to_brand_drug_map = create_drug_ingredient_to_brand_drug_map(
             concept, concept_ancestor
