@@ -114,6 +114,22 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
             pretrained_model_name_or_path, *model_args, **kwargs
         )
 
+    def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        past_key_values=None,
+        inputs_embeds=None,
+        lab_token_ids=None,
+        **kwargs,
+    ):
+        return self.decoder.prepare_inputs_for_generation(
+            input_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            lab_token_ids=lab_token_ids,
+            **kwargs,
+        )
+
     def _sample(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -133,8 +149,8 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
         **model_kwargs,
     ) -> Union[CehrGptGenerateDecoderOnlyOutput, torch.LongTensor]:
 
-        encoder_input_ids = model_kwargs.get("encoder_attention_mask", None)
-        encoder_attention_mask = model_kwargs.get("encoder_attention_mask", None)
+        encoder_input_ids = model_kwargs.pop("encoder_input_ids")
+        encoder_attention_mask = model_kwargs.pop("encoder_attention_mask")
         encoder_batch_size, encoder_sequence_length = encoder_input_ids.size()
         encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
         if encoder_attention_mask is None:
@@ -148,6 +164,10 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
                 attention_mask=encoder_attention_mask,
             )
         encoder_hidden_states = encoder_outputs[0]
+
+        # optionally project encoder_hidden_states
+        if self.encoder.config.hidden_size != self.decoder.config.hidden_size:
+            encoder_hidden_states = self.enc_to_dec_proj(encoder_hidden_states)
 
         generated_output = self.decoder._sample(
             input_ids=input_ids,
