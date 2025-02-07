@@ -101,8 +101,7 @@ def load_and_create_model(
                 cehrgpt_args.add_cross_attention
                 and not pretrained.config.add_cross_attention
             ):
-                pass
-
+                pretrained.enable_cross_attention()
             return pretrained
         except Exception as e:
             LOG.error(
@@ -388,6 +387,7 @@ def main():
         encoder_tokenizer = AutoTokenizer.from_pretrained(
             cehrgpt_args.encoder_tokenizer_name_or_path
         )
+        encoder_tokenizer.save_pretrained(training_args.output_dir)
         encoder_model = AutoModel.from_pretrained(
             cehrgpt_args.encoder_model_name_or_path
         )
