@@ -25,6 +25,9 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
         super().__init__(config, encoder, decoder)
         # Put the encoder in the eval mode
         self.encoder.eval()
+        # Set the whole model to be non-trainable
+        for param in self.encoder.parameters():
+            param.requires_grad = False
 
     def tie_weights(self):
         """
