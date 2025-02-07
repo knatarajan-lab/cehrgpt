@@ -1,6 +1,6 @@
 import os
 import pickle
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 import torch
 from cehrbert.data_generators.hf_data_generator.meds_utils import (
@@ -408,8 +408,10 @@ def main():
             knowledge_graph=knowledge_graph,
             drug_ingredient_to_brand_drug_map=drug_ingredient_to_brand_drug_map,
         )
+        allowed_clinical_conditions = load_allowed_clinical_conditions(cehrgpt_args)
         clinical_statement_generator = ClinicalStatementGenerator(
-            condition_drug_knowledge_graph=condition_drug_knowledge_graph
+            condition_drug_knowledge_graph=condition_drug_knowledge_graph,
+            allowed_clinical_conditions=allowed_clinical_conditions,
         )
         data_collator = InstructCehrGptDataCollator(
             clinical_statement_generator=clinical_statement_generator,
@@ -463,6 +465,31 @@ def main():
     trainer.log_metrics("train", metrics)
     trainer.save_metrics("train", metrics)
     trainer.save_state()
+
+
+def load_allowed_clinical_conditions(
+    cehrgpt_args: CehrGPTArguments,
+) -> Optional[List[int]]:
+    try:
+        with open(cehrgpt_args.allowed_clinical_conditions_path, "rb") as f:
+            allowed_conditions = pickle.load(f)
+            if not isinstance(allowed_conditions, list):
+                allowed_conditions = None
+            else:
+                allowed_conditions = [
+                    int(_)
+                    for _ in allowed_conditions
+                    if isinstance(int, _) or str.isnumeric(str(_))
+                ]
+    except Exception as e:
+        LOG.warning(
+            "The allowed encoder conditions cannot be loaded at %s.\n Setting allowed_conditions=None\n."
+            "Caught exception: %s",
+            cehrgpt_args.allowed_conditions_path,
+            e,
+        )
+        allowed_conditions = None
+    return allowed_conditions
 
 
 if __name__ == "__main__":

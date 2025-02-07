@@ -162,4 +162,13 @@ class CehrGPTArguments:
     )
     vocabulary_dir: Optional[str] = dataclasses.field(
         default=None,
+        metadata={
+            "help": "The vocabulary directory containing concept and concept_ancestor"
+        },
+    )
+    allowed_clinical_conditions_path: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "The pickle file that contains a list of conditions allowed for making clinical statements"
+        },
     )

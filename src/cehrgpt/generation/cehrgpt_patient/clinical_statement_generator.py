@@ -47,7 +47,7 @@ class ConditionDrugKnowledgeGraph:
 
     def get_drug_indications(self, condition_concept_id: int) -> List[int]:
         # Use set for better performance on lookups and additions
-        drug_concept_ids = set()
+        drug_concept_ids = []
         if condition_concept_id in self.knowledge_graph:
             for dest_concept_id, rels in self.knowledge_graph[
                 condition_concept_id
@@ -58,24 +58,24 @@ class ConditionDrugKnowledgeGraph:
                     rels.values()
                 ):  # Assumption: rels are dicts with potential multiple relationships
                     if rel["rel_name"] == "inv_has_indication":
-                        drug_concept_ids.add(dest_concept_id)
-                        drug_concept_ids.update(
+                        drug_concept_ids.append(dest_concept_id)
+                        drug_concept_ids.extend(
                             self.drug_ingredient_to_brand_drug_map.get(
                                 dest_concept_id, []
                             )
                         )
-        return list(drug_concept_ids)
+        return drug_concept_ids
 
 
 class ClinicalStatementGenerator:
     def __init__(
         self,
         condition_drug_knowledge_graph: ConditionDrugKnowledgeGraph,
-        allowed_conditions: Optional[List[int]] = None,
+        allowed_clinical_conditions: Optional[List[int]] = None,
         n_conditions: int = 1,
         capacity: int = 10000,
     ):
-        self.allowed_conditions = allowed_conditions
+        self.allowed_clinical_conditions = allowed_clinical_conditions
         self.n_conditions = n_conditions
         self.condition_drug_map = defaultdict(list)
         self.condition_drug_knowledge_graph = condition_drug_knowledge_graph
@@ -93,8 +93,8 @@ class ClinicalStatementGenerator:
 
     def is_allowed_condition(self, event: CehrGptEvent) -> bool:
         if event.domain.lower().startswith("condition"):
-            if self.allowed_conditions is not None:
-                return int(event.code) in self.allowed_conditions
+            if self.allowed_clinical_conditions is not None:
+                return int(event.code) in self.allowed_clinical_conditions
             return True
         return False
 

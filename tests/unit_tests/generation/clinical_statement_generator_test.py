@@ -25,7 +25,7 @@ class TestClinicalStatementGenerator(unittest.TestCase):
         )
         self.generator = ClinicalStatementGenerator(
             condition_drug_knowledge_graph=self.condition_drug_knowledge_graph,
-            allowed_conditions=[1, 3],
+            allowed_clinical_conditions=[1, 3],
             n_conditions=1,
         )
 
