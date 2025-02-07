@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import networkx as nx
 
 from cehrgpt.generation.cehrgpt_patient.cehrgpt_patient_schema import CehrGptEvent
-from cehrgpt.llm.clinical_statement_generator import (
+from cehrgpt.generation.cehrgpt_patient.clinical_statement_generator import (
     ClinicalStatementGenerator,
     ConditionDrugKnowledgeGraph,
 )
