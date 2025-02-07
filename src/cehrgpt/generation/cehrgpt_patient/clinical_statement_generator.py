@@ -2,7 +2,7 @@ import random
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
-import networkx
+import networkx as nx
 import polars as pl
 
 from cehrgpt.generation.cehrgpt_patient.cehrgpt_patient_schema import CehrGptEvent
@@ -39,24 +39,32 @@ def create_drug_ingredient_to_brand_drug_map(
 class ConditionDrugKnowledgeGraph:
     def __init__(
         self,
-        knowledge_graph: networkx.Graph,
+        knowledge_graph: nx.Graph,
         drug_ingredient_to_brand_drug_map: Dict[int, List[int]],
     ):
         self.knowledge_graph = knowledge_graph
         self.drug_ingredient_to_brand_drug_map = drug_ingredient_to_brand_drug_map
 
     def get_drug_indications(self, condition_concept_id: int) -> List[int]:
-        drug_concept_ids = []
+        # Use set for better performance on lookups and additions
+        drug_concept_ids = set()
         if condition_concept_id in self.knowledge_graph:
-            for dest_concept_id, rel in self.knowledge_graph[
+            for dest_concept_id, rels in self.knowledge_graph[
                 condition_concept_id
             ].items():
-                if rel[0]["rel_name"] == "inv_has_indication":
-                    drug_concept_ids.append(dest_concept_id)
-                    drug_concept_ids.extend(
-                        self.drug_ingredient_to_brand_drug_map.get(dest_concept_id, [])
-                    )
-        return drug_concept_ids
+                for (
+                    rel
+                ) in (
+                    rels.values()
+                ):  # Assumption: rels are dicts with potential multiple relationships
+                    if rel["rel_name"] == "inv_has_indication":
+                        drug_concept_ids.add(dest_concept_id)
+                        drug_concept_ids.update(
+                            self.drug_ingredient_to_brand_drug_map.get(
+                                dest_concept_id, []
+                            )
+                        )
+        return list(drug_concept_ids)
 
 
 class ClinicalStatementGenerator:

@@ -28,7 +28,7 @@ class ProbabilisticCache(Generic[K, V]):
     """
     A generic probabilistic cache implementation that stores items up to a specified capacity.
 
-    This cache randomly evicts items with a probability mechanism when the capacity is reached.
+    This cache randomly evicts items when the capacity is reached.
     It is designed to handle generic key-value pairs and can be used with any data types that are hashable.
 
     Attributes:
@@ -61,8 +61,8 @@ class ProbabilisticCache(Generic[K, V]):
         Add data to the cache based on the provided key and value.
 
         If the key already exists,
-        increment its access count. If the key does not exist and the cache is full, potentially evict an item
-        based on a probabilistic mechanism before adding the new key-value pair.
+        increment its access count. If the key does not exist and the cache is full, randomly evict an item
+        before adding the new key-value pair.
 
         Args:
             key (K): The key associated with the item to be accessed or added.
@@ -72,18 +72,15 @@ class ProbabilisticCache(Generic[K, V]):
         if not self.is_key_valid(key):
             return
 
-        if key in self.cache:
-            self.access_count[key] += 1
-        elif len(self.cache) < self.capacity:
-            self.cache[key] = data
-            self.access_count[key] = 1
-        else:
-            if random.random() < 0.5:  # 50% chance to evict and replace
-                evict_key = min(self.access_count, key=lambda k: self.access_count[k])
-                del self.cache[evict_key]
-                del self.access_count[evict_key]
+        # We update the cache only if this is a new key
+        if key not in self.cache:
+            if len(self.cache) < self.capacity:
                 self.cache[key] = data
-                self.access_count[key] = 1
+            else:
+                # Eviction policy example, simple random eviction
+                evicted_key = random.choice(list(self.cache.keys()))
+                del self.cache[evicted_key]
+                self.cache[key] = data
 
     def get_data(self, key: K) -> Optional[V]:
         """
@@ -98,10 +95,9 @@ class ProbabilisticCache(Generic[K, V]):
         Returns:
             Optional[V]: The value associated with the key if present in the cache; otherwise, None.
         """
-        if self.is_key_valid(key) and key in self.cache:
-            self.access_count[key] += 1
-            return self.cache[key]
-        return None
+        if not self.is_key_valid(key):
+            return None
+        return self.cache.get(key, None)
 
 
 class RandomSampleCache:
