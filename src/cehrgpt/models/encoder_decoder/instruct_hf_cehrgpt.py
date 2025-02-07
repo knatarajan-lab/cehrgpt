@@ -5,6 +5,7 @@ import torch
 from transformers import PretrainedConfig, PreTrainedModel
 from transformers.generation.logits_process import LogitsProcessorList
 from transformers.generation.stopping_criteria import StoppingCriteriaList
+from transformers.generation.streamers import BaseStreamer
 from transformers.models.encoder_decoder import EncoderDecoderModel
 
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
