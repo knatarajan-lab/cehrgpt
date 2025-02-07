@@ -153,7 +153,7 @@ class ClinicalStatementGenerator:
                         (age_at_diagnosis, condition, random_indication)
                     )
             else:
-                logger.warning(
+                logger.debug(
                     "There are no conditions discovered\n.%s",
                     cehrgpt_patient.get_narrative(),
                 )
