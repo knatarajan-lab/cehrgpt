@@ -134,7 +134,7 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
         generation_config = GenerationConfig(
             max_length=512,
             min_length=10,
-            bos_token_id=cehrgpt_tokenizer.end_token_id,
+            bos_token_id=cehrgpt_tokenizer.start_token_id,
             eos_token_id=cehrgpt_tokenizer.end_token_id,
             pad_token_id=cehrgpt_tokenizer.pad_token_id,
             do_sample=True,
@@ -146,7 +146,7 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             renormalize_logits=True,
         )
         output = model.generate(
-            input_ids=batched_inputs,
+            inputs=batched_inputs,
             encoder_input_ids=encoder_input_ids,
             encoder_attention_mask=encoder_attention_mask.to(device),
             generation_config=generation_config,
