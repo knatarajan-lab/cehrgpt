@@ -132,18 +132,21 @@ class ClinicalStatementGenerator:
                     drugs.append(int(event.code))
 
             age_condition_drug_tuples = list()
-            for condition, age_at_diagnosis in random.sample(
-                conditions, self.n_conditions
-            ):
-                indications = [
-                    indication
-                    for indication in self.get_indications(condition)
-                    if indication in drugs
-                ]
-                random_indication = random.choice(indications) if indications else None
-                age_condition_drug_tuples.append(
-                    (age_at_diagnosis, condition, random_indication)
-                )
+            if conditions:
+                for condition, age_at_diagnosis in random.sample(
+                    conditions, self.n_conditions
+                ):
+                    indications = [
+                        indication
+                        for indication in self.get_indications(condition)
+                        if indication in drugs
+                    ]
+                    random_indication = (
+                        random.choice(indications) if indications else None
+                    )
+                    age_condition_drug_tuples.append(
+                        (age_at_diagnosis, condition, random_indication)
+                    )
 
             clinical_statement = f"Race: {cehrgpt_patient.race}\n"
             clinical_statement += f"Gender: {cehrgpt_patient.gender}\n"
