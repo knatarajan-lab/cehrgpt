@@ -1,7 +1,8 @@
 import random
 import re
+from collections.abc import Iterable
 from datetime import date, timedelta
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Dict, Generic, List, Optional, Sequence, Tuple, TypeVar, Union
 
 from cehrgpt.cehrgpt_args import SamplingStrategy
 from cehrgpt.models.special_tokens import (
@@ -17,6 +18,90 @@ from cehrgpt.models.special_tokens import (
 # Regular expression pattern to match inpatient attendance tokens
 INPATIENT_ATT_PATTERN = re.compile(r"(?:VS-|i-)D(\d+)(?:-VE)?")
 DEMOGRAPHIC_PROMPT_SIZE = 4
+
+# Define type variables at the module level
+K = TypeVar("K")
+V = TypeVar("V")
+
+
+class ProbabilisticCache(Generic[K, V]):
+    """
+    A generic probabilistic cache implementation that stores items up to a specified capacity.
+
+    This cache randomly evicts items with a probability mechanism when the capacity is reached.
+    It is designed to handle generic key-value pairs and can be used with any data types that are hashable.
+
+    Attributes:
+        cache (Dict[K, V]): The dictionary that holds the cache items.
+        capacity (int): The maximum number of items the cache can hold.
+        access_count (Dict[K, int]): A dictionary tracking the number of accesses for each key.
+
+    Args:
+        capacity (int): The maximum capacity of the cache, defaulting to 10,000.
+    """
+
+    def __init__(self, capacity: int = 10000):
+        self.cache: Dict[K, V] = {}
+        self.capacity = capacity
+        self.access_count: Dict[K, int] = {}
+
+    @staticmethod
+    def is_key_valid(key: K) -> bool:
+        # We don't want to cache the data if the key is None
+        if key is None:
+            return False
+        # We don't want to cache the data if any element of the key is None
+        if isinstance(key, Iterable) and not isinstance(key, (str, bytes)):
+            if any(item is None for item in key):
+                return False
+        return True
+
+    def add_data(self, key: K, data: V) -> None:
+        """
+        Add data to the cache based on the provided key and value.
+
+        If the key already exists,
+        increment its access count. If the key does not exist and the cache is full, potentially evict an item
+        based on a probabilistic mechanism before adding the new key-value pair.
+
+        Args:
+            key (K): The key associated with the item to be accessed or added.
+            data (V): The value associated with the key.
+        """
+        # We don't want to cache the data if the key is None
+        if not self.is_key_valid(key):
+            return
+
+        if key in self.cache:
+            self.access_count[key] += 1
+        elif len(self.cache) < self.capacity:
+            self.cache[key] = data
+            self.access_count[key] = 1
+        else:
+            if random.random() < 0.5:  # 50% chance to evict and replace
+                evict_key = min(self.access_count, key=lambda k: self.access_count[k])
+                del self.cache[evict_key]
+                del self.access_count[evict_key]
+                self.cache[key] = data
+                self.access_count[key] = 1
+
+    def get_data(self, key: K) -> Optional[V]:
+        """
+        Retrieve an item from the cache.
+
+        If the item exists, increment its access count and return the value.
+        If the item does not exist, return None.
+
+        Args:
+            key (K): The key of the item to be retrieved.
+
+        Returns:
+            Optional[V]: The value associated with the key if present in the cache; otherwise, None.
+        """
+        if self.is_key_valid(key) and key in self.cache:
+            self.access_count[key] += 1
+            return self.cache[key]
+        return None
 
 
 class RandomSampleCache:

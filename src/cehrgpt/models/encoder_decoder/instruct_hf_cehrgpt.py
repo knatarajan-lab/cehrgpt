@@ -50,6 +50,8 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
         time_to_visits: Optional[torch.FloatTensor] = None,
         time_token_indicators: Optional[torch.BoolTensor] = None,
         sub_time_tokens: Optional[torch.LongTensor] = None,
+        # This is added so person_id can be passed to the collator
+        person_id: Optional[torch.LongTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         encoder_outputs: Optional[Tuple[torch.FloatTensor]] = None,

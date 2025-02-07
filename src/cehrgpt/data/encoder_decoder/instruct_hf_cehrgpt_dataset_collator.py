@@ -6,10 +6,15 @@ import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from transformers import PreTrainedTokenizer
+from transformers.utils import logging
 
 from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
+from cehrgpt.generation.cehrgpt_patient.clinical_statement_generator import (
+    ClinicalStatementGenerator,
+)
 from cehrgpt.gpt_utils import is_visit_end, random_slice_gpt_sequence
-from cehrgpt.llm.clinical_statement_generator import ClinicalStatementGenerator
+
+logger = logging.get_logger(__name__)
 
 
 class InstructCehrGptDataCollator(CehrGptDataCollator):
@@ -76,6 +81,8 @@ class InstructCehrGptDataCollator(CehrGptDataCollator):
         )  # Subtract one for the [START] and [END] token
 
         selected_concept_ids = copy.deepcopy(concept_ids)
+        start = 0
+        end = seq_length
         # Return the record directly if the actual sequence length is less than the max sequence
         if seq_length <= new_max_length:
             record["input_ids"] = torch.concat(
@@ -113,20 +120,16 @@ class InstructCehrGptDataCollator(CehrGptDataCollator):
         elif random.random() < 0.5:
             # There is a 50% chance we randomly slice out a portion of the patient history and update the demographic
             # prompt depending on the new starting point
-            start_index, end_index, demographic_tokens = random_slice_gpt_sequence(
+            start, end, demographic_tokens = random_slice_gpt_sequence(
                 concept_ids, new_max_length
             )
             # Update the selected concept ids for making the clinical statement
-            selected_concept_ids = (
-                demographic_tokens + concept_ids[start_index : end_index + 1]
-            )
+            selected_concept_ids = demographic_tokens + concept_ids[start : end + 1]
             record["input_ids"] = torch.concat(
                 [
                     self._convert_to_tensor([self.tokenizer.start_token_id]),
                     self._convert_to_tensor(self.tokenizer.encode(demographic_tokens)),
-                    self._convert_to_tensor(
-                        record["input_ids"][start_index : end_index + 1]
-                    ),
+                    self._convert_to_tensor(record["input_ids"][start : end + 1]),
                 ]
             )
 
@@ -137,7 +140,7 @@ class InstructCehrGptDataCollator(CehrGptDataCollator):
                         self._convert_to_tensor(
                             np.zeros_like(demographic_tokens).astype(bool)
                         ),
-                        record["value_indicators"][start_index : end_index + 1],
+                        record["value_indicators"][start : end + 1],
                     ]
                 )
                 record["values"] = torch.concat(
@@ -146,7 +149,7 @@ class InstructCehrGptDataCollator(CehrGptDataCollator):
                         self._convert_to_tensor(
                             np.ones_like(demographic_tokens, dtype=np.int32)
                         ).fill_(self.tokenizer.pad_value_token_id),
-                        record["values"][start_index : end_index + 1],
+                        record["values"][start : end + 1],
                     ]
                 )
             if self.include_ttv_prediction:
@@ -157,27 +160,25 @@ class InstructCehrGptDataCollator(CehrGptDataCollator):
                             np.ones_like(demographic_tokens, dtype=np.int32)
                         ).fill_(-100.0),
                         self._convert_to_tensor(
-                            self._convert_time_to_event(
-                                concept_ids[start_index : end_index + 1]
-                            )
+                            self._convert_time_to_event(concept_ids[start : end + 1])
                         ),
                     ]
                 )
         else:
             # The default employs a right truncation strategy, where the demographic prompt is reserved
-            end_index = new_max_length
-            for i in reversed(list(range(0, end_index))):
+            end = new_max_length
+            for i in reversed(list(range(0, end))):
                 current_concept = concept_ids[i]
                 if current_concept == is_visit_end(current_concept):
-                    end_index = i
+                    end = i
                     break
 
             # Update the selected concept ids for making the clinical statement
-            selected_concept_ids = concept_ids[0 : end_index + 1]
+            selected_concept_ids = concept_ids[: end + 1]
             record["input_ids"] = torch.concat(
                 [
                     self._convert_to_tensor([self.tokenizer.start_token_id]),
-                    self._convert_to_tensor(record["input_ids"][0 : end_index + 1]),
+                    self._convert_to_tensor(record["input_ids"][: end + 1]),
                 ]
             )
 
@@ -185,15 +186,13 @@ class InstructCehrGptDataCollator(CehrGptDataCollator):
                 record["value_indicators"] = torch.concat(
                     [
                         self._convert_to_tensor([False]),
-                        self._convert_to_tensor(
-                            record["value_indicators"][0 : end_index + 1]
-                        ),
+                        self._convert_to_tensor(record["value_indicators"][: end + 1]),
                     ]
                 ).to(torch.bool)
                 record["values"] = torch.concat(
                     [
                         self._convert_to_tensor([self.tokenizer.pad_value_token_id]),
-                        self._convert_to_tensor(record["values"][0 : end_index + 1]),
+                        self._convert_to_tensor(record["values"][: end + 1]),
                     ]
                 )
             if self.include_ttv_prediction:
@@ -201,18 +200,27 @@ class InstructCehrGptDataCollator(CehrGptDataCollator):
                     [
                         self._convert_to_tensor([-100.0]),
                         self._convert_to_tensor(
-                            self._convert_time_to_event(concept_ids[0 : end_index + 1])
+                            self._convert_time_to_event(concept_ids[: end + 1])
                         ),
                     ]
                 )
 
-        encoded_inputs = self.encoder_tokenizer(
+        person_id = record.get("person_id", None)
+        if person_id is not None:
+            person_id = person_id.item()
+
+        clinical_statement = (
             self.clinical_statement_generator.generate_clinical_statement(
                 selected_concept_ids,
                 self.concept_name_mapping,
                 self.concept_domain_mapping,
+                person_id=person_id,
+                start=start,
+                end=end,
             )
         )
+        logger.debug("Generated clinical statement: %s", clinical_statement)
+        encoded_inputs = self.encoder_tokenizer(clinical_statement)
         record["encoder_input_ids"] = encoded_inputs["input_ids"]
         record["encoder_attention_mask"] = encoded_inputs["attention_mask"]
         return record

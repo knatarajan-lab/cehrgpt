@@ -1,14 +1,16 @@
 import random
 from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import networkx
 import polars as pl
 
 from cehrgpt.generation.cehrgpt_patient.cehrgpt_patient_schema import CehrGptEvent
 from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
+    PatientSequenceConverter,
     get_cehrgpt_patient_converter,
 )
+from cehrgpt.gpt_utils import ProbabilisticCache
 
 
 def create_drug_ingredient_to_brand_drug_map(
@@ -63,11 +65,15 @@ class ClinicalStatementGenerator:
         condition_drug_knowledge_graph: ConditionDrugKnowledgeGraph,
         allowed_conditions: Optional[List[int]] = None,
         n_conditions: int = 1,
+        capacity: int = 10000,
     ):
         self.allowed_conditions = allowed_conditions
         self.n_conditions = n_conditions
         self.condition_drug_map = defaultdict(list)
         self.condition_drug_knowledge_graph = condition_drug_knowledge_graph
+        self.cache = ProbabilisticCache[Tuple[int, int, int], PatientSequenceConverter](
+            capacity
+        )
 
     def get_indications(self, condition_concept_id: int) -> List[int]:
         if condition_concept_id not in self.condition_drug_map:
@@ -89,12 +95,20 @@ class ClinicalStatementGenerator:
         concept_ids: List[str],
         concept_name_mapping: Dict[str, str],
         concept_domain_mapping: Dict[str, str],
+        person_id: Optional[int] = None,
+        start: Optional[int] = None,
+        end: Optional[int] = None,
     ) -> Optional[str]:
         clinical_statement = None
-        patient_sequence_converter = get_cehrgpt_patient_converter(
-            concept_ids=concept_ids,
-            concept_domain_mapping=concept_domain_mapping,
-        )
+        patient_sequence_converter = self.cache.get_data((person_id, start, end))
+        # If the element does not exist, we will generate it
+        if not patient_sequence_converter:
+            patient_sequence_converter = get_cehrgpt_patient_converter(
+                concept_ids=concept_ids,
+                concept_domain_mapping=concept_domain_mapping,
+            )
+            self.cache.add_data((person_id, start, end), patient_sequence_converter)
+
         if patient_sequence_converter.is_validation_passed:
             cehrgpt_patient = patient_sequence_converter.get_patient(
                 domain_map=concept_domain_mapping, concept_map=concept_name_mapping
