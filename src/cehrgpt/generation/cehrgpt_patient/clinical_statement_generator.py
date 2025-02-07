@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple
 
 import networkx as nx
 import polars as pl
+from transformers.utils import logging
 
 from cehrgpt.generation.cehrgpt_patient.cehrgpt_patient_schema import CehrGptEvent
 from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
@@ -11,6 +12,10 @@ from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
     get_cehrgpt_patient_converter,
 )
 from cehrgpt.gpt_utils import ProbabilisticCache
+
+logger = logging.get_logger(__name__)
+
+DEFAULT_CLINICAL_STATEMENT = "Generate a patient"
 
 
 def create_drug_ingredient_to_brand_drug_map(
@@ -147,7 +152,11 @@ class ClinicalStatementGenerator:
                     age_condition_drug_tuples.append(
                         (age_at_diagnosis, condition, random_indication)
                     )
-
+            else:
+                logger.warning(
+                    "There are no conditions discovered\n.%s",
+                    cehrgpt_patient.get_narrative(),
+                )
             clinical_statement = f"Race: {cehrgpt_patient.race}\n"
             clinical_statement += f"Gender: {cehrgpt_patient.gender}\n"
             for i, (age, condition, drug) in enumerate(
@@ -161,4 +170,9 @@ class ClinicalStatementGenerator:
                     clinical_statement += (
                         f"{i + 1}. Drug: {concept_name_mapping.get(str(drug), drugs)}\n"
                     )
+        else:
+            logger.warning(
+                "Failed to generate clinical statement, %s",
+                patient_sequence_converter.get_error_messages(),
+            )
         return clinical_statement

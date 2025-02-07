@@ -10,6 +10,7 @@ from transformers.utils import logging
 
 from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
 from cehrgpt.generation.cehrgpt_patient.clinical_statement_generator import (
+    DEFAULT_CLINICAL_STATEMENT,
     ClinicalStatementGenerator,
 )
 from cehrgpt.gpt_utils import is_visit_end, random_slice_gpt_sequence
@@ -220,6 +221,9 @@ class InstructCehrGptDataCollator(CehrGptDataCollator):
             )
         )
         logger.debug("Generated clinical statement: %s", clinical_statement)
+        # We need to handle the cases where the clinical statement is None
+        if not clinical_statement:
+            clinical_statement = DEFAULT_CLINICAL_STATEMENT
         encoded_inputs = self.encoder_tokenizer(clinical_statement)
         record["encoder_input_ids"] = encoded_inputs["input_ids"]
         record["encoder_attention_mask"] = encoded_inputs["attention_mask"]
