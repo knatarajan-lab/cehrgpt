@@ -714,8 +714,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         torch.cuda.empty_cache()
 
     def enable_cross_attention(self):
-        if not self.config.cross_attention:
-            self.config.cross_attention = True
+        if not self.config.add_cross_attention:
+            self.config.add_cross_attention = True
             if (
                 getattr(self.config, "_attn_implementation", "eager")
                 == "flash_attention_2"
