@@ -268,10 +268,8 @@ def main():
         )
         # Retrain the tokenizer in case we want to pretrain the model further using different datasets
         if cehrgpt_args.expand_tokenizer:
-            new_tokenizer_path = os.path.expanduser(training_args.output_dir)
-            try:
-                cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(new_tokenizer_path)
-            except Exception:
+            tokenizer_output_path = os.path.expanduser(training_args.output_dir)
+            if not tokenizer_exists(tokenizer_output_path):
                 cehrgpt_tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
                     cehrgpt_tokenizer=cehrgpt_tokenizer,
                     dataset=dataset["train"],
@@ -281,9 +279,7 @@ def main():
                         cehrgpt_args.pretrained_embedding_path
                     ),
                 )
-                cehrgpt_tokenizer.save_pretrained(
-                    os.path.expanduser(training_args.output_dir)
-                )
+                cehrgpt_tokenizer.save_pretrained(tokenizer_output_path)
 
         # sort the patient features chronologically and tokenize the data
         processed_dataset = create_cehrgpt_pretraining_dataset(
@@ -319,6 +315,13 @@ def main():
             )
     else:
         processed_dataset = processed_dataset.filter(filter_func, **filter_args)
+
+    # If we choose to continue to train an existing model, we need to check whether the tokenizer exists in the
+    # output_dir, and the tokenizer will be saved if it does not exist.
+    if cehrgpt_args.continue_pretrain and not tokenizer_exists(
+        os.path.expanduser(training_args.output_dir)
+    ):
+        cehrgpt_tokenizer.save_pretrained(os.path.expanduser(training_args.output_dir))
 
     model = load_and_create_model(
         model_args, cehrgpt_args, training_args, cehrgpt_tokenizer
@@ -404,14 +407,12 @@ def main():
             concept, concept_ancestor
         )
         concept_map, concept_domain = generate_concept_maps(concept)
-        condition_drug_knowledge_graph = ConditionDrugKnowledgeGraph(
-            knowledge_graph=knowledge_graph,
-            drug_ingredient_to_brand_drug_map=drug_ingredient_to_brand_drug_map,
-        )
-        allowed_clinical_conditions = load_allowed_clinical_conditions(cehrgpt_args)
         clinical_statement_generator = ClinicalStatementGenerator(
-            condition_drug_knowledge_graph=condition_drug_knowledge_graph,
-            allowed_clinical_conditions=allowed_clinical_conditions,
+            condition_drug_knowledge_graph=ConditionDrugKnowledgeGraph(
+                knowledge_graph=knowledge_graph,
+                drug_ingredient_to_brand_drug_map=drug_ingredient_to_brand_drug_map,
+            ),
+            allowed_clinical_conditions=load_allowed_clinical_conditions(cehrgpt_args),
         )
         data_collator = InstructCehrGptDataCollator(
             clinical_statement_generator=clinical_statement_generator,
@@ -485,7 +486,7 @@ def load_allowed_clinical_conditions(
         LOG.warning(
             "The allowed encoder conditions cannot be loaded at %s.\n Setting allowed_conditions=None\n."
             "Caught exception: %s",
-            cehrgpt_args.allowed_conditions_path,
+            cehrgpt_args.allowed_clinical_conditions_path,
             e,
         )
         allowed_conditions = None
