@@ -34,10 +34,10 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
 
     def forward(
         self,
+        encoder_input_ids: Optional[torch.LongTensor] = None,
+        encoder_attention_mask: Optional[torch.FloatTensor] = None,
         input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        decoder_input_ids: Optional[torch.LongTensor] = None,
-        decoder_attention_mask: Optional[torch.BoolTensor] = None,
+        attention_mask: Optional[torch.BoolTensor] = None,
         encoder_outputs: Optional[Tuple[torch.FloatTensor]] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -50,8 +50,8 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
         # We don't want to update the encoder model
         with torch.no_grad():
             encoder_outputs = self.encoder(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
+                input_ids=encoder_input_ids,
+                attention_mask=encoder_attention_mask,
                 return_dict=return_dict,
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
@@ -72,13 +72,13 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
         output_hidden_states = kwargs.get("output_hidden_states", None)
 
         decoder_output = self.decoder(
-            input_ids=decoder_input_ids,
+            input_ids=input_ids,
             value_indicators=value_indicators,
             values=values,
             encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=attention_mask,
+            encoder_attention_mask=encoder_attention_mask,
             past_key_values=past_key_values,
-            attention_mask=decoder_attention_mask,
+            attention_mask=attention_mask,
             position_ids=position_ids,
             random_vectors=random_vectors,
             head_mask=head_mask,
@@ -93,7 +93,7 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
         decoder_output_dict.update(
             {
                 "encoder_last_hidden_state": encoder_hidden_states,
-                "encoder_attentions": attention_mask,
+                "encoder_attentions": encoder_attention_mask,
             }
         )
         return InstructCehrGptCausalLMOutput(
@@ -119,20 +119,23 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
         **model_kwargs,
     ) -> Union[CehrGptGenerateDecoderOnlyOutput, torch.LongTensor]:
 
-        attention_mask = model_kwargs.get("attention_mask", None)
-        encoder_batch_size, encoder_sequence_length = input_ids.size()
+        encoder_input_ids = model_kwargs.get("encoder_attention_mask", None)
+        encoder_attention_mask = model_kwargs.get("encoder_attention_mask", None)
+        encoder_batch_size, encoder_sequence_length = encoder_input_ids.size()
         encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
-        if attention_mask is None:
-            attention_mask = torch.ones(encoder_hidden_shape, device=input_ids.device)
+        if encoder_attention_mask is None:
+            encoder_attention_mask = torch.ones(
+                encoder_hidden_shape, device=encoder_input_ids.device
+            )
         # We don't want to update the encoder model
         with torch.no_grad():
             encoder_outputs = self.encoder(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
+                input_ids=encoder_input_ids,
+                attention_mask=encoder_attention_mask,
             )
         encoder_hidden_states = encoder_outputs[0]
 
-        generated_output = self._sample(
+        generated_output = self.decoder._sample(
             input_ids=input_ids,
             logits_processor=logits_processor,
             stopping_criteria=stopping_criteria,
@@ -148,7 +151,7 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
             synced_gpus=synced_gpus,
             streamer=streamer,
             encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=attention_mask,
+            encoder_attention_mask=encoder_attention_mask,
             **model_kwargs,
         )
 

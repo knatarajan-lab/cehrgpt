@@ -138,8 +138,13 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
                 att_date_delta = extract_time_interval_in_days(current_token)
                 data_cursor = data_cursor + timedelta(days=att_date_delta)
 
+        # If there are no other starting points, we deploy a right truncation strategy
         if len(starting_points) == 0:
-            return 0, 0, concept_ids[:DEMOGRAPHIC_PROMPT_SIZE]
+            return (
+                DEMOGRAPHIC_PROMPT_SIZE,
+                min(max_seq_len, seq_length),
+                concept_ids[:DEMOGRAPHIC_PROMPT_SIZE],
+            )
 
         random_starting_index, random_starting_year, random_starting_age = (
             random.choice(starting_points)
@@ -151,7 +156,7 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
             start_race,
         ]
         # Remove the number of demographic tokens
-        random_end_index = random_starting_index
+        random_end_index = random_starting_index + max_seq_len - DEMOGRAPHIC_PROMPT_SIZE
         for i in reversed(
             range(
                 random_starting_index,
@@ -165,7 +170,11 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
         return random_starting_index, random_end_index, demographic_tokens
 
     except Exception:
-        return 0, max_seq_len - 1, []
+        return (
+            DEMOGRAPHIC_PROMPT_SIZE,
+            min(max_seq_len, seq_length),
+            concept_ids[:DEMOGRAPHIC_PROMPT_SIZE],
+        )
 
 
 def get_cehrgpt_output_folder(args, cehrgpt_tokenizer) -> str:

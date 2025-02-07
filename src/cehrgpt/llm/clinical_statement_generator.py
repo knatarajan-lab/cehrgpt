@@ -125,8 +125,10 @@ class ClinicalStatementGenerator:
             for i, (age, condition, drug) in enumerate(
                 sorted(age_condition_drug_tuples, key=lambda x: x[0])
             ):
-                clinical_statement += f"\n{i + 1}. Diagnosis age {age}\n"
-                clinical_statement += f"{i + 1}. Condition: {condition}\n"
+                if age:
+                    clinical_statement += f"\n{i + 1}. Diagnosis age {age}\n"
+                if condition:
+                    clinical_statement += f"{i + 1}. Condition: {condition}\n"
                 if drug:
                     clinical_statement += f"{i + 1}. Drug: {drug}\n"
         return clinical_statement
