@@ -58,7 +58,7 @@ class InstructCehrGptDataCollator(CehrGptDataCollator):
         )
         return batch
 
-    def get_data_collector_hook(
+    def get_data_collector_hooks(
         self,
     ) -> Optional[List[Callable[[List[Dict[str, Any]]], Dict[str, Any]]]]:
         return super().get_data_collector_hooks() + [self.encoder_input_hook]

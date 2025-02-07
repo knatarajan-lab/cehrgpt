@@ -135,3 +135,31 @@ class CehrGPTArguments:
             "help": "The number of feed forward layers for transforming pretrained embeddings to internal embeddings"
         },
     )
+    add_cross_attention: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to use the encoder decoder"
+        },
+    )
+    encoder_model_name_or_path: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": (
+                "The model checkpoint for weights initialization. "
+                "Don't set if you want to train a model from scratch."
+            )
+        },
+    )
+    encoder_tokenizer_name_or_path: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "Pretrained tokenizer name or path if not the same as model_name"
+        },
+    )
+    knowledge_graph_path: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={"help": "Knowledge graph path"},
+    )
+    vocabulary_dir: Optional[str] = dataclasses.field(
+        default=None,
+    )

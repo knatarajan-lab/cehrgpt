@@ -45,12 +45,15 @@ class ConditionDrugKnowledgeGraph:
 
     def get_drug_indications(self, condition_concept_id: int) -> List[int]:
         drug_concept_ids = []
-        for dest_concept_id, rel in self.knowledge_graph[condition_concept_id].items():
-            if rel[0]["rel_name"] == "inv_has_indication":
-                drug_concept_ids.append(dest_concept_id)
-                drug_concept_ids.extend(
-                    self.drug_ingredient_to_brand_drug_map.get(dest_concept_id, [])
-                )
+        if condition_concept_id in self.knowledge_graph:
+            for dest_concept_id, rel in self.knowledge_graph[
+                condition_concept_id
+            ].items():
+                if rel[0]["rel_name"] == "inv_has_indication":
+                    drug_concept_ids.append(dest_concept_id)
+                    drug_concept_ids.extend(
+                        self.drug_ingredient_to_brand_drug_map.get(dest_concept_id, [])
+                    )
         return drug_concept_ids
 
 

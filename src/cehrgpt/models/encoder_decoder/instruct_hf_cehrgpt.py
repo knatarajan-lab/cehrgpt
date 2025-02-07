@@ -1,4 +1,3 @@
-from dataclasses import asdict
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -12,6 +11,7 @@ from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.hf_modeling_outputs import CehrGptGenerateDecoderOnlyOutput
 
 from .instruct_hf_modeling_outputs import InstructCehrGptCausalLMOutput
+from .monkey_patch_cehrgpt import register_cehrgpt_in_hf
 
 
 class InstructCEHRGPTModel(EncoderDecoderModel):
@@ -38,7 +38,20 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
         encoder_input_ids: Optional[torch.LongTensor] = None,
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.BoolTensor] = None,
+        value_indicators: Optional[torch.BoolTensor] = None,
+        values: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        random_vectors: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        true_value_indicators: Optional[torch.BoolTensor] = None,
+        true_values: Optional[torch.LongTensor] = None,
+        time_to_visits: Optional[torch.FloatTensor] = None,
+        time_token_indicators: Optional[torch.BoolTensor] = None,
+        sub_time_tokens: Optional[torch.LongTensor] = None,
+        head_mask: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
         encoder_outputs: Optional[Tuple[torch.FloatTensor]] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -62,24 +75,20 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
         if self.encoder.config.hidden_size != self.decoder.config.hidden_size:
             encoder_hidden_states = self.enc_to_dec_proj(encoder_hidden_states)
 
-        value_indicators = kwargs.get("value_indicators", None)
-        values = kwargs.get("values", None)
-        past_key_values = kwargs.get("past_key_values", None)
-        position_ids = kwargs.get("position_ids", None)
-        random_vectors = kwargs.get("random_vectors", None)
-        head_mask = kwargs.get("head_mask", None)
-        use_cache = kwargs.get("use_cache", None)
-        output_attentions = kwargs.get("output_attentions", None)
-        output_hidden_states = kwargs.get("output_hidden_states", None)
-
         decoder_output = self.decoder(
             input_ids=input_ids,
+            attention_mask=attention_mask,
             value_indicators=value_indicators,
             values=values,
             encoder_hidden_states=encoder_hidden_states,
             encoder_attention_mask=encoder_attention_mask,
+            labels=labels,
+            true_value_indicators=true_value_indicators,
+            true_values=true_values,
+            time_to_visits=time_to_visits,
+            time_token_indicators=time_token_indicators,
+            sub_time_tokens=sub_time_tokens,
             past_key_values=past_key_values,
-            attention_mask=attention_mask,
             position_ids=position_ids,
             random_vectors=random_vectors,
             head_mask=head_mask,
@@ -87,18 +96,22 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            cross_attention=False,
         )
 
-        decoder_output_dict = asdict(decoder_output)
-        decoder_output_dict.update(
-            {
-                "encoder_last_hidden_state": encoder_hidden_states,
-                "encoder_attentions": encoder_attention_mask,
-            }
-        )
+        if not return_dict:
+            return decoder_output + encoder_outputs
+
         return InstructCehrGptCausalLMOutput(
-            **decoder_output_dict,
+            encoder_last_hidden_state=encoder_hidden_states,
+            encoder_attentions=encoder_outputs.attentions,
+            **decoder_output,
+        )
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+        register_cehrgpt_in_hf()
+        return super().from_pretrained(
+            pretrained_model_name_or_path, *model_args, **kwargs
         )
 
     def _sample(

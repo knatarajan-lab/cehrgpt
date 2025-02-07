@@ -713,6 +713,26 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.ln_f = self.ln_f.to("cpu")
         torch.cuda.empty_cache()
 
+    def enable_cross_attention(self):
+        if not self.config.cross_attention:
+            self.config.cross_attention = True
+            if (
+                getattr(self.config, "_attn_implementation", "eager")
+                == "flash_attention_2"
+            ):
+                attention_class = GPT2FlashAttention
+            else:
+                attention_class = GPT2Attention
+            for i in range(len(self.h)):
+                layer = self.h[i]
+                device = layer.attn.bias.device
+                layer.crossattention = attention_class(
+                    config=self.config, is_cross_attention=True, layer_idx=i
+                ).to(device)
+                layer.ln_cross_attn = nn.LayerNorm(
+                    self.config.hidden_size, eps=self.config.layer_norm_epsilon
+                ).to(device)
+
     def update_attn_bias(self, max_position_embeddings: int):
         for i in range(len(self.h)):
             self.h[i].attn.register_buffer(
@@ -878,7 +898,10 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
             if encoder_attention_mask is None:
                 encoder_attention_mask = torch.ones(encoder_hidden_shape, device=device)
-            if self._attn_implementation != "flash_attention_2":
+            if (
+                getattr(self.config, "_attn_implementation", "eager")
+                != "flash_attention_2"
+            ):
                 encoder_attention_mask = self.invert_attention_mask(
                     encoder_attention_mask
                 )
@@ -1141,6 +1164,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
     def update_attn_bias(self, max_position_embeddings: int):
         self.cehrgpt.update_attn_bias(max_position_embeddings)
+
+    def enable_cross_attention(self):
+        self.cehrgpt.enable_cross_attention()
 
     def prepare_inputs_for_generation(
         self,
