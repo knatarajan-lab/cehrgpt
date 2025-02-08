@@ -1,9 +1,18 @@
 import argparse
+import os
+from typing import List, Optional, Union
 
+import polars as pl
 import torch
-from transformers import AutoTokenizer, GenerationConfig
+from transformers import AutoTokenizer, GenerationConfig, PreTrainedTokenizer
 from transformers.utils import is_flash_attn_2_available
 
+from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
+    get_cehrgpt_patient_converter,
+)
+from cehrgpt.generation.cehrgpt_patient.patient_narrative_generator import (
+    generate_concept_maps,
+)
 from cehrgpt.models.encoder_decoder.instruct_hf_cehrgpt import InstructCEHRGPTModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
@@ -26,8 +35,13 @@ def setup_model(tokenizer_path, model_path, device):
 
 
 def generate_response(
-    query, encoder_tokenizer, cehrgpt_tokenizer, model, device, generation_config
-):
+    query: str,
+    encoder_tokenizer: PreTrainedTokenizer,
+    cehrgpt_tokenizer: CehrGptTokenizer,
+    model: InstructCEHRGPTModel,
+    device: Union[torch.device, str],
+    generation_config: GenerationConfig,
+) -> Optional[List[str]]:
     encoder_inputs = encoder_tokenizer(query, return_tensors="pt")
     encoder_input_ids = encoder_inputs["input_ids"]
     encoder_attention_mask = encoder_inputs["attention_mask"]
@@ -43,28 +57,43 @@ def generate_response(
         generation_config=generation_config,
         lab_token_ids=cehrgpt_tokenizer.lab_token_ids,
     )
-
-    return [
-        cehrgpt_tokenizer.decode(seq.cpu().numpy(), skip_special_tokens=True)
-        for seq in output.sequences
-    ]
+    for seq in output.sequences:
+        return cehrgpt_tokenizer.decode(seq.cpu().numpy(), skip_special_tokens=True)
+    return None
 
 
-def main():
+def create_instruct_cehrgpt_argparser():
     parser = argparse.ArgumentParser(
         description="Generate responses using InstructCEHRGPTModel"
     )
     parser.add_argument(
-        "--tokenizer_name_or_path", required=True, help="Path to tokenizer"
+        "--tokenizer_name_or_path",
+        required=True,
+        help="Path to InstructCEHRGPT folder containing the encoder and cehrgpt tokenizers",
     )
-    parser.add_argument("--model_name_or_path", required=True, help="Path to model")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--model_name_or_path",
+        required=True,
+        help="Path to the InstructCEHRGPT model checkpoint",
+    )
+    parser.add_argument(
+        "--vocabulary_dir",
+        required=True,
+        help="Path to vocabulary dir containing concept and concept_ancestor data",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = create_instruct_cehrgpt_argparser()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Setting up the model and tokenizer...")
 
     encoder_tokenizer, cehrgpt_tokenizer, model = setup_model(
-        args.tokenizer_name_or_path, args.model_name_or_path, device
+        tokenizer_path=args.tokenizer_name_or_path,
+        model_path=args.model_name_or_path,
+        device=device,
     )
 
     # Configure model generation settings
@@ -83,20 +112,34 @@ def main():
         renormalize_logits=True,
     )
 
+    concept = pl.read_parquet(os.path.join(args.vocabulary_dir, "concept", "*parquet"))
+    concept_name_map, concept_domain_map = generate_concept_maps(concept)
     while True:
-        query = input("Enter your query (type 'exit' to quit): ")
+        query = input(
+            "Enter your query (type 'exit' to quit): \n"
+            "Example: Race: White\nGender: MALE\n\n1. Age: 50\n1. Condition: Essential Hypertension\n"
+        )
         if query.lower() == "exit":
             break
 
-        response = generate_response(
-            query,
-            encoder_tokenizer,
-            cehrgpt_tokenizer,
-            model,
-            device,
-            generation_config,
+        sequence = generate_response(
+            query=query,
+            encoder_tokenizer=encoder_tokenizer,
+            cehrgpt_tokenizer=cehrgpt_tokenizer,
+            model=model,
+            device=device,
+            generation_config=generation_config,
         )
-        print("Generated Response:", response)
+
+        if sequence:
+            patient_sequence_converter = get_cehrgpt_patient_converter(
+                sequence, concept_domain_map
+            )
+            if patient_sequence_converter.is_validation_passed:
+                cehrgpt_patient = patient_sequence_converter.get_patient(
+                    concept_domain_map, concept_name_map
+                )
+                print("\nGenerated Response:\n", cehrgpt_patient.get_narrative())
 
 
 if __name__ == "__main__":
