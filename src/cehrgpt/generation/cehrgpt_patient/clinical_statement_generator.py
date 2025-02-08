@@ -169,7 +169,7 @@ class ClinicalStatementGenerator:
                 sorted(age_condition_drug_tuples, key=lambda x: x[0])
             ):
                 if age:
-                    clinical_statement += f"\n{i + 1}. Diagnosis age {age}\n"
+                    clinical_statement += f"\n{i + 1}. Age: {age}\n"
                 if condition:
                     clinical_statement += f"{i + 1}. Condition: {concept_name_mapping.get(str(condition), condition)}\n"
                 if drug:
