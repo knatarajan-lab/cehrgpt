@@ -50,25 +50,21 @@ class ConditionDrugKnowledgeGraph:
         self.knowledge_graph = knowledge_graph
         self.drug_ingredient_to_brand_drug_map = drug_ingredient_to_brand_drug_map
 
-    def get_drug_indications(self, condition_concept_id: int) -> List[int]:
+    def get_drug_indications(self, condition_concept_id: int) -> Dict[int, int]:
         # Use set for better performance on lookups and additions
-        drug_concept_ids = []
+        drug_concept_ids = {}
         if condition_concept_id in self.knowledge_graph:
             for dest_concept_id, rels in self.knowledge_graph[
                 condition_concept_id
             ].items():
-                for (
-                    rel
-                ) in (
-                    rels.values()
-                ):  # Assumption: rels are dicts with potential multiple relationships
+                # Assumption: rels are dicts with potential multiple relationships
+                for rel in rels.values():
                     if rel["rel_name"] == "inv_has_indication":
-                        drug_concept_ids.append(dest_concept_id)
-                        drug_concept_ids.extend(
-                            self.drug_ingredient_to_brand_drug_map.get(
-                                dest_concept_id, []
-                            )
-                        )
+                        drug_concept_ids[dest_concept_id] = dest_concept_id
+                        for branded_drug in self.drug_ingredient_to_brand_drug_map.get(
+                            dest_concept_id, []
+                        ):
+                            drug_concept_ids[branded_drug] = dest_concept_id
         return drug_concept_ids
 
 
@@ -82,13 +78,13 @@ class ClinicalStatementGenerator:
     ):
         self.allowed_clinical_conditions = allowed_clinical_conditions
         self.n_conditions = n_conditions
-        self.condition_drug_map = defaultdict(list)
+        self.condition_drug_map = defaultdict(dict)
         self.condition_drug_knowledge_graph = condition_drug_knowledge_graph
         self.cache = ProbabilisticCache[Tuple[int, int, int], PatientSequenceConverter](
             capacity
         )
 
-    def get_indications(self, condition_concept_id: int) -> List[int]:
+    def get_indications(self, condition_concept_id: int) -> Dict[int, int]:
         if condition_concept_id not in self.condition_drug_map:
             indications = self.condition_drug_knowledge_graph.get_drug_indications(
                 condition_concept_id
@@ -142,9 +138,11 @@ class ClinicalStatementGenerator:
                     conditions, self.n_conditions
                 ):
                     indications = [
-                        indication
-                        for indication in self.get_indications(condition)
-                        if indication in drugs
+                        ingredient
+                        for branded_drug, ingredient in self.get_indications(
+                            condition
+                        ).items()
+                        if branded_drug in drugs
                     ]
                     random_indication = (
                         random.choice(indications) if indications else None
