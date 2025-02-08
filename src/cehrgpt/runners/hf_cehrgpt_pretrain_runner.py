@@ -394,6 +394,9 @@ def main():
         encoder_model = AutoModel.from_pretrained(
             cehrgpt_args.encoder_model_name_or_path
         )
+        setattr(
+            encoder_model.config, "encoder_trainable", cehrgpt_args.encoder_trainable
+        )
         model = InstructCEHRGPTModel.from_encoder_decoder_pretrained(
             encoder_model=encoder_model, decoder_model=model
         )

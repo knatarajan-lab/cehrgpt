@@ -141,6 +141,10 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether we want to use the encoder decoder"
         },
     )
+    encoder_trainable: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={"help": "A flag to indicate whether the encoder is trainable"},
+    )
     encoder_model_name_or_path: Optional[str] = dataclasses.field(
         default=None,
         metadata={

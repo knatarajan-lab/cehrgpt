@@ -115,7 +115,7 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
         )
         model.decoder.generation_config.pad_token_id = cehrgpt_tokenizer.pad_token_id
         model.decoder.generation_config.eos_token_id = cehrgpt_tokenizer.end_token_id
-        model.decoder.generation_config.bos_token_id = cehrgpt_tokenizer.end_token_id
+        model.decoder.generation_config.bos_token_id = cehrgpt_tokenizer.start_token_id
 
         query = """Race: White
 Gender: MALE
