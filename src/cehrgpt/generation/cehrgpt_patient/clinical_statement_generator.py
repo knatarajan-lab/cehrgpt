@@ -13,7 +13,7 @@ from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
 )
 from cehrgpt.gpt_utils import ProbabilisticCache
 
-logger = logging.get_logger(__name__)
+logger = logging.get_logger("transformers")
 
 DEFAULT_CLINICAL_STATEMENT = "Generate a patient"
 
@@ -152,7 +152,7 @@ class ClinicalStatementGenerator:
                     age_condition_drug_tuples.append(
                         (age_at_diagnosis, condition, random_indication)
                     )
-                    logger.info(
+                    logger.debug(
                         "Tuple[age, condition, drug]: %s, %s, %s",
                         age_at_diagnosis,
                         concept_name_mapping.get(str(condition), condition),
@@ -161,7 +161,7 @@ class ClinicalStatementGenerator:
                         ),
                     )
             else:
-                logger.info(
+                logger.debug(
                     "There are no conditions discovered\n.%s",
                     cehrgpt_patient.get_narrative(),
                 )
