@@ -152,6 +152,14 @@ class ClinicalStatementGenerator:
                     age_condition_drug_tuples.append(
                         (age_at_diagnosis, condition, random_indication)
                     )
+                    logger.debug(
+                        "Tuple[age, condition, drug]: %s, %s, %s",
+                        age_at_diagnosis,
+                        concept_name_mapping.get(str(condition), condition),
+                        concept_name_mapping.get(
+                            str(random_indication), random_indication
+                        ),
+                    )
             else:
                 logger.debug(
                     "There are no conditions discovered\n.%s",
