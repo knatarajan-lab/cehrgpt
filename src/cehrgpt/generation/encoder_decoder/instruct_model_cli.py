@@ -7,8 +7,14 @@ import torch
 from transformers import AutoTokenizer, GenerationConfig, PreTrainedTokenizer
 from transformers.utils import is_flash_attn_2_available
 
+from cehrgpt.generation.cehrgpt_patient.clinical_statement_generator import (
+    DEFAULT_CLINICAL_STATEMENT,
+)
 from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
     get_cehrgpt_patient_converter,
+)
+from cehrgpt.generation.encoder_decoder.instruct_cehrpgt_query import (
+    parse_question_to_cehrgpt_query,
 )
 from cehrgpt.generation.generate_batch_hf_gpt_sequence import (
     extract_output_from_model_response,
@@ -83,6 +89,11 @@ def create_instruct_cehrgpt_argparser():
         required=True,
         help="Path to vocabulary dir containing concept and concept_ancestor data",
     )
+    parser.add_argument(
+        "--use_llm_parser",
+        action="store_true",
+        help="A flag to indicate whether we want to use LLM to parse the clinical statement",
+    )
     return parser.parse_args()
 
 
@@ -122,8 +133,17 @@ def main():
             "Enter your query (type 'exit' to quit): \n"
             "Example: Race: White\nGender: MALE\n\n1. Age: 50\n1. Condition: Essential Hypertension\n"
         )
+
         if query.lower() == "exit":
             break
+
+        if args.use_llm_parser:
+            query = parse_question_to_cehrgpt_query(query)
+            if not query:
+                print(
+                    "Failed to parse the query and will generate a random synthetic patient\n"
+                )
+                query = DEFAULT_CLINICAL_STATEMENT
 
         model_responses = generate_responses(
             queries=[query],

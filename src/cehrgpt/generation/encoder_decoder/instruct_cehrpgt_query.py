@@ -1,12 +1,12 @@
 import os
 from textwrap import dedent
+from typing import Optional
 
 from jinja2 import BaseLoader, Environment
 from openai import OpenAI
 from pydantic import BaseModel
 
 from cehrgpt.generation.cehrgpt_patient.clinical_statement_generator import (
-    DEFAULT_CLINICAL_STATEMENT,
     create_clinical_statement,
 )
 
@@ -51,7 +51,7 @@ class InstructCehrGptQueryTemplate(BaseModel):
     drug: str
 
 
-def parse_question_to_cehrgpt_query(clinical_statement: str) -> str:
+def parse_question_to_cehrgpt_query(clinical_statement: str) -> Optional[str]:
     prompt = QUERY_TEMPLATE.render(clinical_statement=clinical_statement)
     completion = client.beta.chat.completions.parse(
         model=MODEL,
@@ -73,4 +73,4 @@ def parse_question_to_cehrgpt_query(clinical_statement: str) -> str:
             race=race,
             age_condition_drug_tuples=[(age_of_diagnosis, diagnosis, drug)],
         )
-    return DEFAULT_CLINICAL_STATEMENT
+    return None
