@@ -8,11 +8,10 @@ def generate_ancestor_descendant_map(
     concept_ancestor_pl: pl.DataFrame,
     concept_ids: List[str],
 ) -> Dict[str, List[str]]:
+    concept_ids = [int(c) for c in concept_ids if c.isnumeric()]
     ancestor_descendant_map = defaultdict(list)
     for row in (
-        concept_ancestor_pl.filter(
-            pl.col("ancestor_concept_id").cast(str).is_in(concept_ids)
-        )
+        concept_ancestor_pl.filter(pl.col("ancestor_concept_id").is_in(concept_ids))
         .to_pandas()
         .iterrows()
     ):

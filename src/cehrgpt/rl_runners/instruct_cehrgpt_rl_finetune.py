@@ -73,18 +73,22 @@ def main(args):
         ),
     )
 
-    LOG.info("Loading tokenizer at %s", args.model_folder)
-    LOG.info("Loading model at %s", args.model_folder)
-    LOG.info("Context window %s", args.context_window)
-    LOG.info("Temperature %s", args.temperature)
-    LOG.info("Repetition Penalty %s", args.repetition_penalty)
-    LOG.info("Sampling Strategy %s", args.sampling_strategy)
-    LOG.info("Num beam %s", args.num_beams)
-    LOG.info("Num beam groups %s", args.num_beam_groups)
-    LOG.info("Epsilon cutoff %s", args.epsilon_cutoff)
-    LOG.info("Top P %s", args.top_p)
-    LOG.info("Top K %s", args.top_k)
-    LOG.info("Loading demographic_info at %s", args.demographic_data_path)
+    LOG.info("%s: Loading tokenizer at %s", datetime.datetime.now(), args.model_folder)
+    LOG.info("%s: Loading model at %s", datetime.datetime.now(), args.model_folder)
+    LOG.info("%s: Context window %s", datetime.datetime.now(), args.context_window)
+    LOG.info("%s: Temperature %s", datetime.datetime.now(), args.temperature)
+    LOG.info(
+        "%s: Repetition Penalty %s", datetime.datetime.now(), args.repetition_penalty
+    )
+    LOG.info(
+        "%s: Sampling Strategy %s", datetime.datetime.now(), args.sampling_strategy
+    )
+    LOG.info("%s: Num beam %s", datetime.datetime.now(), args.num_beams)
+    LOG.info("%s: Num beam groups %s", datetime.datetime.now(), args.num_beam_groups)
+    LOG.info("%s: Epsilon cutoff %s", datetime.datetime.now(), args.epsilon_cutoff)
+    LOG.info("%s: Top P %s", datetime.datetime.now(), args.top_p)
+    LOG.info("%s: Top K %s", datetime.datetime.now(), args.top_k)
+    LOG.info("%s: Loading demographic_info at %s", args.demographic_data_path)
 
     # Configure model generation settings
     generation_config = GenerationConfig(
@@ -110,19 +114,41 @@ def main(args):
         renormalize_logits=True,
     )
 
+    LOG.info(
+        "%s: Loading the knowledge graph from %s",
+        datetime.datetime.now(),
+        args.knowledge_graph_path,
+    )
     with open(args.knowledge_graph_path, "rb") as f:
         knowledge_graph = pickle.load(f)
+
+    LOG.info(
+        "%s: Loading the concept and concept ancestor from %s",
+        datetime.datetime.now(),
+        args.vocabulary_dir,
+    )
     concept = pl.read_parquet(os.path.join(args.vocabulary_dir, "concept", "*parquet"))
     concept_ancestor = pl.read_parquet(
         os.path.join(args.vocabulary_dir, "concept_ancestor", "*parquet")
+    )
+
+    LOG.info(
+        "%s: Constructing the ingredient to branded drug mapping",
+        datetime.datetime.now(),
     )
     drug_ingredient_to_brand_drug_map = create_drug_ingredient_to_brand_drug_map(
         concept, concept_ancestor
     )
 
+    LOG.info(
+        "%s: Constructing the ancestor to descendent mapping", datetime.datetime.now()
+    )
     ancestor_descendant_map = generate_ancestor_descendant_map(
         concept_ancestor_pl=concept_ancestor,
         concept_ids=cehrgpt_tokenizer.get_vocab().values(),
+    )
+    LOG.info(
+        "%s: Constructing the concept mapping dictionaries", datetime.datetime.now()
     )
     concept_name_map, concept_domain_map = generate_concept_maps(concept)
     clinical_statement_generator = ClinicalStatementGenerator(
@@ -140,6 +166,11 @@ def main(args):
         concept_name_map=concept_name_map,
     )
 
+    LOG.info(
+        "%s: Loading the training data from %s",
+        datetime.datetime.now(),
+        args.demographic_data_path,
+    )
     dataset = load_parquet_as_dataset(args.demographic_data_path).filter(
         lambda batched: [
             model.config.n_positions >= num_of_concepts > args.min_num_tokens
