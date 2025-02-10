@@ -1,5 +1,8 @@
+import datetime
 import inspect
 from typing import Dict, List, Optional, Tuple
+
+from transformers.utils import logging
 
 from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
     PatientSequenceConverter,
@@ -7,6 +10,8 @@ from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
 )
 
 from .reward_function_base import RewardFunction
+
+logger = logging.get_logger("transformers")
 
 
 class CEHRGPTRewardModel:
@@ -28,14 +33,22 @@ class CEHRGPTRewardModel:
         concept_name_map: Dict[str, str],
         concept_domain_map: Dict[str, str],
     ) -> float:
+        logger.debug(
+            "%s: encoder_age_concept_prompt_tuples: %s",
+            datetime.datetime.now(),
+            encoder_age_concept_prompt_tuples,
+        )
         patient_seq_converter: PatientSequenceConverter = get_cehrgpt_patient_converter(
             patient_sequence, concept_domain_map
+        )
+        cehrgpt_patient = patient_seq_converter.get_patient(
+            concept_domain_map, concept_name_map
         )
         reward = 0.0
         for reward_function in self.reward_functions:
             reward += reward_function.get_reward(
                 query,
-                patient_seq_converter.get_patient(concept_domain_map, concept_name_map),
+                cehrgpt_patient,
                 encoder_age_concept_prompt_tuples=encoder_age_concept_prompt_tuples,
             )
         return reward
