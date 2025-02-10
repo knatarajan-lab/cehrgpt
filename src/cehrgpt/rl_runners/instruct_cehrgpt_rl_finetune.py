@@ -149,7 +149,7 @@ def main(args):
     )
     ancestor_descendant_map = generate_ancestor_descendant_map(
         concept_ancestor_pl=concept_ancestor,
-        concept_ids=cehrgpt_tokenizer.get_vocab().values(),
+        concept_ids=cehrgpt_tokenizer.get_vocab().keys(),
     )
     LOG.info(
         "%s: Constructing the concept mapping dictionaries", datetime.datetime.now()

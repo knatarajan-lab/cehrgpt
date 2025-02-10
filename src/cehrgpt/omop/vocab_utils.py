@@ -1,12 +1,12 @@
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import polars as pl
 
 
 def generate_ancestor_descendant_map(
     concept_ancestor_pl: pl.DataFrame,
-    concept_ids: List[str],
+    concept_ids: Iterable[str],
 ) -> Dict[str, List[str]]:
     concept_ids = [int(c) for c in concept_ids if c.isnumeric()]
     ancestor_descendant_map = defaultdict(list)
