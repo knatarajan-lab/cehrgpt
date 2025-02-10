@@ -137,6 +137,7 @@ Gender: MALE
             bos_token_id=cehrgpt_tokenizer.start_token_id,
             eos_token_id=cehrgpt_tokenizer.end_token_id,
             pad_token_id=cehrgpt_tokenizer.pad_token_id,
+            decoder_start_token_id=cehrgpt_tokenizer.start_token_id,
             do_sample=True,
             use_cache=True,
             return_dict_in_generate=True,
