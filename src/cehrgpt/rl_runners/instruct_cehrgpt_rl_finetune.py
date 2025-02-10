@@ -49,6 +49,7 @@ def main(args):
         device=device,
     )
     model = AutoModelForCausalLMWithValueHead(encoder_decoder_model).to(device)
+    model.is_encoder_decoder = True
     model.is_peft_model = False
     ref_model = create_reference_model(model).to(device)
 
