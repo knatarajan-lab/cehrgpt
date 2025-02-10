@@ -85,7 +85,7 @@ class ClinicalStatementGenerator:
         end: Optional[int] = None,
         return_prompt_concepts: bool = False,
     ) -> Optional[Union[str, Tuple[Optional[str], list[tuple[int, int, int]]]]]:
-        clinical_statement = None
+        clinical_statement = DEFAULT_CLINICAL_STATEMENT
         patient_sequence_converter = self.cache.get_data((person_id, start, end))
         # If the element does not exist, we will generate it
         if not patient_sequence_converter:
