@@ -457,3 +457,17 @@ class CehrGptPPOTrainer(PPOTrainer):
             )
         input_data.pop("labels", None)  # we don't want to compute LM losses
         return input_data
+
+    def compute_advantages(
+        self,
+        values: torch.FloatTensor,
+        rewards: torch.FloatTensor,
+        mask: torch.FloatTensor,
+    ):
+        values, advantages, returns = super().compute_advantages(values, rewards, mask)
+        if getattr(self, "use_grpo", False):
+            adv_mean = advantages.mean()
+            adv_std = advantages.std()
+            if adv_std.cpu().item() > 0:
+                advantages = (advantages - adv_mean) / adv_std
+        return values, advantages, returns

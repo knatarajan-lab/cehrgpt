@@ -73,6 +73,7 @@ def main(args):
             max_length=args.context_window,
         ),
     )
+    setattr(ppo_trainer, "use_grpo", args.use_grpo)
 
     LOG.info("%s: Loading tokenizer at %s", datetime.datetime.now(), args.model_folder)
     LOG.info("%s: Loading model at %s", datetime.datetime.now(), args.model_folder)
@@ -198,17 +199,42 @@ def main(args):
         batched_value_indicators = []
         batched_concept_prompts = []
         for _ in range(num_of_micro_batches):
-            random_record = dataset.select(np.random.randint(0, total_rows, 1))
-            random_patient_sequence = random_record[0]["concept_ids"]
-            query, prompt_tuples = (
-                clinical_statement_generator.generate_clinical_statement(
-                    random_patient_sequence,
-                    concept_name_mapping=concept_name_map,
-                    concept_domain_mapping=concept_domain_map,
-                    return_prompt_concepts=True,
+            if args.use_grpo:
+                random_record = dataset.select(np.random.randint(0, total_rows, 1))
+                random_patient_sequence = random_record[0]["concept_ids"]
+                query, prompt_tuples = (
+                    clinical_statement_generator.generate_clinical_statement(
+                        random_patient_sequence,
+                        concept_name_mapping=concept_name_map,
+                        concept_domain_mapping=concept_domain_map,
+                        return_prompt_concepts=True,
+                    )
                 )
-            )
-            queries = [query for _ in range(args.mini_batch_size)]
+                # Copy the same concept prompt the mini_batch_size number of times
+                queries = [query for _ in range(args.mini_batch_size)]
+                batched_concept_prompts.extend(
+                    [prompt_tuples for _ in range(args.mini_batch_size)]
+                )
+            else:
+                random_patient_sequences = [
+                    record["concept_ids"]
+                    for record in dataset.select(
+                        np.random.randint(0, total_rows, args.mini_batch_size)
+                    )
+                ]
+                queries = []
+                for patient_sequence in random_patient_sequences:
+                    clinical_statement, prompt_tuples = (
+                        clinical_statement_generator.generate_clinical_statement(
+                            patient_sequence,
+                            concept_name_mapping=concept_name_map,
+                            concept_domain_mapping=concept_domain_map,
+                            return_prompt_concepts=True,
+                        )
+                    )
+                    queries.append(clinical_statement)
+                    batched_concept_prompts.append(prompt_tuples)
+
             micro_batched_sequences = generate_responses(
                 queries=queries,
                 encoder_tokenizer=encoder_tokenizer,
@@ -221,10 +247,6 @@ def main(args):
             torch.cuda.empty_cache()
             # Copy the same concept prompt the mini_batch_size number of times
             batched_queries.extend(queries)
-            # Copy the same concept prompt the mini_batch_size number of times
-            batched_concept_prompts.extend(
-                [prompt_tuples for _ in range(args.mini_batch_size)]
-            )
             batched_sequences.extend(micro_batched_sequences["sequences"])
             batched_values.extend(micro_batched_sequences["values"])
             batched_value_indicators.extend(micro_batched_sequences["value_indicators"])
@@ -320,6 +342,10 @@ def create_arg_parser():
         action="store",
         type=int,
         required=True,
+    )
+    parser.add_argument(
+        "--use_grpo",
+        action="store_true",
     )
     return parser
 
