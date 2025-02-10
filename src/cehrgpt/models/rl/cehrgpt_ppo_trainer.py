@@ -274,10 +274,21 @@ class CehrGptPPOTrainer(PPOTrainer):
                     ref_logits_or_none, None, gather=False
                 )
 
+                for i, mask in enumerate(masks):
+                    print(f"mask.nonzero(): {mask.nonzero()}")
+                    non_zero_indices = mask.nonzero()
+                    if non_zero_indices.numel() == 0:
+                        raise RuntimeError(queries[i], responses[i], scores[i])
+
                 rewards, non_score_reward, kls = self.compute_rewards(
                     scores, active_full_logprobs, ref_full_logprobs, masks
                 )
             else:
+                for i, mask in enumerate(masks):
+                    print(f"mask.nonzero(): {mask.nonzero()}")
+                    non_zero_indices = mask.nonzero()
+                    if non_zero_indices.numel() == 0:
+                        raise RuntimeError(queries[i], responses[i], scores[i])
                 rewards, non_score_reward, kls = self.compute_rewards(
                     scores, all_logprobs, ref_logprobs, masks
                 )
