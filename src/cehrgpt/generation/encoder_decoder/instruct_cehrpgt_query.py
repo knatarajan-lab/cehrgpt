@@ -16,6 +16,21 @@ Instructions: Analyze the clinical statement provided and extract the following 
 age at diagnosis, and the medication prescribed. If any information is not available in the statement,
 leave the corresponding field blank.
 
+Additional requirements:
+1. Here are the allowed values are for race
+- White
+- Asian
+- Black or African American
+- Middle Eastern or North African
+- Native Hawaiian or Other Pacific Islander
+
+2. Here are the allowed values are for gender
+- Female
+- Male
+
+3. When you extract diagnoses, convert the diagnosis to the standard name
+4. When you extract drugs, convert the drug to their standard ingredients
+
 Clinical Statement: {{ clinical_statement }}
 
 Example Responses:
