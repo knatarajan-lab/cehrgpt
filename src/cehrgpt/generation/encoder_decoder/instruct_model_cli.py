@@ -42,7 +42,9 @@ def generate_responses(
     device: Union[torch.device, str],
     generation_config: GenerationConfig,
 ) -> Dict[str, Any]:
-    encoder_inputs = encoder_tokenizer(queries, return_tensors="pt")
+    encoder_inputs = encoder_tokenizer(
+        queries, padding=True, truncation=True, return_tensors="pt"
+    )
     encoder_input_ids = encoder_inputs["input_ids"]
     encoder_attention_mask = encoder_inputs["attention_mask"]
     batch_size = encoder_input_ids.shape[0]
