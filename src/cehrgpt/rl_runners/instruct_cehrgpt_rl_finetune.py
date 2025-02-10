@@ -278,14 +278,14 @@ def main(args):
                 concept_name_map=concept_name_map,
                 concept_domain_map=concept_domain_map,
             )
-            LOG.info(
-                "%s: Batch %s Reward: %s}",
-                {datetime.datetime.now()},
-                i,
-                reward,
-            )
             rewards.append(torch.FloatTensor([reward]))
 
+        LOG.info(
+            "%s: Batch %s Average Reward: %s}",
+            datetime.datetime.now(),
+            i,
+            torch.tensor(rewards).mean().cpu().item(),
+        )
         train_stats = ppo_trainer.step(
             query_tensors,
             response_tensors,
