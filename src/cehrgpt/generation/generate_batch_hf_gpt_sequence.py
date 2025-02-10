@@ -75,7 +75,7 @@ def normalize_value(
 def extract_output_from_model_response(
     results: GenerateOutput,
     cehrgpt_tokenizer: CehrGptTokenizer,
-    skip_special_tokens: bool = True,
+    skip_special_tokens: bool = False,
 ) -> Dict[str, Any]:
 
     sequences = [
@@ -93,14 +93,19 @@ def extract_output_from_model_response(
             for values in sequence_vals
         ]
     else:
-        values = np.zeros_like(sequences)
-        values.fill(NA)
+        values = []
+        for seq in sequences:
+            v = np.zeros_like(seq)
+            v.fill(NA)
+            values.append(v)
 
     sequence_val_masks: Optional[Tensor] = results.get("sequence_val_masks", None)
     if sequence_val_masks is not None:
         value_indicators = sequence_val_masks.cpu().numpy()
     else:
-        value_indicators = np.zeros_like(sequences, dtype=np.int32).astype(bool)
+        value_indicators = []
+        for seq in sequences:
+            value_indicators.append(np.zeros_like(seq, dtype=np.int32).astype(bool))
 
     return {
         "sequences": sequences,
