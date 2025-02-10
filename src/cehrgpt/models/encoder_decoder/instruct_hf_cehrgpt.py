@@ -37,13 +37,13 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
 
     def forward(
         self,
-        encoder_input_ids: Optional[torch.LongTensor] = None,
-        encoder_attention_mask: Optional[torch.FloatTensor] = None,
         input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        decoder_input_ids: Optional[torch.LongTensor] = None,
+        decoder_attention_mask: Optional[torch.FloatTensor] = None,
         value_indicators: Optional[torch.BoolTensor] = None,
         values: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         random_vectors: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
@@ -68,8 +68,8 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
         # We don't want to update the encoder model
         with torch.no_grad():
             encoder_outputs = self.encoder(
-                input_ids=encoder_input_ids,
-                attention_mask=encoder_attention_mask,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
                 return_dict=return_dict,
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
@@ -80,12 +80,12 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
             encoder_hidden_states = self.enc_to_dec_proj(encoder_hidden_states)
 
         decoder_output = self.decoder(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
+            input_ids=decoder_input_ids,
+            attention_mask=decoder_attention_mask,
             value_indicators=value_indicators,
             values=values,
             encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=encoder_attention_mask,
+            encoder_attention_mask=attention_mask,
             labels=labels,
             true_value_indicators=true_value_indicators,
             true_values=true_values,
@@ -136,7 +136,7 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
 
     def _sample(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
+        inputs: Optional[torch.LongTensor],
         logits_processor: Optional[LogitsProcessorList] = None,
         stopping_criteria: Optional[StoppingCriteriaList] = None,
         logits_warper: Optional[LogitsProcessorList] = None,
@@ -153,28 +153,17 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
         **model_kwargs,
     ) -> Union[CehrGptGenerateDecoderOnlyOutput, torch.LongTensor]:
 
-        encoder_input_ids = model_kwargs.pop("encoder_input_ids")
-        encoder_attention_mask = model_kwargs.pop("encoder_attention_mask")
-        encoder_batch_size, encoder_sequence_length = encoder_input_ids.size()
-        encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
-        if encoder_attention_mask is None:
-            encoder_attention_mask = torch.ones(
-                encoder_hidden_shape, device=encoder_input_ids.device
-            )
-        # We don't want to update the encoder model
-        with torch.no_grad():
-            encoder_outputs = self.encoder(
-                input_ids=encoder_input_ids,
-                attention_mask=encoder_attention_mask,
-            )
+        encoder_outputs = model_kwargs.get("encoder_outputs")
         encoder_hidden_states = encoder_outputs[0]
+        # This is important so that the decoder will not use attention_mask as its own mask
+        encoder_attention_mask = model_kwargs.pop("attention_mask")
 
         # optionally project encoder_hidden_states
         if self.encoder.config.hidden_size != self.decoder.config.hidden_size:
             encoder_hidden_states = self.enc_to_dec_proj(encoder_hidden_states)
 
         generated_output = self.decoder._sample(
-            input_ids=input_ids,
+            input_ids=inputs,
             logits_processor=logits_processor,
             stopping_criteria=stopping_criteria,
             logits_warper=logits_warper,

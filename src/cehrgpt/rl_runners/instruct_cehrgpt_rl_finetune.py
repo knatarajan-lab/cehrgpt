@@ -148,8 +148,6 @@ def main(args):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
         batched_queries = []
         batched_sequences = []
-        batched_values = []
-        batched_value_indicators = []
         batched_encoder_age_concept_prompt_tuples = []
         for _ in range(num_of_micro_batches):
             random_patient_sequences = [
@@ -188,12 +186,8 @@ def main(args):
         LOG.info("%s: Batch %s sequence generated", datetime.datetime.now(), i)
         query_tensors = []
         response_tensors = []
-        value_tensors = []
-        value_indicator_tensors = []
         rewards = []
-        for query, sequence, values, value_indicators in zip(
-            batched_queries, batched_sequences, batched_values, batched_value_indicators
-        ):
+        for query, sequence in zip(batched_queries, batched_sequences):
             # Convert sequence to a NumPy array if it's not already one
             sequence_array = np.asarray(sequence)
             # Find the end token
@@ -204,20 +198,17 @@ def main(args):
                 else len(sequence_array) - 1
             )
             sequence = sequence[: end_index + 1]
-            values = values[: end_index + 1]
-            value_indicators = value_indicators[: end_index + 1]
 
             query_tensors.append(torch.tensor(cehrgpt_tokenizer.encode(sequence[:4])))
             response_tensors.append(
                 torch.tensor(cehrgpt_tokenizer.encode(sequence[4:]))
             )
-            value_tensors.append(torch.tensor(cehrgpt_tokenizer.encode_value(values)))
-            value_indicator_tensors.append(torch.tensor(value_indicators))
             reward = reward_model.get_reward(
                 query,
                 sequence,
-                batched_encoder_age_concept_prompt_tuples,
+                encoder_age_concept_prompt_tuples=batched_encoder_age_concept_prompt_tuples,
                 concept_domain_map=concept_domain_map,
+                concept_name_map=concept_name_map,
             )
             LOG.info(
                 "%s: Batch %s Reward: %s}",
@@ -231,8 +222,6 @@ def main(args):
             query_tensors,
             response_tensors,
             rewards,
-            value_tensors,
-            value_indicator_tensors,
         )
         LOG.info("%s: Batch %s stats: %s}", datetime.datetime.now(), i, train_stats)
         if i != 0 and i % args.save_step == 0:

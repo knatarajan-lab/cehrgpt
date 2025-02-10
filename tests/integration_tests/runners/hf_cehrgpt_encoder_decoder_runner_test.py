@@ -146,9 +146,9 @@ Gender: MALE
             renormalize_logits=True,
         )
         output = model.generate(
-            inputs=batched_inputs,
-            encoder_input_ids=encoder_input_ids,
-            encoder_attention_mask=encoder_attention_mask.to(device),
+            inputs=encoder_input_ids,
+            attention_mask=encoder_attention_mask.to(device),
+            decoder_input_ids=batched_inputs,
             generation_config=generation_config,
             lab_token_ids=cehrgpt_tokenizer.lab_token_ids,
         )

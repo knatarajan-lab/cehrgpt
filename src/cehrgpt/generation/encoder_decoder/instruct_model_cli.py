@@ -48,9 +48,9 @@ def generate_responses(
     ).to(device)
 
     output = model.generate(
-        inputs=batched_inputs,
-        encoder_input_ids=encoder_input_ids.to(device),
-        encoder_attention_mask=encoder_attention_mask.to(device),
+        inputs=encoder_input_ids.to(device),
+        attention_mask=encoder_attention_mask.to(device),
+        decoder_input_ids=batched_inputs.to(device),
         generation_config=generation_config,
         lab_token_ids=cehrgpt_tokenizer.lab_token_ids,
     )
@@ -103,6 +103,7 @@ def main():
         bos_token_id=cehrgpt_tokenizer.start_token_id,
         eos_token_id=cehrgpt_tokenizer.end_token_id,
         pad_token_id=cehrgpt_tokenizer.pad_token_id,
+        decoder_start_token_id=cehrgpt_tokenizer.start_token_id,
         do_sample=True,
         use_cache=True,
         return_dict_in_generate=True,

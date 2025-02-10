@@ -25,6 +25,7 @@ class CEHRGPTRewardModel:
         query: str,
         patient_sequence: List[str],
         encoder_age_concept_prompt_tuples: List[Tuple[int, int, Optional[int]]],
+        concept_name_map: Dict[str, str],
         concept_domain_map: Dict[str, str],
     ) -> float:
         patient_seq_converter: PatientSequenceConverter = get_cehrgpt_patient_converter(
@@ -34,7 +35,7 @@ class CEHRGPTRewardModel:
         for reward_function in self.reward_functions:
             reward += reward_function.get_reward(
                 query,
-                patient_seq_converter.get_patient(),
+                patient_seq_converter.get_patient(concept_domain_map, concept_name_map),
                 encoder_age_concept_prompt_tuples=encoder_age_concept_prompt_tuples,
             )
         return reward

@@ -34,6 +34,21 @@ class InstructCehrGptDataCollator(CehrGptDataCollator):
         self.concept_name_mapping = concept_name_mapping
         self.concept_domain_mapping = concept_domain_mapping
 
+    def __call__(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
+        batch = super().__call__(examples)
+        # Switch the names
+        input_ids = batch["input_ids"]
+        attention_mask = batch["attention_mask"]
+        encoder_input_ids = batch["encoder_input_ids"]
+        encoder_attention_mask = batch["encoder_attention_mask"]
+        del batch["encoder_input_ids"]
+        del batch["encoder_attention_mask"]
+        batch["input_ids"] = encoder_input_ids
+        batch["attention_mask"] = encoder_attention_mask
+        batch["decoder_input_ids"] = input_ids
+        batch["decoder_attention_mask"] = attention_mask
+        return batch
+
     def encoder_input_hook(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
         batch = {}
         # Assume that each example in the batch is a dictionary with 'input_ids' and 'attention_mask'

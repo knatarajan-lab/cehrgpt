@@ -19,22 +19,10 @@ class InstructCehrGptPPODataCollator:
     def __call__(self, examples):
         batch = {}
         # Pad sequences to the max length in the batch
-        batch["encoder_input_ids"] = pad_sequence(
-            [example["encoder_input_ids"] for example in examples],
-            batch_first=True,
-            padding_value=self.encoder_tokenizer.pad_token_id,
-        ).to(torch.int64)
-
-        batch["encoder_attention_mask"] = pad_sequence(
-            [example["encoder_attention_mask"] for example in examples],
-            batch_first=True,
-            padding_value=0.0,
-        )
-
         batch["input_ids"] = pad_sequence(
             [example["input_ids"] for example in examples],
             batch_first=True,
-            padding_value=self.cehrgpt_tokenizer.pad_token_id,
+            padding_value=self.encoder_tokenizer.pad_token_id,
         ).to(torch.int64)
 
         batch["attention_mask"] = pad_sequence(
@@ -43,9 +31,21 @@ class InstructCehrGptPPODataCollator:
             padding_value=0.0,
         )
 
+        batch["decoder_input_ids"] = pad_sequence(
+            [example["decoder_input_ids"] for example in examples],
+            batch_first=True,
+            padding_value=self.cehrgpt_tokenizer.pad_token_id,
+        ).to(torch.int64)
+
+        batch["decoder_attention_mask"] = pad_sequence(
+            [example["decoder_attention_mask"] for example in examples],
+            batch_first=True,
+            padding_value=0.0,
+        )
+
         assert (
-            batch["input_ids"].shape[1] <= self.max_length
-        ), f"Invalid input_ids length: {batch['input_ids'].shape[1]}"
+            batch["decoder_input_ids"].shape[1] <= self.max_length
+        ), f"Invalid input_ids length: {batch['decoder_input_ids'].shape[1]}"
 
         if "value_indicators" in examples[0]:
             batch["value_indicators"] = pad_sequence(
