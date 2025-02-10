@@ -252,6 +252,9 @@ def main(args):
             batched_value_indicators,
             batched_concept_prompts,
         ):
+            # If the generated sequence did not reach the min num tokens, we should skip it
+            if len(sequence) < args.min_num_tokens:
+                continue
             # Convert sequence to a NumPy array if it's not already one
             sequence_array = np.asarray(sequence)
             # Find the end token
