@@ -88,7 +88,11 @@ def main(args):
     LOG.info("%s: Epsilon cutoff %s", datetime.datetime.now(), args.epsilon_cutoff)
     LOG.info("%s: Top P %s", datetime.datetime.now(), args.top_p)
     LOG.info("%s: Top K %s", datetime.datetime.now(), args.top_k)
-    LOG.info("%s: Loading demographic_info at %s", args.demographic_data_path)
+    LOG.info(
+        "%s: Loading demographic_info at %s",
+        datetime.datetime.now(),
+        args.demographic_data_path,
+    )
 
     # Configure model generation settings
     generation_config = GenerationConfig(
