@@ -177,7 +177,9 @@ def main(args):
     )
     dataset = load_parquet_as_dataset(args.demographic_data_path).filter(
         lambda batched: [
-            model.config.n_positions >= num_of_concepts > args.min_num_tokens
+            encoder_decoder_model.config.decoder.n_positions
+            >= num_of_concepts
+            > args.min_num_tokens
             for num_of_concepts in batched["num_of_concepts"]
         ],
         batched=True,
