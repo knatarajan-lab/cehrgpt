@@ -111,8 +111,10 @@ def main(args):
     drug_ingredient_to_brand_drug_map = create_drug_ingredient_to_brand_drug_map(
         concept, concept_ancestor
     )
+
     ancestor_descendant_map = generate_ancestor_descendant_map(
-        concept_ancestor_pl=concept_ancestor
+        concept_ancestor_pl=concept_ancestor,
+        concept_ids=cehrgpt_tokenizer.get_vocab().values(),
     )
     concept_name_map, concept_domain_map = generate_concept_maps(concept)
     clinical_statement_generator = ClinicalStatementGenerator(
