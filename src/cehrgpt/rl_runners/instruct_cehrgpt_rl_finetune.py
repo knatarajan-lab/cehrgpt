@@ -273,7 +273,7 @@ def create_arg_parser():
     )
     parser.add_argument(
         "--save_step",
-        action="save_step",
+        action="store",
         type=int,
         required=True,
     )
