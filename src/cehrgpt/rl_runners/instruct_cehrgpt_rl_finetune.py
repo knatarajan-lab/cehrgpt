@@ -195,7 +195,7 @@ def main(args):
         batched_sequences = []
         batched_values = []
         batched_value_indicators = []
-        batched_encoder_age_concept_prompt_tuples = []
+        batched_concept_prompts = []
         for _ in range(num_of_micro_batches):
             random_patient_sequences = [
                 record["concept_ids"]
@@ -210,11 +210,11 @@ def main(args):
                         patient_sequence,
                         concept_name_mapping=concept_name_map,
                         concept_domain_mapping=concept_domain_map,
-                        return_seed_concepts=True,
+                        return_prompt_concepts=True,
                     )
                 )
                 queries.append(clinical_statement)
-                batched_encoder_age_concept_prompt_tuples.append(prompt_tuples)
+                batched_concept_prompts.append(prompt_tuples)
 
             micro_batched_sequences = generate_responses(
                 queries=queries,
@@ -238,8 +238,18 @@ def main(args):
         value_tensors = []
         value_indicator_tensors = []
         rewards = []
-        for query, sequence, sequence_val, sequence_val_indicator in zip(
-            batched_queries, batched_sequences, batched_values, batched_value_indicators
+        for (
+            query,
+            sequence,
+            sequence_val,
+            sequence_val_indicator,
+            concept_prompt,
+        ) in zip(
+            batched_queries,
+            batched_sequences,
+            batched_values,
+            batched_value_indicators,
+            batched_concept_prompts,
         ):
             # Convert sequence to a NumPy array if it's not already one
             sequence_array = np.asarray(sequence)
@@ -263,7 +273,7 @@ def main(args):
             reward = reward_model.get_reward(
                 query,
                 sequence,
-                batched_encoder_age_concept_prompt_tuples,
+                concept_prompt,
                 concept_name_map=concept_name_map,
                 concept_domain_map=concept_domain_map,
             )

@@ -83,7 +83,7 @@ class ClinicalStatementGenerator:
         person_id: Optional[int] = None,
         start: Optional[int] = None,
         end: Optional[int] = None,
-        return_seed_concepts: bool = False,
+        return_prompt_concepts: bool = False,
     ) -> Optional[Union[str, Tuple[Optional[str], list[tuple[int, int, int]]]]]:
         clinical_statement = None
         patient_sequence_converter = self.cache.get_data((person_id, start, end))
@@ -158,7 +158,7 @@ class ClinicalStatementGenerator:
                 "Failed to generate clinical statement, %s",
                 patient_sequence_converter.get_error_messages(),
             )
-        if return_seed_concepts:
+        if return_prompt_concepts:
             return clinical_statement, age_condition_drug_tuples
         else:
             return clinical_statement
