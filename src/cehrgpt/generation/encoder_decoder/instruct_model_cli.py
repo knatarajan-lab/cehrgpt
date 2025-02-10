@@ -1,6 +1,6 @@
 import argparse
 import os
-from typing import List, Optional, Union
+from typing import List, Union
 
 import polars as pl
 import torch
@@ -10,11 +10,9 @@ from transformers.utils import is_flash_attn_2_available
 from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
     get_cehrgpt_patient_converter,
 )
-from cehrgpt.generation.cehrgpt_patient.patient_narrative_generator import (
-    generate_concept_maps,
-)
 from cehrgpt.models.encoder_decoder.instruct_hf_cehrgpt import InstructCEHRGPTModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.omop.vocab_utils import generate_concept_maps
 
 
 def setup_model(tokenizer_path, model_path, device):
@@ -30,19 +28,18 @@ def setup_model(tokenizer_path, model_path, device):
         .eval()
         .to(device)
     )
-
     return encoder_tokenizer, cehrgpt_tokenizer, model
 
 
-def generate_response(
-    query: str,
+def generate_responses(
+    queries: List[str],
     encoder_tokenizer: PreTrainedTokenizer,
     cehrgpt_tokenizer: CehrGptTokenizer,
     model: InstructCEHRGPTModel,
     device: Union[torch.device, str],
     generation_config: GenerationConfig,
-) -> Optional[List[str]]:
-    encoder_inputs = encoder_tokenizer(query, return_tensors="pt")
+) -> List[List[str]]:
+    encoder_inputs = encoder_tokenizer(queries, return_tensors="pt")
     encoder_input_ids = encoder_inputs["input_ids"]
     encoder_attention_mask = encoder_inputs["attention_mask"]
     batch_size = encoder_input_ids.shape[0]
@@ -57,9 +54,12 @@ def generate_response(
         generation_config=generation_config,
         lab_token_ids=cehrgpt_tokenizer.lab_token_ids,
     )
+    decoded_outputs = []
     for seq in output.sequences:
-        return cehrgpt_tokenizer.decode(seq.cpu().numpy(), skip_special_tokens=True)
-    return None
+        decoded_outputs.append(
+            cehrgpt_tokenizer.decode(seq.cpu().numpy(), skip_special_tokens=True)
+        )
+    return decoded_outputs
 
 
 def create_instruct_cehrgpt_argparser():
@@ -122,8 +122,8 @@ def main():
         if query.lower() == "exit":
             break
 
-        sequence = generate_response(
-            query=query,
+        sequences = generate_responses(
+            queries=[query],
             encoder_tokenizer=encoder_tokenizer,
             cehrgpt_tokenizer=cehrgpt_tokenizer,
             model=model,
@@ -131,9 +131,9 @@ def main():
             generation_config=generation_config,
         )
 
-        if sequence:
+        if sequences:
             patient_sequence_converter = get_cehrgpt_patient_converter(
-                sequence, concept_domain_map
+                sequences[0], concept_domain_map
             )
             if patient_sequence_converter.is_validation_passed:
                 cehrgpt_patient = patient_sequence_converter.get_patient(

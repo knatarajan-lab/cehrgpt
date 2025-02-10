@@ -18,19 +18,17 @@ from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 
 class CehrGptPPODataCollator:
-    def __init__(self, tokenizer: CehrGptTokenizer, max_length: int):
-        self.tokenizer = tokenizer
+    def __init__(self, cehrgpt_tokenizer: CehrGptTokenizer, max_length: int):
+        self.cehrgpt_tokenizer = cehrgpt_tokenizer
         self.max_length = max_length
 
     def __call__(self, examples):
-
         batch = {}
-
         # Pad sequences to the max length in the batch
         batch["input_ids"] = pad_sequence(
             [example["input_ids"] for example in examples],
             batch_first=True,
-            padding_value=self.tokenizer.pad_token_id,
+            padding_value=self.cehrgpt_tokenizer.pad_token_id,
         ).to(torch.int64)
 
         batch["attention_mask"] = pad_sequence(
@@ -54,7 +52,7 @@ class CehrGptPPODataCollator:
             batch["values"] = pad_sequence(
                 [example["values"] for example in examples],
                 batch_first=True,
-                padding_value=self.tokenizer.pad_value_token_id,
+                padding_value=self.cehrgpt_tokenizer.pad_value_token_id,
             )
             assert batch["value_indicators"].shape[1] <= self.max_length
             assert batch["values"].shape[1] <= self.max_length
@@ -191,7 +189,7 @@ class CehrGptPPOTrainer(PPOTrainer):
         t = time.time()
 
         model_inputs = self.prepare_model_inputs(
-            queries, responses, values, value_indicators
+            queries, responses, values=values, value_indicators=value_indicators
         )
 
         if self.is_distributed:
@@ -423,28 +421,26 @@ class CehrGptPPOTrainer(PPOTrainer):
         return stats
 
     def prepare_model_inputs(
-        self,
-        queries: torch.Tensor,
-        responses: torch.Tensor,
-        values: torch.Tensor,
-        value_indicators: torch.Tensor,
+        self, queries: torch.Tensor, responses: torch.Tensor, **kargs
     ):
+        batched_values = (kargs.get("values", None),)
+        batched_value_indicators = (kargs.get("value_indicators", None),)
         if self.is_encoder_decoder:
             input_data = self.data_collator(
                 [
-                    {"input_ids": q, "attention_mask": torch.ones_like(q)}
-                    for q in queries
+                    {
+                        "encoder_input_ids": query,
+                        "encoder_attention_mask": torch.ones_like(query),
+                        "input_ids": response,
+                        "attention_mask": torch.ones_like(response),
+                        "values": values,
+                        "value_indicators": value_indicators,
+                    }
+                    for query, response, values, value_indicators in zip(
+                        queries, responses, batched_values, batched_value_indicators
+                    )
                 ]
-            ).to(self.current_device)
-
-            decoder_inputs = self.data_collator(
-                [
-                    {"input_ids": r, "attention_mask": torch.ones_like(r)}
-                    for r in responses
-                ]
-            ).to(self.current_device)
-            input_data["decoder_input_ids"] = decoder_inputs["input_ids"]
-            input_data["decoder_attention_mask"] = decoder_inputs["attention_mask"]
+            )
         else:
             input_ids = [torch.cat([q, r]) for q, r in zip(queries, responses)]
             input_data = self.data_collator(
@@ -452,11 +448,11 @@ class CehrGptPPOTrainer(PPOTrainer):
                     {
                         "input_ids": ids,
                         "attention_mask": torch.ones_like(ids),
-                        "values": v_s,
-                        "value_indicators": v_indicators,
+                        "values": values,
+                        "value_indicators": value_indicators,
                     }
-                    for ids, v_s, v_indicators in zip(
-                        input_ids, values, value_indicators
+                    for ids, values, value_indicators in zip(
+                        input_ids, batched_values, batched_value_indicators
                     )
                 ]
             )

@@ -6,14 +6,14 @@ from cehrbert.runners.runner_util import (
     get_last_hf_checkpoint,
     load_parquet_as_dataset,
 )
-from datasets import DatasetDict, load_from_disk
+from datasets import load_from_disk
 from transformers import set_seed
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dpo_collator import CehrGptDPODataCollator
 from cehrgpt.data.hf_cehrgpt_dpo_dataset_mapping import HFCehrGptDPOTokenizationMapping
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
-from cehrgpt.rl_finetune.cehrgpt_dpo_trainer import CehrGptDPOTrainer
+from cehrgpt.models.rl.cehrgpt_dpo_trainer import CehrGptDPOTrainer
 from cehrgpt.runners.gpt_runner_util import parse_dpo_runner_args
 from cehrgpt.runners.hf_cehrgpt_finetune_runner import load_pretrained_tokenizer
 

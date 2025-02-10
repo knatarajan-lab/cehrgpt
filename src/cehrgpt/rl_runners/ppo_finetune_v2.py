@@ -17,11 +17,11 @@ from cehrgpt.cehrgpt_args import create_inference_base_arg_parser
 from cehrgpt.generation.generate_batch_hf_gpt_sequence import generate_single_batch
 from cehrgpt.gpt_utils import get_cehrgpt_output_folder
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
-from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
-from cehrgpt.rl_finetune.cehrgpt_ppo_trainer import (
+from cehrgpt.models.rl.cehrgpt_ppo_trainer import (
     CehrGptPPODataCollator,
     CehrGptPPOTrainer,
 )
+from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 LOG = logging.get_logger("transformers")
 
@@ -56,9 +56,6 @@ def main(args):
                 attn_implementation=(
                     "flash_attention_2" if is_flash_attn_2_available() else "eager"
                 ),
-                torch_dtype=(
-                    torch.bfloat16 if is_flash_attn_2_available() else torch.float32
-                ),
             )
         except Exception:
             LOG.warning(
@@ -71,18 +68,12 @@ def main(args):
                 attn_implementation=(
                     "flash_attention_2" if is_flash_attn_2_available() else "eager"
                 ),
-                torch_dtype=(
-                    torch.bfloat16 if is_flash_attn_2_available() else torch.float32
-                ),
             )
     else:
         cehrgpt_model = CEHRGPT2LMHeadModel.from_pretrained(
             args.model_folder,
             attn_implementation=(
                 "flash_attention_2" if is_flash_attn_2_available() else "eager"
-            ),
-            torch_dtype=(
-                torch.bfloat16 if is_flash_attn_2_available() else torch.float32
             ),
         )
 

@@ -1,9 +1,8 @@
 import random
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import networkx as nx
-import polars as pl
 from transformers.utils import logging
 
 from cehrgpt.generation.cehrgpt_patient.cehrgpt_patient_schema import CehrGptEvent
@@ -16,29 +15,6 @@ from cehrgpt.gpt_utils import ProbabilisticCache
 logger = logging.get_logger("transformers")
 
 DEFAULT_CLINICAL_STATEMENT = "Generate a patient"
-
-
-def create_drug_ingredient_to_brand_drug_map(
-    concept: pl.DataFrame, concept_ancestor: pl.DataFrame
-) -> Dict[int, List[int]]:
-    drug_ingredient = concept.filter(
-        (pl.col("domain_id") == "Drug") & (pl.col("concept_class_id") == "Ingredient")
-    ).select(pl.col("concept_id").alias("ingredient_concept_id"))
-    # Join with concept_ancestor where drug_concept_id matches ancestor_concept_id
-    ingredient_drug_map = drug_ingredient.join(
-        concept_ancestor,
-        left_on="ingredient_concept_id",
-        right_on="ancestor_concept_id",
-    ).select(
-        pl.col("ingredient_concept_id"),
-        pl.col("descendant_concept_id").alias("drug_concept_id"),
-    )
-    drug_ingredient_to_brand_drug_map = defaultdict(list)
-    for index, row in ingredient_drug_map.to_pandas().iterrows():
-        ingredient_id = row["ingredient_concept_id"]
-        drug_id = row["drug_concept_id"]
-        drug_ingredient_to_brand_drug_map[ingredient_id].append(drug_id)
-    return drug_ingredient_to_brand_drug_map
 
 
 class ConditionDrugKnowledgeGraph:
@@ -107,7 +83,8 @@ class ClinicalStatementGenerator:
         person_id: Optional[int] = None,
         start: Optional[int] = None,
         end: Optional[int] = None,
-    ) -> Optional[str]:
+        return_seed_concepts: bool = False,
+    ) -> Optional[Union[str, Tuple[Optional[str], list[tuple[int, int, int]]]]]:
         clinical_statement = None
         patient_sequence_converter = self.cache.get_data((person_id, start, end))
         # If the element does not exist, we will generate it
@@ -118,6 +95,7 @@ class ClinicalStatementGenerator:
             )
             self.cache.add_data((person_id, start, end), patient_sequence_converter)
 
+        age_condition_drug_tuples = list[Tuple[int, int, int]]()
         if patient_sequence_converter.is_validation_passed:
             cehrgpt_patient = patient_sequence_converter.get_patient(
                 domain_map=concept_domain_mapping, concept_map=concept_name_mapping
@@ -132,7 +110,6 @@ class ClinicalStatementGenerator:
                 elif event.domain.lower().startswith("drug"):
                     drugs.append(int(event.code))
 
-            age_condition_drug_tuples = list()
             if conditions:
                 for condition, age_at_diagnosis in random.sample(
                     conditions, self.n_conditions
@@ -181,4 +158,7 @@ class ClinicalStatementGenerator:
                 "Failed to generate clinical statement, %s",
                 patient_sequence_converter.get_error_messages(),
             )
-        return clinical_statement
+        if return_seed_concepts:
+            return clinical_statement, age_condition_drug_tuples
+        else:
+            return clinical_statement

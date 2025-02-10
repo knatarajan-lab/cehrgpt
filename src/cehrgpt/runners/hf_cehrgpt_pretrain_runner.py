@@ -353,19 +353,19 @@ def main():
         model.config.add_cross_attention = True
         import polars as pl
 
-        from cehrgpt.data.encoder_decoder.instruct_hf_cehrgpt_dataset_collator import (
+        from cehrgpt.data.encoder_decoder.instruct_cehrgpt_dataset_collator import (
             InstructCehrGptDataCollator,
         )
         from cehrgpt.generation.cehrgpt_patient.clinical_statement_generator import (
             ClinicalStatementGenerator,
             ConditionDrugKnowledgeGraph,
-            create_drug_ingredient_to_brand_drug_map,
-        )
-        from cehrgpt.generation.cehrgpt_patient.patient_narrative_generator import (
-            generate_concept_maps,
         )
         from cehrgpt.models.encoder_decoder.instruct_hf_cehrgpt import (
             InstructCEHRGPTModel,
+        )
+        from cehrgpt.omop.vocab_utils import (
+            create_drug_ingredient_to_brand_drug_map,
+            generate_concept_maps,
         )
 
         if (

@@ -46,56 +46,6 @@ class GeneratePatientNarrativeMapping(DatasetMapping):
         return record
 
 
-def generate_concept_maps(
-    concept_pl: pl.DataFrame,
-) -> Tuple[Dict[str, str], Dict[str, str]]:
-    """
-    Generate mappings from concept IDs to concept names and domain IDs using a Polars DataFrame.
-
-    This function takes a Polars DataFrame containing at least the columns 'concept_id', 'concept_name', and 'domain_id'.
-    It returns two dictionaries: one mapping concept IDs to their corresponding names and another mapping concept IDs to their domain IDs.
-
-    Parameters:
-    - concept_pl (pl.DataFrame): A Polars DataFrame with columns 'concept_id', 'concept_name', and 'domain_id'.
-        'concept_id' should be unique identifiers for the concepts.
-        'concept_name' is the descriptive name associated with each concept ID.
-        'domain_id' refers to the domain classification of each concept ID.
-
-    Returns:
-    - Tuple[Dict[str, str], Dict[str, str]]: A tuple of two dictionaries. The first dictionary maps concept IDs to concept names,
-      and the second maps concept IDs to domain IDs.
-
-    Example:
-    --------
-    >>> concept_pl = pl.DataFrame({
-    ...     "concept_id": [1, 2, 3],
-    ...     "concept_name": ["Name1", "Name2", "Name3"],
-    ...     "domain_id": ["Domain1", "Domain2", "Domain3"]
-    ... })
-    >>> concept_map, concept_domain = generate_concept_maps(concept_pl)
-    >>> print(concept_map)
-    {'1': 'Name1', '2': 'Name2', '3': 'Name3'}
-    >>> print(concept_domain)
-    {'1': 'Domain1', '2': 'Domain2', '3': 'Domain3'}
-    """
-    # Convert DataFrame columns to dictionaries
-    concept_map = concept_pl.select(
-        [pl.col("concept_id").cast(str), pl.col("concept_name")]
-    ).to_dict(as_series=False)
-
-    concept_domain = concept_pl.select(
-        [pl.col("concept_id").cast(str), pl.col("domain_id")]
-    ).to_dict(as_series=False)
-
-    # Convert list of values to single dictionary per column pair
-    concept_map = dict(zip(concept_map["concept_id"], concept_map["concept_name"]))
-    concept_domain = dict(
-        zip(concept_domain["concept_id"], concept_domain["domain_id"])
-    )
-
-    return concept_map, concept_domain
-
-
 def convert_concepts_to_patient_narrative(
     concept_ids: List[str],
     concept_name_mapping: Dict[str, str],
