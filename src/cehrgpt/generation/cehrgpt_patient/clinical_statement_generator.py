@@ -151,7 +151,7 @@ class ClinicalStatementGenerator:
                     clinical_statement += f"{i + 1}. Condition: {concept_name_mapping.get(str(condition), condition)}\n"
                 if drug:
                     clinical_statement += (
-                        f"{i + 1}. Drug: {concept_name_mapping.get(str(drug), drugs)}\n"
+                        f"{i + 1}. Drug: {concept_name_mapping.get(str(drug), drug)}\n"
                     )
         else:
             logger.warning(
@@ -162,3 +162,33 @@ class ClinicalStatementGenerator:
             return clinical_statement, age_condition_drug_tuples
         else:
             return clinical_statement
+
+
+def create_clinical_statement(
+    race: str,
+    gender: str,
+    age_condition_drug_tuples: List[Tuple[int, Union[str, int], Union[str, int]]],
+    concept_name_mapping: Dict[str, str] = None,
+) -> str:
+    clinical_statement = f"Race: {race}\n"
+    clinical_statement += f"Gender: {gender}\n"
+    for i, (age, condition, drug) in enumerate(
+        sorted(age_condition_drug_tuples, key=lambda x: x[0])
+    ):
+        if age:
+            clinical_statement += f"\n{i + 1}. Age: {age}\n"
+        if condition:
+            condition_name = (
+                concept_name_mapping.get(str(condition), condition)
+                if concept_name_mapping
+                else condition
+            )
+            clinical_statement += f"{i + 1}. Condition: {condition_name}\n"
+        if drug:
+            drug_name = (
+                concept_name_mapping.get(str(drug), drug)
+                if concept_name_mapping
+                else drug
+            )
+            clinical_statement += f"{i + 1}. Drug: {drug_name}\n"
+    return clinical_statement

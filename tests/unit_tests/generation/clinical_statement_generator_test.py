@@ -6,6 +6,7 @@ import networkx as nx
 
 from cehrgpt.generation.cehrgpt_patient.cehrgpt_patient_schema import CehrGptEvent
 from cehrgpt.generation.cehrgpt_patient.clinical_statement_generator import (
+    DEFAULT_CLINICAL_STATEMENT,
     ClinicalStatementGenerator,
     ConditionDrugKnowledgeGraph,
 )
@@ -55,7 +56,7 @@ class TestClinicalStatementGenerator(unittest.TestCase):
             concept_name_mapping={"1": "Diabetes"},
             concept_domain_mapping={"1": "condition"},
         )
-        self.assertIsNone(clinical_statement)
+        self.assertEqual(clinical_statement, DEFAULT_CLINICAL_STATEMENT)
 
     def test_generate_clinical_statement_with_data(self):
         # Testing generation of clinical statement with mock data
