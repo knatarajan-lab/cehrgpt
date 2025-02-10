@@ -13,6 +13,7 @@ from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
     get_cehrgpt_patient_converter,
 )
 from cehrgpt.gpt_utils import random_slice_gpt_sequence
+from cehrgpt.omop.vocab_utils import generate_concept_maps
 
 logger = logging.getLogger(__name__)
 
