@@ -55,7 +55,6 @@ Drug:
 
 ENV = Environment(loader=BaseLoader(), autoescape=True)
 QUERY_TEMPLATE = ENV.from_string(TEMPLATE)
-client = OpenAI(api_key=os.environ.get("OPEN_AI_KEY"))
 
 
 class InstructCehrGptQueryTemplate(BaseModel):
@@ -67,6 +66,7 @@ class InstructCehrGptQueryTemplate(BaseModel):
 
 
 def parse_question_to_cehrgpt_query(clinical_statement: str) -> Optional[str]:
+    client = OpenAI(api_key=os.environ.get("OPEN_AI_KEY", None))
     prompt = QUERY_TEMPLATE.render(clinical_statement=clinical_statement)
     completion = client.beta.chat.completions.parse(
         model=MODEL,
