@@ -98,7 +98,7 @@ def main(args):
     # Configure model generation settings
     generation_config = GenerationConfig(
         max_length=args.context_window,
-        mini_num_of_concepts=args.min_num_of_concepts,
+        mini_num_of_concepts=args.min_num_tokens,
         bos_token_id=cehrgpt_tokenizer.start_token_id,
         eos_token_id=cehrgpt_tokenizer.end_token_id,
         pad_token_id=cehrgpt_tokenizer.pad_token_id,
@@ -225,9 +225,9 @@ def main(args):
                 device=device,
                 generation_config=generation_config,
             )
-
             # Clear the cache
             torch.cuda.empty_cache()
+            micro_batched_sequences["sequences"]
             batched_queries.extend(queries)
             batched_sequences.extend(micro_batched_sequences["sequences"])
             batched_values.extend(micro_batched_sequences["values"])
