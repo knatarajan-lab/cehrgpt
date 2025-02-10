@@ -98,7 +98,7 @@ def main(args):
     # Configure model generation settings
     generation_config = GenerationConfig(
         max_length=args.context_window,
-        mini_num_of_concepts=args.min_num_tokens,
+        min_length=args.min_num_tokens,
         bos_token_id=cehrgpt_tokenizer.start_token_id,
         eos_token_id=cehrgpt_tokenizer.end_token_id,
         pad_token_id=cehrgpt_tokenizer.pad_token_id,
@@ -221,7 +221,7 @@ def main(args):
                 queries=queries,
                 encoder_tokenizer=encoder_tokenizer,
                 cehrgpt_tokenizer=cehrgpt_tokenizer,
-                model=encoder_decoder_model,
+                model=model.pretrained_model,
                 device=device,
                 generation_config=generation_config,
             )
@@ -252,9 +252,6 @@ def main(args):
             batched_value_indicators,
             batched_concept_prompts,
         ):
-            # If the generated sequence did not reach the min num tokens, we should skip it
-            if len(sequence) < args.min_num_tokens:
-                continue
             # Convert sequence to a NumPy array if it's not already one
             sequence_array = np.asarray(sequence)
             # Find the end token

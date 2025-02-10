@@ -42,23 +42,23 @@ def generate_responses(
     device: Union[torch.device, str],
     generation_config: GenerationConfig,
 ) -> Dict[str, Any]:
-    encoder_inputs = encoder_tokenizer(
-        queries, padding=True, truncation=True, return_tensors="pt"
-    )
-    encoder_input_ids = encoder_inputs["input_ids"]
-    encoder_attention_mask = encoder_inputs["attention_mask"]
-    batch_size = encoder_input_ids.shape[0]
-    batched_inputs = torch.tile(
-        torch.tensor([[cehrgpt_tokenizer.start_token_id]]), (batch_size, 1)
-    ).to(device)
-
-    output = model.generate(
-        inputs=encoder_input_ids.to(device),
-        attention_mask=encoder_attention_mask.to(device),
-        decoder_input_ids=batched_inputs.to(device),
-        generation_config=generation_config,
-        lab_token_ids=cehrgpt_tokenizer.lab_token_ids,
-    )
+    with torch.no_grad():
+        encoder_inputs = encoder_tokenizer(
+            queries, padding=True, truncation=True, return_tensors="pt"
+        )
+        encoder_input_ids = encoder_inputs["input_ids"]
+        encoder_attention_mask = encoder_inputs["attention_mask"]
+        batch_size = encoder_input_ids.shape[0]
+        batched_inputs = torch.tile(
+            torch.tensor([[cehrgpt_tokenizer.start_token_id]]), (batch_size, 1)
+        ).to(device)
+        output = model.generate(
+            inputs=encoder_input_ids.to(device),
+            attention_mask=encoder_attention_mask.to(device),
+            decoder_input_ids=batched_inputs.to(device),
+            generation_config=generation_config,
+            lab_token_ids=cehrgpt_tokenizer.lab_token_ids,
+        )
     return extract_output_from_model_response(
         results=output, cehrgpt_tokenizer=cehrgpt_tokenizer, skip_special_tokens=True
     )
