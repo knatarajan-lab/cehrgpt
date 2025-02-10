@@ -123,7 +123,7 @@ def main():
         if query.lower() == "exit":
             break
 
-        sequences = generate_responses(
+        model_responses = generate_responses(
             queries=[query],
             encoder_tokenizer=encoder_tokenizer,
             cehrgpt_tokenizer=cehrgpt_tokenizer,
@@ -131,7 +131,7 @@ def main():
             device=device,
             generation_config=generation_config,
         )
-
+        sequences = model_responses["sequences"]
         if sequences:
             patient_sequence_converter = get_cehrgpt_patient_converter(
                 sequences[0], concept_domain_map
@@ -141,6 +141,11 @@ def main():
                     concept_domain_map, concept_name_map
                 )
                 print("\nGenerated Response:\n", cehrgpt_patient.get_narrative())
+            else:
+                print(
+                    "The generated sequence is invalid due to:",
+                    patient_sequence_converter.get_error_messages(),
+                )
 
 
 if __name__ == "__main__":
