@@ -191,32 +191,24 @@ def main(args):
     total_rows = len(dataset)
     num_of_micro_batches = args.batch_size // args.mini_batch_size
     for i in tqdm(range(args.num_of_steps)):
-        LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
+        LOG.info(f"%s: Batch %s started", datetime.datetime.now(), i)
         batched_queries = []
         batched_sequences = []
         batched_values = []
         batched_value_indicators = []
         batched_concept_prompts = []
         for _ in range(num_of_micro_batches):
-            random_patient_sequences = [
-                record["concept_ids"]
-                for record in dataset.select(
-                    np.random.randint(0, total_rows, args.mini_batch_size)
+            random_record = dataset.select(np.random.randint(0, total_rows, 1))
+            random_patient_sequence = random_record[0]["concept_ids"]
+            query, prompt_tuples = (
+                clinical_statement_generator.generate_clinical_statement(
+                    random_patient_sequence,
+                    concept_name_mapping=concept_name_map,
+                    concept_domain_mapping=concept_domain_map,
+                    return_prompt_concepts=True,
                 )
-            ]
-            queries = []
-            for patient_sequence in random_patient_sequences:
-                clinical_statement, prompt_tuples = (
-                    clinical_statement_generator.generate_clinical_statement(
-                        patient_sequence,
-                        concept_name_mapping=concept_name_map,
-                        concept_domain_mapping=concept_domain_map,
-                        return_prompt_concepts=True,
-                    )
-                )
-                queries.append(clinical_statement)
-                batched_concept_prompts.append(prompt_tuples)
-
+            )
+            queries = [query for _ in range(args.mini_batch_size)]
             micro_batched_sequences = generate_responses(
                 queries=queries,
                 encoder_tokenizer=encoder_tokenizer,
@@ -227,8 +219,12 @@ def main(args):
             )
             # Clear the cache
             torch.cuda.empty_cache()
-            micro_batched_sequences["sequences"]
+            # Copy the same concept prompt the mini_batch_size number of times
             batched_queries.extend(queries)
+            # Copy the same concept prompt the mini_batch_size number of times
+            batched_concept_prompts.extend(
+                [prompt_tuples for _ in range(args.mini_batch_size)]
+            )
             batched_sequences.extend(micro_batched_sequences["sequences"])
             batched_values.extend(micro_batched_sequences["values"])
             batched_value_indicators.extend(micro_batched_sequences["value_indicators"])
