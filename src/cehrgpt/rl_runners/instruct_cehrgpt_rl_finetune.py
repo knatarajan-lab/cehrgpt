@@ -184,12 +184,6 @@ def main(args):
             batched_sequences.extend(micro_batched_sequences)
 
         LOG.info("%s: Batch %s sequence generated", datetime.datetime.now(), i)
-        LOG.info(
-            "%s: Batch %s KL divergence reward: %s}",
-            {datetime.datetime.now()},
-            i,
-            reward,
-        )
         query_tensors = []
         response_tensors = []
         value_tensors = []
@@ -222,6 +216,12 @@ def main(args):
                 sequence,
                 batched_encoder_age_concept_prompt_tuples,
                 concept_domain_map=concept_domain_map,
+            )
+            LOG.info(
+                "%s: Batch %s Reward: %s}",
+                {datetime.datetime.now()},
+                i,
+                reward,
             )
             rewards.append(reward)
 
