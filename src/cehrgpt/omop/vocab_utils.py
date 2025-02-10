@@ -13,10 +13,10 @@ def generate_ancestor_descendant_map(
     for row in (
         concept_ancestor_pl.filter(pl.col("ancestor_concept_id").is_in(concept_ids))
         .to_pandas()
-        .iterrows()
+        .itertuples(index=False)
     ):
-        ancestor_descendant_map[str(row["ancestor_concept_id"])].append(
-            str(row["descendant_concept_id"])
+        ancestor_descendant_map[str(row.ancestor_concept_id)].append(
+            str(row.descendant_concept_id)
         )
     return ancestor_descendant_map
 
@@ -87,8 +87,8 @@ def create_drug_ingredient_to_brand_drug_map(
         pl.col("descendant_concept_id").alias("drug_concept_id"),
     )
     drug_ingredient_to_brand_drug_map = defaultdict(list)
-    for index, row in ingredient_drug_map.to_pandas().iterrows():
-        ingredient_id = row["ingredient_concept_id"]
-        drug_id = row["drug_concept_id"]
+    for row in ingredient_drug_map.to_pandas().itertuples(index=False):
+        ingredient_id = row.ingredient_concept_id
+        drug_id = row.drug_concept_id
         drug_ingredient_to_brand_drug_map[ingredient_id].append(drug_id)
     return drug_ingredient_to_brand_drug_map
