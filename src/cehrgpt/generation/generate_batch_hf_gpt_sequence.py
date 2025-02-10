@@ -75,17 +75,20 @@ def normalize_value(
 def extract_output_from_model_response(
     results: GenerateOutput,
     cehrgpt_tokenizer: CehrGptTokenizer,
+    skip_special_tokens: bool = True,
 ) -> Dict[str, Any]:
 
     sequences = [
-        cehrgpt_tokenizer.decode(seq.cpu().numpy(), skip_special_tokens=False)
+        cehrgpt_tokenizer.decode(
+            seq.cpu().numpy(), skip_special_tokens=skip_special_tokens
+        )
         for seq in results.sequences
     ]
     sequence_vals: Optional[Tensor] = results.get("sequence_vals", None)
     if sequence_vals is not None:
         values = [
             cehrgpt_tokenizer.decode_value(
-                values.cpu().numpy(), skip_special_tokens=False
+                values.cpu().numpy(), skip_special_tokens=skip_special_tokens
             )
             for values in sequence_vals
         ]
@@ -150,7 +153,9 @@ def generate_single_batch(
             lab_token_ids=tokenizer.lab_token_ids,
         )
 
-    return extract_output_from_model_response(results, tokenizer)
+    return extract_output_from_model_response(
+        results, tokenizer, skip_special_tokens=False
+    )
 
 
 def main(args):

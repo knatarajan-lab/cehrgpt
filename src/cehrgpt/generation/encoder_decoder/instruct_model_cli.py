@@ -58,7 +58,7 @@ def generate_responses(
         lab_token_ids=cehrgpt_tokenizer.lab_token_ids,
     )
     return extract_output_from_model_response(
-        results=output, cehrgpt_tokenizer=cehrgpt_tokenizer
+        results=output, cehrgpt_tokenizer=cehrgpt_tokenizer, skip_special_tokens=True
     )
 
 
