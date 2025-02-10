@@ -83,6 +83,8 @@ def parse_question_to_cehrgpt_query(clinical_statement: str) -> Optional[str]:
         age_of_diagnosis = parsed.age_of_diagnosis
         diagnosis = parsed.diagnosis
         drug = parsed.drug
+        if not race and not gender and not diagnosis:
+            return None
         return create_clinical_statement(
             gender=gender,
             race=race,

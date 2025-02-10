@@ -144,6 +144,8 @@ def main():
                     "Failed to parse the query and will generate a random synthetic patient\n"
                 )
                 query = DEFAULT_CLINICAL_STATEMENT
+            else:
+                print("\nParsed query:\n", query)
 
         model_responses = generate_responses(
             queries=[query],
