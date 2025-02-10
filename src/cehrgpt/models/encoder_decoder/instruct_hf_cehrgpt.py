@@ -27,6 +27,10 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
             # Set the whole model to be non-trainable
             for param in self.encoder.parameters():
                 param.requires_grad = False
+        # This is needed to pass the validation
+        self.lm_head = self.decoder.lm_head
+        self.lm_head.requires_grad = False
+        self.is_encoder_decoder = True
 
     def tie_weights(self):
         """

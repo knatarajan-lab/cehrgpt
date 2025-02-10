@@ -1,6 +1,6 @@
 import argparse
 import os
-from typing import List, Union
+from typing import Any, Dict, List, Union
 
 import polars as pl
 import torch
@@ -9,6 +9,9 @@ from transformers.utils import is_flash_attn_2_available
 
 from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
     get_cehrgpt_patient_converter,
+)
+from cehrgpt.generation.generate_batch_hf_gpt_sequence import (
+    extract_output_from_model_response,
 )
 from cehrgpt.models.encoder_decoder.instruct_hf_cehrgpt import InstructCEHRGPTModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
@@ -38,7 +41,7 @@ def generate_responses(
     model: InstructCEHRGPTModel,
     device: Union[torch.device, str],
     generation_config: GenerationConfig,
-) -> List[List[str]]:
+) -> Dict[str, Any]:
     encoder_inputs = encoder_tokenizer(queries, return_tensors="pt")
     encoder_input_ids = encoder_inputs["input_ids"]
     encoder_attention_mask = encoder_inputs["attention_mask"]
@@ -54,12 +57,9 @@ def generate_responses(
         generation_config=generation_config,
         lab_token_ids=cehrgpt_tokenizer.lab_token_ids,
     )
-    decoded_outputs = []
-    for seq in output.sequences:
-        decoded_outputs.append(
-            cehrgpt_tokenizer.decode(seq.cpu().numpy(), skip_special_tokens=True)
-        )
-    return decoded_outputs
+    return extract_output_from_model_response(
+        results=output, cehrgpt_tokenizer=cehrgpt_tokenizer
+    )
 
 
 def create_instruct_cehrgpt_argparser():

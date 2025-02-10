@@ -12,7 +12,7 @@ from transformers import GenerationConfig
 from transformers.utils import logging
 from trl import AutoModelForCausalLMWithValueHead, PPOConfig, create_reference_model
 
-from cehrgpt.data.encoder_decoder.rl_ppo_instruct_hf_cehrgpt_data_collator import (
+from cehrgpt.data.encoder_decoder.rl_ppo_instruct_cehrgpt_data_collator import (
     InstructCehrGptPPODataCollator,
 )
 from cehrgpt.generation.cehrgpt_patient.clinical_statement_generator import (
@@ -148,6 +148,8 @@ def main(args):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
         batched_queries = []
         batched_sequences = []
+        batched_values = []
+        batched_value_indicators = []
         batched_encoder_age_concept_prompt_tuples = []
         for _ in range(num_of_micro_batches):
             random_patient_sequences = [
@@ -181,13 +183,19 @@ def main(args):
             # Clear the cache
             torch.cuda.empty_cache()
             batched_queries.extend(queries)
-            batched_sequences.extend(micro_batched_sequences)
+            batched_sequences.extend(micro_batched_sequences["sequences"])
+            batched_values.extend(micro_batched_sequences["values"])
+            batched_value_indicators.extend(micro_batched_sequences["value_indicators"])
 
         LOG.info("%s: Batch %s sequence generated", datetime.datetime.now(), i)
         query_tensors = []
         response_tensors = []
+        value_tensors = []
+        value_indicator_tensors = []
         rewards = []
-        for query, sequence in zip(batched_queries, batched_sequences):
+        for query, sequence, sequence_val, sequence_val_indicator in zip(
+            batched_queries, batched_sequences, batched_values, batched_value_indicators
+        ):
             # Convert sequence to a NumPy array if it's not already one
             sequence_array = np.asarray(sequence)
             # Find the end token
@@ -198,17 +206,21 @@ def main(args):
                 else len(sequence_array) - 1
             )
             sequence = sequence[: end_index + 1]
-
-            query_tensors.append(torch.tensor(cehrgpt_tokenizer.encode(sequence[:4])))
+            encoder_input = encoder_tokenizer(query, return_tensors="pt").to(device)
+            query_tensors.extend(encoder_input["input_ids"])
             response_tensors.append(
-                torch.tensor(cehrgpt_tokenizer.encode(sequence[4:]))
+                torch.LongTensor(cehrgpt_tokenizer.encode(sequence))
             )
+            value_tensors.append(
+                torch.LongTensor(cehrgpt_tokenizer.encode_value(sequence_val))
+            )
+            value_indicator_tensors.append(torch.BoolTensor(sequence_val_indicator))
             reward = reward_model.get_reward(
                 query,
                 sequence,
-                encoder_age_concept_prompt_tuples=batched_encoder_age_concept_prompt_tuples,
-                concept_domain_map=concept_domain_map,
+                batched_encoder_age_concept_prompt_tuples,
                 concept_name_map=concept_name_map,
+                concept_domain_map=concept_domain_map,
             )
             LOG.info(
                 "%s: Batch %s Reward: %s}",
@@ -216,20 +228,20 @@ def main(args):
                 i,
                 reward,
             )
-            rewards.append(reward)
+            rewards.append(torch.FloatTensor([reward]))
 
         train_stats = ppo_trainer.step(
             query_tensors,
             response_tensors,
             rewards,
+            value_tensors,
+            value_indicator_tensors,
         )
         LOG.info("%s: Batch %s stats: %s}", datetime.datetime.now(), i, train_stats)
         if i != 0 and i % args.save_step == 0:
             checkpoint_folder = pathlib.Path(args.output_folder) / f"checkpoint-{i}"
             checkpoint_folder.mkdir(exist_ok=True)
-            ppo_trainer.log_stats(
-                stats=train_stats, batch={}, rewards=torch.tensor(rewards)
-            )
+            ppo_trainer.log_stats(stats=train_stats, batch={}, rewards=rewards)
             ppo_trainer.save_pretrained(checkpoint_folder)
 
     ppo_trainer.save_pretrained(args.output_folder)

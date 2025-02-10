@@ -423,16 +423,16 @@ class CehrGptPPOTrainer(PPOTrainer):
     def prepare_model_inputs(
         self, queries: torch.Tensor, responses: torch.Tensor, **kargs
     ):
-        batched_values = (kargs.get("values", None),)
-        batched_value_indicators = (kargs.get("value_indicators", None),)
+        batched_values: torch.LongTensor = kargs.get("values")
+        batched_value_indicators: torch.LongTensor = kargs.get("value_indicators")
         if self.is_encoder_decoder:
             input_data = self.data_collator(
                 [
                     {
-                        "encoder_input_ids": query,
-                        "encoder_attention_mask": torch.ones_like(query),
-                        "input_ids": response,
-                        "attention_mask": torch.ones_like(response),
+                        "input_ids": query,
+                        "attention_mask": torch.ones_like(query),
+                        "decoder_input_ids": response,
+                        "decoder_attention_mask": torch.ones_like(response),
                         "values": values,
                         "value_indicators": value_indicators,
                     }
