@@ -345,7 +345,7 @@ def create_arg_parser():
         dest="demographic_data_path",
         action="store",
         help="The path for your concept_path",
-        required=True,
+        required=False,
     )
     base_arg_parser.add_argument(
         "--restore_from_checkpoint",
