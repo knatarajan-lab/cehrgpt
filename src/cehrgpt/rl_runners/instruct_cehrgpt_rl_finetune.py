@@ -95,6 +95,11 @@ def main(args):
         datetime.datetime.now(),
         args.demographic_data_path,
     )
+    LOG.info(
+        "%s: Use the GRPO training: %s",
+        datetime.datetime.now(),
+        getattr(ppo_trainer, "use_grpo", False),
+    )
 
     # Configure model generation settings
     generation_config = GenerationConfig(
