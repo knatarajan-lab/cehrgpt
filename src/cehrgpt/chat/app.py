@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, render_template, request
 
 from .config import Config
 from .model_utils import (

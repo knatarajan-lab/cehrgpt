@@ -59,8 +59,19 @@ $(document).ready(function() {
         messageDiv.append(contentDiv);
         $('#chat-box').append(messageDiv);
 
-        // Scroll to bottom
+        // Get the chat box
         const chatBox = document.getElementById('chat-box');
-        chatBox.scrollTop = chatBox.scrollHeight;
+        const newMessage = messageDiv[0];
+
+        // Calculate how much to scroll
+        const messageBottom = newMessage.offsetTop + newMessage.offsetHeight;
+        const visibleHeight = chatBox.clientHeight;
+        const currentScroll = chatBox.scrollTop;
+        const bottomPosition = currentScroll + visibleHeight;
+        // Simply scroll up by a fixed amount (e.g., 100px)
+        const scrollAmount = 400;
+        if (messageBottom > bottomPosition - scrollAmount) {
+            chatBox.scrollTop += scrollAmount;
+        }
     }
 });
