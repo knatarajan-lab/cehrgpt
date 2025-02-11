@@ -75,13 +75,17 @@ class CehrGptVisit:
                     f"\tOn day {(date - self.visit_start_datetime.date()).days}:\n"
                 )
                 for domain in sorted(domain_concepts):
-                    narrative += f"\t{domain}: {domain_concepts[domain]}\n"
+                    narrative += f"\t\t{domain}:\n"
+                    for concept in domain_concepts[domain]:
+                        narrative += f"\t\t   * {concept}\n"
         else:
             group_by_domain = defaultdict(list)
             for event in self.events:
                 group_by_domain[event.domain].append(event.code_label)
             for domain in sorted(group_by_domain):
-                narrative += f"{domain}: {group_by_domain[domain]}\n"
+                narrative += f"\t{domain}:\n"
+                for concept in group_by_domain[domain]:
+                    narrative += f"\t   * {concept}\n"
         return narrative
 
 
