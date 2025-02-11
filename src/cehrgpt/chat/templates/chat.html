@@ -294,6 +294,15 @@
                 return html;
             }
 
+            function isInpatient(visitConceptId) {
+                return ["9201", "262", "8971", "8920"].includes(String(visitConceptId));
+            }
+
+            function dayDifference(date1, date2) {
+                const timeDifference = Math.abs(date2.getTime() - date1.getTime());
+                return Math.ceil(timeDifference / (1000 * 60 * 60 * 24));
+            }
+
             function formatVisit(visit, birthDate) {
                 let visitStartDate = new Date(visit.visit_start_datetime);
                 let age = visitStartDate.getFullYear() - birthDate.getFullYear();
@@ -301,20 +310,50 @@
                 html += `<strong>${visit.visit_type}</strong> on ${visitStartDate.toLocaleDateString()} (Age: ${age})<br>`;
 
                 if (visit.events) {
-                    let eventsByDomain = {};
-                    visit.events.forEach(event => {
-                        if (!eventsByDomain[event.domain]) {
-                            eventsByDomain[event.domain] = [];
-                        }
-                        eventsByDomain[event.domain].push(event.code_label);
-                    });
-
-                    for (let [domain, concepts] of Object.entries(eventsByDomain).sort()) {
-                        html += `<div style="margin-left: 1rem"><strong>${domain}:</strong><ul>`;
-                        concepts.forEach(concept => {
-                            html += `<li>${concept}</li>`;
+                    if (isInpatient(visit.visit_concept_id)) {
+                        // Handle inpatient visits - group by date first
+                        let eventsByDate = {};
+                        visit.events.forEach(event => {
+                            let eventDate = new Date(event.time).toLocaleDateString();
+                            if (!eventsByDate[eventDate]) {
+                                eventsByDate[eventDate] = {};
+                            }
+                            if (!eventsByDate[eventDate][event.domain]) {
+                                eventsByDate[eventDate][event.domain] = [];
+                            }
+                            eventsByDate[eventDate][event.domain].push(event.code_label);
                         });
-                        html += '</ul></div>';
+
+                        // Display events by date
+                        for (let [date, domains] of Object.entries(eventsByDate)) {
+                            let daysFromAdmission = dayDifference(new Date(date), visitStartDate);
+                            html += `<div style="margin-left: 1rem"><strong>Day ${daysFromAdmission}:</strong>`;
+                            for (let [domain, concepts] of Object.entries(domains).sort()) {
+                                html += `<div style="margin-left: 1rem"><strong>${domain}:</strong><ul>`;
+                                concepts.forEach(concept => {
+                                    html += `<li>${concept}</li>`;
+                                });
+                                html += '</ul></div>';
+                            }
+                            html += '</div>';
+                        }
+                    } else {
+                        // Handle outpatient visits - group by domain only
+                        let eventsByDomain = {};
+                        visit.events.forEach(event => {
+                            if (!eventsByDomain[event.domain]) {
+                                eventsByDomain[event.domain] = [];
+                            }
+                            eventsByDomain[event.domain].push(event.code_label);
+                        });
+
+                        for (let [domain, concepts] of Object.entries(eventsByDomain).sort()) {
+                            html += `<div style="margin-left: 1rem"><strong>${domain}:</strong><ul>`;
+                            concepts.forEach(concept => {
+                                html += `<li>${concept}</li>`;
+                            });
+                            html += '</ul></div>';
+                        }
                     }
                 }
 
