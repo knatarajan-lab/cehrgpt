@@ -1,6 +1,7 @@
-from config import Config
 from flask import Flask, jsonify, render_template, request
-from model_utils import get_generation_config, handle_query, load_model
+
+from .config import Config
+from .model_utils import get_generation_config, handle_query, load_model
 
 app = Flask(__name__)
 config = Config()
