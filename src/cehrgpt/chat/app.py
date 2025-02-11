@@ -32,6 +32,7 @@ def send():
         generation_config,
         concept_domain_map,
         concept_name_map,
+        config,
     )
     return response
 

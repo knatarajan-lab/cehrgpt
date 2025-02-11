@@ -2,7 +2,8 @@ import datetime
 import itertools
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import List, Optional
+from email.utils import parsedate_to_datetime
+from typing import Any, Dict, List, Optional
 
 from cehrgpt.gpt_utils import is_inpatient_visit_type_token
 
@@ -60,16 +61,10 @@ class CehrGptVisit:
     discharge_to_concept_id: Optional[int] = None
     events: List[CehrGptEvent] = field(default_factory=list)
 
-    def get_narrative(
-        self, birth_datetime: datetime.datetime, html_output: bool = False
-    ) -> str:
+    def get_narrative(self, birth_datetime: datetime.datetime) -> str:
         birth_year = birth_datetime.year
         age = self.visit_start_datetime.year - birth_year
-        if html_output:
-            narrative = f"<div><strong>{self.visit_type}</strong> on {self.visit_start_datetime.date().strftime('%Y-%m-%d')} (Age: {age})<br></div>"
-        else:
-            narrative = f"\n{self.visit_type} on {self.visit_start_datetime.date().strftime('%Y-%m-%d')} (Age: {age})\n"
-
+        narrative = f"\n{self.visit_type} on {self.visit_start_datetime.date().strftime('%Y-%m-%d')} (Age: {age})\n"
         if is_inpatient_visit_type_token(self.visit_concept_id):
             group_by_date = defaultdict(lambda: defaultdict(list))
             for event in self.events:
@@ -77,44 +72,21 @@ class CehrGptVisit:
                     event.get_code_label()
                 )
             for date, domain_concepts in group_by_date.items():
-                if html_output:
-                    narrative += f"<div style='padding-left:20px;'>On day {(date - self.visit_start_datetime.date()).days}:<br></div>"
-                else:
-                    narrative += (
-                        f"\tOn day {(date - self.visit_start_datetime.date()).days}:\n"
-                    )
+                narrative += (
+                    f"\tOn day {(date - self.visit_start_datetime.date()).days}:\n"
+                )
                 for domain in sorted(domain_concepts):
-                    if html_output:
-                        narrative += f"<div style='padding-left:40px;'><strong>{domain}:</strong><br></div>"
-                    else:
-                        narrative += f"\t\t{domain}:\n"
+                    narrative += f"\t\t{domain}:\n"
                     for concept in domain_concepts[domain]:
-                        if html_output:
-                            narrative += (
-                                f"<div style='padding-left:60px;'>* {concept}<br></div>"
-                            )
-                        else:
-                            narrative += f"\t\t   * {concept}\n"
+                        narrative += f"\t\t   * {concept}\n"
         else:
             group_by_domain = defaultdict(list)
             for event in self.events:
                 group_by_domain[event.domain].append(event.get_code_label())
             for domain in sorted(group_by_domain):
-                if html_output:
-                    narrative += f"<div style='padding-left:20px;'><strong>{domain}:</strong><br></div>"
-                else:
-                    narrative += f"\t{domain}:\n"
+                narrative += f"\t{domain}:\n"
                 for concept in group_by_domain[domain]:
-                    if html_output:
-                        narrative += (
-                            f"<div style='padding-left:40px;'>* {concept}<br></div>"
-                        )
-                    else:
-                        narrative += f"\t   * {concept}\n"
-
-        if html_output:
-            narrative += "</div>"  # Closing div for the narrative
-
+                    narrative += f"\t   * {concept}\n"
         return narrative
 
 
@@ -128,23 +100,89 @@ class CehrGptPatient:
     patient_id: Optional[int] = None
     visits: List[CehrGptVisit] = field(default_factory=list)
 
-    def get_narrative(self, html_output: bool = False) -> str:
-        if html_output:
-            narrative = (
-                f"<div>Patient Demographics:<br>"
-                f"<ul>"
-                f"<li>Gender: {self.gender}</li>"
-                f"<li>Race: {self.race}</li>"
-                f"</ul>"
-                f"</div>"
-            )
-        else:
-            narrative = (
-                f"Patient Demographics:\n\tGender: {self.gender}\n\tRace: {self.race}\n"
-            )
+    def get_narrative(self) -> str:
+        narrative = (
+            f"Patient Demographics:\n\tGender: {self.gender}\n\tRace: {self.race}\n"
+        )
         for visit in self.visits:
-            narrative += visit.get_narrative(self.birth_datetime, html_output)
+            narrative += visit.get_narrative(self.birth_datetime)
         return narrative
 
     def get_events(self) -> List[CehrGptEvent]:
         return itertools.chain.from_iterable(visit.events for visit in self.visits)
+
+
+def parse_datetime(datetime_str: str) -> datetime.datetime:
+    """Parse datetime string to datetime object, handling multiple formats."""
+    try:
+        # First try ISO format
+        return datetime.datetime.fromisoformat(datetime_str)
+    except ValueError:
+        try:
+            # Try RFC format (e.g., 'Tue, 01 Jan 2013 00:00:00 GMT')
+            return parsedate_to_datetime(datetime_str)
+        except Exception:
+            # If all else fails, try a few common formats
+            for fmt in [
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%dT%H:%M:%S",
+                "%a, %d %b %Y %H:%M:%S %Z",
+                "%Y-%m-%d",
+            ]:
+                try:
+                    return datetime.datetime.strptime(datetime_str, fmt)
+                except ValueError:
+                    continue
+            raise ValueError(f"Unable to parse datetime string: {datetime_str}")
+
+
+def create_event(event_data: Dict[Any, Any]) -> CehrGptEvent:
+    """Create a CehrGptEvent from dictionary data."""
+    # Convert time string to datetime
+    event_data["time"] = parse_datetime(event_data["time"])
+
+    # Create CehrGptEvent with only the fields that are present in the data
+    return CehrGptEvent(
+        **{
+            k: v
+            for k, v in event_data.items()
+            if k in CehrGptEvent.__dataclass_fields__
+        }
+    )
+
+
+def create_visit(visit_data: Dict[Any, Any]) -> CehrGptVisit:
+    """Create a CehrGptVisit from dictionary data."""
+    # Convert datetime strings to datetime objects
+    visit_data["visit_start_datetime"] = parse_datetime(
+        visit_data["visit_start_datetime"]
+    )
+    if visit_data.get("visit_end_datetime"):
+        visit_data["visit_end_datetime"] = parse_datetime(
+            visit_data["visit_end_datetime"]
+        )
+
+    # Handle events list
+    if "events" in visit_data:
+        visit_data["events"] = [create_event(event) for event in visit_data["events"]]
+
+    # Create CehrGptVisit with only the fields that are present in the data
+    return CehrGptVisit(
+        **{
+            k: v
+            for k, v in visit_data.items()
+            if k in CehrGptVisit.__dataclass_fields__
+        }
+    )
+
+
+def load_cehrgpt_patient_from_json(data: Dict[str, Any]) -> CehrGptPatient:
+    # Convert birth_datetime string to datetime object
+    data["birth_datetime"] = parse_datetime(data["birth_datetime"])
+    # Handle visits list
+    if "visits" in data:
+        data["visits"] = [create_visit(visit) for visit in data["visits"]]
+    # Create CehrGptPatient with only the fields that are present in the data
+    return CehrGptPatient(
+        **{k: v for k, v in data.items() if k in CehrGptPatient.__dataclass_fields__}
+    )
