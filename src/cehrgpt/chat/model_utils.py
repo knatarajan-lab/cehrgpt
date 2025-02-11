@@ -1,3 +1,6 @@
+import os
+
+import polars as pl
 import torch
 from transformers import GenerationConfig
 
@@ -5,9 +8,19 @@ from cehrgpt.generation.encoder_decoder.instruct_cehrpgt_query import (
     parse_question_to_cehrgpt_query,
 )
 from cehrgpt.generation.encoder_decoder.instruct_model_cli import (
+    generate_concept_maps,
     generate_responses,
+    get_cehrgpt_patient_converter,
     setup_model,
 )
+
+
+def load_concept_domain_map(config):
+    concept = pl.read_parquet(
+        os.path.join(config.VOCABULARY_DIR, "concept", "*parquet")
+    )
+    concept_name_map, concept_domain_map = generate_concept_maps(concept)
+    return concept_name_map, concept_domain_map
 
 
 def load_model(config):
@@ -37,12 +50,20 @@ def get_generation_config(cehrgpt_tokenizer):
 
 
 def handle_query(
-    user_input, encoder_tokenizer, cehrgpt_tokenizer, model, device, generation_config
+    user_input,
+    encoder_tokenizer,
+    cehrgpt_tokenizer,
+    model,
+    device,
+    generation_config,
+    concept_domain_map,
+    concept_name_map,
 ):
     query = parse_question_to_cehrgpt_query(user_input)
     if not query:
         return "Failed to parse the query. Generating a default response..."
-    response = generate_responses(
+
+    model_responses = generate_responses(
         queries=[query],
         encoder_tokenizer=encoder_tokenizer,
         cehrgpt_tokenizer=cehrgpt_tokenizer,
@@ -50,4 +71,18 @@ def handle_query(
         device=device,
         generation_config=generation_config,
     )
-    return response
+
+    sequences = model_responses["sequences"]
+    if sequences:
+        patient_sequence_converter = get_cehrgpt_patient_converter(
+            sequences[0], concept_domain_map
+        )
+        if patient_sequence_converter.is_validation_passed:
+            cehrgpt_patient = patient_sequence_converter.get_patient(
+                concept_domain_map, concept_name_map
+            )
+            return cehrgpt_patient.get_narrative()
+        else:
+            return f"The generated sequence is invalid due to: {patient_sequence_converter.get_error_messages()}"
+
+    return "Failed to generate the patient, please try again"
