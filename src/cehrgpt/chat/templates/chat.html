@@ -3,46 +3,42 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Chat Interface</title>
+    <title>CEHRGPT Chat Interface</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        body, html {
-            height: 100%;
-            margin: 0;
-            font-family: Arial, sans-serif;
-        }
-        .chat-container {
-            display: flex;
-            flex-direction: column;
-            height: 100%;
-            background-color: #fff;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        }
-        .chat-box {
-            flex: 1;
-            overflow-y: auto;
-            padding: 10px 20px;
-        }
-        .chat-input {
-            border-top: 1px solid #ccc;
-        }
-        .chat-message {
-            margin: 5px 0;
-        }
-        .user-message {
-            text-align: right;
-            color: blue;
-        }
-        .bot-message {
-            text-align: left;
-            color: green;
-        }
+    .patient-demographics {
+        background-color: #e9ecef;  /* Light gray background for visibility */
+        padding: 15px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+        border: 1px solid #dee2e6; /* Slight border for definition */
+        font-weight: bold; /* Make the title bold */
+    }
+    .demographics-title {
+        color: #0056b3; /* Giving a distinct color */
+        font-size: 1.2em; /* Slightly larger font size */
+        margin-bottom: 10px; /* Spacing below the title */
+    }
+    .visit-details {
+        padding-left: 20px;
+    }
+    .chat-message {
+        margin: 5px 0;
+    }
+    .user-message {
+        text-align: right;
+        color: blue;
+    }
+    .bot-message {
+        text-align: left;
+        color: green;
+    }
     </style>
 </head>
 <body>
     <div class="container py-3 h-100">
         <div class="row h-100 justify-content-center align-items-center">
-            <div class="col-12 col-md-8 col-lg-6">
+            <div class="col-12 col-md-10 col-lg-8">
                 <div class="chat-container">
                     <div id="chat-box" class="chat-box">
                         <!-- Messages will be displayed here -->
@@ -71,8 +67,9 @@
                     contentType: 'application/json',
                     data: JSON.stringify({message: message}),
                     success: function(data) {
-                        if (data.gender) {
-                            renderPatientData(data);
+                        if (data.visits) {
+                            displayPatientDemographics(data)
+                            data.visits.forEach(visit => renderVisit(visit, new Date(data.birth_datetime)));
                         } else {
                             $('#chat-box').append('<div class="chat-message bot-message">' + data.message + '</div>');
                         }
@@ -82,23 +79,70 @@
             }
         });
 
-        function renderPatientData(patient) {
-            let patientInfoHTML = `<div class="chat-message bot-message">`;
-            patientInfoHTML += `Patient Demographics:<br><ul>`;
-            patientInfoHTML += `<li>Gender: ${patient.gender}</li>`;
-            patientInfoHTML += `<li>Race: ${patient.race}</li>`;
-            patientInfoHTML += `<li>Birth Date: ${new Date(patient.birth_date).toLocaleDateString()}</li></ul>`;
+        function dayDifference(date1, date2) {
+            const timeDifference = Math.abs(date2.getTime() - date1.getTime());
+            return Math.ceil(timeDifference / (1000 * 60 * 60 * 24));
+        }
 
-            patient.visits.forEach(visit => {
-                patientInfoHTML += `<div>Visit on ${new Date(visit.date).toLocaleDateString()}: ${visit.type}<ul>`;
-                visit.notes.forEach(note => {
-                    patientInfoHTML += `<li>${note}</li>`;
+        function displayPatientDemographics(patient) {
+            let demographicsHTML = `<div class="patient-demographics">`;
+            demographicsHTML += `<div class="demographics-title">Patient Demographics:</div><ul>`;
+            demographicsHTML += `<li>Gender: ${patient.gender}</li>`;
+            demographicsHTML += `<li>Race: ${patient.race}</li>`;
+            demographicsHTML += `</ul></div>`;
+
+            $('#chat-box').append(demographicsHTML);
+        }
+
+        function isInpatient(visitConceptId) {
+            return ["9201", "262", "8971", "8920"].includes(String(visitConceptId));
+        }
+
+        function renderVisit(visit, birthDate) {
+            let visitStartDate = new Date(visit.visit_start_datetime);
+            let age = visitStartDate.getFullYear() - birthDate.getFullYear();
+            let visitHTML = `<div><strong>${visit.visit_type}</strong> on ${visitStartDate.toLocaleDateString()} (Age: ${age})<br></div>`;
+
+            if (isInpatient(visit.visit_concept_id)) {
+                let eventsByDate = {};
+                visit.events.forEach(event => {
+                    let eventDate = new Date(event.time).toLocaleDateString();
+                    if (!eventsByDate[eventDate]) {
+                        eventsByDate[eventDate] = {};
+                    }
+                    if (!eventsByDate[eventDate][event.domain]) {
+                        eventsByDate[eventDate][event.domain] = [];
+                    }
+                    eventsByDate[eventDate][event.domain].push(event.code_label);
                 });
-                patientInfoHTML += `</ul></div>`;
-            });
 
-            patientInfoHTML += `</div>`;
-            $('#chat-box').append(patientInfoHTML);
+                for (let [date, domains] of Object.entries(eventsByDate)) {
+                    visitHTML += `<div style='padding-left:20px;'>On day ${dayDifference(new Date(date) - visitStartDate)}:<br></div>`;
+                    for (let [domain, concepts] of Object.entries(domains).sort()) {
+                        visitHTML += `<div style='padding-left:40px;'><strong>${domain}:</strong><br></div>`;
+                        concepts.forEach(concept => {
+                            visitHTML += `<div style='padding-left:60px;'>* ${concept}<br></div>`;
+                        });
+                    }
+                }
+            } else {
+                let eventsByDomain = {};
+                visit.events.forEach(event => {
+                    if (!eventsByDomain[event.domain]) {
+                        eventsByDomain[event.domain] = [];
+                    }
+                    eventsByDomain[event.domain].push(event.code_label);
+                });
+
+                for (let [domain, concepts] of Object.entries(eventsByDomain).sort()) {
+                    visitHTML += `<div style='padding-left:20px;'><strong>${domain}:</strong><br></div>`;
+                    concepts.forEach(concept => {
+                        visitHTML += `<div style='padding-left:40px;'>* ${concept}<br></div>`;
+                    });
+                }
+            }
+
+            $('#chat-box').append(visitHTML);
         }
     });
     </script>
