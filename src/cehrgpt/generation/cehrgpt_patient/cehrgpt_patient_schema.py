@@ -60,10 +60,16 @@ class CehrGptVisit:
     discharge_to_concept_id: Optional[int] = None
     events: List[CehrGptEvent] = field(default_factory=list)
 
-    def get_narrative(self, birth_datetime: datetime.datetime) -> str:
+    def get_narrative(
+        self, birth_datetime: datetime.datetime, html_output: bool = False
+    ) -> str:
         birth_year = birth_datetime.year
         age = self.visit_start_datetime.year - birth_year
-        narrative = f"\n{self.visit_type} on {self.visit_start_datetime.date().strftime('%Y-%m-%d')} (Age: {age})\n"
+        if html_output:
+            narrative = f"<div><strong>{self.visit_type}</strong> on {self.visit_start_datetime.date().strftime('%Y-%m-%d')} (Age: {age})<br></div>"
+        else:
+            narrative = f"\n{self.visit_type} on {self.visit_start_datetime.date().strftime('%Y-%m-%d')} (Age: {age})\n"
+
         if is_inpatient_visit_type_token(self.visit_concept_id):
             group_by_date = defaultdict(lambda: defaultdict(list))
             for event in self.events:
@@ -71,21 +77,44 @@ class CehrGptVisit:
                     event.get_code_label()
                 )
             for date, domain_concepts in group_by_date.items():
-                narrative += (
-                    f"\tOn day {(date - self.visit_start_datetime.date()).days}:\n"
-                )
+                if html_output:
+                    narrative += f"<div style='padding-left:20px;'>On day {(date - self.visit_start_datetime.date()).days}:<br></div>"
+                else:
+                    narrative += (
+                        f"\tOn day {(date - self.visit_start_datetime.date()).days}:\n"
+                    )
                 for domain in sorted(domain_concepts):
-                    narrative += f"\t\t{domain}:\n"
+                    if html_output:
+                        narrative += f"<div style='padding-left:40px;'><strong>{domain}:</strong><br></div>"
+                    else:
+                        narrative += f"\t\t{domain}:\n"
                     for concept in domain_concepts[domain]:
-                        narrative += f"\t\t   * {concept}\n"
+                        if html_output:
+                            narrative += (
+                                f"<div style='padding-left:60px;'>* {concept}<br></div>"
+                            )
+                        else:
+                            narrative += f"\t\t   * {concept}\n"
         else:
             group_by_domain = defaultdict(list)
             for event in self.events:
-                group_by_domain[event.domain].append(event.code_label)
+                group_by_domain[event.domain].append(event.get_code_label())
             for domain in sorted(group_by_domain):
-                narrative += f"\t{domain}:\n"
+                if html_output:
+                    narrative += f"<div style='padding-left:20px;'><strong>{domain}:</strong><br></div>"
+                else:
+                    narrative += f"\t{domain}:\n"
                 for concept in group_by_domain[domain]:
-                    narrative += f"\t   * {concept}\n"
+                    if html_output:
+                        narrative += (
+                            f"<div style='padding-left:40px;'>* {concept}<br></div>"
+                        )
+                    else:
+                        narrative += f"\t   * {concept}\n"
+
+        if html_output:
+            narrative += "</div>"  # Closing div for the narrative
+
         return narrative
 
 
@@ -99,12 +128,22 @@ class CehrGptPatient:
     patient_id: Optional[int] = None
     visits: List[CehrGptVisit] = field(default_factory=list)
 
-    def get_narrative(self) -> str:
-        narrative = (
-            f"Patient Demographics:\n\tGender: {self.gender}\n\tRace: {self.race}\n"
-        )
+    def get_narrative(self, html_output: bool = False) -> str:
+        if html_output:
+            narrative = (
+                f"<div>Patient Demographics:<br>"
+                f"<ul>"
+                f"<li>Gender: {self.gender}</li>"
+                f"<li>Race: {self.race}</li>"
+                f"</ul>"
+                f"</div>"
+            )
+        else:
+            narrative = (
+                f"Patient Demographics:\n\tGender: {self.gender}\n\tRace: {self.race}\n"
+            )
         for visit in self.visits:
-            narrative += visit.get_narrative(self.birth_datetime)
+            narrative += visit.get_narrative(self.birth_datetime, html_output)
         return narrative
 
     def get_events(self) -> List[CehrGptEvent]:

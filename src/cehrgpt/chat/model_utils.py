@@ -81,8 +81,8 @@ def handle_query(
             cehrgpt_patient = patient_sequence_converter.get_patient(
                 concept_domain_map, concept_name_map
             )
-            return cehrgpt_patient.get_narrative()
+            return cehrgpt_patient.get_narrative(html_output=True)
         else:
-            return f"The generated sequence is invalid due to: {patient_sequence_converter.get_error_messages()}"
+            return f"The generated sequence is invalid due to: {'<br>'.join(patient_sequence_converter.get_error_messages())}"
 
-    return "Failed to generate the patient, please try again"
+    return "Failed to generate the patient, please try again<br>"
