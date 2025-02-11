@@ -347,19 +347,20 @@ class PatientSequenceConverter:
                     if self.id_generator
                     else None
                 )
-                events.append(
-                    CehrGptEvent(
-                        time=datetime_cursor.current_datetime,
-                        code=token.name,
-                        code_label=concept_map.get(token.name, None),
-                        text_value=token.text_value,
-                        numeric_value=token.numeric_value,
-                        unit=token.unit,
-                        visit_id=visit_id,
-                        domain=domain,
-                        record_id=record_id,
-                    )
+
+                event = CehrGptEvent(
+                    time=datetime_cursor.current_datetime,
+                    code=token.name,
+                    code_label=concept_map.get(token.name, None),
+                    text_value=token.text_value,
+                    numeric_value=token.numeric_value,
+                    unit=token.unit,
+                    visit_id=visit_id,
+                    domain=domain,
+                    record_id=record_id,
                 )
+                if event not in events:
+                    events.append(event)
 
         if visit_start_datetime is None:
             visit_start_datetime = events[0].get("time")

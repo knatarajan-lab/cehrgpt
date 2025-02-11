@@ -24,6 +24,29 @@ class CehrGptEvent:
             return self.code_label
         return self.code
 
+    def __hash__(self):
+        # Use a large prime number for hashing combination
+        prime = 31
+        # Start with a hash of 1
+        hash_code = 1
+
+        # Combine hash of the datetime, assuming current_datetime is part of the instance
+        # Convert datetime to timestamp for consistent hashing
+        hash_code = hash_code * prime + hash(self.time)
+        hash_code = hash_code * prime + hash(self.code)
+        hash_code = hash_code * prime + hash(self.domain)
+        hash_code = hash_code * prime + hash(
+            self.text_value if self.text_value is not None else 0
+        )
+        hash_code = hash_code * prime + hash(
+            self.numeric_value if self.numeric_value is not None else 0
+        )
+        hash_code = hash_code * prime + hash(self.unit if self.unit is not None else 0)
+        hash_code = hash_code * prime + hash(
+            self.visit_id if self.visit_id is not None else 0
+        )
+        return hash_code
+
 
 @dataclass(frozen=True)
 class CehrGptVisit:
