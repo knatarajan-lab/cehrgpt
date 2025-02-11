@@ -17,7 +17,7 @@ concept_name_map, concept_domain_map = load_concept_domain_map(config)
 
 @app.route("/")
 def index():
-    return render_template("chat.html")
+    return render_template("index.html")
 
 
 @app.route("/send", methods=["POST"])
