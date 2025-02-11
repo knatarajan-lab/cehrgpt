@@ -2,6 +2,7 @@ import os
 
 import polars as pl
 import torch
+from flask import jsonify
 from transformers import GenerationConfig
 
 from cehrgpt.generation.encoder_decoder.instruct_cehrpgt_query import (
@@ -78,11 +79,15 @@ def handle_query(
             sequences[0], concept_domain_map
         )
         if patient_sequence_converter.is_validation_passed:
-            cehrgpt_patient = patient_sequence_converter.get_patient(
-                concept_domain_map, concept_name_map
+            return jsonify(
+                patient_sequence_converter.get_patient(
+                    concept_domain_map, concept_name_map
+                )
             )
-            return cehrgpt_patient.get_narrative(html_output=True)
         else:
-            return f"The generated sequence is invalid due to: {'<br>'.join(patient_sequence_converter.get_error_messages())}"
-
-    return "Failed to generate the patient, please try again<br>"
+            return jsonify(
+                {
+                    "message": f"Error in patient sequence: {'. '.join(patient_sequence_converter.get_error_messages())}"
+                }
+            )
+    return jsonify({"message": "Failed to parse the query, please try again"})

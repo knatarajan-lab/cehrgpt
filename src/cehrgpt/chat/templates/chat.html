@@ -58,26 +58,49 @@
 
     <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
     <script>
-        $(document).ready(function() {
-            $('#chat-form').on('submit', function(e) {
-                e.preventDefault();
-                let message = $('#message-input').val();
-                if (message.trim() !== '') {
-                    $('#chat-box').append('<div class="chat-message user-message">' + message + '</div>');
-                    $('#message-input').val('');
-                    $.ajax({
-                        url: '/send',
-                        type: 'POST',
-                        contentType: 'application/json',
-                        data: JSON.stringify({message: message}),
-                        success: function(data) {
+    $(document).ready(function() {
+        $('#chat-form').on('submit', function(e) {
+            e.preventDefault();
+            let message = $('#message-input').val();
+            if (message.trim() !== '') {
+                $('#chat-box').append('<div class="chat-message user-message">' + message + '</div>');
+                $('#message-input').val('');
+                $.ajax({
+                    url: '/send',
+                    type: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({message: message}),
+                    success: function(data) {
+                        if (data.gender) {
+                            renderPatientData(data);
+                        } else {
                             $('#chat-box').append('<div class="chat-message bot-message">' + data.message + '</div>');
-                            $('#chat-box').scrollTop($('#chat-box')[0].scrollHeight);
                         }
-                    });
-                }
-            });
+                        $('#chat-box').scrollTop($('#chat-box')[0].scrollHeight);
+                    }
+                });
+            }
         });
+
+        function renderPatientData(patient) {
+            let patientInfoHTML = `<div class="chat-message bot-message">`;
+            patientInfoHTML += `Patient Demographics:<br><ul>`;
+            patientInfoHTML += `<li>Gender: ${patient.gender}</li>`;
+            patientInfoHTML += `<li>Race: ${patient.race}</li>`;
+            patientInfoHTML += `<li>Birth Date: ${new Date(patient.birth_date).toLocaleDateString()}</li></ul>`;
+
+            patient.visits.forEach(visit => {
+                patientInfoHTML += `<div>Visit on ${new Date(visit.date).toLocaleDateString()}: ${visit.type}<ul>`;
+                visit.notes.forEach(note => {
+                    patientInfoHTML += `<li>${note}</li>`;
+                });
+                patientInfoHTML += `</ul></div>`;
+            });
+
+            patientInfoHTML += `</div>`;
+            $('#chat-box').append(patientInfoHTML);
+        }
+    });
     </script>
 </body>
 </html>

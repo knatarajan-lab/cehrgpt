@@ -33,7 +33,7 @@ def send():
         concept_domain_map,
         concept_name_map,
     )
-    return jsonify({"message": response})
+    return response
 
 
 if __name__ == "__main__":
