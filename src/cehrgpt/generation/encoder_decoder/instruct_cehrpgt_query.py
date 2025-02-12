@@ -5,10 +5,13 @@ from typing import Optional, Tuple
 from jinja2 import BaseLoader, Environment
 from openai import OpenAI
 from pydantic import BaseModel
+from transformers.utils import logging
 
 from cehrgpt.generation.cehrgpt_patient.clinical_statement_generator import (
     create_clinical_statement,
 )
+
+logger = logging.get_logger("transformers")
 
 MODEL = "gpt-4o-2024-08-06"
 TEMPLATE = """
@@ -65,7 +68,7 @@ class InstructCehrGptQueryTemplate(BaseModel):
     age_of_diagnosis: int
     diagnosis: str
     drug: str
-    num_of_patients: int = 1
+    num_of_patients: int
 
 
 def parse_question_to_cehrgpt_query(
@@ -82,6 +85,7 @@ def parse_question_to_cehrgpt_query(
         response_format=InstructCehrGptQueryTemplate,
     )
     parsed = completion.choices[0].message.parsed
+    logger.debug("ChatGPT response: %s", completion.choices[0].message)
     if parsed:
         race = parsed.race
         gender = parsed.gender
