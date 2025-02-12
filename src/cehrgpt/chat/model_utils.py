@@ -111,12 +111,13 @@ def handle_query(
     if config.DEV_MODE:
         return jsonify(load_test_patient())
 
-    query = parse_question_to_cehrgpt_query(user_input)
-    if not query:
+    query_tuple = parse_question_to_cehrgpt_query(user_input)
+    if not query_tuple:
         return jsonify(
             {"message": "Failed to parse the query. Generating a default response..."}
         )
 
+    query, n_patients = query_tuple
     model_responses = generate_responses(
         queries=[query],
         encoder_tokenizer=encoder_tokenizer,

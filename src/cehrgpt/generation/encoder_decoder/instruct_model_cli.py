@@ -138,13 +138,14 @@ def main():
             break
 
         if args.use_llm_parser:
-            query = parse_question_to_cehrgpt_query(query)
-            if not query:
+            query_tuple = parse_question_to_cehrgpt_query(query)
+            if not query_tuple:
                 print(
                     "Failed to parse the query and will generate a random synthetic patient\n"
                 )
                 query = DEFAULT_CLINICAL_STATEMENT
             else:
+                query, n_patients = query_tuple
                 print("\nParsed query:\n", query)
 
         model_responses = generate_responses(
