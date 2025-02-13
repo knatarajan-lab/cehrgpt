@@ -48,6 +48,18 @@ $(document).ready(function() {
         downloadObjectAsJson(patientData, "patient_data");
     });
 
+    // Batch button functionality
+    $('#batch-data').click(function() {
+        appendMessage('assistant', 'Fetching batch statistics...');
+        // Simply call updateDashboard which will fetch its own data
+        if (typeof updateDashboard === 'function') {
+            updateDashboard();
+            appendMessage('assistant', 'Batch statistics updated successfully.');
+        } else {
+            appendMessage('assistant', 'Dashboard update function not available.');
+        }
+    });
+
     function appendMessage(sender, content) {
         const messageDiv = $('<div>')
             .addClass(`message ${sender}-message`);
@@ -59,19 +71,9 @@ $(document).ready(function() {
         messageDiv.append(contentDiv);
         $('#chat-box').append(messageDiv);
 
-        // Get the chat box
+        // Scroll up by a fixed amount
         const chatBox = document.getElementById('chat-box');
-        const newMessage = messageDiv[0];
-
-        // Calculate how much to scroll
-        const messageBottom = newMessage.offsetTop + newMessage.offsetHeight;
-        const visibleHeight = chatBox.clientHeight;
-        const currentScroll = chatBox.scrollTop;
-        const bottomPosition = currentScroll + visibleHeight;
-        // Simply scroll up by a fixed amount (e.g., 100px)
-        const scrollAmount = 400;
-        if (messageBottom > bottomPosition - scrollAmount) {
-            chatBox.scrollTop += scrollAmount;
-        }
+        const scrollAmount = 100;
+        chatBox.scrollTop += scrollAmount;
     }
 });

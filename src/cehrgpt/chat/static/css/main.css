@@ -6,6 +6,20 @@ body, html {
     font-family: 'Söhne', ui-sans-serif, system-ui, -apple-system, sans-serif;
 }
 
+.main-wrapper {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+}
+
+.chat-section {
+    flex: 1;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
 .container-fluid {
     height: 100%;
     padding: 0;
@@ -20,7 +34,7 @@ body, html {
     max-width: 800px;
     margin: 0 auto;
     width: 100%;
-    height: calc(100vh - 100px);
+    height: 100%;
     position: relative;
     padding-bottom: 120px;
 }
@@ -44,43 +58,55 @@ body, html {
     max-width: 100%;
     margin-left: 1rem;
     overflow-x: auto;
-    padding-bottom: 0.5rem;
+    padding-bottom: 1rem;
 }
 
 .user-message {
     background-color: #ffffff;
 }
 
+.assistant-message {
+    background-color: #f7f7f8;
+}
+
 .input-container {
     position: fixed;
     bottom: 0;
-    left: 0;
-    right: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 800px; /* Match chat container max-width */
     padding: 1.5rem;
     background-color: #ffffff;
     border-top: 1px solid rgba(0,0,0,0.1);
     box-shadow: 0 -2px 5px rgba(0,0,0,0.05);
 }
 
+.message-input {
+    width: 100%;
+    padding: 1.2rem;
+    padding-right: 120px;
+    background-color: #ffffff;
+    border: 1px solid rgba(0,0,0,0.1);
+    border-radius: 1rem; /* More rounded corners */
+    color: #333333;
+    resize: none;
+    min-height: 80px; /* Increased height */
+    max-height: 200px;
+    line-height: 1.5;
+    font-size: 1rem;
+}
+
+/* Add responsive handling for smaller screens */
+@media (max-width: 850px) {
+    .input-container {
+        width: 95%;
+    }
+}
+
 .input-box {
     max-width: 800px;
     margin: 0 auto;
     position: relative;
-}
-
-.message-input {
-    width: 100%;
-    padding: 1rem;
-    padding-right: 120px;
-    background-color: #ffffff;
-    border: 1px solid rgba(0,0,0,0.1);
-    border-radius: 0.5rem;
-    color: #333333;
-    resize: none;
-    min-height: 60px;
-    max-height: 200px;
-    line-height: 1.5;
-    font-size: 1rem;
 }
 
 .message-input:focus {

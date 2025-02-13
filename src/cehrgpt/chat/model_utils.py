@@ -119,7 +119,7 @@ def handle_query(
 
     query, n_patients = query_tuple
     model_responses = generate_responses(
-        queries=[query],
+        queries=[query] * n_patients,
         encoder_tokenizer=encoder_tokenizer,
         cehrgpt_tokenizer=cehrgpt_tokenizer,
         model=model,

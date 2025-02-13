@@ -8,36 +8,56 @@
     <link href="{{ url_for('static', filename='css/main.css') }}" rel="stylesheet">
 </head>
 <body>
-    <div class="container-fluid">
-        <div class="chat-container">
-            <div class="chat-messages" id="chat-box">
-                <div class="message assistant-message">
-                    <div class="message-content">
-                        <div class="system-message">Welcome! I can help you generate synthetic patient data. What kind of patient data would you like to create?</div>
-                    </div>
-                </div>
-            </div>
-            <div class="input-container">
-                <div class="input-box">
-                    <form id="chat-form">
-                        <textarea
-                            id="message-input"
-                            class="message-input"
-                            placeholder="Type your message here..."
-                            rows="1"
-                        ></textarea>
-                        <div class="button-container">
-                            <button type="button" id="download-data" class="btn btn-secondary">Download Data</button>
-                            <button type="submit" class="btn btn-primary">Send</button>
+    <div class="main-wrapper">
+        <!-- Chat Section -->
+        <div class="chat-section">
+            <div class="container-fluid">
+                <div class="chat-container">
+                    <div class="chat-messages" id="chat-box">
+                        <div class="message assistant-message">
+                            <div class="message-content">
+                                <div class="system-message">Welcome! I can help you generate synthetic patient data. What kind of patient data would you like to create?</div>
+                            </div>
                         </div>
-                    </form>
+                    </div>
+                    <div class="input-container">
+                        <div class="input-box">
+                            <form id="chat-form">
+                                <textarea
+                                    id="message-input"
+                                    class="message-input"
+                                    placeholder="Type your message here..."
+                                    rows="1"
+                                ></textarea>
+                                <div class="button-container">
+                                    <button type="button" id="download-data" class="btn btn-secondary">Download Data</button>
+                                    <button type="button" id="batch-data" class="btn btn-secondary">Batch</button>
+                                    <button type="submit" class="btn btn-primary">Send</button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
+
+    <!-- Scripts -->
     <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+
+    <!-- React Scripts -->
+    <script src="https://unpkg.com/react@17/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@17/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/prop-types@15.7.2/prop-types.js"></script>
+    <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+
+    <!-- Recharts -->
+    <script src="https://unpkg.com/recharts@2.1.12/umd/Recharts.js"></script>
+
+    <!-- Application Scripts -->
     <script src="{{ url_for('static', filename='js/utils.js') }}"></script>
     <script src="{{ url_for('static', filename='js/formatters.js') }}"></script>
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script type="text/babel" src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 </body>
 </html>
