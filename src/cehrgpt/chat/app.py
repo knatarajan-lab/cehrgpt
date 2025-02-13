@@ -177,7 +177,7 @@ def task_status(task_id):
                             {
                                 "state": "SUCCESS",
                                 "progress": 100,
-                                "query": task.info.get("query"),
+                                "query": result_data.get("query"),
                                 "total_generated": result_data.get(
                                     "total_generated", 0
                                 ),

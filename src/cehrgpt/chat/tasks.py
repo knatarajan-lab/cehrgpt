@@ -49,11 +49,13 @@ def generate_batch_patients(self, user_input, user_session_id):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         cache_key = f"batch_{user_session_id}_{timestamp}"
         # Update status to started
-        self.update_state(state="PROGRESS", meta={"progress": 0})
+        self.update_state(state="PROGRESS", meta={"progress": 0, "query": user_input})
 
         if config.DEV_MODE:
             synthetic_patients.extend([load_test_patient()] * 128)
-            self.update_state(state="PROGRESS", meta={"progress": 1.0})
+            self.update_state(
+                state="PROGRESS", meta={"progress": 1.0, "query": user_input}
+            )
             status = "SUCCESS"
         else:
             query_tuple = parse_question_to_cehrgpt_query(user_input)
@@ -61,7 +63,7 @@ def generate_batch_patients(self, user_input, user_session_id):
             if query_tuple:
                 query, n_patients = query_tuple
                 self.update_state(
-                    state="PROGRESS", meta={"progress": 0, "query": query}
+                    state="PROGRESS", meta={"progress": 0, "query": user_input}
                 )
                 # Your existing patient generation logic here
                 # This is where you'd call your model and generate patients
@@ -76,7 +78,7 @@ def generate_batch_patients(self, user_input, user_session_id):
                         progress = (i * batch_size / n_patients) * 100
                         self.update_state(
                             state="PROGRESS",
-                            meta={"progress": progress, "query": query},
+                            meta={"progress": progress, "query": user_input},
                         )
                 status = "SUCCESS"
             else:
