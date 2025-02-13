@@ -1,6 +1,29 @@
 $(document).ready(function() {
     let patientData = {};
 
+    // Add function to show/hide spinner
+    function showSpinner() {
+        const spinnerHtml = `
+            <div class="message assistant-message" id="spinner-message">
+                <div class="message-content">
+                    <div class="d-flex align-items-center">
+                        <small class="me-2">Thinking</small>
+                        <div class="spinner-border spinner-border-sm text-primary" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>`;
+        $('#chat-box').append(spinnerHtml);
+        const chatBox = document.getElementById('chat-box');
+        chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    function removeSpinner() {
+        $('#spinner-message').remove();
+    }
+
+
     // Load conversation history if available
     function loadConversationHistory() {
         $.ajax({
@@ -58,6 +81,10 @@ $(document).ready(function() {
                 appendMessage('assistant', 'Please enter a query first.');
                 return;
             }
+            appendMessage('user', message);
+            // Show spinner before making the request
+            showSpinner();
+
             // Send to backend
             $.ajax({
                 url: '/send',
@@ -65,18 +92,19 @@ $(document).ready(function() {
                 contentType: 'application/json',
                 data: JSON.stringify({query: message}),
                 success: function(data) {
+                    // Remove spinner before showing response
+                    removeSpinner();
                     if (data.visits) {
                         // For patient data, format it before displaying
-                        appendMessage('user', message);
                         appendMessage('assistant', formatPatientData(data));
                         patientData = data;
                     } else {
                         // For regular messages
-                        appendMessage('user', message);
                         appendMessage('assistant', data.message || data);
                     }
                 },
                 error: function() {
+                    removeSpinner();
                     appendMessage('assistant', 'Sorry, there was an error processing your request.');
                 }
             });
