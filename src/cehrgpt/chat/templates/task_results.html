@@ -65,6 +65,7 @@
             const taskId = window.location.pathname.split('/').pop();
             let pollingInterval;
             let patientData = null;
+            window.taskId = taskId;
 
             function downloadPatientData() {
                 if (!patientData) {
@@ -100,7 +101,6 @@
                         const errorContainer = $('#error-container');
                         const userQueryContainer = $('#user-query-text');
                         const downloadContainer = $('#download-container');
-                        const downloadBtn = $('#download-btn');
 
                         // Reset previous states
                         dashboardContainer.hide();
@@ -134,7 +134,6 @@
                                         // Show download button
                                         downloadContainer.show();
 
-                                        window.taskId = taskId;
                                         // Update patient stats
                                         $.ajax({
                                             url: `/api/patient-stats/${taskId}`,

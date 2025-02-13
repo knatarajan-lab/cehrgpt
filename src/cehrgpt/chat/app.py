@@ -5,7 +5,7 @@ from datetime import datetime
 
 from flask import Flask, jsonify, render_template, request, session, url_for
 
-from .model_utils import handle_query, load_cehrgpt_patient_from_json
+from .model_utils import handle_query
 from .tasks import generate_batch_patients, redis_client
 
 app = Flask(__name__)
