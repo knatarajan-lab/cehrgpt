@@ -9,6 +9,26 @@ const {
 const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8', '#82ca9d',
                 '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0'];
 
+const chartStyles = {
+    container: {
+        marginBottom: '4rem',  // Add significant margin between chart containers
+        padding: '1rem',
+        backgroundColor: '#fff',
+        borderRadius: '8px',
+        boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+    },
+    title: {
+        marginBottom: '2rem',  // Add space between title and chart
+        color: '#333',
+        fontSize: '1.5rem'
+    },
+    chartWrapper: {
+        width: '100%',
+        height: '400px',  // Increase height for better label visibility
+        marginTop: '1rem'
+    }
+};
+
 function Dashboard() {
     const [stats, setStats] = useState(null);
     const [patients, setPatients] = useState(null);
@@ -143,9 +163,9 @@ function Dashboard() {
         if (!events || events.length === 0) return null;
 
         return (
-            <div className="chart-container">
-                <h3>{title}</h3>
-                <div style={{ width: '100%', height: 400 }}>
+            <div className="chart-container" style={chartStyles.container}>
+                <h3 style={chartStyles.title}>{title}</h3>
+                <div style={chartStyles.chartWrapper}>
                     <ResponsiveContainer>
                         <BarChart data={events}>
                             <CartesianGrid strokeDasharray="3 3" />
@@ -243,9 +263,9 @@ function Dashboard() {
             )}
 
             {/* Existing charts */}
-            <div className="chart-container">
-                <h3>Gender Distribution</h3>
-                <div style={{ width: '100%', height: 300 }}>
+            <div className="chart-container" style={chartStyles.container}>
+                <h3 style={chartStyles.title}>Gender Distribution</h3>
+                <div style={chartStyles.chartWrapper}>
                     <ResponsiveContainer>
                         <PieChart>
                             <Pie
@@ -258,36 +278,36 @@ function Dashboard() {
                                 label
                             >
                                 {genderData.map((entry, index) => (
-                                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]}/>
                                 ))}
                             </Pie>
-                            <Tooltip />
-                            <Legend />
+                            <Tooltip/>
+                            <Legend/>
                         </PieChart>
                     </ResponsiveContainer>
                 </div>
             </div>
 
             {/* Age Distribution */}
-            <div className="chart-container">
-                <h3>Age Distribution</h3>
-                <div style={{ width: '100%', height: 300 }}>
+            <div className="chart-container" style={chartStyles.container}>
+                <h3 style={chartStyles.title}>Age Distribution</h3>
+                <div style={chartStyles.chartWrapper}>
                     <ResponsiveContainer>
                         <BarChart data={ageData}>
-                            <CartesianGrid strokeDasharray="3 3" />
-                            <XAxis dataKey="name" />
-                            <YAxis />
-                            <Tooltip />
-                            <Bar dataKey="value" fill="#8884d8" />
+                            <CartesianGrid strokeDasharray="3 3"/>
+                            <XAxis dataKey="name"/>
+                            <YAxis/>
+                            <Tooltip/>
+                            <Bar dataKey="value" fill="#8884d8"/>
                         </BarChart>
                     </ResponsiveContainer>
                 </div>
             </div>
 
             {/* Race Distribution */}
-            <div className="chart-container">
-                <h3>Race Distribution</h3>
-                <div style={{ width: '100%', height: 300 }}>
+            <div className="chart-container" style={chartStyles.container}>
+                <h3 style={chartStyles.title}>Race Distribution</h3>
+                <div style={chartStyles.chartWrapper}>
                     <ResponsiveContainer>
                         <PieChart>
                             <Pie
@@ -300,27 +320,27 @@ function Dashboard() {
                                 label
                             >
                                 {raceData.map((entry, index) => (
-                                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]}/>
                                 ))}
                             </Pie>
-                            <Tooltip />
-                            <Legend />
+                            <Tooltip/>
+                            <Legend/>
                         </PieChart>
                     </ResponsiveContainer>
                 </div>
             </div>
 
             {/* Visit Types */}
-            <div className="chart-container">
-                <h3>Visit Types</h3>
-                <div style={{ width: '100%', height: 300 }}>
+            <div className="chart-container" style={chartStyles.container}>
+                <h3 style={chartStyles.title}>Visit Types</h3>
+                <div style={chartStyles.chartWrapper}>
                     <ResponsiveContainer>
                         <BarChart data={visitTypeData}>
-                            <CartesianGrid strokeDasharray="3 3" />
-                            <XAxis dataKey="name" />
-                            <YAxis />
-                            <Tooltip />
-                            <Bar dataKey="value" fill="#82ca9d" />
+                            <CartesianGrid strokeDasharray="3 3"/>
+                            <XAxis dataKey="name"/>
+                            <YAxis/>
+                            <Tooltip/>
+                            <Bar dataKey="value" fill="#82ca9d"/>
                         </BarChart>
                     </ResponsiveContainer>
                 </div>
@@ -331,6 +351,6 @@ function Dashboard() {
 
 // Render the dashboard
 ReactDOM.render(
-    <Dashboard />,
+    <Dashboard/>,
     document.getElementById('dashboard-container')
 );
