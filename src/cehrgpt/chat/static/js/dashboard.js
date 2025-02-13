@@ -192,46 +192,46 @@ function Dashboard() {
                 </div>
             )}
 
-            {/* Batch Patient Details (if available) */}
-            {patients && (
-                <div className="patient-details mt-4">
-                    <h3>Generated Patients</h3>
-                    <div className="card">
-                        <div className="card-body">
-                            <p>Total Patients Generated: {patients.length}</p>
-                            <button
-                                className="btn btn-primary"
-                                data-bs-toggle="modal"
-                                data-bs-target="#patientsModal"
-                            >
-                                View Patient Details
-                            </button>
-                        </div>
-                    </div>
+            {/*/!* Batch Patient Details (if available) *!/*/}
+            {/*{patients && (*/}
+            {/*    <div className="patient-details mt-4">*/}
+            {/*        <h3>Generated Patients</h3>*/}
+            {/*        <div className="card">*/}
+            {/*            <div className="card-body">*/}
+            {/*                <p>Total Patients Generated: {patients.length}</p>*/}
+            {/*                <button*/}
+            {/*                    className="btn btn-primary"*/}
+            {/*                    data-bs-toggle="modal"*/}
+            {/*                    data-bs-target="#patientsModal"*/}
+            {/*                >*/}
+            {/*                    View Patient Details*/}
+            {/*                </button>*/}
+            {/*            </div>*/}
+            {/*        </div>*/}
 
-                    {/* Modal for Patient Details */}
-                    <div className="modal fade" id="patientsModal" tabIndex="-1">
-                        <div className="modal-dialog modal-xl">
-                            <div className="modal-content">
-                                <div className="modal-header">
-                                    <h5 className="modal-title">Patient Details</h5>
-                                    <button type="button" className="btn-close" data-bs-dismiss="modal"></button>
-                                </div>
-                                <div className="modal-body">
-                                    {patients.map((patient, index) => (
-                                        <div key={index} className="card mb-2">
-                                            <div className="card-header">Patient {index + 1}</div>
-                                            <div className="card-body">
-                                                <pre>{JSON.stringify(patient, null, 2)}</pre>
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
+            {/*        /!* Modal for Patient Details *!/*/}
+            {/*        <div className="modal fade" id="patientsModal" tabIndex="-1">*/}
+            {/*            <div className="modal-dialog modal-xl">*/}
+            {/*                <div className="modal-content">*/}
+            {/*                    <div className="modal-header">*/}
+            {/*                        <h5 className="modal-title">Patient Details</h5>*/}
+            {/*                        <button type="button" className="btn-close" data-bs-dismiss="modal"></button>*/}
+            {/*                    </div>*/}
+            {/*                    <div className="modal-body">*/}
+            {/*                        {patients.map((patient, index) => (*/}
+            {/*                            <div key={index} className="card mb-2">*/}
+            {/*                                <div className="card-header">Patient {index + 1}</div>*/}
+            {/*                                <div className="card-body">*/}
+            {/*                                    <pre>{JSON.stringify(patient, null, 2)}</pre>*/}
+            {/*                                </div>*/}
+            {/*                            </div>*/}
+            {/*                        ))}*/}
+            {/*                    </div>*/}
+            {/*                </div>*/}
+            {/*            </div>*/}
+            {/*        </div>*/}
+            {/*    </div>*/}
+            {/*)}*/}
 
             {/* Top Events by Domain */}
             {topDomainEvents && (
