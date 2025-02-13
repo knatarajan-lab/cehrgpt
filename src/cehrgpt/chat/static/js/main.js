@@ -1,4 +1,4 @@
-$(document).ready(function() {
+$(document).ready(function () {
     let patientData = {};
 
     // Add function to show/hide spinner
@@ -29,7 +29,7 @@ $(document).ready(function() {
         $.ajax({
             url: '/conversation',
             type: 'GET',
-            success: function(history) {
+            success: function (history) {
                 // Clear existing messages
                 if (history.length > 0) {
                     $('#chat-box').empty();
@@ -51,7 +51,7 @@ $(document).ready(function() {
                 const chatBox = document.getElementById('chat-box');
                 chatBox.scrollTop = chatBox.scrollHeight;
             },
-            error: function(err) {
+            error: function (err) {
                 console.error('Error loading conversation history:', err);
                 // Add fallback welcome message if history loading fails
                 appendMessage('assistant', 'Welcome! I can help you generate synthetic patient data. What kind of patient data would you like to create?');
@@ -64,23 +64,19 @@ $(document).ready(function() {
 
     // Auto-resize textarea
     const textarea = document.getElementById('message-input');
-    textarea.addEventListener('input', function() {
+    textarea.addEventListener('input', function () {
         this.style.height = 'auto';
         this.style.height = (this.scrollHeight) + 'px';
     });
 
     // Handle form submission
-    $('#chat-form').on('submit', function(e) {
+    $('#chat-form').on('submit', function (e) {
         e.preventDefault();
         const message = $('#message-input').val().trim();
         if (message) {
             // Clear input
             $('#message-input').val('');
             textarea.style.height = 'auto';
-            if (!message) {
-                appendMessage('assistant', 'Please enter a query first.');
-                return;
-            }
             appendMessage('user', message);
             // Show spinner before making the request
             showSpinner();
@@ -91,7 +87,7 @@ $(document).ready(function() {
                 type: 'POST',
                 contentType: 'application/json',
                 data: JSON.stringify({query: message}),
-                success: function(data) {
+                success: function (data) {
                     // Remove spinner before showing response
                     removeSpinner();
                     if (data.visits) {
@@ -103,16 +99,18 @@ $(document).ready(function() {
                         appendMessage('assistant', data.message || data);
                     }
                 },
-                error: function() {
+                error: function () {
                     removeSpinner();
                     appendMessage('assistant', 'Sorry, there was an error processing your request.');
                 }
             });
+        } else {
+            appendMessage('assistant', 'Please enter a query first.');
         }
     });
 
     // Download functionality
-    $('#download-data').click(function() {
+    $('#download-data').click(function () {
         if (Object.keys(patientData).length === 0) {
             appendMessage('assistant', 'No patient data available to download yet. Please generate some data first.');
             return;
@@ -121,7 +119,7 @@ $(document).ready(function() {
     });
 
     // Update the batch button handler:
-    $('#batch-data').click(function() {
+    $('#batch-data').click(function () {
         const message = $('#message-input').val().trim();
         if (!message) {
             appendMessage('assistant', 'Please enter a query first.');
@@ -141,11 +139,11 @@ $(document).ready(function() {
             type: 'POST',
             contentType: 'application/json',
             data: JSON.stringify({query: message}),
-            success: function(data) {
+            success: function (data) {
                 // Inform the user in the chat
                 appendMessage('assistant', `${data.message}`);
             },
-            error: function() {
+            error: function () {
                 appendMessage('assistant', 'Sorry, there was an error starting the batch generation.');
             }
         });
