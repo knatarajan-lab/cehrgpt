@@ -11,10 +11,26 @@
         .progress-container { max-width: 600px; margin: 0 auto; }
         #results-container { margin-top: 20px; }
         #dashboard-container { display: none; }
+        .user-query-container {
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+        }
+        #download-container {
+            margin-top: 20px;
+            text-align: center;
+        }
     </style>
 </head>
 <body>
     <div class="container">
+        <div class="user-query-container">
+            <h3>Original Query</h3>
+            <p id="user-query-text" class="lead"></p>
+        </div>
+
         <div class="progress-container text-center">
             <h2>Batch Patient Generation</h2>
             <div class="progress mt-3">
@@ -24,6 +40,10 @@
         </div>
 
         <div id="error-container" class="alert alert-danger mt-4" style="display: none;"></div>
+
+        <div id="download-container" style="display: none;">
+            <button id="download-btn" class="btn btn-primary">Download Patient Data</button>
+        </div>
 
         <div id="dashboard-container" class="mt-4"></div>
     </div>
@@ -44,6 +64,30 @@
         $(document).ready(function() {
             const taskId = window.location.pathname.split('/').pop();
             let pollingInterval;
+            let patientData = null;
+
+            function downloadPatientData() {
+                if (!patientData) {
+                    alert('Patient data is not available for download.');
+                    return;
+                }
+
+                // Convert patients to JSON
+                const jsonData = JSON.stringify(patientData, null, 2);
+
+                // Create a Blob with the JSON data
+                const blob = new Blob([jsonData], {type: 'application/json'});
+
+                // Create a download link
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(blob);
+                link.download = `synthetic_patients_${new Date().toISOString().replace(/:/g, '-')}.json`;
+
+                // Trigger download
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            }
 
             function updateTaskStatus() {
                 $.ajax({
@@ -54,10 +98,14 @@
                         const statusMessage = $('#status-message');
                         const dashboardContainer = $('#dashboard-container');
                         const errorContainer = $('#error-container');
+                        const userQueryContainer = $('#user-query-text');
+                        const downloadContainer = $('#download-container');
+                        const downloadBtn = $('#download-btn');
 
                         // Reset previous states
                         dashboardContainer.hide();
                         errorContainer.hide();
+                        downloadContainer.hide();
                         progressBar.removeClass('bg-success bg-danger');
 
                         switch(response.state) {
@@ -76,20 +124,33 @@
                                     url: response.result_url,
                                     method: 'GET',
                                     success: function(resultData) {
+                                        // Display user query
+                                        userQueryContainer.text(resultData.query || 'No query provided');
+
                                         // Store result data in window to be used by dashboard
                                         window.generatedPatients = resultData.patients;
+                                        patientData = resultData.patients;
 
+                                        // Show download button
+                                        downloadContainer.show();
+
+                                        window.taskId = taskId;
                                         // Update patient stats
                                         $.ajax({
-                                            url: '/api/patient-stats',
+                                            url: `/api/patient-stats/${taskId}`,
                                             method: 'GET',
-                                            success: function() {
+                                            success: function(statsData) {
+                                                // Store the stats globally for the dashboard to access
+                                                window.patientStats = statsData;
+                                                window.userQuery = userQueryContainer.text();
+
                                                 dashboardContainer.show();
                                                 // Re-render dashboard
                                                 window.updateDashboard();
                                             },
-                                            error: function() {
-                                                errorContainer.text('Failed to load patient statistics').show();
+                                            error: function(xhr, status, error) {
+                                                console.error('Failed to load patient statistics:', error);
+                                                errorContainer.text(`Failed to load patient statistics: ${error}`).show();
                                             }
                                         });
                                     },
@@ -119,6 +180,9 @@
                     }
                 });
             }
+
+            // Attach download button event
+            $('#download-btn').on('click', downloadPatientData);
 
             // Initial status check and polling
             updateTaskStatus();

@@ -5,7 +5,7 @@ from datetime import datetime
 
 from flask import Flask, jsonify, render_template, request, session, url_for
 
-from .model_utils import handle_query, load_test_patient
+from .model_utils import handle_query, load_cehrgpt_patient_from_json
 from .tasks import generate_batch_patients, redis_client
 
 app = Flask(__name__)
@@ -146,10 +146,11 @@ def render_task_results(task_id):
     return render_template("task_results.html")
 
 
-@app.route("/api/patient-stats")
-def get_patient_stats():
-    user_session = get_or_create_session()
-    user_session.synthetic_patients = [load_test_patient()]
+from .model_utils import load_cehrgpt_patient_from_json  # Make sure to import this
+
+
+@app.route("/api/patient-stats/<task_id>")
+def get_patient_stats(task_id):
     stats = {
         "demographics": {
             "gender": defaultdict(int),
@@ -163,29 +164,61 @@ def get_patient_stats():
         },
     }
 
-    current_year = datetime.now().year
+    try:
+        task = generate_batch_patients.AsyncResult(task_id)
+        if task.state == "SUCCESS":
+            result = task.get()
+            cache_key = result.get("cache_key")
 
-    # Process patients from user's session
-    for patient in user_session.synthetic_patients:
-        # Demographics
-        stats["demographics"]["gender"][patient.gender] += 1
-        stats["demographics"]["race"][patient.race] += 1
+            if not cache_key:
+                return jsonify({"error": "No cache key found"}), 404
 
-        birth_datetime = patient.birth_datetime
-        age = current_year - birth_datetime.year
-        age_group = f"{(age // 10) * 10}-{(age // 10) * 10 + 9}"
-        stats["demographics"]["age_groups"][age_group] += 1
+            data = redis_client.get(cache_key)
+            if not data:
+                return jsonify({"error": "No data found in cache"}), 404
 
-        # Process visits
-        for visit in patient.visits:
-            stats["visits"]["types"][visit.visit_type] += 1
+            result_data = json.loads(data)
+            patients = result_data.get("patients", [])
 
-            for event in visit.events:
-                stats["visits"]["events_by_domain"][event.domain] += 1
+            if not patients:
+                return jsonify({"error": "No patients found"}), 404
 
-            visit_datetime = visit.visit_start_datetime
-            month_year = visit_datetime.strftime("%Y-%m")
-            stats["visits"]["visits_by_month"][month_year] += 1
+            current_year = datetime.now().year
+
+            for patient_data in patients:
+                try:
+                    patient = load_cehrgpt_patient_from_json(patient_data)
+
+                    # Demographics
+                    stats["demographics"]["gender"][patient.gender] += 1
+                    stats["demographics"]["race"][patient.race] += 1
+
+                    birth_datetime = patient.birth_datetime
+                    age = current_year - birth_datetime.year
+                    age_group = f"{(age // 10) * 10}-{(age // 10) * 10 + 9}"
+                    stats["demographics"]["age_groups"][age_group] += 1
+
+                    # Process visits
+                    for visit in patient.visits:
+                        stats["visits"]["types"][visit.visit_type] += 1
+
+                        for event in visit.events:
+                            stats["visits"]["events_by_domain"][event.domain] += 1
+
+                        visit_datetime = visit.visit_start_datetime
+                        month_year = visit_datetime.strftime("%Y-%m")
+                        stats["visits"]["visits_by_month"][month_year] += 1
+
+                except Exception as e:
+                    # Log the error but continue processing other patients
+                    print(f"Error processing patient: {e}")
+                    continue
+
+        else:
+            return jsonify({"error": f"Task is in {task.state} state"}), 400
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
     return jsonify(
         {
