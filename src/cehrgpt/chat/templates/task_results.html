@@ -27,7 +27,7 @@
 <body>
     <div class="container">
         <div class="user-query-container">
-            <h3>Original Query</h3>
+            <h3>User Query</h3>
             <p id="user-query-text" class="lead"></p>
         </div>
 
@@ -102,6 +102,9 @@
                         const userQueryContainer = $('#user-query-text');
                         const downloadContainer = $('#download-container');
 
+                        // Display user query
+                        userQueryContainer.text(response.query || 'No query provided');
+
                         // Reset previous states
                         dashboardContainer.hide();
                         errorContainer.hide();
@@ -124,9 +127,6 @@
                                     url: response.result_url,
                                     method: 'GET',
                                     success: function(resultData) {
-                                        // Display user query
-                                        userQueryContainer.text(resultData.query || 'No query provided');
-
                                         // Store result data in window to be used by dashboard
                                         window.generatedPatients = resultData.patients;
                                         patientData = resultData.patients;

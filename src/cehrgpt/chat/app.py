@@ -132,10 +132,18 @@ def start_batch():
 def task_status(task_id):
     try:
         task = generate_batch_patients.AsyncResult(task_id)
-
         # Check if task exists
         if not task:
-            return jsonify({"state": "FAILURE", "error": "Task not found"}), 404
+            return (
+                jsonify(
+                    {
+                        "state": "FAILURE",
+                        "error": "Task not found",
+                        "query": task.info.get("query"),
+                    }
+                ),
+                404,
+            )
 
         # Handle different task states
         if task.state == "PENDING":
@@ -150,7 +158,11 @@ def task_status(task_id):
                 if task.info
                 else "An error occurred during task execution"
             )
-            response = {"state": task.state, "error": error_info}
+            response = {
+                "state": task.state,
+                "error": error_info,
+                "query": task.info.get("query"),
+            }
         elif task.state == "SUCCESS":
             try:
                 result = task.get()
@@ -165,6 +177,7 @@ def task_status(task_id):
                             {
                                 "state": "SUCCESS",
                                 "progress": 100,
+                                "query": task.info.get("query"),
                                 "total_generated": result_data.get(
                                     "total_generated", 0
                                 ),
@@ -175,6 +188,7 @@ def task_status(task_id):
                         return jsonify(
                             {
                                 "state": "FAILURE",
+                                "query": task.info.get("query"),
                                 "error": "Invalid data format in cache",
                             }
                         )
@@ -182,6 +196,7 @@ def task_status(task_id):
                     return jsonify(
                         {
                             "state": "FAILURE",
+                            "query": task.info.get("query"),
                             "error": "Results no longer available in cache",
                         }
                     )
@@ -189,6 +204,7 @@ def task_status(task_id):
                 return jsonify(
                     {
                         "state": "FAILURE",
+                        "query": task.info.get("query"),
                         "error": f"Error retrieving task results: {str(e)}",
                     }
                 )
@@ -197,11 +213,13 @@ def task_status(task_id):
                 response = {
                     "state": task.state,
                     "progress": task.info.get("progress", 0) if task.info else 0,
+                    "query": task.info.get("query"),
                 }
             except Exception as e:
                 response = {
                     "state": task.state,
                     "progress": 0,
+                    "query": task.info.get("query"),
                     "error": f"Error getting progress: {str(e)}",
                 }
 

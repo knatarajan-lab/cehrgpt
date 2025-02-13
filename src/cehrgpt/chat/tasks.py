@@ -60,6 +60,9 @@ def generate_batch_patients(self, user_input, user_session_id):
 
             if query_tuple:
                 query, n_patients = query_tuple
+                self.update_state(
+                    state="PROGRESS", meta={"progress": 0, "query": query}
+                )
                 # Your existing patient generation logic here
                 # This is where you'd call your model and generate patients
                 # For example:
@@ -71,7 +74,10 @@ def generate_batch_patients(self, user_input, user_session_id):
                     # Update progress every 10 patients
                     if i % 10 == 0:
                         progress = (i * batch_size / n_patients) * 100
-                        self.update_state(state="PROGRESS", meta={"progress": progress})
+                        self.update_state(
+                            state="PROGRESS",
+                            meta={"progress": progress, "query": query},
+                        )
                 status = "SUCCESS"
             else:
                 status = "FAILURE"
