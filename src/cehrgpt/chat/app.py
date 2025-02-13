@@ -1,12 +1,17 @@
 import json
+import logging
 import uuid
 from collections import defaultdict
 from datetime import datetime
 
+from celery.exceptions import CeleryError
 from flask import Flask, jsonify, render_template, request, session, url_for
 
 from .model_utils import handle_query
 from .tasks import generate_batch_patients, redis_client
+
+logger = logging.getLogger(__name__)
+
 
 app = Flask(__name__)
 app.secret_key = "your-secret-key-here"  # Replace with a real secret key
@@ -189,9 +194,6 @@ def render_task_results(task_id):
     return render_template("task_results.html")
 
 
-from .model_utils import load_cehrgpt_patient_from_json  # Make sure to import this
-
-
 @app.route("/api/patient-stats/<task_id>")
 def get_patient_stats(task_id):
     stats = {
@@ -208,27 +210,54 @@ def get_patient_stats(task_id):
     }
 
     try:
-        task = generate_batch_patients.AsyncResult(task_id)
-        if task.state == "SUCCESS":
-            result = task.get()
-            cache_key = result.get("cache_key")
+        # Log the task ID being processed
+        logger.info(f"Processing stats for task ID: {task_id}")
 
+        try:
+            task = generate_batch_patients.AsyncResult(task_id)
+        except CeleryError as ce:
+            logger.error(f"Celery error retrieving task: {ce}")
+            return jsonify({"error": "Failed to retrieve task status"}), 500
+
+        logger.info(f"Task state: {task.state}")
+
+        if task.state == "SUCCESS":
+            try:
+                result = task.get()
+                logger.info(f"Task result type: {type(result)}")
+                logger.info(f"Task result: {result}")
+            except Exception as e:
+                logger.error(f"Error getting task result: {e}")
+                return jsonify({"error": "Failed to get task result"}), 500
+
+            cache_key = result.get("cache_key")
             if not cache_key:
+                logger.error("No cache key in result")
                 return jsonify({"error": "No cache key found"}), 404
 
-            data = redis_client.get(cache_key)
-            if not data:
-                return jsonify({"error": "No data found in cache"}), 404
+            try:
+                data = redis_client.get(cache_key)
+                if not data:
+                    logger.error(f"No data found in Redis for key: {cache_key}")
+                    return jsonify({"error": "No data found in cache"}), 404
 
-            result_data = json.loads(data)
+                result_data = json.loads(data)
+            except json.JSONDecodeError as je:
+                logger.error(f"JSON decode error: {je}")
+                return jsonify({"error": "Invalid data format in cache"}), 500
+            except Exception as e:
+                logger.error(f"Redis error: {e}")
+                return jsonify({"error": "Failed to retrieve data from cache"}), 500
+
             patients = result_data.get("patients", [])
-
             if not patients:
+                logger.error("No patients in result data")
                 return jsonify({"error": "No patients found"}), 404
 
+            logger.info(f"Processing {len(patients)} patients")
             current_year = datetime.now().year
 
-            for patient_data in patients:
+            for i, patient_data in enumerate(patients):
                 try:
                     patient = load_cehrgpt_patient_from_json(patient_data)
 
@@ -253,32 +282,35 @@ def get_patient_stats(task_id):
                         stats["visits"]["visits_by_month"][month_year] += 1
 
                 except Exception as e:
-                    # Log the error but continue processing other patients
-                    print(f"Error processing patient: {e}")
+                    logger.error(f"Error processing patient {i}: {e}")
+                    logger.error(f"Patient data: {patient_data}")
                     continue
 
+            logger.info("Successfully processed all patients")
+
         else:
+            logger.error(f"Task in invalid state: {task.state}")
             return jsonify({"error": f"Task is in {task.state} state"}), 400
 
     except Exception as e:
+        logger.error(f"Unexpected error in get_patient_stats: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
-    return jsonify(
-        {
-            "demographics": {
-                "gender": dict(stats["demographics"]["gender"]),
-                "race": dict(stats["demographics"]["race"]),
-                "age_groups": dict(stats["demographics"]["age_groups"]),
-            },
-            "visits": {
-                "types": dict(stats["visits"]["types"]),
-                "events_by_domain": dict(stats["visits"]["events_by_domain"]),
-                "visits_by_month": dict(
-                    sorted(stats["visits"]["visits_by_month"].items())
-                ),
-            },
-        }
-    )
+    final_stats = {
+        "demographics": {
+            "gender": dict(stats["demographics"]["gender"]),
+            "race": dict(stats["demographics"]["race"]),
+            "age_groups": dict(stats["demographics"]["age_groups"]),
+        },
+        "visits": {
+            "types": dict(stats["visits"]["types"]),
+            "events_by_domain": dict(stats["visits"]["events_by_domain"]),
+            "visits_by_month": dict(sorted(stats["visits"]["visits_by_month"].items())),
+        },
+    }
+
+    logger.info("Successfully generated stats")
+    return jsonify(final_stats)
 
 
 # Clean up old sessions periodically
