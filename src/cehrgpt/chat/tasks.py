@@ -1,4 +1,5 @@
 import json
+import logging
 import math
 from dataclasses import asdict
 from datetime import datetime
@@ -16,6 +17,7 @@ from .model_utils import load_test_patient, prompt_model
 # Initialize Redis for caching
 redis_client = redis.Redis(host="localhost", port=6379, db=0)
 CACHE_EXPIRATION = 60 * 60 * 24  # 24 hours
+logger = logging.getLogger(__name__)
 
 # Initialize Celery
 celery = Celery(
@@ -63,7 +65,7 @@ def generate_batch_patients(self, user_input, user_session_id):
                 # For example:
                 # patients = generate_synthetic_patients(query, n=128)
                 # Simulate progress updates (replace with actual generation progress)
-                batch_size = 8
+                batch_size = 4
                 for i in range(math.ceil(n_patients / batch_size)):
                     synthetic_patients.extend(prompt_model(query, batch_size))
                     # Update progress every 10 patients
@@ -96,5 +98,6 @@ def generate_batch_patients(self, user_input, user_session_id):
         }
 
     except Exception as e:
+        logger.error(f"Task failed: {str(e)}", exc_info=True)
         self.update_state(state="FAILURE", meta={"error": str(e)})
         raise

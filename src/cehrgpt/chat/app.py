@@ -130,47 +130,101 @@ def start_batch():
 
 @app.route("/status/<task_id>")
 def task_status(task_id):
-    task = generate_batch_patients.AsyncResult(task_id)
+    try:
+        task = generate_batch_patients.AsyncResult(task_id)
 
-    # First check if the task is in a final state
-    if task.state == "SUCCESS":
-        result = task.get()
-        cache_key = result.get("cache_key")
+        # Check if task exists
+        if not task:
+            return jsonify({"state": "FAILURE", "error": "Task not found"}), 404
 
-        # Get data from Redis
-        data = redis_client.get(cache_key)
-        if data:
+        # Handle different task states
+        if task.state == "PENDING":
+            response = {
+                "state": task.state,
+                "progress": 0,
+            }
+        elif task.state == "FAILURE":
+            # Safe error extraction
+            error_info = (
+                str(task.info)
+                if task.info
+                else "An error occurred during task execution"
+            )
+            response = {"state": task.state, "error": error_info}
+        elif task.state == "SUCCESS":
             try:
-                result_data = json.loads(data)
+                result = task.get()
+                cache_key = result.get("cache_key")
+
+                # Get data from Redis
+                data = redis_client.get(cache_key)
+                if data:
+                    try:
+                        result_data = json.loads(data)
+                        return jsonify(
+                            {
+                                "state": "SUCCESS",
+                                "progress": 100,
+                                "total_generated": result_data.get(
+                                    "total_generated", 0
+                                ),
+                                "result_url": result.get("result_url"),
+                            }
+                        )
+                    except json.JSONDecodeError:
+                        return jsonify(
+                            {
+                                "state": "FAILURE",
+                                "error": "Invalid data format in cache",
+                            }
+                        )
+                else:
+                    return jsonify(
+                        {
+                            "state": "FAILURE",
+                            "error": "Results no longer available in cache",
+                        }
+                    )
+            except Exception as e:
                 return jsonify(
                     {
-                        "state": "SUCCESS",
-                        "progress": 100,
-                        "total_generated": result_data.get("total_generated", 0),
-                        "result_url": result.get("result_url"),
+                        "state": "FAILURE",
+                        "error": f"Error retrieving task results: {str(e)}",
                     }
                 )
-            except json.JSONDecodeError:
-                return jsonify(
-                    {"state": "FAILURE", "error": "Invalid data format in cache"}
-                )
-        else:
-            # Data not found in Redis despite successful task
-            return jsonify(
-                {"state": "FAILURE", "error": "Results no longer available in cache"}
-            )
+        else:  # state = 'PROGRESS' or other states
+            try:
+                response = {
+                    "state": task.state,
+                    "progress": task.info.get("progress", 0) if task.info else 0,
+                }
+            except Exception as e:
+                response = {
+                    "state": task.state,
+                    "progress": 0,
+                    "error": f"Error getting progress: {str(e)}",
+                }
 
-    elif task.state == "PENDING":
-        response = {
-            "state": task.state,
-            "progress": 0,
-        }
-    elif task.state == "FAILURE":
-        response = {"state": task.state, "error": str(task.info.get("error", ""))}
-    else:  # state = 'PROGRESS'
-        response = {"state": task.state, "progress": task.info.get("progress", 0)}
+        return jsonify(response)
 
-    return jsonify(response)
+    except ValueError:
+        # Handle the specific ValueError from Celery's exception_to_python
+        return (
+            jsonify(
+                {
+                    "state": "FAILURE",
+                    "error": "Task failed with invalid exception information",
+                }
+            ),
+            500,
+        )
+    except Exception as e:
+        return (
+            jsonify(
+                {"state": "FAILURE", "error": f"Error checking task status: {str(e)}"}
+            ),
+            500,
+        )
 
 
 @app.route("/results/<cache_key>")
