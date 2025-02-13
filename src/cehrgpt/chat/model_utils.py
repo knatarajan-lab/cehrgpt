@@ -1,9 +1,10 @@
 import datetime
 import json
 import os
+import threading
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import polars as pl
 import torch
@@ -25,17 +26,41 @@ from cehrgpt.generation.encoder_decoder.instruct_model_cli import (
 
 from .config import Config
 
+
+class ModelWrapper:
+    _instance = None
+    _lock = threading.Lock()
+
+    @classmethod
+    def get_instance(cls) -> Tuple[Any, Any, Any, Any]:
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls._initialize_model()
+        return cls._instance
+
+    @staticmethod
+    def _initialize_model():
+        if Config().DEV_MODE:
+            return None, None, None, None
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        encoder_tokenizer, cehrgpt_tokenizer, model = setup_model(
+            Config().TOKENIZER_PATH, Config().MODEL_PATH, device
+        )
+        return encoder_tokenizer, cehrgpt_tokenizer, model, device
+
+
+def get_model_components():
+    """Get model components in a thread-safe way."""
+    return ModelWrapper.get_instance()
+
+
 # Initialize model and configs
 config = Config()
 
 if config.DEV_MODE:
-    encoder_tokenizer, cehrgpt_tokenizer, model, device = None, None, None, None
     concept_name_map, concept_domain_map = {}, {}
 else:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    encoder_tokenizer, cehrgpt_tokenizer, model = setup_model(
-        config.TOKENIZER_PATH, config.MODEL_PATH, device
-    )
     concept = pl.read_parquet(
         os.path.join(config.VOCABULARY_DIR, "concept", "*parquet")
     )
@@ -77,6 +102,10 @@ def handle_query(user_input: str) -> Dict[str, Any]:
 
 
 def prompt_model(query: str, n_patients: int) -> List[CehrGptPatient]:
+    encoder_tokenizer, cehrgpt_tokenizer, model, device = get_model_components()
+    if Config().DEV_MODE:
+        return [load_test_patient()] * n_patients
+
     generation_config = GenerationConfig(
         max_length=1024,
         min_length=20,
@@ -92,6 +121,7 @@ def prompt_model(query: str, n_patients: int) -> List[CehrGptPatient]:
         output_scores=False,
         renormalize_logits=True,
     )
+
     model_responses = generate_responses(
         queries=[query] * n_patients,
         encoder_tokenizer=encoder_tokenizer,
