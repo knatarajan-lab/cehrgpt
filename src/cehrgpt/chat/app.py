@@ -139,7 +139,6 @@ def task_status(task_id):
                     {
                         "state": "FAILURE",
                         "error": "Task not found",
-                        "query": task.info.get("query"),
                     }
                 ),
                 404,

@@ -73,13 +73,11 @@ def generate_batch_patients(self, user_input, user_session_id):
                 batch_size = 4
                 for i in range(math.ceil(n_patients / batch_size)):
                     synthetic_patients.extend(prompt_model(query, batch_size))
-                    # Update progress every 10 patients
-                    if i % 10 == 0:
-                        progress = (i * batch_size / n_patients) * 100
-                        self.update_state(
-                            state="PROGRESS",
-                            meta={"progress": progress, "query": user_input},
-                        )
+                    progress = (i * batch_size / n_patients) * 100
+                    self.update_state(
+                        state="PROGRESS",
+                        meta={"progress": progress, "query": user_input},
+                    )
                 status = "SUCCESS"
             else:
                 status = "FAILURE"
