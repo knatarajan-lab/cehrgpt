@@ -149,6 +149,7 @@ def task_status(task_id):
         if task.state == "PENDING":
             response = {
                 "state": task.state,
+                "query": task.info.get("query"),
                 "progress": 0,
             }
         elif task.state == "FAILURE":
