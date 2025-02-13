@@ -1,12 +1,12 @@
 import datetime
 import json
 import os
+from dataclasses import asdict
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
 import polars as pl
 import torch
-from flask import Response, jsonify
 from transformers import GenerationConfig
 
 from cehrgpt.generation.cehrgpt_patient.cehrgpt_patient_schema import (
@@ -61,19 +61,19 @@ def load_test_patient() -> CehrGptPatient:
         )
 
 
-def handle_query(user_input: str) -> Response:
+def handle_query(user_input: str) -> Dict[str, Any]:
     if config.DEV_MODE:
-        return jsonify(load_test_patient())
+        return asdict(load_test_patient())
     query_tuple = parse_question_to_cehrgpt_query(user_input)
     if not query_tuple:
-        return jsonify({"message": "Failed to parse the query, please try again"})
+        return {"message": "Failed to parse the query, please try again"}
     query, _ = query_tuple
     cehrgpt_patients = prompt_model(query, 1)
     if cehrgpt_patients:
-        return jsonify(cehrgpt_patients)
-    return jsonify(
-        {"message": f"Failed to generate patients for query: {query}, please try again"}
-    )
+        return asdict(cehrgpt_patients[0])
+    return {
+        "message": f"Failed to generate patients for query: {query}, please try again"
+    }
 
 
 def prompt_model(query: str, n_patients: int) -> List[CehrGptPatient]:

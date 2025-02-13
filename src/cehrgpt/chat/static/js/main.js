@@ -1,6 +1,44 @@
 $(document).ready(function() {
     let patientData = {};
 
+    // Load conversation history if available
+    function loadConversationHistory() {
+        $.ajax({
+            url: '/conversation',
+            type: 'GET',
+            success: function(history) {
+                // Clear existing messages
+                if (history.length > 0) {
+                    $('#chat-box').empty();
+                }
+                // Append each message from history
+                history.forEach(msg => {
+                    if (msg.is_patient_data) {
+                        // Use formatPatientData for patient data
+                        appendMessage(msg.role, formatPatientData(msg.content));
+                        // Update patientData storage
+                        if (msg.role === 'assistant') {
+                            patientData = msg.content;
+                        }
+                    } else {
+                        appendMessage(msg.role, msg.content);
+                    }
+                });
+                // Scroll to bottom after loading history
+                const chatBox = document.getElementById('chat-box');
+                chatBox.scrollTop = chatBox.scrollHeight;
+            },
+            error: function(err) {
+                console.error('Error loading conversation history:', err);
+                // Add fallback welcome message if history loading fails
+                appendMessage('assistant', 'Welcome! I can help you generate synthetic patient data. What kind of patient data would you like to create?');
+            }
+        });
+    }
+
+    // Load conversation history when page loads
+    loadConversationHistory();
+
     // Auto-resize textarea
     const textarea = document.getElementById('message-input');
     textarea.addEventListener('input', function() {
@@ -13,23 +51,29 @@ $(document).ready(function() {
         e.preventDefault();
         const message = $('#message-input').val().trim();
         if (message) {
-            // Add user message
-            appendMessage('user', message);
+            // Clear input
             $('#message-input').val('');
             textarea.style.height = 'auto';
-
+            if (!message) {
+                appendMessage('assistant', 'Please enter a query first.');
+                return;
+            }
             // Send to backend
             $.ajax({
                 url: '/send',
                 type: 'POST',
                 contentType: 'application/json',
-                data: JSON.stringify({message: message}),
+                data: JSON.stringify({query: message}),
                 success: function(data) {
                     if (data.visits) {
-                        patientData = data;
+                        // For patient data, format it before displaying
+                        appendMessage('user', message);
                         appendMessage('assistant', formatPatientData(data));
+                        patientData = data;
                     } else {
-                        appendMessage('assistant', data.message);
+                        // For regular messages
+                        appendMessage('user', message);
+                        appendMessage('assistant', data.message || data);
                     }
                 },
                 error: function() {
@@ -74,7 +118,7 @@ $(document).ready(function() {
                 window.open(`/task/${data.task_id}`, '_blank');
 
                 // Inform the user in the chat
-                appendMessage('assistant', `Batch generation started. Task ID: ${data.task_id}`);
+                appendMessage('assistant', `${data.message}`);
             },
             error: function() {
                 appendMessage('assistant', 'Sorry, there was an error starting the batch generation.');

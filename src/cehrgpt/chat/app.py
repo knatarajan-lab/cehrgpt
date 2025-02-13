@@ -19,6 +19,24 @@ class UserSession:
     def __init__(self):
         self.synthetic_patients = []  # List to store CehrGptPatient objects
         self.last_accessed = datetime.now()
+        self.conversation_history = []  # List to store conversation messages
+
+    def add_message(self, role, content, is_patient_data=False):
+        """Add a message to the conversation history.
+
+        Args:
+            role: 'user' or 'assistant'
+            content: message content or patient data dict
+            is_patient_data: boolean indicating if content is patient data
+        """
+        self.conversation_history.append(
+            {
+                "role": role,
+                "content": content,
+                "is_patient_data": is_patient_data,
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
 
 
 def get_or_create_session():
@@ -36,46 +54,71 @@ def get_or_create_session():
 
 @app.route("/")
 def index():
-    get_or_create_session()
-    return render_template("index.html")
+    user_session = get_or_create_session()
+    # Pass the conversation history to the template
+    return render_template(
+        "index.html", conversation_history=user_session.conversation_history
+    )
 
 
 @app.route("/send", methods=["POST"])
 def send():
     user_session = get_or_create_session()
-    user_input = request.json["message"]
+    user_query = request.json["query"]
 
+    # Store user message
+    user_session.add_message("user", user_query)
     try:
         # Get response from your model
-        response = handle_query(user_input)
-
+        query_response = handle_query(user_query)
         # If response contains patient data, store it in the session
-        if isinstance(response, dict) and "visits" in response:
-            user_session.synthetic_patients = [
-                response
-            ]  # Assuming response is a single patient
-
-        return response
+        if isinstance(query_response, dict) and "visits" in query_response:
+            user_session.synthetic_patients = [query_response]
+            # Store formatted patient data response
+            user_session.add_message("assistant", query_response, is_patient_data=True)
+        else:
+            # Store regular message response
+            user_session.add_message(
+                "assistant",
+                query_response.get("message", str(query_response)),
+                is_patient_data=False,
+            )
+        return jsonify(query_response)
 
     except Exception as e:
-        return jsonify({"message": f"Error: {str(e)}"}), 500
+        error_message = f"Error: {str(e)}"
+        user_session.add_message("assistant", error_message)
+        return jsonify({"message": error_message}), 500
+
+
+@app.route("/conversation")
+def get_conversation():
+    """Endpoint to fetch conversation history."""
+    user_session = get_or_create_session()
+    return jsonify(user_session.conversation_history)
 
 
 @app.route("/batch", methods=["POST"])
 def start_batch():
-    query = request.json.get("query")
+    user_query = request.json.get("query")
+    user_session = get_or_create_session()
     user_session_id = session.get("user_id")
-
     # Start Celery task
-    task = generate_batch_patients.delay(query, user_session_id)
+    task = generate_batch_patients.delay(user_query, user_session_id)
+    system_message = (
+        "Batch generation started. Click here to "
+        f'<a href="{url_for("render_task_results", task_id=task.id)}" '
+        'target="_blank">View Results</a>'
+    )
 
+    # Store user message
+    user_session.add_message("user", user_query)
+    user_session.add_message("assistant", system_message)
     return jsonify(
         {
             "task_id": task.id,
-            "status_url": url_for("task_status", task_id=task.id),
-            "message": "Batch generation started. Click here to view progress: "
-            f'<a href="{url_for("task_status", task_id=task.id)}" '
-            'target="_blank">View Progress</a>',
+            "status_url": url_for("render_task_results", task_id=task.id),
+            "message": system_message,
         }
     )
 
