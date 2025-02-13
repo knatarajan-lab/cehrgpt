@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Synthetic Patient Batch Generation</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/main.css') }}" rel="stylesheet">
+    <style>
+        body { padding-top: 50px; }
+        .progress-container { max-width: 600px; margin: 0 auto; }
+        #results-container { margin-top: 20px; }
+        #dashboard-container { display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="progress-container text-center">
+            <h2>Batch Patient Generation</h2>
+            <div class="progress mt-3">
+                <div id="progress-bar" class="progress-bar" role="progressbar" style="width: 0%">0%</div>
+            </div>
+            <div id="status-message" class="mt-3"></div>
+        </div>
+
+        <div id="error-container" class="alert alert-danger mt-4" style="display: none;"></div>
+
+        <div id="dashboard-container" class="mt-4"></div>
+    </div>
+
+    <!-- Vendor Scripts -->
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+    <script src="https://unpkg.com/react@17/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@17/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/prop-types@15.7.2/prop-types.js"></script>
+    <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+    <script src="https://unpkg.com/recharts@2.1.12/umd/Recharts.js"></script>
+
+    <!-- Dashboard Script -->
+    <script src="{{ url_for('static', filename='js/formatters.js') }}"></script>
+    <script type="text/babel" src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+
+    <script>
+        $(document).ready(function() {
+            const taskId = window.location.pathname.split('/').pop();
+            let pollingInterval;
+
+            function updateTaskStatus() {
+                $.ajax({
+                    url: `/status/${taskId}`,
+                    method: 'GET',
+                    success: function(response) {
+                        const progressBar = $('#progress-bar');
+                        const statusMessage = $('#status-message');
+                        const dashboardContainer = $('#dashboard-container');
+                        const errorContainer = $('#error-container');
+
+                        // Reset previous states
+                        dashboardContainer.hide();
+                        errorContainer.hide();
+                        progressBar.removeClass('bg-success bg-danger');
+
+                        switch(response.state) {
+                            case 'PROGRESS':
+                                const progress = Math.min(100, response.progress);
+                                progressBar.css('width', `${progress}%`).text(`${progress}%`);
+                                statusMessage.text('Generating patients...');
+                                break;
+
+                            case 'SUCCESS':
+                                progressBar.css('width', '100%').text('100%').addClass('bg-success');
+                                statusMessage.text('Task completed successfully!');
+
+                                // Fetch and display results
+                                $.ajax({
+                                    url: response.result_url,
+                                    method: 'GET',
+                                    success: function(resultData) {
+                                        // Store result data in window to be used by dashboard
+                                        window.generatedPatients = resultData.patients;
+
+                                        // Update patient stats
+                                        $.ajax({
+                                            url: '/api/patient-stats',
+                                            method: 'GET',
+                                            success: function() {
+                                                dashboardContainer.show();
+                                                // Re-render dashboard
+                                                window.updateDashboard();
+                                            },
+                                            error: function() {
+                                                errorContainer.text('Failed to load patient statistics').show();
+                                            }
+                                        });
+                                    },
+                                    error: function() {
+                                        errorContainer.text('Failed to retrieve patient data').show();
+                                    }
+                                });
+
+                                clearInterval(pollingInterval);
+                                break;
+
+                            case 'FAILURE':
+                                progressBar.css('width', '100%').addClass('bg-danger').text('Error');
+                                statusMessage.text('Task failed');
+                                errorContainer.text(`Task failed: ${response.error}`).show();
+                                clearInterval(pollingInterval);
+                                break;
+
+                            default:
+                                statusMessage.text('Waiting to start...');
+                        }
+                    },
+                    error: function() {
+                        clearInterval(pollingInterval);
+                        const errorContainer = $('#error-container');
+                        errorContainer.text('Error checking task status').show();
+                    }
+                });
+            }
+
+            // Initial status check and polling
+            updateTaskStatus();
+            pollingInterval = setInterval(updateTaskStatus, 2000);
+        });
+    </script>
+</body>
+</html>

@@ -36,7 +36,9 @@ dependencies = [
     "trl==0.11.4",
     "networkx==3.2.1",
     "polars",
-    "flask<3.0.0"
+    "flask<3.0.0",
+    "redis==4.6.0",
+    "celery==5.3.1",
 ]
 
 [tool.setuptools_scm]

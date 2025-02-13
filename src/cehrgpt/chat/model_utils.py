@@ -2,12 +2,12 @@ import datetime
 import json
 import os
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Union
+from typing import List
 
 import polars as pl
 import torch
 from flask import Response, jsonify
-from transformers import GenerationConfig, PreTrainedTokenizer
+from transformers import GenerationConfig
 
 from cehrgpt.generation.cehrgpt_patient.cehrgpt_patient_schema import (
     CehrGptPatient,
@@ -22,10 +22,24 @@ from cehrgpt.generation.encoder_decoder.instruct_model_cli import (
     get_cehrgpt_patient_converter,
     setup_model,
 )
-from cehrgpt.models.encoder_decoder.instruct_hf_cehrgpt import InstructCEHRGPTModel
-from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 from .config import Config
+
+# Initialize model and configs
+config = Config()
+
+if config.DEV_MODE:
+    encoder_tokenizer, cehrgpt_tokenizer, model, device = None, None, None, None
+    concept_name_map, concept_domain_map = {}, {}
+else:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    encoder_tokenizer, cehrgpt_tokenizer, model = setup_model(
+        config.TOKENIZER_PATH, config.MODEL_PATH, device
+    )
+    concept = pl.read_parquet(
+        os.path.join(config.VOCABULARY_DIR, "concept", "*parquet")
+    )
+    concept_name_map, concept_domain_map = generate_concept_maps(concept)
 
 
 def load_test_patient() -> CehrGptPatient:
@@ -47,40 +61,23 @@ def load_test_patient() -> CehrGptPatient:
         )
 
 
-def load_concept_domain_map(config) -> Tuple[Dict[str, str], Dict[str, str]]:
+def handle_query(user_input: str) -> Response:
     if config.DEV_MODE:
-        return {}, {}
-    concept = pl.read_parquet(
-        os.path.join(config.VOCABULARY_DIR, "concept", "*parquet")
+        return jsonify(load_test_patient())
+    query_tuple = parse_question_to_cehrgpt_query(user_input)
+    if not query_tuple:
+        return jsonify({"message": "Failed to parse the query, please try again"})
+    query, _ = query_tuple
+    cehrgpt_patients = prompt_model(query, 1)
+    if cehrgpt_patients:
+        return jsonify(cehrgpt_patients)
+    return jsonify(
+        {"message": f"Failed to generate patients for query: {query}, please try again"}
     )
-    concept_name_map, concept_domain_map = generate_concept_maps(concept)
-    return concept_name_map, concept_domain_map
 
 
-def load_model(
-    config,
-) -> Tuple[
-    Optional[PreTrainedTokenizer],
-    Optional[CehrGptTokenizer],
-    Optional[InstructCEHRGPTModel],
-    Optional[Union[torch.device, str]],
-]:
-    if config.DEV_MODE:
-        return None, None, None, None
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    encoder_tokenizer, cehrgpt_tokenizer, model = setup_model(
-        config.TOKENIZER_PATH, config.MODEL_PATH, device
-    )
-    return encoder_tokenizer, cehrgpt_tokenizer, model, device
-
-
-def get_generation_config(
-    cehrgpt_tokenizer: Optional[CehrGptTokenizer],
-) -> Optional[GenerationConfig]:
-    if cehrgpt_tokenizer is None:
-        return None
-
-    return GenerationConfig(
+def prompt_model(query: str, n_patients: int) -> List[CehrGptPatient]:
+    generation_config = GenerationConfig(
         max_length=1024,
         min_length=20,
         bos_token_id=cehrgpt_tokenizer.start_token_id,
@@ -95,29 +92,6 @@ def get_generation_config(
         output_scores=False,
         renormalize_logits=True,
     )
-
-
-def handle_query(
-    user_input: str,
-    encoder_tokenizer: Optional[PreTrainedTokenizer],
-    cehrgpt_tokenizer: Optional[CehrGptTokenizer],
-    model: Optional[InstructCEHRGPTModel],
-    device: Optional[Union[torch.device, str]],
-    generation_config: Optional[GenerationConfig],
-    concept_domain_map: Optional[Dict[str, str]],
-    concept_name_map: Optional[Dict[str, str]],
-    config: Config,
-) -> Response:
-    if config.DEV_MODE:
-        return jsonify(load_test_patient())
-
-    query_tuple = parse_question_to_cehrgpt_query(user_input)
-    if not query_tuple:
-        return jsonify(
-            {"message": "Failed to parse the query. Generating a default response..."}
-        )
-
-    query, n_patients = query_tuple
     model_responses = generate_responses(
         queries=[query] * n_patients,
         encoder_tokenizer=encoder_tokenizer,
@@ -127,21 +101,15 @@ def handle_query(
         generation_config=generation_config,
     )
 
-    sequences = model_responses["sequences"]
-    if sequences:
+    cehrgpt_patients = []
+    for seq in model_responses["sequences"]:
         patient_sequence_converter = get_cehrgpt_patient_converter(
-            sequences[0], concept_domain_map
+            seq, concept_domain_map
         )
         if patient_sequence_converter.is_validation_passed:
-            return jsonify(
+            cehrgpt_patients.append(
                 patient_sequence_converter.get_patient(
                     concept_domain_map, concept_name_map
                 )
             )
-        else:
-            return jsonify(
-                {
-                    "message": f"Error in patient sequence: {'. '.join(patient_sequence_converter.get_error_messages())}"
-                }
-            )
-    return jsonify({"message": "Failed to parse the query, please try again"})
+    return cehrgpt_patients

@@ -1,26 +1,15 @@
+import json
 import uuid
 from collections import defaultdict
 from datetime import datetime
 
-from flask import Flask, jsonify, render_template, request, session
+from flask import Flask, jsonify, render_template, request, session, url_for
 
-from .config import Config
-from .model_utils import (
-    get_generation_config,
-    handle_query,
-    load_concept_domain_map,
-    load_model,
-    load_test_patient,
-)
+from .model_utils import handle_query, load_test_patient
+from .tasks import generate_batch_patients, redis_client
 
 app = Flask(__name__)
 app.secret_key = "your-secret-key-here"  # Replace with a real secret key
-
-# Initialize model and configs
-config = Config()
-encoder_tokenizer, cehrgpt_tokenizer, model, device = load_model(config)
-generation_config = get_generation_config(cehrgpt_tokenizer)
-concept_name_map, concept_domain_map = load_concept_domain_map(config)
 
 # Store user sessions and their data
 user_sessions = {}
@@ -58,17 +47,7 @@ def send():
 
     try:
         # Get response from your model
-        response = handle_query(
-            user_input,
-            encoder_tokenizer,
-            cehrgpt_tokenizer,
-            model,
-            device,
-            generation_config,
-            concept_domain_map,
-            concept_name_map,
-            config,
-        )
+        response = handle_query(user_input)
 
         # If response contains patient data, store it in the session
         if isinstance(response, dict) and "visits" in response:
@@ -80,6 +59,91 @@ def send():
 
     except Exception as e:
         return jsonify({"message": f"Error: {str(e)}"}), 500
+
+
+@app.route("/batch", methods=["POST"])
+def start_batch():
+    query = request.json.get("query")
+    user_session_id = session.get("user_id")
+
+    # Start Celery task
+    task = generate_batch_patients.delay(query, user_session_id)
+
+    return jsonify(
+        {
+            "task_id": task.id,
+            "status_url": url_for("task_status", task_id=task.id),
+            "message": "Batch generation started. Click here to view progress: "
+            f'<a href="{url_for("task_status", task_id=task.id)}" '
+            'target="_blank">View Progress</a>',
+        }
+    )
+
+
+@app.route("/status/<task_id>")
+def task_status(task_id):
+    task = generate_batch_patients.AsyncResult(task_id)
+
+    # First check if the task is in a final state
+    if task.state == "SUCCESS":
+        result = task.get()
+        cache_key = result.get("cache_key")
+
+        # Get data from Redis
+        data = redis_client.get(cache_key)
+        if data:
+            try:
+                result_data = json.loads(data)
+                return jsonify(
+                    {
+                        "state": "SUCCESS",
+                        "progress": 100,
+                        "total_generated": result_data.get("total_generated", 0),
+                        "result_url": result.get("result_url"),
+                    }
+                )
+            except json.JSONDecodeError:
+                return jsonify(
+                    {"state": "FAILURE", "error": "Invalid data format in cache"}
+                )
+        else:
+            # Data not found in Redis despite successful task
+            return jsonify(
+                {"state": "FAILURE", "error": "Results no longer available in cache"}
+            )
+
+    elif task.state == "PENDING":
+        response = {
+            "state": task.state,
+            "progress": 0,
+        }
+    elif task.state == "FAILURE":
+        response = {"state": task.state, "error": str(task.info.get("error", ""))}
+    else:  # state = 'PROGRESS'
+        response = {"state": task.state, "progress": task.info.get("progress", 0)}
+
+    return jsonify(response)
+
+
+@app.route("/results/<cache_key>")
+def get_results(cache_key):
+    data = redis_client.get(cache_key)
+    if data:
+        result_data = json.loads(data)
+        return jsonify(
+            {
+                "query": result_data["query"],
+                "timestamp": result_data["timestamp"],
+                "total_generated": len(result_data["patients"]),
+                "patients": result_data["patients"],
+            }
+        )
+    return jsonify({"error": "Results not found"}), 404
+
+
+@app.route("/task/<task_id>")
+def render_task_results(task_id):
+    return render_template("task_results.html")
 
 
 @app.route("/api/patient-stats")
