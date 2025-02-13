@@ -7,7 +7,7 @@ from datetime import datetime
 from celery.exceptions import CeleryError
 from flask import Flask, jsonify, render_template, request, session, url_for
 
-from .model_utils import handle_query
+from .model_utils import handle_query, load_cehrgpt_patient_from_json
 from .tasks import generate_batch_patients, redis_client
 
 logger = logging.getLogger(__name__)
@@ -278,8 +278,6 @@ def get_patient_stats(task_id):
         if task.state == "SUCCESS":
             try:
                 result = task.get()
-                logger.info(f"Task result type: {type(result)}")
-                logger.info(f"Task result: {result}")
             except Exception as e:
                 logger.error(f"Error getting task result: {e}")
                 return jsonify({"error": "Failed to get task result"}), 500
@@ -294,7 +292,6 @@ def get_patient_stats(task_id):
                 if not data:
                     logger.error(f"No data found in Redis for key: {cache_key}")
                     return jsonify({"error": "No data found in cache"}), 404
-
                 result_data = json.loads(data)
             except json.JSONDecodeError as je:
                 logger.error(f"JSON decode error: {je}")
