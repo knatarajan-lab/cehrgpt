@@ -332,14 +332,14 @@ def get_patient_stats(task_id):
                         month_year = visit_datetime.strftime("%Y-%m")
                         stats["visits"]["visits_by_month"][month_year] += 1
 
+                    logger.info("Successfully generated stats")
                 except Exception as e:
                     logger.error(f"Error processing patient {i}: {e}")
                     logger.error(f"Patient data: {patient_data}")
                     continue
 
             logger.info("Successfully processed all patients")
-
-        else:
+        elif task.state != "PROGRESS":
             logger.error(f"Task in invalid state: {task.state}")
             return jsonify({"error": f"Task is in {task.state} state"}), 400
 
@@ -359,8 +359,6 @@ def get_patient_stats(task_id):
             "visits_by_month": dict(sorted(stats["visits"]["visits_by_month"].items())),
         },
     }
-
-    logger.info("Successfully generated stats")
     return jsonify(final_stats)
 
 
