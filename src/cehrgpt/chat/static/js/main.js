@@ -114,9 +114,6 @@ $(document).ready(function() {
             contentType: 'application/json',
             data: JSON.stringify({query: message}),
             success: function(data) {
-                // Open the task status page in a new window/tab
-                window.open(`/task/${data.task_id}`, '_blank');
-
                 // Inform the user in the chat
                 appendMessage('assistant', `${data.message}`);
             },
