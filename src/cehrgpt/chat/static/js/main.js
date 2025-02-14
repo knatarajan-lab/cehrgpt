@@ -1,6 +1,4 @@
 $(document).ready(function () {
-    let patientData = {};
-
     // Add function to show/hide spinner
     function showSpinner() {
         const spinnerHtml = `
@@ -23,7 +21,6 @@ $(document).ready(function () {
         $('#spinner-message').remove();
     }
 
-
     // Load conversation history if available
     function loadConversationHistory() {
         $.ajax({
@@ -39,10 +36,6 @@ $(document).ready(function () {
                     if (msg.is_patient_data) {
                         // Use formatPatientData for patient data
                         appendMessage(msg.role, formatPatientData(msg.content));
-                        // Update patientData storage
-                        if (msg.role === 'assistant') {
-                            patientData = msg.content;
-                        }
                     } else {
                         appendMessage(msg.role, msg.content);
                     }
@@ -93,7 +86,6 @@ $(document).ready(function () {
                     if (data.visits) {
                         // For patient data, format it before displaying
                         appendMessage('assistant', formatPatientData(data));
-                        patientData = data;
                     } else {
                         // For regular messages
                         appendMessage('assistant', data.message || data);
@@ -107,15 +99,6 @@ $(document).ready(function () {
         } else {
             appendMessage('assistant', 'Please enter a query first.');
         }
-    });
-
-    // Download functionality
-    $('#download-data').click(function () {
-        if (Object.keys(patientData).length === 0) {
-            appendMessage('assistant', 'No patient data available to download yet. Please generate some data first.');
-            return;
-        }
-        downloadObjectAsJson(patientData, "patient_data");
     });
 
     // Update the batch button handler:
