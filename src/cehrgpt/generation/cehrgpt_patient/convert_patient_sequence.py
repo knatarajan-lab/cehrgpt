@@ -249,14 +249,14 @@ class PatientSequenceConverter:
                 if token.type == TokenType.VS:
                     vs_index = token_index
                 elif token.type == TokenType.VE:
-                    visits.append(
-                        self.process_visit_block(
-                            visit_tokens=clinical_tokens[vs_index : token_index + 1],
-                            datetime_cursor=datetime_cursor,
-                            domain_map=domain_map,
-                            concept_map=concept_map,
-                        )
+                    visit_block = self.process_visit_block(
+                        visit_tokens=clinical_tokens[vs_index : token_index + 1],
+                        datetime_cursor=datetime_cursor,
+                        domain_map=domain_map,
+                        concept_map=concept_map,
                     )
+                    if visit_block not in visits:
+                        visits.append(visit_block)
                 elif token.type == TokenType.ATT:
                     datetime_cursor.add_days(extract_time_interval_in_days(token.name))
 
