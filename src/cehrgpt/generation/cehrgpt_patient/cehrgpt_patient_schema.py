@@ -61,6 +61,42 @@ class CehrGptVisit:
     discharge_to_concept_id: Optional[int] = None
     events: List[CehrGptEvent] = field(default_factory=list)
 
+    def __hash__(self):
+        # Use a large prime number for hashing combination
+        prime = 31
+        # Start with a hash of 1
+        hash_code = 1
+
+        # Hash mandatory fields
+        hash_code = hash_code * prime + hash(self.visit_type)
+        hash_code = hash_code * prime + hash(self.visit_concept_id)
+        hash_code = hash_code * prime + hash(self.visit_start_datetime)
+
+        # Hash optional fields with default values for None
+        hash_code = hash_code * prime + hash(
+            self.patient_id if self.patient_id is not None else 0
+        )
+        hash_code = hash_code * prime + hash(
+            self.visit_id if self.visit_id is not None else 0
+        )
+        hash_code = hash_code * prime + hash(
+            self.visit_end_datetime if self.visit_end_datetime is not None else 0
+        )
+        hash_code = hash_code * prime + hash(
+            self.discharge_facility if self.discharge_facility is not None else ""
+        )
+        hash_code = hash_code * prime + hash(
+            self.discharge_to_concept_id
+            if self.discharge_to_concept_id is not None
+            else 0
+        )
+
+        # Hash the events list by combining hashes of all events
+        # Convert list to tuple for hashing since lists aren't hashable
+        hash_code = hash_code * prime + hash(tuple(self.events))
+
+        return hash_code
+
     def get_narrative(self, birth_datetime: datetime.datetime) -> str:
         birth_year = birth_datetime.year
         age = self.visit_start_datetime.year - birth_year
