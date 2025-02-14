@@ -39,6 +39,11 @@ body, html {
     padding-bottom: 120px;
 }
 
+.system-message {
+    font-size: 1.25rem;  /* This is equivalent to 20px */
+    font-weight: 500;    /* Makes it slightly bolder */
+}
+
 .chat-messages {
     flex-grow: 1;
     overflow-y: auto;
