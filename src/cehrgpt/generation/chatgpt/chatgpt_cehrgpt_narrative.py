@@ -141,14 +141,21 @@ def translate_to_cehrgpt_patient(generated_patient: Patient) -> CehrGptPatient:
             if visit.visit_end_datetime
             else None
         )
-        if visit.visit_type.lower() == "inpatient visit":
+        visit_type_lowercase = visit.visit_type.lower()
+        if visit_type_lowercase == "inpatient visit":
             visit_concept_id = 9201
-        elif visit.visit_type.lower() == "outpatient visit":
+        elif visit_type_lowercase == "outpatient visit":
             visit_concept_id = 9202
-        elif visit.visit_type.lower() == "emergency room visit":
+        elif visit_type_lowercase == "emergency room visit":
             visit_concept_id = 9203
-        elif visit.visit_type.lower() == "emergency room and inpatient Visit":
+        elif visit_type_lowercase == "emergency room and inpatient Visit":
             visit_concept_id = 262
+        elif visit_type_lowercase == "office visit":
+            visit_concept_id = 581477
+        elif visit_type_lowercase == "ambulatory radiology clinic / center":
+            visit_concept_id = 38004250
+        elif visit_type_lowercase == "telehealth":
+            visit_concept_id = 5083
         events: List[CehrGptEvent] = []
         for event in visit.events:
             try:
@@ -218,10 +225,9 @@ if __name__ == "__main__":
     # Create a Jinja2 environment and render the template
     env = Environment(loader=BaseLoader(), autoescape=True)
     template = env.from_string(TEMPLATE)
-
+    prompt = template.render(query=args.narrative)
+    client = OpenAI(api_key=os.environ.get("OPEN_AI_KEY"))
     for i, _ in tqdm(enumerate(range(args.num_sequences))):
-        prompt = template.render(query=args.narrative)
-        client = OpenAI(api_key=os.environ.get("OPEN_AI_KEY"))
         completion = client.beta.chat.completions.parse(
             model=MODEL,
             messages=[
