@@ -56,7 +56,7 @@ Outpatient Visit on 2008-01-30 (Age: 47)
 Emergency Room and Inpatient Visit on 2008-02-08 (Age: 47)
     Visit End Date: 2008-02-10
 
-    On Day 0:
+    On Day 0 on 2008-02-08:
         Condition:
            * concept_name: Coronary arteriosclerosis; concept_code: ICD10//I25.1
         Drug:
@@ -64,13 +64,13 @@ Emergency Room and Inpatient Visit on 2008-02-08 (Age: 47)
         Procedure:
            * concept_name: Intravascular imaging of coronary vessels; concept_code: ICD10//B245ZZZ
 
-    On Day 1:
+    On Day 1 on 2008-02-09:
         Drug:
            * concept_name: Acetaminophen 325 MG Oral Tablet [Tylenol]; concept_code: RXNORM//161
         Procedure:
            * concept_name: Electrocardiogram, routine ECG with at least 12 leads; concept_code: ICD10//4A02114
 
-    On Day 2:
+    On Day 2 on 2008-02-10:
         Condition:
            * concept_name: Coronary arteriosclerosis; concept_code: ICD10//I25.1
         Drug:
@@ -109,6 +109,9 @@ class Patient(BaseModel):
 
 def parse_datetime(date_str):
     """Parses date strings, handling both date-only and full ISO 8601 formats."""
+    if date_str.endswith("T24:00:00"):
+        # Convert 'YYYY-MM-DDT24:00:00' → 'YYYY-MM-DD + 1 day T00:00:00'
+        date_str = date_str.split("T")[0]
     try:
         # Handle full ISO 8601 format, including 'Z' (UTC)
         return datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%SZ")
@@ -159,7 +162,7 @@ def translate_to_cehrgpt_patient(generated_patient: Patient) -> CehrGptPatient:
                     )
                 )
             except ValueError:
-                print(f"Invalid event.time: {event.time}")
+                print(f"Invalid event.time: {event}")
 
         cehrgpt_visits.append(
             CehrGptVisit(
