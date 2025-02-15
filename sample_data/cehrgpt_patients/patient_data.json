@@ -1,0 +1,99 @@
+{
+  "birth_datetime": "Tue, 01 Jan 2013 00:00:00 GMT",
+  "gender": "MALE",
+  "gender_concept_id": 8507,
+  "patient_id": null,
+  "race": "Asian",
+  "race_concept_id": 8515,
+  "visits": [
+    {
+      "discharge_facility": "Home",
+      "discharge_to_concept_id": 8536,
+      "events": [
+        {
+          "code": "4218438",
+          "code_label": "Circumcision",
+          "domain": "Procedure",
+          "numeric_value": null,
+          "record_id": null,
+          "text_value": null,
+          "time": "Tue, 01 Jan 2013 01:00:00 GMT",
+          "unit": null,
+          "visit_id": null
+        },
+        {
+          "code": "19044785",
+          "code_label": "0.5 ML vitamin K1 2 MG/ML Prefilled Syringe",
+          "domain": "Drug",
+          "numeric_value": null,
+          "record_id": null,
+          "text_value": null,
+          "time": "Tue, 01 Jan 2013 01:00:00 GMT",
+          "unit": null,
+          "visit_id": null
+        },
+        {
+          "code": "19076953",
+          "code_label": "erythromycin 0.005 MG/MG Ophthalmic Ointment",
+          "domain": "Drug",
+          "numeric_value": null,
+          "record_id": null,
+          "text_value": null,
+          "time": "Tue, 01 Jan 2013 01:00:00 GMT",
+          "unit": null,
+          "visit_id": null
+        },
+        {
+          "code": "35604324",
+          "code_label": "2 ML lidocaine hydrochloride 10 MG/ML Injection [Xylocaine]",
+          "domain": "Drug",
+          "numeric_value": null,
+          "record_id": null,
+          "text_value": null,
+          "time": "Tue, 01 Jan 2013 10:00:00 GMT",
+          "unit": null,
+          "visit_id": null
+        },
+        {
+          "code": "2007893",
+          "code_label": "Hearing examination, not otherwise specified",
+          "domain": "Procedure",
+          "numeric_value": null,
+          "record_id": null,
+          "text_value": null,
+          "time": "Wed, 02 Jan 2013 00:00:00 GMT",
+          "unit": null,
+          "visit_id": null
+        },
+        {
+          "code": "2008340",
+          "code_label": "Prophylactic administration of vaccine against other diseases",
+          "domain": "Procedure",
+          "numeric_value": null,
+          "record_id": null,
+          "text_value": null,
+          "time": "Wed, 02 Jan 2013 00:00:00 GMT",
+          "unit": null,
+          "visit_id": null
+        },
+        {
+          "code": "4072061",
+          "code_label": "Ritual circumcision",
+          "domain": "Procedure",
+          "numeric_value": null,
+          "record_id": null,
+          "text_value": null,
+          "time": "Fri, 04 Jan 2013 12:00:00 GMT",
+          "unit": null,
+          "visit_id": null
+        }
+      ],
+      "patient_id": null,
+      "visit_concept_id": 9201,
+      "visit_end_datetime": "Fri, 04 Jan 2013 12:00:00 GMT",
+      "visit_id": null,
+      "visit_start_datetime": "Tue, 01 Jan 2013 00:00:00 GMT",
+      "visit_type": "Inpatient Visit"
+    }
+  ]
+}
