@@ -1,5 +1,7 @@
 import argparse
+import math
 import os
+from collections import defaultdict
 from typing import Any, Dict, List, Union
 
 import polars as pl
@@ -47,27 +49,40 @@ def generate_responses(
     model: InstructCEHRGPTModel,
     device: Union[torch.device, str],
     generation_config: GenerationConfig,
+    batch_size: int = 4,
 ) -> Dict[str, Any]:
-    with torch.no_grad():
-        encoder_inputs = encoder_tokenizer(
-            queries, padding=True, truncation=True, return_tensors="pt"
+    n_batches = math.ceil(len(queries) / batch_size)
+    model_response = defaultdict(list)
+    for i in range(n_batches):
+        with torch.no_grad():
+            batched_queries = queries[: batch_size * (i + 1)]
+            if not batched_queries:
+                break
+            encoder_inputs = encoder_tokenizer(
+                batched_queries, padding=True, truncation=True, return_tensors="pt"
+            )
+            encoder_input_ids = encoder_inputs["input_ids"]
+            encoder_attention_mask = encoder_inputs["attention_mask"]
+            batch_size = encoder_input_ids.shape[0]
+            batched_inputs = torch.tile(
+                torch.tensor([[cehrgpt_tokenizer.start_token_id]]), (batch_size, 1)
+            ).to(device)
+            output = model.generate(
+                inputs=encoder_input_ids.to(device),
+                attention_mask=encoder_attention_mask.to(device),
+                decoder_input_ids=batched_inputs.to(device),
+                generation_config=generation_config,
+                lab_token_ids=cehrgpt_tokenizer.lab_token_ids,
+            )
+        extracted_output = extract_output_from_model_response(
+            results=output,
+            cehrgpt_tokenizer=cehrgpt_tokenizer,
+            skip_special_tokens=True,
         )
-        encoder_input_ids = encoder_inputs["input_ids"]
-        encoder_attention_mask = encoder_inputs["attention_mask"]
-        batch_size = encoder_input_ids.shape[0]
-        batched_inputs = torch.tile(
-            torch.tensor([[cehrgpt_tokenizer.start_token_id]]), (batch_size, 1)
-        ).to(device)
-        output = model.generate(
-            inputs=encoder_input_ids.to(device),
-            attention_mask=encoder_attention_mask.to(device),
-            decoder_input_ids=batched_inputs.to(device),
-            generation_config=generation_config,
-            lab_token_ids=cehrgpt_tokenizer.lab_token_ids,
-        )
-    return extract_output_from_model_response(
-        results=output, cehrgpt_tokenizer=cehrgpt_tokenizer, skip_special_tokens=True
-    )
+        model_response["sequences"].extend(extracted_output["sequences"])
+        model_response["values"].extend(extracted_output["values"])
+        model_response["value_indicators"].extend(extracted_output["value_indicators"])
+    return model_response
 
 
 def create_instruct_cehrgpt_argparser():
@@ -138,13 +153,14 @@ def main():
             break
 
         if args.use_llm_parser:
-            query = parse_question_to_cehrgpt_query(query)
-            if not query:
+            query_tuple = parse_question_to_cehrgpt_query(query)
+            if not query_tuple:
                 print(
                     "Failed to parse the query and will generate a random synthetic patient\n"
                 )
                 query = DEFAULT_CLINICAL_STATEMENT
             else:
+                query, n_patients = query_tuple
                 print("\nParsed query:\n", query)
 
         model_responses = generate_responses(

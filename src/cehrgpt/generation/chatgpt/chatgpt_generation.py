@@ -78,7 +78,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     # Create a Jinja2 environment and render the template
-    env = Environment(loader=BaseLoader())
+    env = Environment(loader=BaseLoader(), autoescape=True)
     template = env.from_string(TEMPLATE)
     demographics = pd.read_parquet(args.demographic_data)
 
