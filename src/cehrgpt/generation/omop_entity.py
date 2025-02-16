@@ -1,6 +1,7 @@
+import copy
 from abc import ABC, abstractmethod
 from datetime import date, datetime
-from typing import Union
+from typing import Dict, List, Optional, Union
 
 
 def fill_datetime(year: int) -> str:
@@ -46,6 +47,28 @@ class OmopEntity(ABC):
     @abstractmethod
     def get_table_name(self):
         pass
+
+    @abstractmethod
+    def get_concept_id(self) -> Optional[int]:
+        pass
+
+    @abstractmethod
+    def set_concept_id(self, standard_concept_id: int) -> None:
+        pass
+
+    def map_to_standard(self, to_standard_concept_id_map: Dict[int, List[int]]):
+        new_entities = []
+        current_concept_id = self.get_concept_id()
+        if current_concept_id:
+            standard_concept_ids = to_standard_concept_id_map.get(
+                current_concept_id, [current_concept_id]
+            )
+            for standard_concept_id in standard_concept_ids:
+                new_entity = copy.deepcopy(self)
+                new_entity.set_concept_id(standard_concept_id)
+                new_entities.append(new_entity)
+            return new_entities
+        return [self]
 
 
 # -----------------------------------------------------------------------------
@@ -107,6 +130,12 @@ class Person(OmopEntity):
     def get_table_name(self):
         return "person"
 
+    def get_concept_id(self) -> Optional[int]:
+        return None
+
+    def set_concept_id(self, standard_concept_id: int) -> None:
+        pass
+
 
 # -----------------------------------------------------------------------------
 # VISIT_OCCURRENCE
@@ -120,6 +149,7 @@ class VisitOccurrence(OmopEntity):
         visit_start_datetime: datetime,
         person: Person,
         discharged_to_concept_id: int = 0,
+        visit_source_value: str = None,
     ):
         self._visit_occurrence_id = visit_occurrence_id
         self._visit_concept_id = visit_concept_id
@@ -129,6 +159,7 @@ class VisitOccurrence(OmopEntity):
         self._visit_end_datetime = fill_end_datetime(visit_start_datetime)
         self._person = person
         self._discharged_to_concept_id = discharged_to_concept_id
+        self._visit_source_value = visit_source_value
 
     def export_as_json(self):
         return {
@@ -142,7 +173,7 @@ class VisitOccurrence(OmopEntity):
             "visit_type_concept_id": 44818702,  # default concept (e.g. Inpatient Visit)
             "provider_id": 0,
             "care_site_id": 0,
-            "visit_source_value": "",
+            "visit_source_value": self._visit_source_value,
             "visit_source_concept_id": self._visit_concept_id,
             "admitted_from_concept_id": 0,  # replaced "admitting_source_concept_id"
             "admitted_from_source_value": "",  # replaced "admitting_source_value"
@@ -176,6 +207,12 @@ class VisitOccurrence(OmopEntity):
     def get_table_name(self):
         return "visit_occurrence"
 
+    def get_concept_id(self) -> Optional[int]:
+        return self._visit_concept_id
+
+    def set_concept_id(self, standard_concept_id: int) -> None:
+        self._visit_concept_id = standard_concept_id
+
     @property
     def person(self):
         return self._person
@@ -203,6 +240,7 @@ class ConditionOccurrence(OmopEntity):
         condition_concept_id: int,
         visit_occurrence: VisitOccurrence,
         condition_datetime: datetime,
+        condition_source_value: Optional[str] = None,
     ):
         self._condition_occurrence_id = condition_occurrence_id
         self._condition_concept_id = condition_concept_id
@@ -211,6 +249,7 @@ class ConditionOccurrence(OmopEntity):
         self._condition_start_datetime = fill_start_datetime(condition_datetime)
         self._condition_end_date = condition_datetime.date()
         self._condition_end_datetime = fill_start_datetime(condition_datetime)
+        self._condition_source_value = condition_source_value
 
     def export_as_json(self):
         return {
@@ -226,7 +265,7 @@ class ConditionOccurrence(OmopEntity):
             "provider_id": 0,
             "visit_occurrence_id": self._visit_occurrence._visit_occurrence_id,
             "visit_detail_id": 0,
-            "condition_source_value": "",
+            "condition_source_value": self._condition_source_value,
             "condition_source_concept_id": self._condition_concept_id,
             "condition_status_source_value": "",
             "condition_status_concept_id": 0,
@@ -256,6 +295,12 @@ class ConditionOccurrence(OmopEntity):
     def get_table_name(self):
         return "condition_occurrence"
 
+    def get_concept_id(self) -> Optional[int]:
+        return self._condition_concept_id
+
+    def set_concept_id(self, standard_concept_id: int) -> None:
+        self._condition_concept_id = standard_concept_id
+
 
 # -----------------------------------------------------------------------------
 # DRUG_EXPOSURE
@@ -268,6 +313,7 @@ class DrugExposure(OmopEntity):
         drug_concept_id: int,
         visit_occurrence: VisitOccurrence,
         drug_datetime: datetime,
+        drug_source_value: Optional[str] = None,
     ):
         self._drug_exposure_id = drug_exposure_id
         self._drug_concept_id = drug_concept_id
@@ -276,6 +322,7 @@ class DrugExposure(OmopEntity):
         self._drug_exposure_start_datetime = fill_start_datetime(drug_datetime)
         self._drug_exposure_end_date = drug_datetime.date()
         self._drug_exposure_end_datetime = fill_start_datetime(drug_datetime)
+        self._drug_source_value = drug_source_value
 
     def export_as_json(self):
         return {
@@ -298,7 +345,7 @@ class DrugExposure(OmopEntity):
             "provider_id": 0,
             "visit_occurrence_id": self._visit_occurrence._visit_occurrence_id,
             "visit_detail_id": 0,
-            "drug_source_value": "",
+            "drug_source_value": self._drug_source_value,
             "drug_source_concept_id": self._drug_concept_id,
             "route_source_value": "",
             "dose_unit_source_value": "",
@@ -335,6 +382,12 @@ class DrugExposure(OmopEntity):
     def get_table_name(self):
         return "drug_exposure"
 
+    def get_concept_id(self) -> Optional[int]:
+        return self._drug_concept_id
+
+    def set_concept_id(self, standard_concept_id: int) -> None:
+        self._drug_concept_id = standard_concept_id
+
 
 # -----------------------------------------------------------------------------
 # PROCEDURE_OCCURRENCE
@@ -347,12 +400,14 @@ class ProcedureOccurrence(OmopEntity):
         procedure_concept_id: int,
         visit_occurrence: VisitOccurrence,
         procedure_datetime: datetime,
+        procedure_source_value: Optional[str] = None,
     ):
         self._procedure_occurrence_id = procedure_occurrence_id
         self._procedure_concept_id = procedure_concept_id
         self._visit_occurrence = visit_occurrence
         self._procedure_date = procedure_datetime.date()
         self._procedure_datetime = fill_start_datetime(procedure_datetime)
+        self._procedure_source_value = procedure_source_value
 
     def export_as_json(self):
         return {
@@ -367,7 +422,7 @@ class ProcedureOccurrence(OmopEntity):
             "provider_id": 0,
             "visit_occurrence_id": self._visit_occurrence._visit_occurrence_id,
             "visit_detail_id": 0,
-            "procedure_source_value": "",
+            "procedure_source_value": self._procedure_source_value,
             "procedure_source_concept_id": self._procedure_concept_id,
             "qualifier_source_value": "",
         }
@@ -394,6 +449,12 @@ class ProcedureOccurrence(OmopEntity):
     def get_table_name(self):
         return "procedure_occurrence"
 
+    def get_concept_id(self) -> Optional[int]:
+        return self._procedure_concept_id
+
+    def set_concept_id(self, standard_concept_id: int) -> None:
+        self._procedure_concept_id = standard_concept_id
+
 
 # -----------------------------------------------------------------------------
 # DEATH
@@ -405,11 +466,13 @@ class Death(OmopEntity):
         person: Person,
         death_date: date,
         death_type_concept_id: int = 0,
+        cause_source_value: Optional[str] = None,
     ):
         self._person = person
         self._death_date = death_date
         self._death_datetime = fill_end_datetime(death_date)
         self._death_type_concept_id = death_type_concept_id
+        self._cause_source_value = cause_source_value
 
     def export_as_json(self):
         return {
@@ -418,7 +481,7 @@ class Death(OmopEntity):
             "death_datetime": self._death_datetime,
             "death_type_concept_id": self._death_type_concept_id,
             "cause_concept_id": 0,
-            "cause_source_value": "",
+            "cause_source_value": self._cause_source_value,
             "cause_source_concept_id": 0,
         }
 
@@ -437,6 +500,12 @@ class Death(OmopEntity):
     def get_table_name(self):
         return "death"
 
+    def get_concept_id(self) -> Optional[int]:
+        return None
+
+    def set_concept_id(self, standard_concept_id: int) -> None:
+        pass
+
 
 # -----------------------------------------------------------------------------
 # MEASUREMENT
@@ -453,6 +522,7 @@ class Measurement(OmopEntity):
         visit_occurrence: VisitOccurrence,
         measurement_datetime: datetime,
         unit_source_value,
+        measurement_source_value: Optional[str] = None,
     ):
         self._measurement_id = measurement_id
         self._measurement_concept_id = measurement_concept_id
@@ -463,6 +533,7 @@ class Measurement(OmopEntity):
         self._measurement_datetime = fill_start_datetime(measurement_datetime)
         self._operator_concept_id = 4172703 if is_numeric_type == 1 else 0
         self._unit_source_value = unit_source_value
+        self._measurement_source_value = measurement_source_value
 
     def export_as_json(self):
         return {
@@ -481,7 +552,7 @@ class Measurement(OmopEntity):
             "provider_id": 0,
             "visit_occurrence_id": self._visit_occurrence._visit_occurrence_id,
             "visit_detail_id": 0,
-            "measurement_source_value": "",
+            "measurement_source_value": self._measurement_source_value,
             "measurement_source_concept_id": self._measurement_concept_id,
             "unit_source_value": self._unit_source_value,
             "value_source_value": "",
@@ -513,3 +584,9 @@ class Measurement(OmopEntity):
 
     def get_table_name(self):
         return "measurement"
+
+    def get_concept_id(self) -> Optional[int]:
+        return self._measurement_concept_id
+
+    def set_concept_id(self, standard_concept_id: int) -> None:
+        self._measurement_concept_id = standard_concept_id
