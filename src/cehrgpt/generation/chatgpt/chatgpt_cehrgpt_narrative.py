@@ -22,22 +22,49 @@ You are tasked with generating a high-quality synthetic patient timeline that ac
 The timeline must follow a structured format to ensure clinical plausibility.
 
 Requirements
-1. Demographics: The sequence must begin with the patient's date of birth, gender, and race.
-2. Visits: The patient timeline should include a series of visits, each with:
-    - Visit type: Must be one of the following:
-        - Inpatient Visit
-        - Outpatient Visit
-        - Emergency Room Visit
-        - Emergency Room and Inpatient Visit
-    - Visit start date and time (%Y-%m-%dT%H:%M:%S).
-    - Visit end date and time for inpatient visits.
-3. Events within each visit: Each visit may include:
-    - Conditions (Diagnoses) with ICD-10 codes in the format:concept_name: Condition Name; concept_code: ICD10//Code
-    - Medications (Prescriptions/Administrations) with RXNORM codes in the format:concept_name: Drug Name; concept_code: RXNORM//Code
-    - Procedures with ICD-10 codes in the format:concept_name: Procedure Name; concept_code: ICD10//Code
+1. Demographics: Start the sequence with essential demographics including the patient's date of birth, gender, and race.
+    - Date of birth should be in the format of %Y-%m-%dT%H:%M:%S
+    - Race Type:
+        * No matching concept
+        * White
+        * Black or African American
+        * Other Race
+        * Asian
+        * American Indian or Alaska Native
+        * Native Hawaiian or Other Pacific Islander
+    - Gender Type:
+        * FEMALE
+        * MALE
+        * No matching concept
+2. Visits: Incorporate a series of medical visits characterized by:
+    - Visit Type: Choose from the following options:
+        * Inpatient Visit
+        * Outpatient Visit
+        * Emergency Room Visit
+        * Combined Emergency Room and Inpatient Visit
+        * Office Visit
+        * Ambulatory Radiology Clinic/Center
+        * Telehealth
+    - Timing: Each visit should specify a start date and time (%Y-%m-%dT%H:%M:%S). For inpatient visits, include an end date and time.
+3. Events Within Each Visit: Document clinical events such as conditions, medications, and procedures during each visit:
+    - Conditions (Diagnoses)
+        * Return condition date_time, concept name, concept_code, and the vocabulary name
+        * Allowed Vocabulary:
+            * SNOMED
+            * ICD10
+    - Drugs (Prescriptions/Administrations)
+        * Return drug date_time, concept name, concept_code, and the vocabulary name
+        * Allowed Vocabulary:
+            * RXNORM
+            * CVX
+    - Procedures
+        * Return procedure date_time, concept name, concept_code, and the vocabulary name
+        * Allowed Vocabulary:
+            * CPT4
+            * ICD10
+            * HCPCS
 4. Inpatient Visit Specifics:
-    - Clinical events must be grouped by each day of hospitalization.
-    - Day-based structure should be used, where "Day 0" represents the admission day.
+    - Organize clinical events by day of hospitalization, using a "Day 0" for admission and subsequent days numerically.
 
 Example Output (Illustration Only):
 Do not simply mimic this example. Generate unique, clinically realistic data.
@@ -89,8 +116,9 @@ Outpatient Visit on 2008-03-08 (Age: 47)
 class Event(BaseModel):
     concept_name: str
     concept_code: str
+    vocabulary_name: str
     domain: str
-    time: str
+    date_time: str
 
 
 class Visit(BaseModel):
@@ -131,45 +159,80 @@ def datetime_converter(obj):
     raise TypeError(f"Type {type(obj)} not serializable")
 
 
+def map_gender_to_gender_concept_id(gender: str) -> int:
+    gender_concept_id = 0
+    gender_lowercase = gender.lower()
+    if gender_lowercase == "female":
+        gender_concept_id = 8532
+    elif gender_lowercase == "male":
+        gender_concept_id = 8507
+    return gender_concept_id
+
+
+def map_race_race_concept_id(race: str) -> int:
+    race_concept_id = 0
+    race_lowercase = race.lower()
+    if race_lowercase == "white":
+        race_concept_id = 8527
+    elif race_lowercase == "black or african american":
+        race_concept_id = 8516
+    elif race_lowercase == "unknown":
+        race_concept_id = 8552
+    elif race_lowercase == "other race":
+        race_concept_id = 8522
+    elif race_lowercase == "Asian":
+        race_concept_id = 8515
+    elif race_lowercase == "american indian or alaska native":
+        race_concept_id = 8657
+    elif race_lowercase == "native hawaiian or other pacific islander":
+        race_concept_id = 8557
+    return race_concept_id
+
+
+def map_visit_type_to_visit_concept_id(visit_type: str) -> int:
+    visit_concept_id = 0
+    visit_type_lowercase = visit_type.lower()
+    if visit_type_lowercase == "inpatient visit":
+        visit_concept_id = 9201
+    elif visit_type_lowercase == "outpatient visit":
+        visit_concept_id = 9202
+    elif visit_type_lowercase == "emergency room visit":
+        visit_concept_id = 9203
+    elif visit_type_lowercase == "emergency room and inpatient Visit":
+        visit_concept_id = 262
+    elif visit_type_lowercase == "office visit":
+        visit_concept_id = 581477
+    elif visit_type_lowercase == "ambulatory radiology clinic / center":
+        visit_concept_id = 38004250
+    elif visit_type_lowercase == "telehealth":
+        visit_concept_id = 5083
+    return visit_concept_id
+
+
 def translate_to_cehrgpt_patient(generated_patient: Patient) -> CehrGptPatient:
     cehrgpt_visits: List[CehrGptVisit] = []
     for visit in generated_patient.visits:
-        visit_concept_id = 0
+        visit_concept_id = map_visit_type_to_visit_concept_id(visit.visit_type)
         visit_start_datetime = parse_datetime(visit.visit_start_datetime)
         visit_end_datetime = (
             parse_datetime(visit.visit_end_datetime)
             if visit.visit_end_datetime
             else None
         )
-        visit_type_lowercase = visit.visit_type.lower()
-        if visit_type_lowercase == "inpatient visit":
-            visit_concept_id = 9201
-        elif visit_type_lowercase == "outpatient visit":
-            visit_concept_id = 9202
-        elif visit_type_lowercase == "emergency room visit":
-            visit_concept_id = 9203
-        elif visit_type_lowercase == "emergency room and inpatient Visit":
-            visit_concept_id = 262
-        elif visit_type_lowercase == "office visit":
-            visit_concept_id = 581477
-        elif visit_type_lowercase == "ambulatory radiology clinic / center":
-            visit_concept_id = 38004250
-        elif visit_type_lowercase == "telehealth":
-            visit_concept_id = 5083
         events: List[CehrGptEvent] = []
         for event in visit.events:
             try:
-                event_time = parse_datetime(event.time)
+                event_time = parse_datetime(event.date_time)
                 events.append(
                     CehrGptEvent(
                         time=event_time,
-                        code=event.concept_code,
+                        code=f"{event.vocabulary_name}//{event.concept_code}",
                         domain=event.domain,
                         code_label=event.concept_name,
                     )
                 )
             except ValueError:
-                print(f"Invalid event.time: {event}")
+                print(f"Invalid event.date_time: {event}")
 
         cehrgpt_visits.append(
             CehrGptVisit(
@@ -185,8 +248,8 @@ def translate_to_cehrgpt_patient(generated_patient: Patient) -> CehrGptPatient:
         gender=generated_patient.gender,
         race=generated_patient.race,
         birth_datetime=parse_datetime(generated_patient.birth_datetime),
-        gender_concept_id=0,
-        race_concept_id=0,
+        gender_concept_id=map_gender_to_gender_concept_id(generated_patient.gender),
+        race_concept_id=map_race_race_concept_id(generated_patient.race),
         visits=cehrgpt_visits,
     )
 
