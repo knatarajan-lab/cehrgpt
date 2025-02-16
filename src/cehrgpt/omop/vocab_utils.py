@@ -25,9 +25,12 @@ def generate_to_standard_concept_id_map(
     concept_relationship: pl.DataFrame,
 ) -> Dict[int, List[int]]:
     # Group by concept_id_1 and aggregate concept_id_2 into a list
+    concept_relationship = concept_relationship.filter(
+        pl.col("relationship_id") == "Maps to"
+    )
     concept_map_df = concept_relationship.group_by("concept_id_1").agg(
         pl.col("concept_id_2").alias("concept_id_2_list")
-    )  # ✅ Fix: Remove .list()
+    )
 
     # Convert to dictionary
     concept_map: Dict[int, List[int]] = dict(
@@ -37,6 +40,18 @@ def generate_to_standard_concept_id_map(
         )
     )
     return concept_map
+
+
+def generate_vocabulary_name_to_concept_id_map(
+    concept_pl: pl.DataFrame,
+) -> Dict[str, int]:
+    concept_pl = concept_pl.select(
+        pl.concat_str(["vocabulary_id", "concept_name"], separator="//")
+        .str.to_lowercase()
+        .alias("code"),
+        pl.col("concept_id"),
+    ).to_dict(as_series=False)
+    return dict(zip(concept_pl["code"], concept_pl["concept_id"]))
 
 
 def generate_vocabulary_concept_to_concept_id_map(

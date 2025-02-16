@@ -28,6 +28,7 @@ from cehrgpt.generation.omop_entity import (
 from cehrgpt.omop.vocab_utils import (
     generate_to_standard_concept_id_map,
     generate_vocabulary_concept_to_concept_id_map,
+    generate_vocabulary_name_to_concept_id_map,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ def convert_cehrgpt_to_omop_events(
     cehrgpt_patient: CehrGptPatient,
     id_generator: IdGenerator,
     vocabulary_concept_to_concept_id: Dict[str, int],
+    vocabulary_name_to_concept_id: Dict[str, int],
     to_standard_concept_id_map: Dict[int, List[int]],
 ) -> List[OmopEntity]:
     omop_entities: List[OmopEntity] = []
@@ -69,12 +71,19 @@ def convert_cehrgpt_to_omop_events(
         )
         omop_entities.append(visit_occurrence)
         for event in visit.events:
+            concept_id = vocabulary_concept_to_concept_id.get(event.code, None)
+            if not concept_id:
+                vocabulary_id = event.code.split("\\")[0]
+                vocabulary_concept_name_str = (
+                    f"{vocabulary_id.lower()}\\{event.code_label.lower()}"
+                )
+                concept_id = vocabulary_name_to_concept_id.get(
+                    vocabulary_concept_name_str, 0
+                )
             if event.domain.lower() == "condition":
                 condition_occurrence = ConditionOccurrence(
                     condition_occurrence_id=id_generator.get_next_condition_occurrence_id(),
-                    condition_concept_id=vocabulary_concept_to_concept_id.get(
-                        event.code, 0
-                    ),
+                    condition_concept_id=concept_id,
                     visit_occurrence=visit_occurrence,
                     condition_datetime=event.time,
                     condition_source_value=event.code,
@@ -85,9 +94,7 @@ def convert_cehrgpt_to_omop_events(
             elif event.domain.lower() == "procedure":
                 procedure_occurrence = ProcedureOccurrence(
                     procedure_occurrence_id=id_generator.get_next_procedure_occurrence_id(),
-                    procedure_concept_id=vocabulary_concept_to_concept_id.get(
-                        event.code, 0
-                    ),
+                    procedure_concept_id=concept_id,
                     visit_occurrence=visit_occurrence,
                     procedure_datetime=event.time,
                     procedure_source_value=event.code,
@@ -98,7 +105,7 @@ def convert_cehrgpt_to_omop_events(
             elif event.domain.lower() == "drug":
                 drug_exposure = DrugExposure(
                     drug_exposure_id=id_generator.get_next_drug_exposure_id(),
-                    drug_concept_id=vocabulary_concept_to_concept_id.get(event.code, 0),
+                    drug_concept_id=concept_id,
                     visit_occurrence=visit_occurrence,
                     drug_datetime=event.time,
                     drug_source_value=event.code,
@@ -116,9 +123,10 @@ def main(args):
     )
     # Step 1: convert cehrgpt patients to a OMOP instance that contains the non-standard concepts
     id_generator = IdGenerator()
-    vocabulary_concept_concept_id = generate_vocabulary_concept_to_concept_id_map(
+    vocabulary_concept_concept_id_map = generate_vocabulary_concept_to_concept_id_map(
         concept
     )
+    vocabulary_name_concept_id_map = generate_vocabulary_name_to_concept_id_map(concept)
     to_standard_concept_id_map = generate_to_standard_concept_id_map(
         concept_relationship
     )
@@ -135,7 +143,8 @@ def main(args):
                     convert_cehrgpt_to_omop_events(
                         cehrgpt_patient,
                         id_generator,
-                        vocabulary_concept_concept_id,
+                        vocabulary_concept_concept_id_map,
+                        vocabulary_name_concept_id_map,
                         to_standard_concept_id_map,
                     )
                 )
