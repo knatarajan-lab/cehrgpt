@@ -10,6 +10,14 @@ def test_generate_to_standard_concept_id_map():
         {
             "concept_id_1": [1001, 1001, 1002, 1003, 1003, 1003],
             "concept_id_2": [2001, 2002, 2003, 3001, 3002, 3003],
+            "relationship_id": [
+                "Maps to",
+                "Maps to",
+                "Maps to",
+                "Maps to",
+                "Maps to",
+                "Maps to",
+            ],
         }
     )
 
@@ -26,7 +34,9 @@ def test_generate_to_standard_concept_id_map():
 
 def test_generate_to_standard_concept_id_map_empty():
     # Empty DataFrame test
-    concept_relationship = pl.DataFrame({"concept_id_1": [], "concept_id_2": []})
+    concept_relationship = pl.DataFrame(
+        {"concept_id_1": [], "concept_id_2": [], "relationship_id": []}
+    )
 
     # Run function
     result = generate_to_standard_concept_id_map(concept_relationship)
@@ -38,10 +48,7 @@ def test_generate_to_standard_concept_id_map_empty():
 def test_generate_to_standard_concept_id_map_single_entry():
     # Single entry test
     concept_relationship = pl.DataFrame(
-        {
-            "concept_id_1": [1001],
-            "concept_id_2": [2001],
-        }
+        {"concept_id_1": [1001], "concept_id_2": [2001], "relationship_id": ["Maps to"]}
     )
 
     # Expected output
@@ -60,6 +67,7 @@ def test_generate_to_standard_concept_id_map_duplicates():
         {
             "concept_id_1": [1001, 1001, 1001],
             "concept_id_2": [2001, 2002, 2003],
+            "relationship_id": ["Maps to", "Maps to", "Maps to"],
         }
     )
 
@@ -79,6 +87,7 @@ def test_generate_to_standard_concept_id_map_unrelated_columns():
         {
             "concept_id_1": [1001, 1001, 1002],
             "concept_id_2": [2001, 2002, 2003],
+            "relationship_id": ["Maps to", "Maps to", "Maps to"],
             "extra_column": ["A", "B", "C"],  # Extra column
         }
     )
