@@ -71,7 +71,7 @@ Requirements:
             * ICD10
             * HCPCS
 4. Inpatient Visit Specifics:
-    - Organize clinical events by day of hospitalization, using a "Day 0" for admission and subsequent days numerically.
+    - Organize clinical events by day of hospitalization
 
 Additional Consideration:
 While the input timeline may not encompass all potential visit types, conditions, drugs, and procedures, you are encouraged to introduce novel yet clinically plausible elements. Adjustments to the length and content of the patient timeline are permitted provided they maintain clinical plausibility.
