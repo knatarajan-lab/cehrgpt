@@ -117,7 +117,12 @@ if __name__ == "__main__":
         required=True,
     )
     parser.add_argument(
-        "--time_window", dest="time_window", action="store", type=int, required=False
+        "--time_window",
+        dest="time_window",
+        action="store",
+        type=int,
+        default=None,
+        required=False,
     )
     parser.add_argument(
         "--max_num_concepts",
