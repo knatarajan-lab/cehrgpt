@@ -23,9 +23,13 @@ def main(args):
         else f"{args.output_dir}_lifetime"
     )
     patient_events = spark.read.parquet(args.patient_events_dir)
-    patient_events = patient_events.where(
-        f.col("num_of_concepts").between(args.min_num_concepts, args.max_num_concepts)
+    qualified_persons = (
+        patient_events.groupBy("person_id")
+        .count()
+        .where(f.col("count").between(args.min_num_concepts, args.max_num_concepts))
+        .select("person_id")
     )
+    patient_events = patient_events.join(qualified_persons, "person_id")
     if args.use_sample:
         patient_events = patient_events.sample(args.sample_frac)
 
