@@ -1,3 +1,5 @@
+import os
+
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as f
 from pyspark.sql.functions import udf
@@ -22,7 +24,40 @@ def main(args):
         if args.time_window is None
         else f"{args.output_dir}_lifetime"
     )
-    patient_events = spark.read.parquet(args.patient_events_dir)
+    patient_events = spark.read.parquet(
+        os.path.join(args.patient_events_dir, "all_patient_events")
+    )
+    start_year_events = spark.read.parquet(
+        os.path.join(
+            args.patient_events_dir, "demographic_events", "sequence_start_year_tokens"
+        )
+    ).select("person_id", f.col("standard_concept_id").alias("year"))
+    start_age_events = spark.read.parquet(
+        os.path.join(
+            args.patient_events_dir, "demographic_events", "sequence_age_tokens"
+        )
+    ).select(
+        "person_id",
+        create_age_group_udf(f.col("standard_concept_id")).alias("age_group"),
+    )
+    race_events = spark.read.parquet(
+        os.path.join(
+            args.patient_events_dir, "demographic_events", "sequence_race_tokens"
+        )
+    ).select("person_id", f.col("standard_concept_id").alias("race"))
+    gender_events = spark.read.parquet(
+        os.path.join(
+            args.patient_events_dir, "demographic_events", "sequence_gender_tokens"
+        )
+    ).select("person_id", f.col("standard_concept_id").alias("gender"))
+
+    patient_events = (
+        patient_events.join(start_year_events, "person_id")
+        .join(start_age_events, "person_id")
+        .join(race_events, "person_id")
+        .join(gender_events, "person_id")
+    )
+
     qualified_persons = (
         patient_events.groupBy("person_id")
         .count()
@@ -32,13 +67,6 @@ def main(args):
     patient_events = patient_events.join(qualified_persons, "person_id")
     if args.use_sample:
         patient_events = patient_events.sample(args.sample_frac)
-
-    patient_events = (
-        patient_events.withColumn("year", f.element_at("concept_ids", 1))
-        .withColumn("age_group", create_age_group_udf(f.element_at("concept_ids", 2)))
-        .withColumn("gender", f.element_at("concept_ids", 3))
-        .withColumn("race", f.element_at("concept_ids", 4))
-    )
 
     co_occurrence_raw_count_by_demographic_group = (
         patient_events.alias("past")
