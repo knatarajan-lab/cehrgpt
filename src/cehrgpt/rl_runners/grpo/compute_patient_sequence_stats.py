@@ -28,11 +28,6 @@ def main(args):
     patient_events = spark.read.parquet(
         os.path.join(args.patient_events_dir, "all_patient_events")
     )
-    start_year_events = spark.read.parquet(
-        os.path.join(
-            args.patient_events_dir, "demographic_events", "sequence_start_year_tokens"
-        )
-    ).select("person_id", f.col("standard_concept_id").alias("year"))
     start_age_events = spark.read.parquet(
         os.path.join(
             args.patient_events_dir, "demographic_events", "sequence_age_tokens"
@@ -53,8 +48,7 @@ def main(args):
     ).select("person_id", f.col("standard_concept_id").alias("gender"))
 
     patient_events = (
-        patient_events.join(start_year_events, "person_id")
-        .join(start_age_events, "person_id")
+        patient_events.join(start_age_events, "person_id")
         .join(race_events, "person_id")
         .join(gender_events, "person_id")
     )
@@ -78,7 +72,6 @@ def main(args):
         .where(f.col("future.datetime") > f.col("past.datetime"))
         .where(f.datediff(f.col("future.date"), f.col("past.date")) <= time_window)
         .groupBy(
-            f.col("past.year").alias("year"),
             f.col("past.age_group").alias("age_group"),
             f.col("past.gender").alias("gender"),
             f.col("past.race").alias("race"),
@@ -87,11 +80,13 @@ def main(args):
         )
         .count()
     )
+    demographic_group_total = co_occurrence_raw_count_by_demographic_group.groupBy(
+        "age_group", "gender", "race"
+    ).agg(f.sum("count").alias("total"))
     co_occurrence_raw_count_by_demographic_group = (
-        co_occurrence_raw_count_by_demographic_group.crossJoin(
-            co_occurrence_raw_count_by_demographic_group.select(
-                f.sum("count").alias("total")
-            )
+        co_occurrence_raw_count_by_demographic_group.join(
+            demographic_group_total,
+            ["age_group", "gender", "race"],
         )
         .withColumn("prob", f.col("count") / f.col("total"))
         .drop("total")
