@@ -24,9 +24,7 @@ def main(args):
     )
     patient_events = spark.read.parquet(args.patient_events_dir)
     patient_events = patient_events.where(
-        f.col("num_of_concepts").between(
-            args.min_num_of_concepts, args.max_num_of_concepts
-        )
+        f.col("num_of_concepts").between(args.min_num_concepts, args.max_num_concepts)
     )
     if args.use_sample:
         patient_events = patient_events.sample(args.sample_frac)
