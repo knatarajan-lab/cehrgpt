@@ -5,12 +5,14 @@ from pyspark.sql import functions as f
 from pyspark.sql.functions import udf
 from pyspark.sql.types import StringType
 
-from cehrgpt.tools.generate_causal_patient_split_by_age import age_group_func
 
-
+# Copied over from cehrgpt.tools.generate_causal_patient_split_by_age because spark requires all the functions
+# to be self-contained unless they exist in the spark venv.
 @udf(StringType())
 def create_age_group_udf(age_str):
-    return age_group_func(age_str)
+    age = int(age_str.split(":")[1])
+    group_number = age // 10
+    return f"age:{group_number * 10}-{(group_number + 1) * 10}"
 
 
 def main(args):
