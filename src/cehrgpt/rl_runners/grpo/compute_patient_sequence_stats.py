@@ -19,12 +19,11 @@ def main(args):
     spark = SparkSession.builder.appName(
         "Compute the temporal co-occurrence matrix"
     ).getOrCreate()
-
-    time_window = args.time_window if args.time_window is not None else 1_000_000
+    time_window = args.time_window if args.time_window else 1_000_000
     output_dir = (
-        f"{args.output_dir}_{args.time_window}"
-        if args.time_window is None
-        else f"{args.output_dir}_lifetime"
+        os.path.join(args.output_dir, f"co_occurrence_{args.time_window}")
+        if args.time_window
+        else os.path.join(args.output_dir, f"co_occurrence_lifetime")
     )
     patient_events = spark.read.parquet(
         os.path.join(args.patient_events_dir, "all_patient_events")
