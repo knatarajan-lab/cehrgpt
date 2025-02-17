@@ -1,50 +1,14 @@
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as f
 from pyspark.sql.functions import udf
-from pyspark.sql.types import ArrayType, StringType
-from pyspark.sql.window import Window
+from pyspark.sql.types import StringType
 
 from cehrgpt.tools.generate_causal_patient_split_by_age import age_group_func
-
-
-@udf(ArrayType(StringType()))
-def unique_concepts(sequence):
-    return list(set([concept for concept in sequence if concept.isnumeric()]))
 
 
 @udf(StringType())
 def create_age_group_udf(age_str):
     return age_group_func(age_str)
-
-
-def compute_marginal(dataframe, num_of_partitions):
-    all_concepts_dataframe = (
-        dataframe.withColumn("unique_concepts", unique_concepts("concept_ids"))
-        .select(f.explode("unique_concepts").alias("concept_id"))
-        .drop("unique_concepts")
-    )
-    marginal_dist = all_concepts_dataframe.groupBy("concept_id").count()
-    data_size = all_concepts_dataframe.count()
-    marginal_dist = marginal_dist.withColumn(
-        "prob", f.col("count") / f.lit(data_size)
-    ).withColumn("concept_order", f.row_number().over(Window.orderBy(f.desc("prob"))))
-    num_of_concepts = marginal_dist.count()
-    partition_size = num_of_concepts // num_of_partitions
-    marginal_dist = (
-        marginal_dist.withColumn(
-            "concept_partition",
-            f.floor(f.col("concept_order") / f.lit(partition_size)).cast("int")
-            + f.lit(1),
-        )
-        .withColumn(
-            "concept_partition",
-            f.when(
-                f.col("concept_partition") > num_of_partitions, num_of_partitions
-            ).otherwise(f.col("concept_partition")),
-        )
-        .drop("concept_order")
-    )
-    return marginal_dist
 
 
 def main(args):
