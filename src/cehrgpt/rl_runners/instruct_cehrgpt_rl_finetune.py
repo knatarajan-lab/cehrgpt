@@ -30,9 +30,7 @@ from cehrgpt.omop.vocab_utils import (
     generate_ancestor_descendant_map,
     generate_concept_maps,
 )
-from cehrgpt.rl_finetune.ppo_finetune_v2 import (
-    create_arg_parser as rl_create_arg_parser,
-)
+from cehrgpt.rl_runners.ppo_finetune_v2 import create_arg_parser as rl_create_arg_parser
 
 LOG = logging.get_logger("transformers")
 
@@ -309,6 +307,7 @@ def main(args):
             i,
             torch.tensor(rewards).mean().cpu().item(),
         )
+
         train_stats = ppo_trainer.step(
             query_tensors,
             response_tensors,

@@ -103,19 +103,19 @@ def main(args):
         ),
     )
 
-    LOG.info(f"Loading tokenizer at {args.model_folder}")
-    LOG.info(f"Loading model at {args.model_folder}")
-    LOG.info(f"Will save the fine-tuned model at {model_folder_name}")
-    LOG.info(f"Context window {args.context_window}")
-    LOG.info(f"Temperature {args.temperature}")
-    LOG.info(f"Repetition Penalty {args.repetition_penalty}")
-    LOG.info(f"Sampling Strategy {args.sampling_strategy}")
-    LOG.info(f"Num beam {args.num_beams}")
-    LOG.info(f"Num beam groups {args.num_beam_groups}")
-    LOG.info(f"Epsilon cutoff {args.epsilon_cutoff}")
-    LOG.info(f"Top P {args.top_p}")
-    LOG.info(f"Top K {args.top_k}")
-    LOG.info(f"Loading demographic_info at {args.demographic_data_path}")
+    LOG.info("Loading tokenizer at %s", args.model_folder)
+    LOG.info("Loading model at %s", args.model_folder)
+    LOG.info("Will save the fine-tuned model at %s", model_folder_name)
+    LOG.info("Context window %s", args.context_window)
+    LOG.info("Temperature %s", args.temperature)
+    LOG.info("Repetition Penalty %s", args.repetition_penalty)
+    LOG.info("Sampling Strategy %s", args.sampling_strategy)
+    LOG.info("Num beam %s", args.num_beams)
+    LOG.info("Num beam groups %s", args.num_beam_groups)
+    LOG.info("Epsilon cutoff %s", args.epsilon_cutoff)
+    LOG.info("Top P %s", args.top_p)
+    LOG.info("Top K %s", args.top_k)
+    LOG.info("Loading demographic_info at %s", args.demographic_data_path)
 
     dataset = load_parquet_as_dataset(args.demographic_data_path).filter(
         lambda batched: [
@@ -146,7 +146,7 @@ def main(args):
     total_rows = len(dataset)
     num_of_micro_batches = args.batch_size // args.mini_batch_size
     for i in tqdm(range(args.num_of_steps)):
-        LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
+        LOG.info(f"%s: Batch %s started", datetime.datetime.now(), i)
         random_prompts = []
         batched_sequences = []
         batched_values = []
@@ -183,11 +183,13 @@ def main(args):
             batched_values.extend(micro_batched_sequences["values"])
             batched_value_indicators.extend(micro_batched_sequences["value_indicators"])
 
-        LOG.info(f"{datetime.datetime.now()}: Batch {i} sequence generated")
+        LOG.info(f"%s: Batch %s sequence generated", datetime.datetime.now(), i)
         reward = compute_marginal_dist_reward(
             batched_sequences, concept_stats, cehrgpt_tokenizer
         )
-        LOG.info(f"{datetime.datetime.now()}: Batch {i} KL divergence reward: {reward}")
+        LOG.info(
+            f"%s: Batch %s KL divergence reward: %s", datetime.datetime.now(), i, reward
+        )
         query_tensors = []
         response_tensors = []
         value_tensors = []
@@ -210,14 +212,17 @@ def main(args):
             values = values[: end_index + 1]
             value_indicators = value_indicators[: end_index + 1]
 
-            query_tensors.append(torch.tensor(cehrgpt_tokenizer.encode(sequence[:4])))
+            query_tensors.append(
+                torch.LongTensor(cehrgpt_tokenizer.encode(sequence[:4]))
+            )
             response_tensors.append(
-                torch.tensor(cehrgpt_tokenizer.encode(sequence[4:]))
+                torch.LongTensor(cehrgpt_tokenizer.encode(sequence[4:]))
             )
             value_tensors.append(torch.tensor(cehrgpt_tokenizer.encode_value(values)))
-            value_indicator_tensors.append(torch.tensor(value_indicators))
+            value_indicator_tensors.append(torch.BoolTensor(value_indicators))
             rewards.append(reward)
 
+        # Do one step of optimization
         train_stats = ppo_trainer.step(
             query_tensors,
             response_tensors,
@@ -225,7 +230,8 @@ def main(args):
             value_tensors,
             value_indicator_tensors,
         )
-        LOG.info(f"{datetime.datetime.now()}: Batch {i} stats: {train_stats}")
+
+        LOG.info(f"%s: Batch %s stats: %s", datetime.datetime.now(), i, train_stats)
         logs.append(reward)
         ppo_trainer.log_stats(stats=train_stats, batch={}, rewards=rewards)
     ppo_trainer.save_pretrained(model_folder_name)
@@ -237,19 +243,22 @@ def compute_marginal_dist_reward(
     batched_sequences: List[List[str]],
     expected_concept_dist: Dict[str, float],
     tokenizer: CehrGptTokenizer,
-) -> torch.Tensor:
+) -> torch.FloatTensor:
+    tokenizer_concept_ids = tokenizer.get_vocab().keys()
     actual_concept_dist = dict(
         Counter(
             [
                 concept_id
                 for sequence in batched_sequences
                 for concept_id in sequence[4:]
+                if concept_id in tokenizer_concept_ids
             ]
         )
     )
     total_count = sum(actual_concept_dist.values())
     for concept_id in actual_concept_dist.keys():
-        actual_concept_dist[concept_id] /= total_count
+        if concept_id in tokenizer_concept_ids:
+            actual_concept_dist[concept_id] /= total_count
     # Translate the concept ids to token ids
     actual_dist = np.zeros(tokenizer.vocab_size)
     actual_dist[tokenizer.encode(list(actual_concept_dist.keys()))] = list(
@@ -266,10 +275,12 @@ def compute_marginal_dist_reward(
     ref_logprob_dist = torch.tensor(np.log(ref_dist + epsilon))
 
     # Flip is required due to this issue? :https://github.com/pytorch/pytorch/issues/57459
-    return torch.exp(
-        -torch.nn.functional.kl_div(
-            ref_logprob_dist, logprob_dist, log_target=True, reduction="none"
-        ).sum(-1)
+    return torch.FloatTensor(
+        torch.exp(
+            -torch.nn.functional.kl_div(
+                ref_logprob_dist, logprob_dist, log_target=True, reduction="none"
+            ).sum(-1)
+        )
     )
 
 
