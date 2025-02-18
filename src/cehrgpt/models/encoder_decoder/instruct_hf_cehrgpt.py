@@ -161,7 +161,8 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
         encoder_hidden_states = encoder_outputs[0]
         # This is important so that the decoder will not use attention_mask as its own mask
         encoder_attention_mask = model_kwargs.pop("attention_mask")
-
+        # Overwrite the generation_config of the decoder by the encoder_decoder one
+        self.decoder.generation_config = self.generation_config
         # optionally project encoder_hidden_states
         if self.encoder.config.hidden_size != self.decoder.config.hidden_size:
             encoder_hidden_states = self.enc_to_dec_proj(encoder_hidden_states)

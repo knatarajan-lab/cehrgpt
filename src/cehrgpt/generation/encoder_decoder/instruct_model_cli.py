@@ -73,6 +73,7 @@ def generate_responses(
                 decoder_input_ids=batched_inputs.to(device),
                 generation_config=generation_config,
                 lab_token_ids=cehrgpt_tokenizer.lab_token_ids,
+                return_dict_in_generate=True,
             )
         extracted_output = extract_output_from_model_response(
             results=output,

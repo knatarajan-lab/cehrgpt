@@ -411,7 +411,7 @@ def main():
                     data_args, is_pretraining=False
                 )
                 if not data_args.streaming:
-                    dataset.save_to_disk(meds_extension_path)
+                    dataset.save_to_disk(str(meds_extension_path))
             train_set = dataset["train"]
             validation_set = dataset["validation"]
             test_set = dataset["test"]
@@ -451,7 +451,7 @@ def main():
             dataset=final_splits, cehrgpt_tokenizer=tokenizer, data_args=data_args
         )
         if not data_args.streaming:
-            processed_dataset.save_to_disk(prepared_ds_path)
+            processed_dataset.save_to_disk(str(prepared_ds_path))
 
     # Set seed before initializing model.
     set_seed(training_args.seed)

@@ -156,6 +156,7 @@ def generate_single_batch(
             inputs=batched_prompts,
             generation_config=generation_config,
             lab_token_ids=tokenizer.lab_token_ids,
+            return_dict_in_generate=True,
         )
 
     return extract_output_from_model_response(
