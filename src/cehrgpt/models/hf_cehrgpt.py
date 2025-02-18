@@ -5,7 +5,7 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn.functional as f
-from torch import nn
+from torch import Tensor, nn
 from torch.distributions import Gamma
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
@@ -76,6 +76,7 @@ class GPT2FlashAttention(GPT2Attention):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
+        **kwargs,
     ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor]], ...]:
         # Prepare query, key, and value
         if encoder_hidden_states is not None:
@@ -93,9 +94,12 @@ class GPT2FlashAttention(GPT2Attention):
         else:
             query, key, value = self.c_attn(hidden_states).split(self.split_size, dim=2)
 
-        query = self._split_heads(query, self.num_heads, self.head_dim)
-        key = self._split_heads(key, self.num_heads, self.head_dim)
-        value = self._split_heads(value, self.num_heads, self.head_dim)
+        shape_q = (*query.shape[:-1], -1, self.head_dim)
+        shape_kv = (*key.shape[:-1], -1, self.head_dim)
+
+        query = query.view(shape_q).transpose(1, 2)
+        key = key.view(shape_kv).transpose(1, 2)
+        value = value.view(shape_kv).transpose(1, 2)
 
         if layer_past is not None:
             past_key, past_value = layer_past
@@ -390,6 +394,7 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
         self,
         new_num_tokens: Optional[int] = None,
         pad_to_multiple_of: Optional[int] = None,
+        mean_resizing: bool = True,
     ) -> nn.Embedding:
         if getattr(self.config, "use_pretrained_embeddings", False):
             base_model = getattr(self, self.base_model_prefix, self)
@@ -1482,10 +1487,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             token_value_loss=token_value_loss,
         )
 
-    @staticmethod
     def _reorder_cache(
-        past_key_values: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor
-    ) -> Tuple[Tuple[torch.Tensor]]:
+        self, past_key_values: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor
+    ) -> tuple[tuple[Tensor, ...], ...]:
         """
         This function is used to re-order the `past_key_values` cache if [`~PreTrainedModel.beam_search`] or.
 
