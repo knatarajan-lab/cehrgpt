@@ -129,28 +129,33 @@ def generate_single_batch(
     epsilon_cutoff=0.0,
     device: Any = "cpu",
 ) -> Dict[str, Any]:
-    with torch.no_grad():
-        generation_config = GenerationConfig(
-            repetition_penalty=repetition_penalty,
-            max_length=max_new_tokens,
-            min_length=mini_num_of_concepts,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            bos_token_id=tokenizer.end_token_id,
-            eos_token_id=tokenizer.end_token_id,
-            pad_token_id=tokenizer.pad_token_id,
-            do_sample=True,
-            use_cache=True,
-            return_dict_in_generate=True,
-            output_attentions=False,
-            output_hidden_states=False,
-            output_scores=False,
-            renormalize_logits=True,
-            num_beams=num_beams,
-            num_beam_groups=num_beam_groups,
-            epsilon_cutoff=epsilon_cutoff,
-        )
+    generation_config = GenerationConfig(
+        repetition_penalty=repetition_penalty,
+        max_length=max_new_tokens,
+        min_length=mini_num_of_concepts,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        bos_token_id=tokenizer.end_token_id,
+        eos_token_id=tokenizer.end_token_id,
+        pad_token_id=tokenizer.pad_token_id,
+        do_sample=True,
+        use_cache=True,
+        return_dict_in_generate=True,
+        output_attentions=False,
+        output_hidden_states=False,
+        output_scores=False,
+        renormalize_logits=True,
+        num_beams=num_beams,
+        num_beam_groups=num_beam_groups,
+        epsilon_cutoff=epsilon_cutoff,
+    )
+    with (
+        torch.no_grad(),
+        torch.autocast(
+            device_type=device.type if isinstance(device, torch.device) else device
+        ),
+    ):
         model.generation_config = generation_config
         batched_prompts = torch.tensor(prompts).to(device)
         results = model.generate(
@@ -178,11 +183,7 @@ def main(args):
             attn_implementation=(
                 "flash_attention_2" if is_flash_attn_2_available() else "eager"
             ),
-            torch_dtype=(
-                torch.bfloat16
-                if is_flash_attn_2_available() and args.use_bfloat16
-                else torch.float32
-            ),
+            torch_dtype=torch.float32,
         )
         .eval()
         .to(device)
