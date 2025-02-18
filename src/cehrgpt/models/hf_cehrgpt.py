@@ -1289,6 +1289,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        **kargs,
     ) -> Union[Tuple, CehrGptCausalLMOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -1738,18 +1739,23 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         if streamer is not None:
             streamer.end()
 
-        return CehrGptGenerateDecoderOnlyOutput(
-            sequences=input_ids,
-            sequence_val_masks=(
-                value_indicators.to(torch.bool) if self.cehrgpt.include_values else None
-            ),
-            sequence_vals=(values if self.cehrgpt.include_values else None),
-            scores=scores,
-            logits=raw_logits,
-            attentions=decoder_attentions,
-            hidden_states=decoder_hidden_states,
-            past_key_values=model_kwargs.get("past_key_values"),
-        )
+        if return_dict_in_generate:
+            return CehrGptGenerateDecoderOnlyOutput(
+                sequences=input_ids,
+                sequence_val_masks=(
+                    value_indicators.to(torch.bool)
+                    if self.cehrgpt.include_values
+                    else None
+                ),
+                sequence_vals=(values if self.cehrgpt.include_values else None),
+                scores=scores,
+                logits=raw_logits,
+                attentions=decoder_attentions,
+                hidden_states=decoder_hidden_states,
+                past_key_values=model_kwargs.get("past_key_values"),
+            )
+        else:
+            return input_ids
 
 
 class CehrGptForClassification(CEHRGPTPreTrainedModel):
