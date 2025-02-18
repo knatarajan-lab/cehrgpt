@@ -25,6 +25,8 @@ from tokenizers.pre_tokenizers import WhitespaceSplit
 from tokenizers.trainers import WordLevelTrainer
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer
+from transformers.tokenization_utils_base import TextInput
+from transformers.utils import to_py_obj
 
 from cehrgpt.gpt_utils import (
     convert_time_interval_to_time_tuple,
@@ -481,6 +483,21 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     def pretrained_concept_embedding_model(self):
         return self._pretrained_concept_embedding_model
 
+    def __call__(self, *args, **kwargs):
+        kwargs["is_split_into_words"] = True
+        return super().__call__(*args, **kwargs)
+
+    def tokenize(self, text: TextInput, **kwargs) -> List[str]:
+        return [text]
+
+    def convert_tokens_to_ids(
+        self, tokens: Union[str, List[str]]
+    ) -> Union[int, List[int]]:
+        if isinstance(tokens, str):
+            return self._convert_token_to_id(tokens)
+        elif isinstance(tokens, list):
+            return list(map(self._convert_token_to_id, tokens))
+
     def get_vocab(self) -> Dict[str, int]:
         return self._tokenizer.get_vocab()
 
@@ -493,11 +510,13 @@ class CehrGptTokenizer(PreTrainedTokenizer):
 
     def decode(
         self,
-        concept_token_ids: List[int],
+        concept_token_ids: Union[List[int], "torch.Tensor"],
         skip_special_tokens: bool = True,
         use_concept_name: bool = False,
         **kwargs,
     ) -> List[str]:
+        # Convert inputs to python lists
+        concept_token_ids = to_py_obj(concept_token_ids)
         concept_ids = self._tokenizer.decode(
             concept_token_ids, skip_special_tokens=skip_special_tokens
         ).split(" ")
@@ -507,6 +526,35 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                 for concept_id in concept_ids
             ]
         return concept_ids
+
+    def batch_decode(
+        self,
+        sequences: Union[List[List[int]], "torch.Tensor"],
+        skip_special_tokens: bool = False,
+        **kwargs,
+    ) -> List[List[str]]:
+        """
+        Convert a list of lists of token ids into a list of strings by calling decode.
+
+        Args:
+            sequences (`Union[List[int], List[List[int]], np.ndarray, torch.Tensor, tf.Tensor]`):
+                List of tokenized input ids. Can be obtained using the `__call__` method.
+            skip_special_tokens (`bool`, *optional*, defaults to `False`):
+                Whether or not to remove special tokens in the decoding.
+            kwargs (additional keyword arguments, *optional*):
+                Will be passed to the underlying model specific decode method.
+
+        Returns:
+            `List[str]`: The list of decoded sentences.
+        """
+        return [
+            self.decode(
+                seq,
+                skip_special_tokens=skip_special_tokens,
+                **kwargs,
+            )
+            for seq in sequences
+        ]
 
     def encode_value(self, concept_values: Sequence[str]) -> Sequence[int]:
         encoded = self._value_tokenizer.encode(concept_values, is_pretokenized=True)
