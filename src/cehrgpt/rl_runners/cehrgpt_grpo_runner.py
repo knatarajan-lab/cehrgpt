@@ -1,0 +1,123 @@
+import argparse
+import os
+from functools import partial
+from typing import Dict, Tuple
+
+import polars as pl
+from cehrbert.runners.runner_util import load_parquet_as_dataset
+from transformers.utils import logging
+from trl import GRPOConfig, GRPOTrainer
+
+from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
+from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.rl_runners.grpo.rewards import (
+    DemographicGroup,
+    reward_co_occurrence,
+    reward_length,
+)
+
+logger = logging.get_logger("transformers")
+
+
+def create_co_occurrence_matrix(
+    matrix: pl.DataFrame,
+    threshold: int = 20,
+) -> Dict[DemographicGroup, Dict[Tuple[str, str], float]]:
+    result = (
+        matrix.filter(pl.col("count") >= threshold)
+        .group_by(["age_group", "race", "gender"])
+        .agg(
+            [
+                pl.col("concept_id_1").alias("concept_id_1_list"),
+                pl.col("concept_id_2").alias("concept_id_2_list"),
+                pl.col("prob").alias("prob_list"),
+            ]
+        )
+    )
+
+    # Transform DataFrame to the desired dictionary
+    result_dict = {}
+    for row in result.to_dicts():
+        demographic_group = DemographicGroup(
+            row["age_group"], row["race"], row["gender"]
+        )
+        # Prepare the inner dictionary
+        inner_dict = {}
+        for concept_id_1, concept_id_2, prob in zip(
+            row["concept_id_1_list"], row["concept_id_2_list"], row["prob_list"]
+        ):
+            inner_dict[(str(concept_id_1), str(concept_id_2))] = prob
+        result_dict[demographic_group] = inner_dict
+    return result_dict
+
+
+def main(args):
+    dataset = load_parquet_as_dataset(args.data_dir)
+    dataset = dataset.map(
+        lambda batch: {
+            "prompt": [concept_ids[:4] for concept_ids in batch["concept_ids"]]
+        },
+        batch_size=1024,
+        batched=True,
+        remove_columns=dataset.column_names,
+    )
+    cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(args.model_dir)
+    cehrgpt_model = CEHRGPT2LMHeadModel.from_pretrained(args.model_dir)
+    cehrgpt_model.generation_config.pad_token_id = cehrgpt_tokenizer.pad_token_id
+    cehrgpt_model.generation_config.eos_token_id = cehrgpt_tokenizer.end_token_id
+    cehrgpt_model.generation_config.bos_token_id = cehrgpt_tokenizer.end_token_id
+
+    co_occurrence_list = []
+    for co_occurrence_folder in [
+        f.path for f in os.scandir(args.co_occurrence_dir) if f.is_dir()
+    ]:
+        time_window = co_occurrence_folder.split("_")[-1]
+        logger.info("Load co-occurrence using time window %s", time_window)
+        co_occurrence_30 = pl.read_parquet(
+            os.path.join(co_occurrence_folder, "*.parquet")
+        )
+        result_dict = create_co_occurrence_matrix(co_occurrence_30, threshold=20)
+        if time_window.isnumeric():
+            time_window = int(time_window)
+        else:
+            time_window = 1_000_000
+        co_occurrence_list.append((time_window, result_dict))
+    reward_co_occurrence_with_time_window = partial(
+        reward_co_occurrence, co_occurrence_matrices=co_occurrence_list
+    )
+    reward_co_occurrence_with_time_window.__name__ = f"reward_co_occurrence"
+
+    training_args = GRPOConfig(
+        output_dir=args.output_dir,
+        max_completion_length=1020,
+        num_generations=8,
+        logging_steps=10,
+        per_device_train_batch_size=8,
+        per_device_eval_batch_size=8,
+        num_train_epochs=1,
+        report_to="none",
+        save_strategy="steps",
+        eval_strategy="steps",
+        max_steps=1_000_000,
+        save_steps=1000,
+        save_total_limit=10,
+    )
+
+    trainer = GRPOTrainer(
+        model=cehrgpt_model,
+        processing_class=cehrgpt_tokenizer,
+        reward_funcs=[reward_co_occurrence_with_time_window],
+        args=training_args,
+        train_dataset=dataset,
+    )
+    trainer.generation_config.return_dict_in_generate = False
+    trainer.train()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_dir", required=True, action="store")
+    parser.add_argument("--model_dir", required=True, action="store")
+    parser.add_argument("--co_occurrence_dir", required=True, action="store")
+    parser.add_argument("--output_dir", required=True, action="store")
+    main(parser.parse_args())
