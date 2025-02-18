@@ -54,7 +54,12 @@ def generate_responses(
     n_batches = math.ceil(len(queries) / batch_size)
     model_response = defaultdict(list)
     for i in range(n_batches):
-        with torch.no_grad():
+        with (
+            torch.no_grad(),
+            torch.autocast(
+                device_type=device.type if isinstance(device, torch.device) else device
+            ),
+        ):
             batched_queries = queries[: batch_size * (i + 1)]
             if not batched_queries:
                 break
