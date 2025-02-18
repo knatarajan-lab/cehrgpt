@@ -2,7 +2,7 @@ import datetime
 import os
 import random
 import uuid
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -127,7 +127,7 @@ def generate_single_batch(
     num_beams=1,
     num_beam_groups=1,
     epsilon_cutoff=0.0,
-    device: Any = "cpu",
+    device: Union[torch.device, str] = "cpu",
 ) -> Dict[str, Any]:
     generation_config = GenerationConfig(
         repetition_penalty=repetition_penalty,
