@@ -151,6 +151,7 @@ def generate_single_batch(
             num_beam_groups=num_beam_groups,
             epsilon_cutoff=epsilon_cutoff,
         )
+        model.generation_config = generation_config
         batched_prompts = torch.tensor(prompts).to(device)
         results = model.generate(
             inputs=batched_prompts,
