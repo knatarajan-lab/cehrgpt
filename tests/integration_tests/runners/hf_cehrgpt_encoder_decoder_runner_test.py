@@ -152,6 +152,7 @@ Gender: MALE
             decoder_input_ids=batched_inputs,
             generation_config=generation_config,
             lab_token_ids=cehrgpt_tokenizer.lab_token_ids,
+            return_dict_in_generate=True,
         )
         sequences = [
             cehrgpt_tokenizer.decode(seq.cpu().numpy(), skip_special_tokens=False)
