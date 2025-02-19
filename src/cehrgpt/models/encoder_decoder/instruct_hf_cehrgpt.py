@@ -22,6 +22,9 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
         encoder: Optional[PreTrainedModel] = None,
         decoder: Optional[CEHRGPT2LMHeadModel] = None,
     ):
+        # The current BERT encoder does not support flash attention 2
+        if getattr(config.encoder, "_attn_implementation") == "flash_attention_2":
+            setattr(config.encoder, "_attn_implementation", "eager")
         super().__init__(config, encoder, decoder)
         if not getattr(config.encoder, "encoder_trainable", False):
             # Set the whole model to be non-trainable
