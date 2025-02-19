@@ -131,6 +131,7 @@ def main(args):
         max_steps=1_000_000,
         save_steps=1000,
         save_total_limit=10,
+        do_train=True,
     )
     # Detecting last checkpoint.
     checkpoint = get_last_hf_checkpoint(training_args)
