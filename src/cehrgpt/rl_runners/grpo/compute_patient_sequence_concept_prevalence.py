@@ -24,9 +24,7 @@ def main(args):
         )
         .withColumn("gender", f.col("concept_ids")[2])
         .withColumn("race", f.col("concept_ids")[3])
-        .withColumn(
-            "concept_id", f.explode(f.slice("concept_ids", 5, f.size("concept_ids")))
-        )
+        .withColumn("concept_id", f.explode(f.slice("concept_ids", 5, 100_000)))
     )
 
     demographic_concept_stats = patient_sequence.groupBy(
