@@ -95,7 +95,7 @@ def create_length_stats(patient_seq_length_stats):
     return length_stats
 
 
-def main(args):
+def main():
     cehrgpt_grpo_args, model_args, training_args = parse_dynamic_arguments(
         (CehrGPTGRPOArguments, ModelArguments, GRPOConfig)
     )
@@ -176,22 +176,6 @@ def main(args):
     )
     reward_concept_prevalence_func.__name__ = f"reward_concept_prevalence"
 
-    training_args = GRPOConfig(
-        output_dir=args.output_dir,
-        reward_weights=[5, 1, 1, 1],
-        max_completion_length=1020,
-        num_generations=8,
-        logging_steps=10,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        num_train_epochs=1,
-        report_to="none",
-        save_strategy="steps",
-        eval_strategy="no",
-        max_steps=1_000_000,
-        save_steps=1000,
-        save_total_limit=10,
-        do_train=True,
-    )
     # Detecting last checkpoint.
     checkpoint = get_last_hf_checkpoint(training_args)
     if training_args.resume_from_checkpoint is not None:
