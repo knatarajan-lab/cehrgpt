@@ -4,7 +4,8 @@ from functools import partial
 from typing import Dict, Tuple
 
 import polars as pl
-from cehrbert.runners.runner_util import load_parquet_as_dataset
+from cehrbert.runners.runner_util import get_last_hf_checkpoint, load_parquet_as_dataset
+from transformers import set_seed
 from transformers.utils import logging
 from trl import GRPOConfig, GRPOTrainer
 
@@ -132,7 +133,10 @@ def main(args):
         save_steps=1000,
         save_total_limit=10,
     )
-
+    # Detecting last checkpoint.
+    checkpoint = get_last_hf_checkpoint(training_args)
+    if training_args.resume_from_checkpoint is not None:
+        checkpoint = training_args.resume_from_checkpoint
     trainer = GRPOTrainer(
         model=cehrgpt_model,
         processing_class=cehrgpt_tokenizer,
@@ -145,7 +149,7 @@ def main(args):
         train_dataset=dataset,
     )
     trainer.generation_config.return_dict_in_generate = False
-    trainer.train()
+    trainer.train(resume_from_checkpoint=checkpoint)
 
 
 if __name__ == "__main__":
