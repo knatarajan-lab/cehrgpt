@@ -5,7 +5,6 @@ from typing import Dict, Tuple
 
 import polars as pl
 from cehrbert.runners.runner_util import get_last_hf_checkpoint, load_parquet_as_dataset
-from transformers import set_seed
 from transformers.utils import logging
 from trl import GRPOConfig, GRPOTrainer
 
@@ -137,6 +136,7 @@ def main(args):
     checkpoint = get_last_hf_checkpoint(training_args)
     if training_args.resume_from_checkpoint is not None:
         checkpoint = training_args.resume_from_checkpoint
+    logger.info("The existing checkpoint is %s", checkpoint)
     trainer = GRPOTrainer(
         model=cehrgpt_model,
         processing_class=cehrgpt_tokenizer,
