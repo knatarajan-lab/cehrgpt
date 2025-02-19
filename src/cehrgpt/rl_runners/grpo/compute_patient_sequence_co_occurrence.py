@@ -105,12 +105,10 @@ def main(args):
     )
 
 
-if __name__ == "__main__":
+def create_arg_parser(description: str):
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Arguments for generating the co-occurrence matrix"
-    )
+    parser = argparse.ArgumentParser(description=description)
 
     parser.add_argument(
         "--patient_events_dir",
@@ -155,4 +153,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output_dir", dest="output_dir", action="store", required=True
     )
-    main(parser.parse_args())
+    return parser
+
+
+if __name__ == "__main__":
+    main(
+        create_arg_parser(
+            "Arguments for generating the co-occurrence matrix"
+        ).parse_args()
+    )
