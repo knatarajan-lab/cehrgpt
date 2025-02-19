@@ -8,6 +8,8 @@ from .compute_patient_sequence_co_occurrence import (
     create_arg_parser,
 )
 
+patient_sequence_length_stats_name = "patient_seq_length_stats"
+
 
 def main(args):
     spark = SparkSession.builder.appName(
@@ -35,7 +37,7 @@ def main(args):
         f.stddev("log_patient_length").alias("log_std"),
     )
     patient_seq_length_stats.write.mode("overwrite").parquet(
-        os.path.join(args.output_dir, "patient_seq_length_stats")
+        os.path.join(args.output_dir, patient_sequence_length_stats_name)
     )
 
 

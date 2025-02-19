@@ -5,6 +5,8 @@ from pyspark.sql import functions as f
 from pyspark.sql.functions import udf
 from pyspark.sql.types import IntegerType, StringType
 
+temporal_co_occurrence_stats_name = "temporal_cooccurrence_matrices"
+
 
 # Copied over from cehrgpt.tools.generate_causal_patient_split_by_age because spark requires all the functions
 # to be self-contained unless they exist in the spark venv.
@@ -20,10 +22,11 @@ def main(args):
         "Compute the temporal co-occurrence matrix"
     ).getOrCreate()
     time_window = args.time_window if args.time_window else 1_000_000
+    output_dir = os.path.join(args.output_dir, temporal_co_occurrence_stats_name)
     output_dir = (
-        os.path.join(args.output_dir, f"co_occurrence_{args.time_window}")
+        os.path.join(output_dir, f"co_occurrence_{args.time_window}")
         if args.time_window
-        else os.path.join(args.output_dir, f"co_occurrence_lifetime")
+        else os.path.join(output_dir, f"co_occurrence_lifetime")
     )
     patient_events = spark.read.parquet(
         os.path.join(args.patient_events_dir, "clinical_events")
