@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
+from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
+    get_cehrgpt_patient_converter,
+)
 from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token
 from cehrgpt.tools.generate_causal_patient_split_by_age import age_group_func
 
@@ -10,6 +13,20 @@ class DemographicGroup:
     age_group: str
     race: str
     gender: str
+
+
+def reward_valid_sequences(
+    prompts: List[List[str]], completions: List[List[str]], **kwargs
+) -> List[float]:
+    rewards = []
+    concept_domain_map = kwargs.get("concept_domain_map")
+    for prompt, completion in zip(prompts, completions):
+        pat_seq = prompt + completion
+        cehrgpt_patient_converter = get_cehrgpt_patient_converter(
+            pat_seq, concept_domain_map
+        )
+        rewards.append(1.0 if cehrgpt_patient_converter.is_validation_passed else 0.0)
+    return rewards
 
 
 def reward_co_occurrence(
