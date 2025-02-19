@@ -131,7 +131,6 @@ def main(args):
         max_steps=1_000_000,
         save_steps=1000,
         save_total_limit=10,
-        use_vllm=True,
     )
 
     trainer = GRPOTrainer(
