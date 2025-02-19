@@ -10,10 +10,12 @@ from trl import GRPOConfig, GRPOTrainer
 
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.omop.vocab_utils import generate_concept_maps
 from cehrgpt.rl_runners.grpo.rewards import (
     DemographicGroup,
     reward_co_occurrence,
     reward_length,
+    reward_valid_sequences,
 )
 
 logger = logging.get_logger("transformers")
@@ -82,13 +84,22 @@ def main(args):
         else:
             time_window = 1_000_000
         co_occurrence_list.append((time_window, result_dict))
+
     reward_co_occurrence_with_time_window = partial(
         reward_co_occurrence, co_occurrence_matrices=co_occurrence_list
     )
     reward_co_occurrence_with_time_window.__name__ = f"reward_co_occurrence"
 
+    concept = pl.read_parquet(os.path.join(args.vocabulary_dir, "concept", "*.parquet"))
+    _, concept_domain_map = generate_concept_maps(concept)
+    reward_valid_sequence_func = partial(
+        reward_valid_sequences, concept_domain_map=concept_domain_map
+    )
+    reward_valid_sequence_func.__name__ = f"reward_valid_sequence"
+
     training_args = GRPOConfig(
         output_dir=args.output_dir,
+        reward_weights=[1e4, 1],
         max_completion_length=1020,
         num_generations=8,
         logging_steps=10,
@@ -105,7 +116,10 @@ def main(args):
     trainer = GRPOTrainer(
         model=cehrgpt_model,
         processing_class=cehrgpt_tokenizer,
-        reward_funcs=[reward_co_occurrence_with_time_window],
+        reward_funcs=[
+            reward_co_occurrence_with_time_window,
+            reward_valid_sequence_func,
+        ],
         args=training_args,
         train_dataset=dataset,
     )
@@ -116,6 +130,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", required=True, action="store")
+    parser.add_argument("--vocabulary_dir", required=True, action="store")
     parser.add_argument("--model_dir", required=True, action="store")
     parser.add_argument("--co_occurrence_dir", required=True, action="store")
     parser.add_argument("--output_dir", required=True, action="store")
