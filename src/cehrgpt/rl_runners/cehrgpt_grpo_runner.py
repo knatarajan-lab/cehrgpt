@@ -53,6 +53,19 @@ def create_co_occurrence_matrix(
     return result_dict
 
 
+def create_length_stats(patient_seq_length_stats):
+    length_stats = {}
+    for row in patient_seq_length_stats.to_dicts():
+        demographic_group = DemographicGroup(
+            row["age_group"], row["race"], row["gender"]
+        )
+        length_stats[demographic_group] = {
+            "log_mean": row["log_mean"],
+            "log_std": row["log_std"],
+        }
+    return length_stats
+
+
 def main(args):
     dataset = load_parquet_as_dataset(args.data_dir)
     dataset = dataset.map(
@@ -90,6 +103,13 @@ def main(args):
     )
     reward_co_occurrence_with_time_window.__name__ = f"reward_co_occurrence"
 
+    patient_seq_length_stats = pl.read_parquet(
+        os.path.join(args.patient_seq_length_dir, "*.parquet")
+    )
+    length_stats = create_length_stats(patient_seq_length_stats)
+    reward_length_func = partial(reward_length, length_stats=length_stats)
+    reward_length_func.__name__ = f"reward_length"
+
     concept = pl.read_parquet(os.path.join(args.vocabulary_dir, "concept", "*.parquet"))
     _, concept_domain_map = generate_concept_maps(concept)
     reward_valid_sequence_func = partial(
@@ -99,7 +119,7 @@ def main(args):
 
     training_args = GRPOConfig(
         output_dir=args.output_dir,
-        reward_weights=[1e4, 1],
+        reward_weights=[1e3, 1, 1],
         max_completion_length=1020,
         num_generations=8,
         logging_steps=10,
@@ -111,6 +131,7 @@ def main(args):
         max_steps=1_000_000,
         save_steps=1000,
         save_total_limit=10,
+        use_vllm=True,
     )
 
     trainer = GRPOTrainer(
@@ -119,6 +140,7 @@ def main(args):
         reward_funcs=[
             reward_co_occurrence_with_time_window,
             reward_valid_sequence_func,
+            reward_length_func,
         ],
         args=training_args,
         train_dataset=dataset,
@@ -133,5 +155,6 @@ if __name__ == "__main__":
     parser.add_argument("--vocabulary_dir", required=True, action="store")
     parser.add_argument("--model_dir", required=True, action="store")
     parser.add_argument("--co_occurrence_dir", required=True, action="store")
+    parser.add_argument("--patient_seq_length_dir", required=True, action="store")
     parser.add_argument("--output_dir", required=True, action="store")
     main(parser.parse_args())
