@@ -26,11 +26,15 @@ def main(args):
         else os.path.join(args.output_dir, f"co_occurrence_lifetime")
     )
     patient_events = spark.read.parquet(
-        os.path.join(args.patient_events_dir, "all_patient_events")
+        os.path.join(args.patient_events_dir, "clinical_events")
+    ).select("person_id", "standard_concept_id", "date", "datetime")
+    visit_type_tokens = (
+        spark.read.parquet(
+            os.path.join(args.patient_events_dir, "att_events", "artificial_tokens")
+        )
+        .where(f.col("standard_concept_id").cast(IntegerType()).isNotNull())
+        .select("person_id", "standard_concept_id", "date", "datetime")
     )
-    visit_type_tokens = spark.read.parquet(
-        os.path.join(args.patient_events_dir, "att_events", "artificial_tokens")
-    ).where(f.col("standard_concept_id").cast(IntegerType()).isNotNull())
     patient_events = patient_events.unionByName(visit_type_tokens)
     start_age_events = spark.read.parquet(
         os.path.join(
