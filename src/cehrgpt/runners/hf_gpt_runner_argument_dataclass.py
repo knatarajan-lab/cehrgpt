@@ -3,6 +3,19 @@ from typing import List, Optional
 
 
 @dataclasses.dataclass
+class CehrGPTGRPOArguments:
+    demographics_prompt_dir: Optional[str] = dataclasses.field(
+        metadata={"help": "The name of the dataset to use (via the datasets library)."}
+    )
+    aggregate_data_dir: Optional[str] = dataclasses.field(
+        metadata={"help": "The name of the dataset to use (via the datasets library)."}
+    )
+    vocabulary_dir: Optional[str] = dataclasses.field(
+        metadata={"help": "The directory that contains the OHDSI vocabulary data"}
+    )
+
+
+@dataclasses.dataclass
 class CehrGPTArguments:
     """Arguments pertaining to what data we are going to input our model for training and eval."""
 

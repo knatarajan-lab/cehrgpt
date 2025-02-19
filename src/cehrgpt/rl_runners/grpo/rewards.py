@@ -90,3 +90,22 @@ def reward_length(
                 reward += np.exp(-np.abs(log_seq_length - log_mean) / log_std)
         rewards.append(reward)
     return rewards
+
+
+def reward_concept_prevalence(
+    prompts: List[List[str]], completions: List[List[str]], **kwargs
+) -> List[float]:
+    concept_prevalence: Dict[DemographicGroup, Dict[str, float]]
+    concept_prevalence = kwargs.get("concept_prevalence")
+    rewards = []
+    for prompt, completion in zip(prompts, completions):
+        reward = 0.0
+        age, gender, race = prompt[1:4]
+        demographic_group = DemographicGroup(age_group_func(age), race, gender)
+        if demographic_group in concept_prevalence:
+            demographic_concept_prevalence = concept_prevalence[demographic_group]
+            for concept_id in completion:
+                concept_prob = demographic_concept_prevalence.get(concept_id, 1e-9)
+                reward += np.exp(-np.log(concept_prob))
+        rewards.append(reward)
+    return rewards
