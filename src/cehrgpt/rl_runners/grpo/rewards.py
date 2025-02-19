@@ -107,5 +107,6 @@ def reward_concept_prevalence(
             for concept_id in completion:
                 concept_prob = demographic_concept_prevalence.get(concept_id, 1e-9)
                 reward += np.exp(-np.log(concept_prob))
+            reward = reward / len(completion)
         rewards.append(reward)
     return rewards
