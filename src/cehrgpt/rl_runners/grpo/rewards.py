@@ -1,5 +1,8 @@
+import math
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
+
+from scipy.stats import norm
 
 from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
     get_cehrgpt_patient_converter,
@@ -79,9 +82,9 @@ def reward_length(
         age, race, gender = prompt[1:4]
         demographic_group = DemographicGroup(age_group_func(age), race, gender)
         if demographic_group in length_stats:
-            q1 = length_stats[demographic_group].get("q1")
-            q3 = length_stats[demographic_group].get("q3")
-            if q1 <= len(completion) <= q3:
-                reward += 1.0
+            log_mean = length_stats[demographic_group].get("log_mean")
+            log_std = length_stats[demographic_group].get("log_std")
+            log_seq_length = math.log(len(completion))
+            reward += norm.pdf(log_seq_length, log_mean, log_std)
         rewards.append(reward)
     return rewards
