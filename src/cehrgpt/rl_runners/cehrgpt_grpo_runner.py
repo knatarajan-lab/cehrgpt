@@ -1,11 +1,11 @@
 import os
+from collections import defaultdict
 from functools import partial
 from typing import Dict, Tuple
 
 import polars as pl
 from cehrbert.runners.hf_runner_argument_dataclass import ModelArguments
 from cehrbert.runners.runner_util import get_last_hf_checkpoint, load_parquet_as_dataset
-from transformers import TrainingArguments
 from transformers.utils import logging
 from trl import GRPOConfig, GRPOTrainer
 
@@ -37,16 +37,12 @@ logger = logging.get_logger("transformers")
 def create_concept_prevalence(
     concept_prevalence_stats: pl.DataFrame,
 ) -> Dict[DemographicGroup, Dict[str, float]]:
-    result_dict = {}
+    result_dict = defaultdict(lambda: defaultdict(float))
     for row in concept_prevalence_stats.to_dicts():
         demographic_group = DemographicGroup(
             row["age_group"], row["race"], row["gender"]
         )
-        # Prepare the inner dictionary
-        inner_dict = {}
-        for concept_id, prob in zip(row["concept_id"], row["prob"]):
-            inner_dict[(str(concept_id))] = prob
-        result_dict[demographic_group] = inner_dict
+        result_dict[demographic_group][str(row["concept_id"])] = row["prob"]
     return result_dict
 
 
