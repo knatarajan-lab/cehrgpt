@@ -3,7 +3,7 @@ import os
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as f
 from pyspark.sql.functions import udf
-from pyspark.sql.types import StringType
+from pyspark.sql.types import IntegerType, StringType
 
 
 # Copied over from cehrgpt.tools.generate_causal_patient_split_by_age because spark requires all the functions
@@ -28,6 +28,10 @@ def main(args):
     patient_events = spark.read.parquet(
         os.path.join(args.patient_events_dir, "all_patient_events")
     )
+    visit_type_tokens = spark.read.parquet(
+        os.path.join(args.patient_events_dir, "att_events", "artificial_tokens")
+    ).where(f.col("standard_concept_id").cast(IntegerType()).isNotNull())
+    patient_events = patient_events.unionByName(visit_type_tokens)
     start_age_events = spark.read.parquet(
         os.path.join(
             args.patient_events_dir, "demographic_events", "sequence_age_tokens"
