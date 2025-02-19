@@ -119,7 +119,7 @@ def main(args):
 
     training_args = GRPOConfig(
         output_dir=args.output_dir,
-        reward_weights=[1e3, 1, 1],
+        reward_weights=[1, 1, 1],
         max_completion_length=1020,
         num_generations=8,
         logging_steps=10,
