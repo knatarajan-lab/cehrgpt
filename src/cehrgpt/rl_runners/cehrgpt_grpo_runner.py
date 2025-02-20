@@ -138,6 +138,12 @@ def main():
             result_dict = create_co_occurrence_matrix(
                 co_occurrence_matrix, threshold=20
             )
+            if time_window_start.isnumeric():
+                time_window_start = int(time_window_start)
+            else:
+                raise RuntimeError(
+                    f"time_window_start must be numeric, but received {time_window_start}"
+                )
             if time_window_end.isnumeric():
                 time_window_end = int(time_window_end)
             else:
