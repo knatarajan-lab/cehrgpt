@@ -122,7 +122,8 @@ def main():
     for co_occurrence_folder in [
         f.path for f in os.scandir(co_occurrence_dir) if f.is_dir()
     ]:
-        time_window = co_occurrence_folder.split("_")[-1]
+        time_window_start = co_occurrence_folder.split("_")[1]
+        time_window = co_occurrence_folder.split("_")[2]
         logger.info("Load co-occurrence using time window %s", time_window)
         co_occurrence_30 = pl.read_parquet(
             os.path.join(co_occurrence_folder, "*.parquet")
@@ -131,8 +132,8 @@ def main():
         if time_window.isnumeric():
             time_window = int(time_window)
         else:
-            time_window = 1_000_000
-        co_occurrence_list.append((time_window, result_dict))
+            time_window = 1_000_000_000
+        co_occurrence_list.append((time_window_start, time_window, result_dict))
 
     reward_co_occurrence_with_time_window = partial(
         reward_co_occurrence, co_occurrence_matrices=co_occurrence_list
