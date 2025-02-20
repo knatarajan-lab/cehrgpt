@@ -132,10 +132,12 @@ def main():
                 time_window_start,
                 time_window_end,
             )
-            co_occurrence_30 = pl.read_parquet(
+            co_occurrence_matrix = pl.read_parquet(
                 os.path.join(co_occurrence_folder, "*.parquet")
             )
-            result_dict = create_co_occurrence_matrix(co_occurrence_30, threshold=20)
+            result_dict = create_co_occurrence_matrix(
+                co_occurrence_matrix, threshold=20
+            )
             if time_window_end.isnumeric():
                 time_window_end = int(time_window_end)
             else:
