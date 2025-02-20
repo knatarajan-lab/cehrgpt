@@ -13,6 +13,7 @@ from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.omop.vocab_utils import generate_concept_maps
 from cehrgpt.rl_runners.grpo.compute_patient_sequence_co_occurrence import (
+    is_co_occurrence_folder,
     temporal_co_occurrence_stats_name,
 )
 from cehrgpt.rl_runners.grpo.compute_patient_sequence_concept_prevalence import (
@@ -122,10 +123,10 @@ def main():
     for co_occurrence_folder in [
         f.path for f in os.scandir(co_occurrence_dir) if f.is_dir()
     ]:
-        folder_split_parts = co_occurrence_folder.split("_")
-        if len(folder_split_parts) == 3:
-            time_window_start = folder_split_parts[1]
-            time_window_end = folder_split_parts[2]
+        folder_split_parts = os.path.basename(co_occurrence_folder).split("_")
+        if is_co_occurrence_folder(co_occurrence_folder):
+            time_window_start = folder_split_parts[-2]
+            time_window_end = folder_split_parts[-1]
             logger.info(
                 "Load co-occurrence using a time window that starts at %s and ends at %s",
                 time_window_start,
