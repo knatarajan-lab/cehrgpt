@@ -8,7 +8,12 @@ import pandas as pd
 from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
     get_cehrgpt_patient_converter,
 )
-from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token
+from cehrgpt.gpt_utils import (
+    extract_time_interval_in_days,
+    is_att_token,
+    is_visit_end,
+    is_visit_start,
+)
 from cehrgpt.tools.generate_causal_patient_split_by_age import age_group_func
 
 
@@ -105,8 +110,12 @@ def reward_concept_prevalence(
         if demographic_group in concept_prevalence:
             demographic_concept_prevalence = concept_prevalence[demographic_group]
             for concept_id in completion:
-                concept_prob = demographic_concept_prevalence.get(concept_id, 1e-9)
-                reward += np.exp(-np.log(concept_prob))
+                if (
+                    not is_visit_start(concept_id)
+                    and not is_visit_end(concept_id)
+                    and not is_att_token(concept_id)
+                ):
+                    reward += demographic_concept_prevalence.get(concept_id, 1e-9)
             reward = reward / len(completion)
         rewards.append(reward)
     return rewards
