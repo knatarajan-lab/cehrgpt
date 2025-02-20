@@ -21,12 +21,15 @@ def main(args):
     spark = SparkSession.builder.appName(
         "Compute the temporal co-occurrence matrix"
     ).getOrCreate()
-    time_window = args.time_window if args.time_window else 1_000_000
+    time_window_start = args.time_window_start if args.time_window_start else 0
+    time_window = args.time_window if args.time_window else 1_000_000_000
     output_dir = os.path.join(args.output_dir, temporal_co_occurrence_stats_name)
     output_dir = (
-        os.path.join(output_dir, f"co_occurrence_{args.time_window}")
+        os.path.join(
+            output_dir, f"co_occurrence_{time_window_start}_{args.time_window}"
+        )
         if args.time_window
-        else os.path.join(output_dir, f"co_occurrence_lifetime")
+        else os.path.join(output_dir, f"co_occurrence_{time_window_start}_lifetime")
     )
     patient_events = spark.read.parquet(
         os.path.join(args.patient_events_dir, "clinical_events")
@@ -81,6 +84,9 @@ def main(args):
             f.col("past.person_id") == f.col("future.person_id"),
         )
         .where(f.col("future.datetime") > f.col("past.datetime"))
+        .where(
+            f.datediff(f.col("future.date"), f.col("past.date")) >= time_window_start
+        )
         .where(f.datediff(f.col("future.date"), f.col("past.date")) <= time_window)
         .groupBy(
             f.col("past.age_group").alias("age_group"),
@@ -119,6 +125,14 @@ def create_arg_parser(description: str):
         action="store",
         help="The path for patient events data",
         required=True,
+    )
+    parser.add_argument(
+        "--time_window_start",
+        dest="time_window_start",
+        action="store",
+        type=int,
+        default=0,
+        required=False,
     )
     parser.add_argument(
         "--time_window",

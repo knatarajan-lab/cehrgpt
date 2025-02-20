@@ -42,10 +42,10 @@ def reward_co_occurrence(
     prompts: List[List[str]], completions: List[List[str]], **kwargs
 ) -> List[float]:
     co_occurrence_list: List[
-        Tuple[int, Dict[DemographicGroup, Dict[Tuple[str, str], float]]]
+        Tuple[int, int, Dict[DemographicGroup, Dict[Tuple[str, str], float]]]
     ]
     co_occurrence_list = kwargs.get("co_occurrence_matrices")
-    time_windows, co_occurrence_matrices = zip(*co_occurrence_list)
+    time_window_starts, time_windows, co_occurrence_matrices = zip(*co_occurrence_list)
     rewards = []
     for prompt, completion in zip(prompts, completions):
         reward = 0.0
@@ -64,8 +64,10 @@ def reward_co_occurrence(
                 if not future_concept_id.isnumeric():
                     continue
 
-                for z, time_window in enumerate(time_windows):
-                    if time_interval <= time_window:
+                for z, (time_window_start, time_window) in enumerate(
+                    zip(time_window_starts, time_windows)
+                ):
+                    if time_window_start <= time_interval <= time_window:
                         co_occurrence = co_occurrence_matrices[z].get(
                             demographic_group, None
                         )
