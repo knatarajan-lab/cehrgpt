@@ -1,4 +1,5 @@
 import os
+import re
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as f
@@ -6,6 +7,21 @@ from pyspark.sql.functions import udf
 from pyspark.sql.types import IntegerType, StringType
 
 temporal_co_occurrence_stats_name = "temporal_cooccurrence_matrices"
+# Compile the regex pattern once for better performance
+_CO_OCCURRENCE_PATTERN = re.compile(r"co_occurrence_\d+_(?:\d+|lifetime)/?$")
+
+
+def is_co_occurrence_folder(folder_name: str) -> bool:
+    """
+    Check if a folder name matches the co-occurrence pattern.
+
+    Args:
+        folder_name: String to check against the co-occurrence pattern
+
+    Returns:
+        bool: True if the name matches the pattern, False otherwise
+    """
+    return _CO_OCCURRENCE_PATTERN.match(os.path.basename(folder_name)) is not None
 
 
 # Copied over from cehrgpt.tools.generate_causal_patient_split_by_age because spark requires all the functions
