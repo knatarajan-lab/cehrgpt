@@ -98,7 +98,7 @@ def reward_length(
         if demographic_group in length_stats:
             log_mean = length_stats[demographic_group].get("log_mean")
             log_std = length_stats[demographic_group].get("log_std")
-            if not pd.isnull(log_std) and not pd.isnull(log_mean):
+            if not pd.isnull(log_std) and not pd.isnull(log_mean) and log_std > 0.0:
                 log_seq_length = math.log(len(completion))
                 reward += np.exp(-np.abs(log_seq_length - log_mean) / log_std)
         rewards.append(reward)
