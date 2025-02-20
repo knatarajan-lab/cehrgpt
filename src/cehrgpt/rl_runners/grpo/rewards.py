@@ -67,7 +67,11 @@ def reward_co_occurrence(
                 for z, (time_window_start, time_window) in enumerate(
                     zip(time_window_starts, time_windows)
                 ):
-                    if time_window_start <= time_interval <= time_window:
+                    if (
+                        time_window_start
+                        <= time_interval
+                        <= time_window_start + time_window
+                    ):
                         co_occurrence = co_occurrence_matrices[z].get(
                             demographic_group, None
                         )
