@@ -26,7 +26,8 @@ def main(args):
     output_dir = os.path.join(args.output_dir, temporal_co_occurrence_stats_name)
     output_dir = (
         os.path.join(
-            output_dir, f"co_occurrence_{time_window_start}_{args.time_window}"
+            output_dir,
+            f"co_occurrence_{time_window_start}_{time_window_start + args.time_window}",
         )
         if args.time_window
         else os.path.join(output_dir, f"co_occurrence_{time_window_start}_lifetime")
@@ -89,7 +90,7 @@ def main(args):
         )
         .where(
             f.datediff(f.col("future.date"), f.col("past.date"))
-            <= time_window_start + time_window
+            < time_window_start + time_window
         )
         .groupBy(
             f.col("past.age_group").alias("age_group"),
