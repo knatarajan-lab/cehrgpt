@@ -49,37 +49,41 @@ def reward_co_occurrence(
     rewards = []
     for prompt, completion in zip(prompts, completions):
         reward = 0.0
-        age, gender, race = prompt[1:4]
-        demographic_group = DemographicGroup(age_group_func(age), race, gender)
-        for i, current_concept_id in enumerate(completion):
-            if not current_concept_id.isnumeric():
-                continue
-            time_interval = 0
-            for j in range(i + 1, len(completion)):
-                future_concept_id = completion[j]
-                if is_att_token(future_concept_id):
-                    time_interval += extract_time_interval_in_days(future_concept_id)
+        if prompt and completion:
+            age, gender, race = prompt[1:4]
+            demographic_group = DemographicGroup(age_group_func(age), race, gender)
+            for i, current_concept_id in enumerate(completion):
+                if not current_concept_id.isnumeric():
                     continue
-
-                if not future_concept_id.isnumeric():
-                    continue
-
-                for z, (time_window_start, time_window) in enumerate(
-                    zip(time_window_starts, time_windows)
-                ):
-                    if (
-                        time_window_start
-                        <= time_interval
-                        <= time_window_start + time_window
-                    ):
-                        co_occurrence = co_occurrence_matrices[z].get(
-                            demographic_group, None
+                time_interval = 0
+                for j in range(i + 1, len(completion)):
+                    future_concept_id = completion[j]
+                    if is_att_token(future_concept_id):
+                        time_interval += extract_time_interval_in_days(
+                            future_concept_id
                         )
-                        if co_occurrence:
-                            reward += co_occurrence.get(
-                                (current_concept_id, future_concept_id), 0.0
+                        continue
+
+                    if not future_concept_id.isnumeric():
+                        continue
+
+                    for z, (time_window_start, time_window) in enumerate(
+                        zip(time_window_starts, time_windows)
+                    ):
+                        if (
+                            time_window_start
+                            <= time_interval
+                            <= time_window_start + time_window
+                        ):
+                            co_occurrence = co_occurrence_matrices[z].get(
+                                demographic_group, None
                             )
-        rewards.append(reward / len(completion))
+                            if co_occurrence:
+                                reward += co_occurrence.get(
+                                    (current_concept_id, future_concept_id), 0.0
+                                )
+            reward = reward / len(completion)
+        rewards.append(reward)
     return rewards
 
 
