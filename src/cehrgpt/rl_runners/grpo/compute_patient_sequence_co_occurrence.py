@@ -87,7 +87,10 @@ def main(args):
         .where(
             f.datediff(f.col("future.date"), f.col("past.date")) >= time_window_start
         )
-        .where(f.datediff(f.col("future.date"), f.col("past.date")) <= time_window)
+        .where(
+            f.datediff(f.col("future.date"), f.col("past.date"))
+            <= time_window_start + time_window
+        )
         .groupBy(
             f.col("past.age_group").alias("age_group"),
             f.col("past.gender").alias("gender"),
