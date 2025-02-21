@@ -1,5 +1,4 @@
 import argparse
-import logging
 import os
 import uuid
 from datetime import date, timedelta
@@ -15,9 +14,6 @@ from transformers.utils import logging
 
 from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
     get_cehrgpt_patient_converter,
-)
-from cehrgpt.generation.simple_generator.compute_conditional_concept_probability import (
-    create_age_group_udf,
 )
 from cehrgpt.gpt_utils import (
     extract_time_interval_in_days,
@@ -350,6 +346,11 @@ class ConceptTransitionTokenizer:
 
         except KeyError:
             raise KeyError(f"Concept {concept_id} not found in vocabulary")
+
+
+def create_age_group_udf(age):
+    group_number = age // 10
+    return f"age:{group_number * 10}-{(group_number + 1) * 10}"
 
 
 def generate_and_save_sequences(
