@@ -176,11 +176,14 @@ def generate_and_save_sequences(
 
     for i in range(n_patients):
         current_token = "[START]"
-        tokens = [current_token]
+        tokens = []
 
-        while current_token != "[END]" and len(tokens) < max_length:
+        while len(tokens) < max_length:
             current_token, _ = tokenizer.sample(current_token, top_k=top_k)
-            tokens.append(current_token)
+            if current_token == "[END]":
+                break
+            else:
+                tokens.append(current_token)
 
         cehrgpt_patient = get_cehrgpt_patient_converter(tokens, concept_domain_map)
         if cehrgpt_patient.is_validation_passed:
