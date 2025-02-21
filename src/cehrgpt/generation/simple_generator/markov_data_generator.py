@@ -14,12 +14,7 @@ from transformers.utils import logging
 from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
     get_cehrgpt_patient_converter,
 )
-from cehrgpt.gpt_utils import (
-    extract_time_interval_in_days,
-    is_att_token,
-    is_visit_start,
-    is_visit_type_token,
-)
+from cehrgpt.gpt_utils import is_visit_start, is_visit_type_token
 from cehrgpt.omop.vocab_utils import generate_concept_maps
 
 logger = logging.get_logger("transformers")
@@ -187,33 +182,23 @@ class ConceptTransitionTokenizer:
         medical_df = prob_df.filter(pl.col("age_group") != "age:-10-0")
         # Group by visit type and age group
         for visit_type in medical_df["visit_concept_id"].unique().to_list():
-            for age_group in medical_df["age_group"].unique().to_list():
-                subset = medical_df.filter(
-                    (pl.col("visit_concept_id") == visit_type)
-                    & (pl.col("age_group") == age_group)
-                )
+            subset = medical_df.filter(pl.col("visit_concept_id") == visit_type)
 
-                if len(subset) == 0:
-                    continue
-                logger.info(
-                    f"Build the transition matrix for age: {age_group} visit: {visit_type}"
-                )
-                row_indices = [
-                    self.concept_to_idx[row[2]] for row in subset.iter_rows()
-                ]
-                col_indices = [
-                    self.concept_to_idx[row[3]] for row in subset.iter_rows()
-                ]
-                values = [row[6] for row in subset.iter_rows()]
+            if len(subset) == 0:
+                continue
+            logger.info(f"Build the transition matrix for visit: {visit_type}")
+            row_indices = [self.concept_to_idx[row[2]] for row in subset.iter_rows()]
+            col_indices = [self.concept_to_idx[row[3]] for row in subset.iter_rows()]
+            values = [row[6] for row in subset.iter_rows()]
 
-                matrix = sparse.coo_matrix(
-                    (values, (row_indices, col_indices)),
-                    shape=(self.vocab_size, self.vocab_size),
-                ).tocsr()
+            matrix = sparse.coo_matrix(
+                (values, (row_indices, col_indices)),
+                shape=(self.vocab_size, self.vocab_size),
+            ).tocsr()
 
-                # Normalize and add to dictionary
-                self._normalize_sparse_matrix(matrix)
-                self.medical_matrices[(str(visit_type), age_group)] = matrix
+            # Normalize and add to dictionary
+            self._normalize_sparse_matrix(matrix)
+            self.medical_matrices[(str(visit_type))] = matrix
 
         # Normalize matrices
         self._normalize_sparse_matrix(self.demographic_matrix)
@@ -327,7 +312,6 @@ class ConceptTransitionTokenizer:
     def sample(
         self,
         visit_concept_id: str,
-        age_group: str,
         concept_id: str,
         top_k: Optional[int] = None,
         temperature: float = 1.0,
@@ -338,7 +322,6 @@ class ConceptTransitionTokenizer:
 
         Args:
             visit_concept_id: Current visit type
-            age_group: Current age group
             concept_id: Current concept
             top_k: If provided, sample only from top-k most likely concepts
             temperature: Temperature for sampling (higher = more random)
@@ -347,11 +330,9 @@ class ConceptTransitionTokenizer:
         if random_state is not None:
             np.random.seed(random_state)
 
-        matrix = self.medical_matrices.get((visit_concept_id, age_group))
+        matrix = self.medical_matrices.get(visit_concept_id)
         if matrix is None:
-            raise ValueError(
-                f"No transitions for visit type {visit_concept_id} and age group {age_group}"
-            )
+            raise ValueError(f"No transitions for visit type {visit_concept_id}")
 
         try:
             idx = self.concept_to_idx[concept_id]
@@ -424,29 +405,20 @@ def generate_and_save_sequences(
                     current_token, top_k=top_k
                 )
                 tokens.append(current_token)
-                if current_token.startswith("year:"):
-                    start_year = int(current_token.split(":")[1])
-                elif current_token.startswith("age:"):
-                    current_age = int(current_token.split(":")[1].split("-")[0])
 
             tokens.append("[VS]")
             visit_concept_id, _ = tokenizer.sample_first_visit_type(top_k=top_k)
             tokens.append(visit_concept_id)
             current_token = visit_concept_id
 
-            if any(x is None for x in [current_age, visit_concept_id]):
+            if visit_concept_id is None:
                 continue
 
-            # Initialize temporal tracking
-            age_group = create_age_group_udf(current_age)
-
-            logger.debug(f"Initial age_group: {age_group}")
             logger.debug(f"Initial visit_concept_id: {visit_concept_id}")
             while len(tokens) < max_length:
                 try:
                     current_token, _ = tokenizer.sample(
                         visit_concept_id,
-                        age_group,
                         current_token,
                         top_k=top_k,
                         temperature=temperature,
@@ -454,13 +426,6 @@ def generate_and_save_sequences(
                     if current_token == "[END]":
                         break
                     tokens.append(current_token)
-
-                    # if is_att_token(current_token):
-                    #     day_delta = extract_time_interval_in_days(current_token)
-                    #     current_date += timedelta(days=day_delta)
-                    #     current_age = current_date.year - birth_year
-                    #     age_group = create_age_group_udf(current_age)
-                    #     logger.debug(f"Updated age_group: {age_group}")
                     if is_visit_type_token(current_token):
                         visit_concept_id = current_token
 
