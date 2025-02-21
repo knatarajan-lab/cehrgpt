@@ -478,13 +478,29 @@ def generate_and_save_sequences(
                         tokens, concept_domain_map
                     )
                     if cehrgpt_patient.is_validation_passed:
-                        sequences.append({"concept_ids": tokens})
+                        sequences.append(
+                            {
+                                "concept_ids": tokens,
+                                "concept_value_masks": np.zeros_like(tokens),
+                                "number_as_values": np.zeros_like(tokens),
+                                "concept_as_values": np.zeros_like(tokens, dtype=int),
+                                "is_numeric_types": np.zeros_like(tokens, dtype=bool),
+                            }
+                        )
                     else:
                         logger.warning(
                             f"The validation failed due to: {cehrgpt_patient.get_error_messages()}"
                         )
                 else:
-                    sequences.append({"concept_ids": tokens})
+                    sequences.append(
+                        {
+                            "concept_ids": tokens,
+                            "concept_value_masks": np.zeros_like(tokens),
+                            "number_as_values": np.zeros_like(tokens),
+                            "concept_as_values": np.zeros_like(tokens, dtype=int),
+                            "is_numeric_types": np.zeros_like(tokens, dtype=bool),
+                        }
+                    )
 
         except Exception as e:
             logger.error(f"Error generating sequence {i}: {str(e)}")
