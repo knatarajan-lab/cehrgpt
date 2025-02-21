@@ -132,6 +132,7 @@ class ConceptTransitionTokenizer:
         self.visit_type_vector = np.zeros(self.vocab_size)
 
         # Process demographic transitions
+        print("Build the demographic transition matrix")
         demographic_df = prob_df.filter(pl.col("age_group") == "age:-10-0")
         row_indices = [
             self.concept_to_idx[row[2]] for row in demographic_df.iter_rows()
@@ -140,13 +141,13 @@ class ConceptTransitionTokenizer:
             self.concept_to_idx[row[3]] for row in demographic_df.iter_rows()
         ]
         values = [row[6] for row in demographic_df.iter_rows()]
-
         self.demographic_matrix = sparse.coo_matrix(
             (values, (row_indices, col_indices)),
             shape=(self.vocab_size, self.vocab_size),
         ).tocsr()
 
         # Process visit type probabilities
+        print("Build the visit type probability distribution")
         visit_df = prob_df.filter(pl.col("concept_id_1") == "[VS]")
         for row in visit_df.iter_rows():
             j = self.concept_to_idx[row[3]]
@@ -165,7 +166,9 @@ class ConceptTransitionTokenizer:
 
                 if len(subset) == 0:
                     continue
-
+                print(
+                    f"Build the transition matrix for age: {age_group} visit: {visit_type}"
+                )
                 row_indices = [
                     self.concept_to_idx[row[2]] for row in subset.iter_rows()
                 ]
