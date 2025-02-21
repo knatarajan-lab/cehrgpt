@@ -26,12 +26,6 @@ class ConceptTransitionTokenizer:
             prob_df: Polars DataFrame with transition probabilities
             cache_dir: Optional directory to cache/load transition matrices
         """
-
-        # Process medical transitions
-        # Only keep age groups up to 90-100
-        valid_age_groups = [f"age:{i}-{i + 10}" for i in range(0, 91, 10)]
-        prob_df = prob_df.filter((pl.col("age_group").is_in(valid_age_groups)))
-
         self._initialize_vocabulary(prob_df)
 
         # Initialize matrices
@@ -135,47 +129,61 @@ class ConceptTransitionTokenizer:
     def _build_transition_matrices(self, prob_df: pl.DataFrame) -> None:
         """Build transition matrices using sparse matrices."""
         # Initialize sparse matrices
-        self.demographic_matrix = sparse.lil_matrix((self.vocab_size, self.vocab_size))
         self.visit_type_vector = np.zeros(self.vocab_size)
-        self.medical_matrices = {}  # {visit_type: sparse_matrix}
 
         # Process demographic transitions
-        print(f"Building the demographic transition matrix")
         demographic_df = prob_df.filter(pl.col("age_group") == "age:-10-0")
-        for row in demographic_df.iter_rows():
-            i = self.concept_to_idx[row[2]]
-            j = self.concept_to_idx[row[3]]
-            self.demographic_matrix[i, j] = row[6]
+        row_indices = [
+            self.concept_to_idx[row[2]] for row in demographic_df.iter_rows()
+        ]
+        col_indices = [
+            self.concept_to_idx[row[3]] for row in demographic_df.iter_rows()
+        ]
+        values = [row[6] for row in demographic_df.iter_rows()]
+
+        self.demographic_matrix = sparse.coo_matrix(
+            (values, (row_indices, col_indices)),
+            shape=(self.vocab_size, self.vocab_size),
+        ).tocsr()
 
         # Process visit type probabilities
-        print(f"Building the visit type probability distribution")
         visit_df = prob_df.filter(pl.col("concept_id_1") == "[VS]")
         for row in visit_df.iter_rows():
             j = self.concept_to_idx[row[3]]
             self.visit_type_vector[j] = row[6]
 
-        # Process medical transitions - aggregate across age groups
-        medical_df = (
-            prob_df.filter(pl.col("age_group") != "age:-10-0")
-            .group_by(["visit_concept_id", "concept_id_1", "concept_id_2"])
-            .agg(pl.col("prob").mean())
-        )
+        # Process medical transitions
+        medical_df = prob_df.filter(pl.col("age_group") != "age:-10-0")
 
-        # Group by visit type
+        # Group by visit type and age group
         for visit_type in medical_df["visit_concept_id"].unique().to_list():
-            matrix = sparse.lil_matrix((self.vocab_size, self.vocab_size))
-            subset = medical_df.filter(pl.col("visit_concept_id") == visit_type)
-            print(f"Building transition matrices for {visit_type}")
-            for row in subset.iter_rows():
-                i = self.concept_to_idx[row[1]]  # concept_id_1
-                j = self.concept_to_idx[row[2]]  # concept_id_2
-                matrix[i, j] = row[3]  # aggregated probability
+            for age_group in medical_df["age_group"].unique().to_list():
+                subset = medical_df.filter(
+                    (pl.col("visit_concept_id") == visit_type)
+                    & (pl.col("age_group") == age_group)
+                )
 
-            # Normalize and convert to CSR format for efficient operations
-            self._normalize_sparse_matrix(matrix)
-            self.medical_matrices[str(visit_type)] = matrix.tocsr()
+                if len(subset) == 0:
+                    continue
 
-        # Normalize demographic matrix
+                row_indices = [
+                    self.concept_to_idx[row[2]] for row in subset.iter_rows()
+                ]
+                col_indices = [
+                    self.concept_to_idx[row[3]] for row in subset.iter_rows()
+                ]
+                values = [row[6] for row in subset.iter_rows()]
+
+                matrix = sparse.coo_matrix(
+                    (values, (row_indices, col_indices)),
+                    shape=(self.vocab_size, self.vocab_size),
+                ).tocsr()
+
+                # Normalize and add to dictionary
+                self._normalize_sparse_matrix(matrix)
+                self.medical_matrices[(str(visit_type), age_group)] = matrix
+
+        # Normalize matrices
         self._normalize_sparse_matrix(self.demographic_matrix)
         self.demographic_matrix = self.demographic_matrix.tocsr()
 
@@ -276,6 +284,7 @@ class ConceptTransitionTokenizer:
     def sample(
         self,
         visit_concept_id: str,
+        age_group: str,
         concept_id: str,
         top_k: Optional[int] = None,
         random_state: Optional[int] = None,
@@ -284,23 +293,20 @@ class ConceptTransitionTokenizer:
         if random_state is not None:
             np.random.seed(random_state)
 
-        matrix = self.medical_matrices.get(visit_concept_id)
+        matrix = self.medical_matrices.get((visit_concept_id, age_group))
         if matrix is None:
-            raise ValueError(f"No transitions for visit type {visit_concept_id}")
+            raise ValueError(
+                f"No transitions for visit type {visit_concept_id} and age group {age_group}"
+            )
 
         try:
             idx = self.concept_to_idx[concept_id]
             probs = matrix[idx].toarray().flatten()
 
-            if probs.sum() == 0:
-                raise ValueError(f"No valid transitions for {concept_id}")
-
-            # Get non-zero probability indices
             non_zero_indices = np.nonzero(probs)[0]
             if len(non_zero_indices) == 0:
                 raise ValueError(f"No valid transitions for {concept_id}")
 
-            # Sample only from non-zero probabilities
             if top_k is not None:
                 top_k = min(top_k, len(non_zero_indices))
                 sorted_indices = non_zero_indices[
@@ -348,8 +354,8 @@ def generate_and_save_sequences(
                     current_token, top_k=top_k
                 )
                 tokens.append(current_token)
-                # if current_token.startswith("age:"):
-                #     age_group = age_group_func(current_token)
+                if current_token.startswith("age:"):
+                    age_group = current_token
 
             tokens.append("[VS]")
             # Add first visit type
@@ -363,7 +369,7 @@ def generate_and_save_sequences(
             # Generate medical concepts
             while len(tokens) < max_length:
                 current_token, _ = tokenizer.sample(
-                    visit_concept_id, current_token, top_k=top_k
+                    visit_concept_id, age_group, current_token, top_k=top_k
                 )
                 tokens.append(current_token)
 
