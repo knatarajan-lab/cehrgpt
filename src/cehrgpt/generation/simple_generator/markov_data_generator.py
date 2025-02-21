@@ -1,7 +1,6 @@
 import argparse
 import os
 import uuid
-from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -417,7 +416,6 @@ def generate_and_save_sequences(
         current_token = "[START]"
         tokens = []  # Don't initialize with START token
         current_age: Optional[int] = None
-        start_year: Optional[int] = None
 
         try:
             # Generate 4 demographic tokens
@@ -436,12 +434,10 @@ def generate_and_save_sequences(
             tokens.append(visit_concept_id)
             current_token = visit_concept_id
 
-            if any(x is None for x in [current_age, visit_concept_id, start_year]):
+            if any(x is None for x in [current_age, visit_concept_id]):
                 continue
 
             # Initialize temporal tracking
-            birth_year = start_year - current_age
-            current_date = date(start_year, 1, 1)
             age_group = create_age_group_udf(current_age)
 
             logger.debug(f"Initial age_group: {age_group}")
@@ -459,13 +455,13 @@ def generate_and_save_sequences(
                         break
                     tokens.append(current_token)
 
-                    if is_att_token(current_token):
-                        day_delta = extract_time_interval_in_days(current_token)
-                        current_date += timedelta(days=day_delta)
-                        current_age = current_date.year - birth_year
-                        age_group = create_age_group_udf(current_age)
-                        logger.debug(f"Updated age_group: {age_group}")
-                    elif is_visit_type_token(current_token):
+                    # if is_att_token(current_token):
+                    #     day_delta = extract_time_interval_in_days(current_token)
+                    #     current_date += timedelta(days=day_delta)
+                    #     current_age = current_date.year - birth_year
+                    #     age_group = create_age_group_udf(current_age)
+                    #     logger.debug(f"Updated age_group: {age_group}")
+                    if is_visit_type_token(current_token):
                         visit_concept_id = current_token
 
                 except ValueError as e:
