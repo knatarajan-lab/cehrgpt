@@ -192,75 +192,65 @@ def generate_and_save_sequences(
     max_length: int = 1024,
     top_k: int = 100,
 ) -> None:
-    """
-    Generate synthetic patient sequences and save them in batches.
-
-    Args:
-        tokenizer: Initialized ConceptTransitionTokenizer
-        output_dir: Output directory path
-        batch_size: Number of sequences to generate before saving to disk
-        n_patients: Total number of patients to generate
-        concept_domain_map: concept to domain map
-        max_length: Maximum sequence length
-        top_k: Top k concepts to sample from
-    """
+    """Generate synthetic patient sequences and save them in batches."""
     sequences = []
     batch_num = 0
 
-    for i in tqdm(range(n_patients), total=n_patients):
+    for i in range(n_patients):
         current_token = "[START]"
         tokens = []
-
         age_group = None
-        visit_concept_id = None
-
-        while len(tokens) < max_length:
-            if len(tokens) < 4:
+        try:
+            # Generate demographic info first (4 tokens)
+            for _ in range(4):  # START is already added, need 3 more demographic tokens
                 current_token, _ = tokenizer.sample_demographic(
                     current_token, top_k=top_k
                 )
-                tokens.append(current_token)  # Add demographic tokens
+                tokens.append(current_token)
                 if current_token.startswith("age:"):
                     age_group = age_group_func(current_token)
-            elif len(tokens) == 5:
-                # The first visit type will be generated at the 6th position
-                current_token, _ = tokenizer.sample_first_visit_type(
-                    top_k=top_k
-                )  # Added top_k parameter
-                visit_concept_id = current_token
-                tokens.append(current_token)  # Add visit type token
-            elif visit_concept_id is not None and age_group is not None:
+
+            tokens.append("[VS]")
+            # Add first visit type
+            visit_concept_id, _ = tokenizer.sample_first_visit_type(top_k=top_k)
+            tokens.append(visit_concept_id)
+            current_token = visit_concept_id
+
+            if age_group is None or visit_concept_id is None:
+                continue
+
+            # Generate medical concepts
+            while len(tokens) < max_length:
                 current_token, _ = tokenizer.sample(
                     visit_concept_id, age_group, current_token, top_k=top_k
                 )
-                if current_token == "[END]":
-                    tokens.append(current_token)  # Add END token
-                    break
-                else:
-                    tokens.append(current_token)
+                tokens.append(current_token)
 
-        if len(tokens) < 5:  # Minimum sequence length check
-            print(f"Sequence too short: {tokens}")
+                if current_token == "[END]":
+                    break
+
+            # Validate and save sequence
+            cehrgpt_patient = get_cehrgpt_patient_converter(tokens, concept_domain_map)
+            if cehrgpt_patient.is_validation_passed:
+                sequences.append({"concept_ids": tokens})
+            else:
+                print(f"Invalid sequence: {cehrgpt_patient.get_error_messages()}")
+
+        except Exception as e:
+            print(f"Error generating sequence: {str(e)}")
             continue
 
-        cehrgpt_patient = get_cehrgpt_patient_converter(tokens, concept_domain_map)
-        if cehrgpt_patient.is_validation_passed:
-            sequences.append({"concept_ids": tokens})
-        else:
-            print(
-                f"Invalid generated patient sequence due to: {cehrgpt_patient.get_error_messages()}"
-            )
-
-        # When batch is full or we've reached the end, save to disk
+        # Save batch when full
         if len(sequences) >= batch_size or i == n_patients - 1:
-            batch_df = pd.DataFrame(sequences)
-            output_file = output_dir / f"batch_{batch_num}_{uuid.uuid4()}.parquet"
-            batch_df.to_parquet(output_file)
-
-            # Clear sequences list for next batch
-            sequences = []
-            batch_num += 1
-            print(f"Saved batch {batch_num}, processed {i + 1}/{n_patients} patients")
+            if sequences:  # Only save if we have valid sequences
+                batch_df = pd.DataFrame(sequences)
+                output_file = output_dir / f"batch_{batch_num}_{uuid.uuid4()}.parquet"
+                batch_df.to_parquet(output_file)
+                sequences = []
+                batch_num += 1
+                print(
+                    f"Saved batch {batch_num}, processed {i + 1}/{n_patients} patients"
+                )
 
 
 def main():
