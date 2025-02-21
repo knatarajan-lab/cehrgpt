@@ -298,6 +298,7 @@ def main(args):
                     concept_ids, concept_domain_map
                 )
                 if not patient_converter.is_validation_passed:
+                    LOG.debug(patient_converter.get_error_messages())
                     continue
             (
                 concept_ids,
