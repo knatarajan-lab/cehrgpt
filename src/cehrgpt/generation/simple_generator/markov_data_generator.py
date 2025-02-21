@@ -1,3 +1,7 @@
+import argparse
+import os
+import uuid
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -6,22 +10,32 @@ import polars as pl
 
 
 class ConceptTransitionTokenizer:
+    """A tokenizer for handling concept transitions with probability-based sampling."""
+
     def __init__(self, prob_df: pl.DataFrame):
         """
         Initialize tokenizer with conditional probability dataframe.
 
         Args:
             prob_df: Polars DataFrame with columns [concept_id_1, concept_id_2, prob]
+                    representing transition probabilities between concepts
         """
-        # Get unique concepts from both columns
-        # Get unique concepts from both columns
-        concepts1 = prob_df.select("concept_id_1").unique()
-        concepts2 = prob_df.select("concept_id_2").unique()
+        self.vocab_size = 0
+        self.concept_to_token = {}
+        self.token_to_concept = {}
+        self.transition_matrix = None
+        self._initialize_vocabulary(prob_df)
+        self._build_transition_matrix(prob_df)
 
-        # Rename columns to match before concatenation
-        concepts1 = concepts1.rename({"concept_id_1": "concept"})
-        concepts2 = concepts2.rename({"concept_id_2": "concept"})
-
+    def _initialize_vocabulary(self, prob_df: pl.DataFrame) -> None:
+        """Initialize vocabulary mappings from probability dataframe."""
+        # Get unique concepts from both columns
+        concepts1 = (
+            prob_df.select("concept_id_1").unique().rename({"concept_id_1": "concept"})
+        )
+        concepts2 = (
+            prob_df.select("concept_id_2").unique().rename({"concept_id_2": "concept"})
+        )
         unique_concepts = pl.concat([concepts1, concepts2]).unique()
 
         # Create token mappings
@@ -32,71 +46,36 @@ class ConceptTransitionTokenizer:
         self.token_to_concept = {v: k for k, v in self.concept_to_token.items()}
         self.vocab_size = len(self.concept_to_token)
 
-        # Create transition matrix
+    def _build_transition_matrix(self, prob_df: pl.DataFrame) -> None:
+        """Build and normalize the transition probability matrix."""
         self.transition_matrix = np.zeros((self.vocab_size, self.vocab_size))
 
         # Fill transition matrix with probabilities
         for row in prob_df.iter_rows():
-            i = self.concept_to_token[row[0]]  # concept_id_1
-            j = self.concept_to_token[row[1]]  # concept_id_2
-            self.transition_matrix[i, j] = row[2]  # prob
+            i, j = self.concept_to_token[row[0]], self.concept_to_token[row[1]]
+            self.transition_matrix[i, j] = row[2]
 
-        # Normalize probabilities for each concept_id_1
+        # Normalize probabilities
         row_sums = self.transition_matrix.sum(axis=1)
-        # Avoid division by zero for rows that sum to 0
-        row_sums[row_sums == 0] = 1
+        row_sums[row_sums == 0] = 1  # Avoid division by zero
         self.transition_matrix = self.transition_matrix / row_sums[:, np.newaxis]
 
     def encode(self, concepts: List[str]) -> List[int]:
-        """
-        Convert concept IDs to token indices.
-
-        Args:
-            concepts: List of concept strings to encode
-
-        Returns:
-            List of token indices
-
-        Raises:
-            KeyError: If a concept is not in the vocabulary
-        """
+        """Convert concept IDs to token indices."""
         try:
             return [self.concept_to_token[c] for c in concepts]
         except KeyError as e:
             raise KeyError(f"Concept {e} not found in vocabulary")
 
     def decode(self, tokens: List[int]) -> List[str]:
-        """
-        Convert token indices back to concept IDs.
-
-        Args:
-            tokens: List of token indices to decode
-
-        Returns:
-            List of concept strings
-
-        Raises:
-            KeyError: If a token index is not valid
-        """
+        """Convert token indices back to concept IDs."""
         try:
             return [self.token_to_concept[t] for t in tokens]
         except KeyError as e:
             raise KeyError(f"Token {e} not found in vocabulary")
 
-    def get_transition_prob(self, concept_id_1: str, concept_id_2: str):
-        """
-        Get transition probability between two concepts.
-
-        Args:
-            concept_id_1: Source concept string
-            concept_id_2: Target concept string
-
-        Returns:
-            Transition probability from concept_id_1 to concept_id_2
-
-        Raises:
-            KeyError: If either concept is not in the vocabulary
-        """
+    def get_transition_prob(self, concept_id_1: str, concept_id_2: str) -> float:
+        """Get transition probability between two concepts."""
         try:
             token1 = self.concept_to_token[concept_id_1]
             token2 = self.concept_to_token[concept_id_2]
@@ -107,26 +86,9 @@ class ConceptTransitionTokenizer:
     def get_next_concepts(
         self, concept_id: str, top_k: int = 5
     ) -> List[Tuple[str, float]]:
-        """
-        Get top-k most likely next concepts and their probabilities.
-
-        Args:
-            concept_id: Source concept string
-            top_k: Number of top concepts to return
-
-        Returns:
-            List of tuples (concept_string, probability) sorted by probability
-
-        Raises:
-            KeyError: If the concept is not in the vocabulary
-            ValueError: If top_k is less than 1 or greater than vocabulary size
-        """
-        if top_k < 1:
-            raise ValueError("top_k must be at least 1")
-        if top_k > self.vocab_size:
-            raise ValueError(
-                f"top_k cannot be larger than vocabulary size ({self.vocab_size})"
-            )
+        """Get top-k most likely next concepts and their probabilities."""
+        if not 1 <= top_k <= self.vocab_size:
+            raise ValueError(f"top_k must be between 1 and {self.vocab_size}")
 
         try:
             token = self.concept_to_token[concept_id]
@@ -145,87 +107,128 @@ class ConceptTransitionTokenizer:
         """
         Randomly sample a next concept based on transition probabilities.
 
-        If top_k is provided, sample only from the top-k most likely concepts.
-
         Args:
             concept_id: Source concept string
-            top_k: Optional, if provided, sample only from top-k most likely concepts
+            top_k: If provided, sample only from top-k most likely concepts
             random_state: Optional random seed for reproducibility
 
         Returns:
             Tuple of (sampled_concept, probability)
-
-        Raises:
-            KeyError: If the concept is not in the vocabulary
-            ValueError: If top_k is less than 1 or greater than vocabulary size
         """
-        try:
-            if random_state is not None:
-                np.random.seed(random_state)
+        if random_state is not None:
+            np.random.seed(random_state)
 
+        try:
             token = self.concept_to_token[concept_id]
             probs = self.transition_matrix[token]
 
             if top_k is not None:
-                if top_k < 1:
-                    raise ValueError("top_k must be at least 1")
-                if top_k > self.vocab_size:
-                    raise ValueError(
-                        f"top_k cannot be larger than vocabulary size ({self.vocab_size})"
-                    )
+                if not 1 <= top_k <= self.vocab_size:
+                    raise ValueError(f"top_k must be between 1 and {self.vocab_size}")
 
-                # Get top-k indices and their probabilities
                 top_indices = np.argsort(probs)[-top_k:]
                 top_probs = probs[top_indices]
+                top_probs = top_probs / top_probs.sum()  # Renormalize
 
-                # Renormalize probabilities of top-k concepts
-                top_probs = top_probs / top_probs.sum()
-
-                # Sample from top-k
                 sampled_idx = np.random.choice(top_indices, p=top_probs)
-                sampled_concept = self.token_to_concept[sampled_idx]
-                sampled_prob = probs[sampled_idx]  # Return original probability
             else:
-                # Sample from all concepts
                 sampled_idx = np.random.choice(self.vocab_size, p=probs)
-                sampled_concept = self.token_to_concept[sampled_idx]
-                sampled_prob = probs[sampled_idx]
 
-            return sampled_concept, sampled_prob
+            return self.token_to_concept[sampled_idx], probs[sampled_idx]
 
         except KeyError:
             raise KeyError(f"Concept {concept_id} not found in vocabulary")
         except ValueError as e:
             if "probabilities do not sum to 1" in str(e):
-                # Handle numerical precision issues
                 probs = probs / probs.sum()
                 return self.sample(concept_id, top_k, random_state)
             raise e
 
 
-if __name__ == "__main__":
-    import argparse
-    import os
+def generate_and_save_sequences(
+    tokenizer: ConceptTransitionTokenizer,
+    output_dir: Path,
+    batch_size: int,
+    n_patients: int,
+    max_length: int = 1024,
+    top_k: int = 100,
+) -> None:
+    """
+    Generate synthetic patient sequences and save them in batches.
 
-    parser = argparse.ArgumentParser("Data generator")
-    parser.add_argument("--probability_table", dest="probability_table", required=True)
-    parser.add_argument("--output_folder", dest="output_folder", required=True)
-    args = parser.parse_args()
-    n_patients = 10_000
-    probability_table = pl.read_parquet(
-        os.path.join(args.probability_table, "*.parquet")
-    )
-    tokenizer = ConceptTransitionTokenizer(probability_table)
-    batched_seqs = []
+    Args:
+        tokenizer: Initialized ConceptTransitionTokenizer
+        output_dir: Output directory path
+        batch_size: Number of sequences to generate before saving to disk
+        n_patients: Total number of patients to generate
+        max_length: Maximum sequence length
+        top_k: Top k concepts to sample from
+    """
+    sequences = []
+    batch_num = 0
+
     for i in range(n_patients):
         current_token = "[START]"
         tokens = [current_token]
-        while current_token != "[END]":
-            current_token, _ = tokenizer.sample(current_token, top_k=100)
+
+        while current_token != "[END]" and len(tokens) < max_length:
+            current_token, _ = tokenizer.sample(current_token, top_k=top_k)
             tokens.append(current_token)
-            if len(tokens) > 1024:
-                break
-        batched_seqs.append({"concept_ids": tokens})
-    pd.DataFrame(batched_seqs, columns=["concept_ids"]).to_parquet(
-        os.path.join(args.output_folder, "batched_seqs.parquet")
+
+        sequences.append({"concept_ids": tokens})
+
+        # When batch is full or we've reached the end, save to disk
+        if len(sequences) >= batch_size or i == n_patients - 1:
+            batch_df = pd.DataFrame(sequences)
+            output_file = output_dir / f"batch_{batch_num}_{uuid.uuid4()}.parquet"
+            batch_df.to_parquet(output_file)
+
+            # Clear sequences list for next batch
+            sequences = []
+            batch_num += 1
+            print(f"Saved batch {batch_num}, processed {i + 1}/{n_patients} patients")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate synthetic patient sequences")
+    parser.add_argument(
+        "--probability_table", required=True, help="Path to probability table"
     )
+    parser.add_argument("--output_folder", required=True, help="Output directory")
+    parser.add_argument(
+        "--n_patients", required=True, type=int, help="Number of patients to generate"
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=1000,
+        help="Number of sequences to generate before saving to disk",
+    )
+
+    args = parser.parse_args()
+
+    # Ensure output directory exists
+    output_dir = Path(args.output_folder)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load probability table and initialize tokenizer
+    print("Loading probability table...")
+    prob_table = pl.read_parquet(os.path.join(args.probability_table, "*.parquet"))
+    tokenizer = ConceptTransitionTokenizer(prob_table)
+
+    print(f"Generating {args.n_patients} sequences in batches of {args.batch_size}...")
+    try:
+        generate_and_save_sequences(
+            tokenizer=tokenizer,
+            output_dir=output_dir,
+            batch_size=args.batch_size,
+            n_patients=args.n_patients,
+        )
+        print("Generation completed successfully!")
+    except Exception as e:
+        print(f"Error during sequence generation: {e}")
+        raise
+
+
+if __name__ == "__main__":
+    main()
