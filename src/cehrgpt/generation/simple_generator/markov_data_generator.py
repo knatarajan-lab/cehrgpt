@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 import uuid
 from datetime import date, timedelta
@@ -10,6 +11,7 @@ import pandas as pd
 import polars as pl
 from scipy import sparse
 from tqdm import tqdm
+from transformers.utils import logging
 
 from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
     get_cehrgpt_patient_converter,
@@ -24,6 +26,8 @@ from cehrgpt.gpt_utils import (
 )
 from cehrgpt.omop.vocab_utils import generate_concept_maps
 
+logger = logging.get_logger("transformers")
+
 
 class ConceptTransitionTokenizer:
     def __init__(self, prob_df: pl.DataFrame, cache_dir: Optional[Path] = None):
@@ -34,15 +38,6 @@ class ConceptTransitionTokenizer:
             prob_df: Polars DataFrame with transition probabilities
             cache_dir: Optional directory to cache/load transition matrices
         """
-        # Process medical transitions
-        # Only keep age groups up to 90-100
-        valid_age_groups = [f"age:{i}-{i + 10}" for i in range(0, 91, 10)]
-
-        prob_df = prob_df.filter(
-            (pl.col("age_group").is_in(valid_age_groups))
-            | (pl.col("age_group") == "age:-10-0")
-        )
-
         self._initialize_vocabulary(prob_df)
 
         # Initialize matrices
@@ -56,7 +51,7 @@ class ConceptTransitionTokenizer:
 
             # Try to load from cache first
             if self._load_from_cache(cache_dir):
-                print("Loaded transition matrices from cache")
+                logger.info("Loaded transition matrices from cache")
                 return
 
         # Build matrices if not loaded from cache
@@ -113,8 +108,8 @@ class ConceptTransitionTokenizer:
 
             # Load vocabulary
             vocab_data = joblib.load(vocab_file)
-            if not np.array_equal(self.vocab, vocab_data["vocab"]):
-                print("Cache vocabulary doesn't match current data")
+            if len(self.vocab) != len(vocab_data["vocab"]):
+                logger.error("Cache vocabulary doesn't match current data")
                 return False
 
             # Load matrices
@@ -125,7 +120,7 @@ class ConceptTransitionTokenizer:
             return True
 
         except Exception as e:
-            print(f"Error loading from cache: {str(e)}")
+            logger.exception(f"Error loading from cache: {str(e)}")
             return False
 
     def _initialize_vocabulary(self, prob_df: pl.DataFrame) -> None:
@@ -149,7 +144,7 @@ class ConceptTransitionTokenizer:
         self.visit_type_vector = np.zeros(self.vocab_size)
 
         # Process demographic transitions
-        print("Build the demographic transition matrix")
+        logger.info("Build the demographic transition matrix")
         demographic_df = prob_df.filter(pl.col("age_group") == "age:-10-0")
         row_indices = [
             self.concept_to_idx[row[2]] for row in demographic_df.iter_rows()
@@ -164,11 +159,20 @@ class ConceptTransitionTokenizer:
         ).tocsr()
 
         # Process visit type probabilities
-        print("Build the visit type probability distribution")
+        logger.info("Build the visit type probability distribution")
         visit_df = prob_df.filter(pl.col("concept_id_1") == "[VS]")
         for row in visit_df.iter_rows():
             j = self.concept_to_idx[row[3]]
             self.visit_type_vector[j] = row[6]
+
+        # Process medical transitions
+        # Only keep age groups up to 90-100
+        valid_age_groups = [f"age:{i}-{i + 10}" for i in range(0, 91, 10)]
+
+        prob_df = prob_df.filter(
+            (pl.col("age_group").is_in(valid_age_groups))
+            | (pl.col("age_group") == "age:-10-0")
+        )
 
         medical_df = prob_df.filter(pl.col("age_group") != "age:-10-0")
         # Group by visit type and age group
@@ -181,7 +185,7 @@ class ConceptTransitionTokenizer:
 
                 if len(subset) == 0:
                     continue
-                print(
+                logger.info(
                     f"Build the transition matrix for age: {age_group} visit: {visit_type}"
                 )
                 row_indices = [
@@ -392,6 +396,8 @@ def generate_and_save_sequences(
             current_date = date(start_year, 1, 1)
             age_group = create_age_group_udf(current_age)
 
+            logger.debug(f"Initial age_group: {age_group}")
+            logger.debug(f"Initial visit_concept_id: {visit_concept_id}")
             while len(tokens) < max_length:
                 try:
                     current_token, _ = tokenizer.sample(
@@ -407,11 +413,12 @@ def generate_and_save_sequences(
                         current_date += timedelta(days=day_delta)
                         current_age = current_date.year - birth_year
                         age_group = create_age_group_udf(current_age)
+                        logger.debug(f"Updated age_group: {age_group}")
                     elif is_visit_type_token(current_token):
                         visit_concept_id = current_token
 
                 except ValueError as e:
-                    print(f"Error in sequence generation: {e}")
+                    logger.error(f"Error in sequence generation: {e}")
                     break
 
             if tokens[-1] in ["[END]", "[VE]"]:
@@ -422,7 +429,7 @@ def generate_and_save_sequences(
                     sequences.append({"concept_ids": tokens})
 
         except Exception as e:
-            print(f"Error generating sequence {i}: {str(e)}")
+            logger.error(f"Error generating sequence {i}: {str(e)}")
             continue
 
         # Save batch when full
@@ -433,7 +440,7 @@ def generate_and_save_sequences(
                 batch_df.to_parquet(output_file)
                 sequences = []
                 batch_num += 1
-                print(
+                logger.info(
                     f"Saved batch {batch_num}, processed {i + 1}/{n_patients} patients"
                 )
 
@@ -463,15 +470,17 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load probability table and initialize tokenizer
-    print("Loading probability table...")
+    logger.info("Loading probability table...")
     prob_table = pl.read_parquet(os.path.join(args.probability_table, "*.parquet"))
-    print("Building the transition matrix...")
+    logger.info("Building the transition matrix...")
     tokenizer = ConceptTransitionTokenizer(prob_table, args.cache_dir)
-    print("Building the concept table...")
+    logger.info("Building the concept table...")
     concept = pl.read_parquet(os.path.join(args.vocabulary_dir, "concept", "*.parquet"))
     _, concept_domain_map = generate_concept_maps(concept)
 
-    print(f"Generating {args.n_patients} sequences in batches of {args.batch_size}...")
+    logger.info(
+        f"Generating {args.n_patients} sequences in batches of {args.batch_size}..."
+    )
     try:
         generate_and_save_sequences(
             tokenizer=tokenizer,
@@ -480,9 +489,9 @@ def main():
             n_patients=args.n_patients,
             concept_domain_map=concept_domain_map,
         )
-        print("Generation completed successfully!")
+        logger.info("Generation completed successfully!")
     except Exception as e:
-        print(f"Error during sequence generation: {e}")
+        logger.error(f"Error during sequence generation: {e}")
         raise
 
 
