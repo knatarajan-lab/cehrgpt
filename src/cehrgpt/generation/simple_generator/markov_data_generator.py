@@ -429,6 +429,10 @@ def generate_and_save_sequences(
                 )
                 if cehrgpt_patient.is_validation_passed:
                     sequences.append({"concept_ids": tokens})
+                else:
+                    logger.warning(
+                        f"The validation failed due to: {cehrgpt_patient.get_error_messages()}"
+                    )
 
         except Exception as e:
             logger.error(f"Error generating sequence {i}: {str(e)}")
