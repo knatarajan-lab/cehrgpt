@@ -38,8 +38,6 @@ class ConceptTransitionTokenizer:
             prob_df: Polars DataFrame with transition probabilities
             cache_dir: Optional directory to cache/load transition matrices
         """
-        self._initialize_vocabulary(prob_df)
-
         # Initialize matrices
         self.demographic_matrix = None
         self.visit_type_vector = None
@@ -53,6 +51,9 @@ class ConceptTransitionTokenizer:
             if self._load_from_cache(cache_dir):
                 logger.info("Loaded transition matrices from cache")
                 return
+
+        logger.info("Initializing vocabulary")
+        self._initialize_vocabulary(prob_df)
 
         # Build matrices if not loaded from cache
         self._build_transition_matrices(prob_df)
@@ -108,10 +109,9 @@ class ConceptTransitionTokenizer:
 
             # Load vocabulary
             vocab_data = joblib.load(vocab_file)
-            if len(self.vocab) != len(vocab_data["vocab"]):
-                logger.error("Cache vocabulary doesn't match current data")
-                return False
-
+            self.vocab = vocab_data["vocab"]
+            self.vocab_size = len(self.vocab)
+            self.concept_to_idx = vocab_data["concept_to_idx"]
             # Load matrices
             self.demographic_matrix = sparse.load_npz(demographic_file)
             self.visit_type_vector = np.load(visit_file)
