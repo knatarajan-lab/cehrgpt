@@ -405,10 +405,9 @@ def generate_and_save_sequences(
                     current_token, _ = tokenizer.sample(
                         visit_concept_id, age_group, current_token, top_k=top_k
                     )
-                    tokens.append(current_token)
-
                     if current_token == "[END]":
                         break
+                    tokens.append(current_token)
 
                     if is_att_token(current_token):
                         day_delta = extract_time_interval_in_days(current_token)
@@ -423,7 +422,7 @@ def generate_and_save_sequences(
                     logger.error(f"Error in sequence generation: {e}")
                     break
 
-            if tokens[-1] in ["[END]", "[VE]"]:
+            if tokens[-1] == "[VE]":
                 if validate:
                     cehrgpt_patient = get_cehrgpt_patient_converter(
                         tokens, concept_domain_map
