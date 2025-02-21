@@ -156,10 +156,15 @@ class ConceptTransitionTokenizer:
 
         # Process visit type probabilities
         logger.info("Build the visit type probability distribution")
-        visit_df = prob_df.filter(pl.col("concept_id_1") == "[VS]")
+        visit_df = (
+            prob_df.filter(pl.col("concept_id_1") == "[VS]")
+            .group_by(pl.col("concept_id_1"), pl.col("concept_id_2"))
+            .agg(pl.sum("count").alias("count"))
+        )
+        total_sum = visit_df.select(pl.col("count").sum()).to_numpy()[0, 0]
         for row in visit_df.iter_rows():
-            j = self.concept_to_idx[row[3]]
-            self.visit_type_vector[j] = row[6]
+            j = self.concept_to_idx[row[1]]
+            self.visit_type_vector[j] = row[2] / total_sum
 
         # Process medical transitions
         # Only keep age groups up to 90-100
