@@ -2,11 +2,16 @@ import argparse
 import os
 import uuid
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import polars as pl
+
+from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
+    get_cehrgpt_patient_converter,
+)
+from cehrgpt.omop.vocab_utils import generate_concept_maps
 
 
 class ConceptTransitionTokenizer:
@@ -150,6 +155,7 @@ def generate_and_save_sequences(
     output_dir: Path,
     batch_size: int,
     n_patients: int,
+    concept_domain_map: Dict[str, str],
     max_length: int = 1024,
     top_k: int = 100,
 ) -> None:
@@ -161,6 +167,7 @@ def generate_and_save_sequences(
         output_dir: Output directory path
         batch_size: Number of sequences to generate before saving to disk
         n_patients: Total number of patients to generate
+        concept_domain_map: concept to domain map
         max_length: Maximum sequence length
         top_k: Top k concepts to sample from
     """
@@ -175,7 +182,13 @@ def generate_and_save_sequences(
             current_token, _ = tokenizer.sample(current_token, top_k=top_k)
             tokens.append(current_token)
 
-        sequences.append({"concept_ids": tokens})
+        cehrgpt_patient = get_cehrgpt_patient_converter(tokens, concept_domain_map)
+        if cehrgpt_patient.is_validation_passed:
+            sequences.append({"concept_ids": tokens})
+        else:
+            print(
+                f"Invalid generated patient sequence due to: {cehrgpt_patient.get_error_messages()}"
+            )
 
         # When batch is full or we've reached the end, save to disk
         if len(sequences) >= batch_size or i == n_patients - 1:
@@ -194,6 +207,7 @@ def main():
     parser.add_argument(
         "--probability_table", required=True, help="Path to probability table"
     )
+    parser.add_argument("--vocabulary_dir", required=True, help="Vocabulary directory")
     parser.add_argument("--output_folder", required=True, help="Output directory")
     parser.add_argument(
         "--n_patients", required=True, type=int, help="Number of patients to generate"
@@ -214,7 +228,11 @@ def main():
     # Load probability table and initialize tokenizer
     print("Loading probability table...")
     prob_table = pl.read_parquet(os.path.join(args.probability_table, "*.parquet"))
+    print("Building the transition matrix...")
     tokenizer = ConceptTransitionTokenizer(prob_table)
+    print("Building the concept table...")
+    concept = pl.read_parquet(os.path.join(args.vocabulary_dir, "concept", "*.parquet"))
+    _, concept_domain_map = generate_concept_maps(concept)
 
     print(f"Generating {args.n_patients} sequences in batches of {args.batch_size}...")
     try:
@@ -223,6 +241,7 @@ def main():
             output_dir=output_dir,
             batch_size=args.batch_size,
             n_patients=args.n_patients,
+            concept_domain_map=concept_domain_map,
         )
         print("Generation completed successfully!")
     except Exception as e:
