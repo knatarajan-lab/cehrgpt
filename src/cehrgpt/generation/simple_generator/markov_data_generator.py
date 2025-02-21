@@ -385,6 +385,7 @@ def generate_and_save_sequences(
     concept_domain_map: Dict[str, str],
     max_length: int = 1024,
     top_k: int = 100,
+    temperature: float = 1.0,
     validate: bool = True,
 ) -> None:
     """Generate synthetic patient sequences and save them in batches."""
@@ -427,7 +428,11 @@ def generate_and_save_sequences(
             while len(tokens) < max_length:
                 try:
                     current_token, _ = tokenizer.sample(
-                        visit_concept_id, age_group, current_token, top_k=top_k
+                        visit_concept_id,
+                        age_group,
+                        current_token,
+                        top_k=top_k,
+                        temperature=temperature,
                     )
                     if current_token == "[END]":
                         break
