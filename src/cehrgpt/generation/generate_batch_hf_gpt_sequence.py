@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import torch
 from cehrbert.runners.runner_util import load_parquet_as_dataset
 from torch import Tensor
@@ -14,6 +15,9 @@ from transformers.generation.utils import GenerateOutput
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.cehrgpt_args import create_inference_base_arg_parser
+from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
+    get_cehrgpt_patient_converter,
+)
 from cehrgpt.generation.omop_converter_batch import START_TOKEN_SIZE
 from cehrgpt.gpt_utils import get_cehrgpt_output_folder
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
@@ -23,6 +27,7 @@ from cehrgpt.models.tokenization_hf_cehrgpt import (
     CehrGptTokenizer,
     is_valid_valid_bin,
 )
+from cehrgpt.omop.vocab_utils import generate_concept_maps
 
 LOG = logging.get_logger("transformers")
 
@@ -176,6 +181,18 @@ def main(args):
     else:
         device = torch.device("cpu")
 
+    if args.validate and not args.vocabulary_dir:
+        raise RuntimeError(
+            "When validate is set to true, the vocabulary directory must be specified."
+        )
+
+    concept_domain_map = {}
+    if args.validate:
+        concept = pl.read_parquet(
+            os.path.join(args.vocabulary_dir, "concept", "*.parquet")
+        )
+        _, concept_domain_map = generate_concept_maps(concept)
+
     cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer_folder)
     cehrgpt_model = (
         CEHRGPT2LMHeadModel.from_pretrained(
@@ -207,20 +224,20 @@ def main(args):
         else np.iinfo(np.int32).max
     )
 
-    LOG.info(f"Loading tokenizer at {args.model_folder}")
-    LOG.info(f"Loading model at {args.model_folder}")
-    LOG.info(f"Write sequences to {output_folder_name}")
-    LOG.info(f"Context window {args.context_window}")
-    LOG.info(f"Max sequence allowed {max_seq_allowed}")
-    LOG.info(f"Temperature {args.temperature}")
-    LOG.info(f"Repetition Penalty {args.repetition_penalty}")
-    LOG.info(f"Sampling Strategy {args.sampling_strategy}")
-    LOG.info(f"Num beam {args.num_beams}")
-    LOG.info(f"Num beam groups {args.num_beam_groups}")
-    LOG.info(f"Epsilon cutoff {args.epsilon_cutoff}")
-    LOG.info(f"Top P {args.top_p}")
-    LOG.info(f"Top K {args.top_k}")
-    LOG.info(f"Loading demographic_info at {args.demographic_data_path}")
+    LOG.info("Loading tokenizer at %s", args.model_folder)
+    LOG.info("Loading model at %s", args.model_folder)
+    LOG.info("Write sequences to %s", output_folder_name)
+    LOG.info("Context window %d", args.context_window)
+    LOG.info("Max sequence allowed %d", max_seq_allowed)
+    LOG.info("Temperature %f", args.temperature)
+    LOG.info("Repetition Penalty %f", args.repetition_penalty)
+    LOG.info("Sampling Strategy %s", args.sampling_strategy)
+    LOG.info("Num beam %d", args.num_beams)
+    LOG.info("Num beam groups %d", args.num_beam_groups)
+    LOG.info("Epsilon cutoff %f", args.epsilon_cutoff)
+    LOG.info("Top P %f", args.top_p)
+    LOG.info("Top K %d", args.top_k)
+    LOG.info("Loading demographic_info at %s", args.demographic_data_path)
 
     dataset = load_parquet_as_dataset(args.demographic_data_path)
     total_rows = len(dataset)
@@ -229,8 +246,7 @@ def main(args):
     sequence_to_flush = []
     current_person_id = 1
     for i in range(num_of_batches):
-        LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
-
+        LOG.info("%s: Batch %s started", datetime.datetime.now(), i)
         # Randomly pick demographics from the existing population
         random_prompts = []
         iter = 0
@@ -277,6 +293,12 @@ def main(args):
             batch_sequences["value_indicators"],
             batch_sequences["values"],
         ):
+            if args.validate:
+                patient_converter = get_cehrgpt_patient_converter(
+                    concept_ids, concept_domain_map
+                )
+                if not patient_converter.is_validation_passed:
+                    continue
             (
                 concept_ids,
                 is_numeric_types,
@@ -300,7 +322,9 @@ def main(args):
             current_person_id += 1
 
         if len(sequence_to_flush) >= args.buffer_size:
-            LOG.info(f"{datetime.datetime.now()}: Flushing to the Disk at Batch {i}")
+            LOG.info(
+                f"%s: Flushing to the Disk at Batch %s", datetime.datetime.now(), i
+            )
             pd.DataFrame(
                 sequence_to_flush,
                 columns=[
@@ -316,7 +340,7 @@ def main(args):
             sequence_to_flush.clear()
 
     if len(sequence_to_flush) > 0:
-        LOG.info(f"{datetime.datetime.now()}: Flushing to the Disk at Final Batch")
+        LOG.info("%s: Flushing to the Disk at Final Batch", datetime.datetime.now())
         pd.DataFrame(
             sequence_to_flush,
             columns=[
@@ -354,6 +378,17 @@ def create_arg_parser():
         "--drop_long_sequences",
         dest="drop_long_sequences",
         action="store_true",
+    )
+    base_arg_parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Validate the generated sequences",
+    )
+    base_arg_parser.add_argument(
+        "--vocabulary_dir",
+        type=str,
+        required=False,
+        help="When validate is set to true, the vocabulary dir must be provided",
     )
     return base_arg_parser
 
