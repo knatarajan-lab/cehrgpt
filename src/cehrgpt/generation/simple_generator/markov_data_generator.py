@@ -477,10 +477,18 @@ def generate_and_save_sequences(
                         sequences.append(
                             {
                                 "concept_ids": tokens,
-                                "concept_value_masks": np.zeros_like(tokens),
-                                "number_as_values": np.zeros_like(tokens),
-                                "concept_as_values": np.zeros_like(tokens, dtype=int),
-                                "is_numeric_types": np.zeros_like(tokens, dtype=bool),
+                                "concept_value_masks": np.zeros_like(
+                                    tokens, dtype=int
+                                ).tolist(),
+                                "number_as_values": np.zeros_like(
+                                    tokens, dtype=float
+                                ).tolist(),
+                                "concept_as_values": np.zeros_like(
+                                    tokens, dtype=int
+                                ).tolist(),
+                                "is_numeric_types": np.zeros_like(
+                                    tokens, dtype=bool
+                                ).tolist(),
                             }
                         )
                     else:
@@ -491,10 +499,18 @@ def generate_and_save_sequences(
                     sequences.append(
                         {
                             "concept_ids": tokens,
-                            "concept_value_masks": np.zeros_like(tokens),
-                            "number_as_values": np.zeros_like(tokens),
-                            "concept_as_values": np.zeros_like(tokens, dtype=int),
-                            "is_numeric_types": np.zeros_like(tokens, dtype=bool),
+                            "concept_value_masks": np.zeros_like(
+                                tokens, dtype=int
+                            ).tolist(),
+                            "number_as_values": np.zeros_like(
+                                tokens, dtype=float
+                            ).tolist(),
+                            "concept_as_values": np.zeros_like(
+                                tokens, dtype=int
+                            ).tolist(),
+                            "is_numeric_types": np.zeros_like(
+                                tokens, dtype=bool
+                            ).tolist(),
                         }
                     )
 
