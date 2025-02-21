@@ -2,7 +2,7 @@ import argparse
 import os
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -17,266 +17,134 @@ from cehrgpt.tools.generate_causal_patient_split_by_age import age_group_func
 
 
 class ConceptTransitionTokenizer:
-    """A tokenizer for handling concept transitions with probability-based sampling."""
-
     def __init__(self, prob_df: pl.DataFrame):
-        """
-        Initialize tokenizer with conditional probability dataframe.
-
-        Args:
-            prob_df: Polars DataFrame with columns [concept_id_1, concept_id_2, prob]
-                    representing transition probabilities between concepts
-        """
-        self.vocab_size = 0
-        self.concept_to_token = {}
-        self.token_to_concept = {}
-        self.transition_matrix = None
-        self.visit_type_probability = None
-        self.demographic_transition_matrix = None
+        """Initialize tokenizer with conditional probability dataframe."""
         self._initialize_vocabulary(prob_df)
-        self._build_transition_matrix(prob_df)
+
+        # Store probabilities in dictionaries instead of full matrices
+        self.demographic_transitions = {}  # {(concept_id_1, concept_id_2): prob}
+        self.medical_transitions = (
+            {}
+        )  # {(visit_type, age_group, concept_id_1, concept_id_2): prob}
+        self.visit_type_transitions = {}  # {visit_type: prob}
+
+        self._build_transition_probabilities(prob_df)
 
     def _initialize_vocabulary(self, prob_df: pl.DataFrame) -> None:
-        """Initialize vocabulary mappings from probability dataframe."""
-        # Get unique concepts from both columns
-        concepts1 = (
-            prob_df.select("concept_id_1").unique().rename({"concept_id_1": "concept"})
-        )
-        concepts2 = (
-            prob_df.select("concept_id_2").unique().rename({"concept_id_2": "concept"})
-        )
-        unique_concepts = pl.concat([concepts1, concepts2]).unique()
+        """Initialize vocabulary with minimal memory usage."""
+        concepts1 = prob_df.select("concept_id_1").unique()
+        concepts2 = prob_df.select("concept_id_2").unique()
 
-        # Create token mappings
-        self.concept_to_token = {
-            concept: idx
-            for idx, concept in enumerate(unique_concepts.to_numpy().flatten())
-        }
-        self.token_to_concept = {v: k for k, v in self.concept_to_token.items()}
-        self.vocab_size = len(self.concept_to_token)
+        # Use string concatenation instead of concat for memory efficiency
+        unique_concepts = pl.concat(
+            [
+                concepts1.rename({"concept_id_1": "concept"}),
+                concepts2.rename({"concept_id_2": "concept"}),
+            ]
+        ).unique()
 
-    def _build_transition_matrix(self, prob_df: pl.DataFrame) -> None:
-        """Build and normalize the transition probability matrix."""
+        self.vocab = unique_concepts.to_numpy().flatten()
+        self.concept_to_idx = {concept: idx for idx, concept in enumerate(self.vocab)}
 
-        self.transition_matrix: Dict[Tuple[str, str], np.ndarray] = {}
-        self.demographic_transition_matrix: np.ndarray = np.zeros(
-            (self.vocab_size, self.vocab_size)
-        )
-        self.visit_type_probability: np.ndarray = np.zeros(self.vocab_size)
+    def _build_transition_probabilities(self, prob_df: pl.DataFrame) -> None:
+        """Build transition probabilities using sparse storage."""
+        # Process demographic transitions
+        demographic_df = prob_df.filter(pl.col("age_group") == "age:-10-0")
+        for row in demographic_df.iter_rows():
+            self.demographic_transitions[(row[2], row[3])] = row[6]
 
-        # Fill demographic transition matrix with probabilities
-        for row in prob_df.filter(pl.col("age_group") == "age:-10-0").iter_rows():
-            concept_id_1 = row[2]
-            concept_id_2 = row[3]
-            prob = row[6]
-            i, j = (
-                self.concept_to_token[concept_id_1],
-                self.concept_to_token[concept_id_2],
-            )
-            self.demographic_transition_matrix[i, j] = prob
+        # Process visit type probabilities
+        visit_df = prob_df.filter(pl.col("concept_id_1") == "[VS]")
+        for row in visit_df.iter_rows():
+            self.visit_type_transitions[row[3]] = row[6]
 
-        # Fill visit type probability distribution with probabilities
-        for row in prob_df.filter(pl.col("concept_id_1") == "[VS]").iter_rows():
-            concept_id_2 = row[3]
-            prob = row[6]
-            self.visit_type_probability[self.concept_to_token[concept_id_2]] = prob
+        # Process medical transitions
+        medical_df = prob_df.filter(pl.col("age_group") != "age:-10-0")
+        for row in medical_df.iter_rows():
+            key = (str(row[0]), row[1], row[2], row[3])
+            self.medical_transitions[key] = row[6]
 
-        # Fill transition matrix with probabilities
-        for row in prob_df.filter(pl.col("age_group") != "age:-10-0").iter_rows():
-            visit_concept_id = str(row[0])
-            age_group = row[1]
-            concept_id_1 = row[2]
-            concept_id_2 = row[3]
-            prob = row[6]
-            if (visit_concept_id, age_group) not in self.transition_matrix:
-                self.transition_matrix[(visit_concept_id, age_group)] = np.zeros(
-                    (self.vocab_size, self.vocab_size)
+        # Normalize probabilities within groups
+        self._normalize_probabilities()
+
+    def _normalize_probabilities(self):
+        """Normalize probabilities within their respective groups."""
+        # Normalize visit type probabilities
+        total = sum(self.visit_type_transitions.values())
+        if total > 0:
+            for k in self.visit_type_transitions:
+                self.visit_type_transitions[k] /= total
+
+        # Normalize demographic transitions by source concept
+        demographic_sums = {}
+        for (src, dst), prob in self.demographic_transitions.items():
+            demographic_sums[src] = demographic_sums.get(src, 0) + prob
+        for (src, dst), prob in self.demographic_transitions.items():
+            if demographic_sums[src] > 0:
+                self.demographic_transitions[(src, dst)] = prob / demographic_sums[src]
+
+        # Normalize medical transitions by visit type, age group, and source concept
+        medical_sums = {}
+        for (visit, age, src, dst), prob in self.medical_transitions.items():
+            key = (visit, age, src)
+            medical_sums[key] = medical_sums.get(key, 0) + prob
+        for (visit, age, src, dst), prob in self.medical_transitions.items():
+            key = (visit, age, src)
+            if medical_sums[key] > 0:
+                self.medical_transitions[(visit, age, src, dst)] = (
+                    prob / medical_sums[key]
                 )
-            i, j = (
-                self.concept_to_token[concept_id_1],
-                self.concept_to_token[concept_id_2],
-            )
-            self.transition_matrix[(visit_concept_id, age_group)][i, j] = prob
-
-        # Normalize probabilities
-        for demographic_group in self.transition_matrix.keys():
-            row_sums = self.transition_matrix[demographic_group].sum(axis=1)
-            row_sums[row_sums == 0] = 1  # Avoid division by zero
-            self.transition_matrix[demographic_group] = (
-                self.transition_matrix[demographic_group] / row_sums[:, np.newaxis]
-            )
-
-        # Normalize demographic transition matrix
-        row_sums = self.demographic_transition_matrix.sum(axis=1)
-        row_sums[row_sums == 0] = 1  # Avoid division by zero
-        self.demographic_transition_matrix = (
-            self.demographic_transition_matrix / row_sums[:, np.newaxis]
-        )
-
-        # Normalize visit type probability
-        if self.visit_type_probability.sum() > 0:
-            self.visit_type_probability = (
-                self.visit_type_probability / self.visit_type_probability.sum()
-            )
-
-    def encode(self, concepts: List[str]) -> List[int]:
-        """Convert concept IDs to token indices."""
-        try:
-            return [self.concept_to_token[c] for c in concepts]
-        except KeyError as e:
-            raise KeyError(f"Concept {e} not found in vocabulary")
-
-    def decode(self, tokens: List[int]) -> List[str]:
-        """Convert token indices back to concept IDs."""
-        try:
-            return [self.token_to_concept[t] for t in tokens]
-        except KeyError as e:
-            raise KeyError(f"Token {e} not found in vocabulary")
-
-    def get_transition_prob(
-        self,
-        visit_concept_id: str,
-        age_group: str,
-        concept_id_1: str,
-        concept_id_2: str,
-    ) -> float:
-        """Get transition probability between two concepts."""
-        try:
-            token1 = self.concept_to_token[concept_id_1]
-            token2 = self.concept_to_token[concept_id_2]
-            return self.transition_matrix[(visit_concept_id, age_group)][token1, token2]
-        except KeyError as e:
-            raise KeyError(f"Concept {e} not found in vocabulary")
-
-    def get_next_medical_concepts(
-        self, visit_concept_id: str, age_group: str, concept_id: str, top_k: int = 5
-    ) -> List[Tuple[str, float]]:
-        """Get top-k most likely next concepts and their probabilities."""
-        if not 1 <= top_k <= self.vocab_size:
-            raise ValueError(f"top_k must be between 1 and {self.vocab_size}")
-
-        try:
-            token = self.concept_to_token[concept_id]
-            probs = self.transition_matrix[(visit_concept_id, age_group)][token]
-            top_indices = np.argsort(probs)[-top_k:][::-1]
-            return [(self.token_to_concept[idx], probs[idx]) for idx in top_indices]
-        except KeyError:
-            raise KeyError(f"Concept {concept_id} not found in vocabulary")
-
-    def get_next_demographic_concepts(
-        self, concept_id: str, top_k: int = 5
-    ) -> List[Tuple[str, float]]:
-        """Get top-k most likely next concepts and their probabilities."""
-        if not 1 <= top_k <= self.vocab_size:
-            raise ValueError(f"top_k must be between 1 and {self.vocab_size}")
-
-        try:
-            token = self.concept_to_token[concept_id]
-            probs = self.demographic_transition_matrix[token]
-            top_indices = np.argsort(probs)[-top_k:][::-1]
-            return [(self.token_to_concept[idx], probs[idx]) for idx in top_indices]
-        except KeyError:
-            raise KeyError(f"Concept {concept_id} not found in vocabulary")
 
     def sample_first_visit_type(
         self, top_k: Optional[int] = None, random_state: Optional[int] = None
-    ) -> Tuple[str, float]:
-        """
-        Randomly sample a visit type based on visit type probabilities.
-
-        Args:
-            top_k: If provided, sample only from top-k most likely visit types
-            random_state: Optional random seed for reproducibility
-
-        Returns:
-            Tuple of (sampled_visit_type, probability)
-
-        Raises:
-            ValueError: If top_k is less than 1 or greater than vocabulary size
-        """
+    ):
+        """Sample visit type using dictionary-based probabilities."""
         if random_state is not None:
             np.random.seed(random_state)
 
-        probs = self.visit_type_probability
+        visits, probs = zip(*self.visit_type_transitions.items())
 
         if top_k is not None:
-            if not 1 <= top_k <= self.vocab_size:
-                raise ValueError(f"top_k must be between 1 and {self.vocab_size}")
+            top_k = min(top_k, len(visits))
+            sorted_indices = np.argsort(probs)[-top_k:]
+            visits = [visits[i] for i in sorted_indices]
+            probs = [probs[i] for i in sorted_indices]
+            probs = np.array(probs) / sum(probs)
 
-            # Get top-k indices and their probabilities
-            top_indices = np.argsort(probs)[-top_k:]
-            top_probs = probs[top_indices]
-
-            # Renormalize probabilities of top-k concepts
-            top_probs = top_probs / top_probs.sum()
-
-            # Sample from top-k
-            sampled_idx = np.random.choice(top_indices, p=top_probs)
-        else:
-            # Ensure probabilities sum to 1
-            probs = probs / probs.sum()
-            sampled_idx = np.random.choice(self.vocab_size, p=probs)
-
-        return self.token_to_concept[sampled_idx], probs[sampled_idx]
+        sampled_idx = np.random.choice(len(visits), p=probs)
+        return visits[sampled_idx], probs[sampled_idx]
 
     def sample_demographic(
         self,
         concept_id: str,
         top_k: Optional[int] = None,
         random_state: Optional[int] = None,
-    ) -> Tuple[str, float]:
-        """
-        Randomly sample a demographic concept based on demographic transition probabilities.
-
-        Args:
-            concept_id: Source concept string
-            top_k: If provided, sample only from top-k most likely demographic concepts
-            random_state: Optional random seed for reproducibility
-
-        Returns:
-            Tuple of (sampled_demographic_concept, probability)
-
-        Raises:
-            KeyError: If the concept is not in the vocabulary
-            ValueError: If top_k is less than 1 or greater than vocabulary size
-        """
+    ):
+        """Sample demographic transition using dictionary-based probabilities."""
         if random_state is not None:
             np.random.seed(random_state)
 
-        try:
-            token = self.concept_to_token[concept_id]
-            probs = self.demographic_transition_matrix[token]
+        # Get all possible transitions from current concept
+        transitions = [
+            (dst, prob)
+            for (src, dst), prob in self.demographic_transitions.items()
+            if src == concept_id
+        ]
 
-            if top_k is not None:
-                if not 1 <= top_k <= self.vocab_size:
-                    raise ValueError(f"top_k must be between 1 and {self.vocab_size}")
+        if not transitions:
+            raise ValueError(f"No valid transitions from concept {concept_id}")
 
-                # Get top-k indices and their probabilities
-                top_indices = np.argsort(probs)[-top_k:]
-                top_probs = probs[top_indices]
+        concepts, probs = zip(*transitions)
 
-                # Renormalize probabilities of top-k concepts
-                top_probs = top_probs / top_probs.sum()
+        if top_k is not None:
+            top_k = min(top_k, len(concepts))
+            sorted_indices = np.argsort(probs)[-top_k:]
+            concepts = [concepts[i] for i in sorted_indices]
+            probs = [probs[i] for i in sorted_indices]
+            probs = np.array(probs) / sum(probs)
 
-                # Sample from top-k
-                sampled_idx = np.random.choice(top_indices, p=top_probs)
-            else:
-                # Ensure probabilities sum to 1
-                if probs.sum() > 0:
-                    probs = probs / probs.sum()
-                    sampled_idx = np.random.choice(self.vocab_size, p=probs)
-                else:
-                    raise ValueError(f"No valid transitions from concept {concept_id}")
-
-            return self.token_to_concept[sampled_idx], probs[sampled_idx]
-
-        except KeyError:
-            raise KeyError(f"Concept {concept_id} not found in vocabulary")
-        except ValueError as e:
-            if "probabilities do not sum to 1" in str(e):
-                probs = probs / probs.sum()
-                return self.sample_demographic(concept_id, top_k, random_state)
-            raise e
+        sampled_idx = np.random.choice(len(concepts), p=probs)
+        return concepts[sampled_idx], probs[sampled_idx]
 
     def sample(
         self,
@@ -285,51 +153,34 @@ class ConceptTransitionTokenizer:
         concept_id: str,
         top_k: Optional[int] = None,
         random_state: Optional[int] = None,
-    ) -> Tuple[str, float]:
-        """
-        Randomly sample a next concept based on transition probabilities.
-
-        Args:
-            concept_id: Source concept string
-            top_k: If provided, sample only from top-k most likely concepts
-            random_state: Optional random seed for reproducibility
-
-        Returns:
-            Tuple of (sampled_concept, probability)
-        """
-        if (visit_concept_id, age_group) not in self.transition_matrix:
-            return "0", 0.0
-
+    ):
+        """Sample medical transition using dictionary-based probabilities."""
         if random_state is not None:
             np.random.seed(random_state)
 
-        try:
-            token = self.concept_to_token[concept_id]
-            probs = self.transition_matrix[(visit_concept_id, age_group)][token]
+        # Get all possible transitions for the current state
+        transitions = [
+            (dst, prob)
+            for (visit, age, src, dst), prob in self.medical_transitions.items()
+            if visit == visit_concept_id and age == age_group and src == concept_id
+        ]
 
-            if top_k is not None:
-                if not 1 <= top_k <= self.vocab_size:
-                    raise ValueError(f"top_k must be between 1 and {self.vocab_size}")
+        if not transitions:
+            raise ValueError(
+                f"No valid transitions for {visit_concept_id}, {age_group}, {concept_id}"
+            )
 
-                top_indices = np.argsort(probs)[-top_k:]
-                top_probs = probs[top_indices]
-                top_probs = top_probs / top_probs.sum()  # Renormalize
+        concepts, probs = zip(*transitions)
 
-                sampled_idx = np.random.choice(top_indices, p=top_probs)
-            else:
-                sampled_idx = np.random.choice(self.vocab_size, p=probs)
+        if top_k is not None:
+            top_k = min(top_k, len(concepts))
+            sorted_indices = np.argsort(probs)[-top_k:]
+            concepts = [concepts[i] for i in sorted_indices]
+            probs = [probs[i] for i in sorted_indices]
+            probs = np.array(probs) / sum(probs)
 
-            return self.token_to_concept[sampled_idx], probs[sampled_idx]
-
-        except KeyError:
-            raise KeyError(f"Concept {concept_id} not found in vocabulary")
-        except ValueError as e:
-            if "probabilities do not sum to 1" in str(e):
-                probs = probs / probs.sum()
-                return self.sample(
-                    visit_concept_id, age_group, concept_id, top_k, random_state
-                )
-            raise e
+        sampled_idx = np.random.choice(len(concepts), p=probs)
+        return concepts[sampled_idx], probs[sampled_idx]
 
 
 def generate_and_save_sequences(
