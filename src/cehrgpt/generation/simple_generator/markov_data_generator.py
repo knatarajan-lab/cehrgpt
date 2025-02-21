@@ -1,6 +1,7 @@
 import argparse
 import os
 import uuid
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -13,8 +14,15 @@ from tqdm import tqdm
 from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
     get_cehrgpt_patient_converter,
 )
+from cehrgpt.generation.simple_generator.compute_conditional_concept_probability import (
+    create_age_group_udf,
+)
+from cehrgpt.gpt_utils import (
+    extract_time_interval_in_days,
+    is_att_token,
+    is_visit_type_token,
+)
 from cehrgpt.omop.vocab_utils import generate_concept_maps
-from src.cehrgpt.gpt_utils import is_visit_type_token
 
 
 class ConceptTransitionTokenizer:
@@ -355,54 +363,71 @@ def generate_and_save_sequences(
 
     for i in tqdm(range(n_patients), total=n_patients):
         current_token = "[START]"
-        tokens = []
-        age_group = None
+        tokens = []  # Don't initialize with START token
+        current_age: Optional[int] = None
+        start_year: Optional[int] = None
+
         try:
-            # Generate demographic info first (4 tokens)
-            for _ in range(4):  # START is already added, need 3 more demographic tokens
+            # Generate 4 demographic tokens
+            for _ in range(4):
                 current_token, _ = tokenizer.sample_demographic(
                     current_token, top_k=top_k
                 )
                 tokens.append(current_token)
-                if current_token.startswith("age:"):
-                    age_group = current_token
+                if current_token.startswith("year:"):
+                    start_year = int(current_token.split(":")[1])
+                elif current_token.startswith("age:"):
+                    current_age = int(current_token.split(":")[1].split("-")[0])
 
             tokens.append("[VS]")
-            # Add first visit type
             visit_concept_id, _ = tokenizer.sample_first_visit_type(top_k=top_k)
             tokens.append(visit_concept_id)
             current_token = visit_concept_id
 
-            if age_group is None or visit_concept_id is None:
+            if any(x is None for x in [current_age, visit_concept_id, start_year]):
                 continue
 
-            # Generate medical concepts
-            while len(tokens) < max_length:
-                current_token, _ = tokenizer.sample(
-                    visit_concept_id, age_group, current_token, top_k=top_k
-                )
-                tokens.append(current_token)
+            # Initialize temporal tracking
+            birth_year = start_year - current_age
+            current_date = date(start_year, 1, 1)
+            age_group = create_age_group_udf(current_age)
 
-                if current_token == "[END]":
+            while len(tokens) < max_length:
+                try:
+                    current_token, _ = tokenizer.sample(
+                        visit_concept_id, age_group, current_token, top_k=top_k
+                    )
+                    tokens.append(current_token)
+
+                    if current_token == "[END]":
+                        break
+
+                    if is_att_token(current_token):
+                        day_delta = extract_time_interval_in_days(current_token)
+                        current_date += timedelta(days=day_delta)
+                        current_age = current_date.year - birth_year
+                        age_group = create_age_group_udf(current_age)
+                    elif is_visit_type_token(current_token):
+                        visit_concept_id = current_token
+
+                except ValueError as e:
+                    print(f"Error in sequence generation: {e}")
                     break
 
-                if is_visit_type_token(current_token):
-                    visit_concept_id = current_token
-
-            # Validate and save sequence
-            cehrgpt_patient = get_cehrgpt_patient_converter(tokens, concept_domain_map)
-            if cehrgpt_patient.is_validation_passed:
-                sequences.append({"concept_ids": tokens})
-            else:
-                print(f"Invalid sequence: {cehrgpt_patient.get_error_messages()}")
+            if tokens[-1] in ["[END]", "[VE]"]:
+                cehrgpt_patient = get_cehrgpt_patient_converter(
+                    tokens, concept_domain_map
+                )
+                if cehrgpt_patient.is_validation_passed:
+                    sequences.append({"concept_ids": tokens})
 
         except Exception as e:
-            print(f"Error generating sequence: {str(e)}")
+            print(f"Error generating sequence {i}: {str(e)}")
             continue
 
         # Save batch when full
         if len(sequences) >= batch_size or i == n_patients - 1:
-            if sequences:  # Only save if we have valid sequences
+            if sequences:
                 batch_df = pd.DataFrame(sequences)
                 output_file = output_dir / f"batch_{batch_num}_{uuid.uuid4()}.parquet"
                 batch_df.to_parquet(output_file)
