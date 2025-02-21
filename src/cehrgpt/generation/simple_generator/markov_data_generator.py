@@ -489,6 +489,7 @@ def generate_and_save_sequences(
                                 "is_numeric_types": np.zeros_like(
                                     tokens, dtype=bool
                                 ).tolist(),
+                                "num_of_concepts": len(tokens),
                             }
                         )
                     else:
@@ -511,6 +512,7 @@ def generate_and_save_sequences(
                             "is_numeric_types": np.zeros_like(
                                 tokens, dtype=bool
                             ).tolist(),
+                            "num_of_concepts": len(tokens),
                         }
                     )
 
