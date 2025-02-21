@@ -423,16 +423,19 @@ def generate_and_save_sequences(
                     logger.error(f"Error in sequence generation: {e}")
                     break
 
-            if tokens[-1] in ["[END]", "[VE]"] and validate:
-                cehrgpt_patient = get_cehrgpt_patient_converter(
-                    tokens, concept_domain_map
-                )
-                if cehrgpt_patient.is_validation_passed:
-                    sequences.append({"concept_ids": tokens})
-                else:
-                    logger.warning(
-                        f"The validation failed due to: {cehrgpt_patient.get_error_messages()}"
+            if tokens[-1] in ["[END]", "[VE]"]:
+                if validate:
+                    cehrgpt_patient = get_cehrgpt_patient_converter(
+                        tokens, concept_domain_map
                     )
+                    if cehrgpt_patient.is_validation_passed:
+                        sequences.append({"concept_ids": tokens})
+                    else:
+                        logger.warning(
+                            f"The validation failed due to: {cehrgpt_patient.get_error_messages()}"
+                        )
+                else:
+                    sequences.append({"concept_ids": tokens})
 
         except Exception as e:
             logger.error(f"Error generating sequence {i}: {str(e)}")
