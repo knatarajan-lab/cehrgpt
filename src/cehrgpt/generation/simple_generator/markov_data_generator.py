@@ -310,9 +310,20 @@ class ConceptTransitionTokenizer:
         age_group: str,
         concept_id: str,
         top_k: Optional[int] = None,
+        temperature: float = 1.0,
         random_state: Optional[int] = None,
     ) -> Tuple[str, float]:
-        """Sample medical transition using sparse matrix."""
+        """
+        Sample medical transition using sparse matrix.
+
+        Args:
+            visit_concept_id: Current visit type
+            age_group: Current age group
+            concept_id: Current concept
+            top_k: If provided, sample only from top-k most likely concepts
+            temperature: Temperature for sampling (higher = more random)
+            random_state: Optional random seed
+        """
         if random_state is not None:
             np.random.seed(random_state)
 
@@ -329,6 +340,14 @@ class ConceptTransitionTokenizer:
             non_zero_indices = np.nonzero(probs)[0]
             if len(non_zero_indices) == 0:
                 raise ValueError(f"No valid transitions for {concept_id}")
+
+            # Apply temperature scaling to probabilities
+            if temperature != 1.0:
+                # Take log of probabilities to avoid numerical issues
+                log_probs = np.log(probs + 1e-10)
+                log_probs = log_probs / temperature
+                probs = np.exp(log_probs)
+                probs = probs / probs.sum()  # Renormalize
 
             if top_k is not None:
                 top_k = min(top_k, len(non_zero_indices))
@@ -476,6 +495,15 @@ def main():
         help="Number of sequences to generate before saving to disk",
     )
     parser.add_argument(
+        "--top_k", type=int, default=100, help="Top k tokens to sample from"
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Temperature for sampling (higher = more random, lower = more deterministic)",
+    )
+    parser.add_argument(
         "--validate",
         action="store_true",
     )
@@ -506,6 +534,8 @@ def main():
             n_patients=args.n_patients,
             concept_domain_map=concept_domain_map,
             validate=args.validate,
+            top_k=args.top_k,
+            temperature=args.temperature,
         )
         logger.info("Generation completed successfully!")
     except Exception as e:
