@@ -233,13 +233,24 @@ class ConceptTransitionTokenizer:
         matrix[:] = normalized.tolil()
 
     def sample_first_visit_type(
-        self, top_k: Optional[int] = None, random_state: Optional[int] = None
+        self,
+        top_k: Optional[int] = None,
+        temperature: float = 1.0,
+        random_state: Optional[int] = None,
     ) -> Tuple[str, float]:
         """Sample visit type using probability vector."""
         if random_state is not None:
             np.random.seed(random_state)
 
         probs = self.visit_type_vector
+        # Apply temperature scaling to probabilities
+        if temperature != 1.0:
+            # Take log of probabilities to avoid numerical issues
+            log_probs = np.log(probs + 1e-10)
+            log_probs = log_probs / temperature
+            probs = np.exp(log_probs)
+            probs = probs / probs.sum()  # Renormalize
+
         non_zero_indices = np.nonzero(probs)[0]
 
         if len(non_zero_indices) == 0:
