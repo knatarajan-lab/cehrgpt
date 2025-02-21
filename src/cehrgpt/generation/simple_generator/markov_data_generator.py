@@ -142,13 +142,22 @@ class ConceptTransitionTokenizer:
         # Process demographic transitions
         logger.info("Build the demographic transition matrix")
         demographic_df = prob_df.filter(pl.col("age_group") == "age:-10-0")
+        total_sum_demographics = demographic_df.select(
+            pl.col("count").sum()
+        ).to_numpy()[0, 0]
+
+        demographic_df = (
+            demographic_df.group_by(pl.col("concept_id_1"), pl.col("concept_id_2"))
+            .agg(pl.sum("count"))
+            .with_columns((pl.col("count") / total_sum_demographics).alias("prob"))
+        )
         row_indices = [
-            self.concept_to_idx[row[2]] for row in demographic_df.iter_rows()
+            self.concept_to_idx[row[0]] for row in demographic_df.iter_rows()
         ]
         col_indices = [
-            self.concept_to_idx[row[3]] for row in demographic_df.iter_rows()
+            self.concept_to_idx[row[1]] for row in demographic_df.iter_rows()
         ]
-        values = [row[6] for row in demographic_df.iter_rows()]
+        values = [row[3] for row in demographic_df.iter_rows()]
         self.demographic_matrix = sparse.coo_matrix(
             (values, (row_indices, col_indices)),
             shape=(self.vocab_size, self.vocab_size),
