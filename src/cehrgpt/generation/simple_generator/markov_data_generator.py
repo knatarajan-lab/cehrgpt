@@ -512,6 +512,7 @@ def main():
 
     # Ensure output directory exists
     output_dir = Path(args.output_dir)
+    output_dir = output_dir / f"top_k{args.top_k}_temp_{int(args.temperature * 100)}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load probability table and initialize tokenizer
