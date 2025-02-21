@@ -14,21 +14,108 @@ from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
     get_cehrgpt_patient_converter,
 )
 from cehrgpt.omop.vocab_utils import generate_concept_maps
-from cehrgpt.tools.generate_causal_patient_split_by_age import age_group_func
 from src.cehrgpt.gpt_utils import is_visit_type_token
 
 
 class ConceptTransitionTokenizer:
-    def __init__(self, prob_df: pl.DataFrame):
-        """Initialize tokenizer with conditional probability dataframe."""
+    def __init__(self, prob_df: pl.DataFrame, cache_dir: Optional[Path] = None):
+        """
+        Initialize tokenizer with conditional probability dataframe.
+
+        Args:
+            prob_df: Polars DataFrame with transition probabilities
+            cache_dir: Optional directory to cache/load transition matrices
+        """
+
+        # Process medical transitions
+        # Only keep age groups up to 90-100
+        valid_age_groups = [f"age:{i}-{i + 10}" for i in range(0, 91, 10)]
+        prob_df = prob_df.filter((pl.col("age_group").is_in(valid_age_groups)))
+
         self._initialize_vocabulary(prob_df)
 
-        # Initialize sparse matrices
+        # Initialize matrices
         self.demographic_matrix = None
         self.visit_type_vector = None
-        self.medical_matrices = {}  # {(visit_type, age_group): sparse_matrix}
+        self.medical_matrices = {}
 
+        if cache_dir is not None:
+            cache_dir = Path(cache_dir)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+
+            # Try to load from cache first
+            if self._load_from_cache(cache_dir):
+                print("Loaded transition matrices from cache")
+                return
+
+        # Build matrices if not loaded from cache
         self._build_transition_matrices(prob_df)
+
+        # Save to cache if directory provided
+        if cache_dir is not None:
+            self._save_to_cache(cache_dir)
+
+    def _save_to_cache(self, cache_dir: Path):
+        """Save transition matrices to cache directory."""
+        import joblib
+
+        # Save vocabulary
+        vocab_file = cache_dir / "vocabulary.joblib"
+        joblib.dump(
+            {"vocab": self.vocab, "concept_to_idx": self.concept_to_idx}, vocab_file
+        )
+
+        # Save demographic matrix
+        demographic_file = cache_dir / "demographic_matrix.npz"
+        sparse.save_npz(demographic_file, self.demographic_matrix)
+
+        # Save visit type vector
+        visit_file = cache_dir / "visit_type_vector.npy"
+        np.save(visit_file, self.visit_type_vector)
+
+        # Save medical matrices
+        medical_file = cache_dir / "medical_matrices.joblib"
+        medical_dict = {k: v.tocoo() for k, v in self.medical_matrices.items()}
+        joblib.dump(medical_dict, medical_file)
+
+    def _load_from_cache(self, cache_dir: Path) -> bool:
+        """
+        Load transition matrices from cache directory.
+
+        Returns:
+            bool: True if successfully loaded from cache
+        """
+        try:
+            import joblib
+
+            # Check if all required files exist
+            vocab_file = cache_dir / "vocabulary.joblib"
+            demographic_file = cache_dir / "demographic_matrix.npz"
+            visit_file = cache_dir / "visit_type_vector.npy"
+            medical_file = cache_dir / "medical_matrices.joblib"
+
+            if not all(
+                f.exists()
+                for f in [vocab_file, demographic_file, visit_file, medical_file]
+            ):
+                return False
+
+            # Load vocabulary
+            vocab_data = joblib.load(vocab_file)
+            if not np.array_equal(self.vocab, vocab_data["vocab"]):
+                print("Cache vocabulary doesn't match current data")
+                return False
+
+            # Load matrices
+            self.demographic_matrix = sparse.load_npz(demographic_file)
+            self.visit_type_vector = np.load(visit_file)
+            medical_dict = joblib.load(medical_file)
+            self.medical_matrices = {k: v.tocsr() for k, v in medical_dict.items()}
+            return True
+
+        except Exception as e:
+            print(f"Error loading from cache: {str(e)}")
+            return False
 
     def _initialize_vocabulary(self, prob_df: pl.DataFrame) -> None:
         """Initialize vocabulary with minimal memory usage."""
@@ -53,6 +140,7 @@ class ConceptTransitionTokenizer:
         self.medical_matrices = {}  # {visit_type: sparse_matrix}
 
         # Process demographic transitions
+        print(f"Building the demographic transition matrix")
         demographic_df = prob_df.filter(pl.col("age_group") == "age:-10-0")
         for row in demographic_df.iter_rows():
             i = self.concept_to_idx[row[2]]
@@ -60,6 +148,7 @@ class ConceptTransitionTokenizer:
             self.demographic_matrix[i, j] = row[6]
 
         # Process visit type probabilities
+        print(f"Building the visit type probability distribution")
         visit_df = prob_df.filter(pl.col("concept_id_1") == "[VS]")
         for row in visit_df.iter_rows():
             j = self.concept_to_idx[row[3]]
@@ -76,7 +165,7 @@ class ConceptTransitionTokenizer:
         for visit_type in medical_df["visit_concept_id"].unique().to_list():
             matrix = sparse.lil_matrix((self.vocab_size, self.vocab_size))
             subset = medical_df.filter(pl.col("visit_concept_id") == visit_type)
-
+            print(f"Building transition matrices for {visit_type}")
             for row in subset.iter_rows():
                 i = self.concept_to_idx[row[1]]  # concept_id_1
                 j = self.concept_to_idx[row[2]]  # concept_id_2
@@ -314,7 +403,8 @@ def main():
         "--probability_table", required=True, help="Path to probability table"
     )
     parser.add_argument("--vocabulary_dir", required=True, help="Vocabulary directory")
-    parser.add_argument("--output_folder", required=True, help="Output directory")
+    parser.add_argument("--output_dir", required=True, help="Output directory")
+    parser.add_argument("--cache_dir", required=True, help="Output directory")
     parser.add_argument(
         "--n_patients", required=True, type=int, help="Number of patients to generate"
     )
@@ -328,14 +418,14 @@ def main():
     args = parser.parse_args()
 
     # Ensure output directory exists
-    output_dir = Path(args.output_folder)
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load probability table and initialize tokenizer
     print("Loading probability table...")
     prob_table = pl.read_parquet(os.path.join(args.probability_table, "*.parquet"))
     print("Building the transition matrix...")
-    tokenizer = ConceptTransitionTokenizer(prob_table)
+    tokenizer = ConceptTransitionTokenizer(prob_table, args.cache_dir)
     print("Building the concept table...")
     concept = pl.read_parquet(os.path.join(args.vocabulary_dir, "concept", "*.parquet"))
     _, concept_domain_map = generate_concept_maps(concept)
