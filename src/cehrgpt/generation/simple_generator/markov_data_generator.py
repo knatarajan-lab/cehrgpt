@@ -361,6 +361,7 @@ def generate_and_save_sequences(
     concept_domain_map: Dict[str, str],
     max_length: int = 1024,
     top_k: int = 100,
+    validate: bool = True,
 ) -> None:
     """Generate synthetic patient sequences and save them in batches."""
     sequences = []
@@ -422,7 +423,7 @@ def generate_and_save_sequences(
                     logger.error(f"Error in sequence generation: {e}")
                     break
 
-            if tokens[-1] in ["[END]", "[VE]"]:
+            if tokens[-1] in ["[END]", "[VE]"] and validate:
                 cehrgpt_patient = get_cehrgpt_patient_converter(
                     tokens, concept_domain_map
                 )
@@ -463,6 +464,10 @@ def main():
         default=1000,
         help="Number of sequences to generate before saving to disk",
     )
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+    )
 
     args = parser.parse_args()
 
@@ -489,6 +494,7 @@ def main():
             batch_size=args.batch_size,
             n_patients=args.n_patients,
             concept_domain_map=concept_domain_map,
+            validate=args.validate,
         )
         logger.info("Generation completed successfully!")
     except Exception as e:
