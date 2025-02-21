@@ -26,6 +26,15 @@ class ConceptTransitionTokenizer:
             prob_df: Polars DataFrame with transition probabilities
             cache_dir: Optional directory to cache/load transition matrices
         """
+        # Process medical transitions
+        # Only keep age groups up to 90-100
+        valid_age_groups = [f"age:{i}-{i + 10}" for i in range(0, 91, 10)]
+
+        prob_df = prob_df.filter(
+            (pl.col("age_group").is_in(valid_age_groups))
+            | (pl.col("age_group") == "age:-10-0")
+        )
+
         self._initialize_vocabulary(prob_df)
 
         # Initialize matrices
@@ -153,9 +162,7 @@ class ConceptTransitionTokenizer:
             j = self.concept_to_idx[row[3]]
             self.visit_type_vector[j] = row[6]
 
-        # Process medical transitions
         medical_df = prob_df.filter(pl.col("age_group") != "age:-10-0")
-
         # Group by visit type and age group
         for visit_type in medical_df["visit_concept_id"].unique().to_list():
             for age_group in medical_df["age_group"].unique().to_list():
