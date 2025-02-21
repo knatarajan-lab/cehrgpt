@@ -18,6 +18,7 @@ from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
 from cehrgpt.gpt_utils import (
     extract_time_interval_in_days,
     is_att_token,
+    is_visit_start,
     is_visit_type_token,
 )
 from cehrgpt.omop.vocab_utils import generate_concept_maps
@@ -362,7 +363,7 @@ class ConceptTransitionTokenizer:
                 raise ValueError(f"No valid transitions for {concept_id}")
 
             # Apply temperature scaling to probabilities
-            if temperature != 1.0:
+            if temperature != 1.0 and is_visit_start(concept_id):
                 # Take log of probabilities to avoid numerical issues
                 log_probs = np.log(probs + 1e-10)
                 log_probs = log_probs / temperature
