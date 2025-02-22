@@ -4,6 +4,7 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
 
 from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
     get_cehrgpt_patient_converter,
@@ -100,12 +101,12 @@ def reward_length(
             log_std = length_stats[demographic_group].get("log_std")
             if not pd.isnull(log_std) and not pd.isnull(log_mean) and log_std > 0.0:
                 log_seq_length = math.log(len(completion))
-                reward += np.exp(-np.abs(log_seq_length - log_mean) / log_std)
+                reward += norm.pdf(log_seq_length, log_mean, log_std)
         rewards.append(reward)
     return rewards
 
 
-def reward_concept_prevalence(
+def reward_concept_information_content(
     prompts: List[List[str]], completions: List[List[str]], **kwargs
 ) -> List[float]:
     concept_prevalence: Dict[DemographicGroup, Dict[str, float]]
@@ -123,7 +124,8 @@ def reward_concept_prevalence(
                     and not is_visit_end(concept_id)
                     and not is_att_token(concept_id)
                 ):
-                    reward += demographic_concept_prevalence.get(concept_id, 1e-9)
+                    prob = demographic_concept_prevalence.get(concept_id, 1e-9)
+                    reward += -np.log(prob) * prob
             reward = reward / len(completion)
         rewards.append(reward)
     return rewards

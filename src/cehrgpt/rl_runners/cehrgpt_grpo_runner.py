@@ -25,7 +25,7 @@ from cehrgpt.rl_runners.grpo.compute_patient_sequence_length_stats import (
 from cehrgpt.rl_runners.grpo.rewards import (
     DemographicGroup,
     reward_co_occurrence,
-    reward_concept_prevalence,
+    reward_concept_information_content,
     reward_length,
     reward_valid_sequences,
 )
@@ -183,10 +183,12 @@ def main():
         )
     )
     concept_prevalence = create_concept_prevalence(concept_prevalence_stats)
-    reward_concept_prevalence_func = partial(
-        reward_concept_prevalence, concept_prevalence=concept_prevalence
+    reward_concept_information_content_func = partial(
+        reward_concept_information_content, concept_prevalence=concept_prevalence
     )
-    reward_concept_prevalence_func.__name__ = f"reward_concept_prevalence"
+    reward_concept_information_content_func.__name__ = (
+        f"reward_concept_information_content"
+    )
 
     # Detecting last checkpoint.
     checkpoint = get_last_hf_checkpoint(training_args)
@@ -198,9 +200,9 @@ def main():
         processing_class=cehrgpt_tokenizer,
         reward_funcs=[
             reward_valid_sequence_func,
-            reward_concept_prevalence_func,
-            reward_co_occurrence_with_time_window,
             reward_length_func,
+            reward_co_occurrence_with_time_window,
+            reward_concept_information_content_func,
         ],
         args=training_args,
         train_dataset=dataset,
