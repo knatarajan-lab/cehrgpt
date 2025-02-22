@@ -39,7 +39,7 @@ def reward_valid_sequences(
     return rewards
 
 
-def reward_co_occurrence(
+def reward_co_occurrence_information_content(
     prompts: List[List[str]], completions: List[List[str]], **kwargs
 ) -> List[float]:
     co_occurrence_list: List[
@@ -49,6 +49,9 @@ def reward_co_occurrence(
     time_window_starts, time_window_ends, co_occurrence_matrices = zip(
         *co_occurrence_list
     )
+    time_window_weights = [
+        1 / np.sqrt(time_window_start) for time_window_start in time_window_starts
+    ]
     rewards = []
     for prompt, completion in zip(prompts, completions):
         reward = 0.0
@@ -70,17 +73,18 @@ def reward_co_occurrence(
                     if not future_concept_id.isnumeric():
                         continue
 
-                    for z, (time_window_start, time_window_end) in enumerate(
-                        zip(time_window_starts, time_window_ends)
+                    for z, (weight, time_window_start, time_window_end) in enumerate(
+                        zip(time_window_weights, time_window_starts, time_window_ends)
                     ):
                         if time_window_start <= time_interval < time_window_end:
                             co_occurrence = co_occurrence_matrices[z].get(
                                 demographic_group, None
                             )
                             if co_occurrence:
-                                reward += co_occurrence.get(
-                                    (current_concept_id, future_concept_id), 0.0
+                                prob = co_occurrence.get(
+                                    (current_concept_id, future_concept_id), 1e-9
                                 )
+                                reward += -np.log(prob) * prob * weight
             reward = reward / len(completion)
         rewards.append(reward)
     return rewards

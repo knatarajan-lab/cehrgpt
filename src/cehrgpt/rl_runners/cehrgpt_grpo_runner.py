@@ -24,7 +24,7 @@ from cehrgpt.rl_runners.grpo.compute_patient_sequence_length_stats import (
 )
 from cehrgpt.rl_runners.grpo.rewards import (
     DemographicGroup,
-    reward_co_occurrence,
+    reward_co_occurrence_information_content,
     reward_concept_information_content,
     reward_length,
     reward_valid_sequences,
@@ -136,7 +136,7 @@ def main():
                 os.path.join(co_occurrence_folder, "*.parquet")
             )
             result_dict = create_co_occurrence_matrix(
-                co_occurrence_matrix, threshold=20
+                co_occurrence_matrix, threshold=10
             )
             if time_window_start.isnumeric():
                 time_window_start = int(time_window_start)
@@ -151,7 +151,8 @@ def main():
             co_occurrence_list.append((time_window_start, time_window_end, result_dict))
 
     reward_co_occurrence_with_time_window = partial(
-        reward_co_occurrence, co_occurrence_matrices=co_occurrence_list
+        reward_co_occurrence_information_content,
+        co_occurrence_matrices=co_occurrence_list,
     )
     reward_co_occurrence_with_time_window.__name__ = f"reward_co_occurrence"
 
