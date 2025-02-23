@@ -385,13 +385,9 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             )
 
         self.drop = nn.Dropout(config.embd_pdrop)
-        gpt2blocks = []
-        for i in range(config.num_hidden_layers):
-            gpt2block = GPT2Block(config, layer_idx=i)
-            # TODO: flash_attention.py infers the data types based on a linear layer this is a temporary solution
-            gpt2block.attn.linear_placeholder = torch.nn.Linear(1, 1)
-            gpt2blocks.append(gpt2block)
-        self.h = nn.ModuleList(gpt2blocks)
+        self.h = nn.ModuleList(
+            [GPT2Block(config, layer_idx=i) for i in range(config.num_hidden_layers)]
+        )
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 
         # Model parallel
