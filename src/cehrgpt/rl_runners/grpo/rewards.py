@@ -84,7 +84,7 @@ def reward_co_occurrence_information_content(
                                 prob = co_occurrence.get(
                                     (current_concept_id, future_concept_id), 1e-9
                                 )
-                                reward += -np.log(prob) * prob * weight
+                                reward += -np.log(prob) * prob
             reward = reward / len(completion)
         rewards.append(reward)
     return rewards

@@ -154,7 +154,9 @@ def main():
         reward_co_occurrence_information_content,
         co_occurrence_matrices=co_occurrence_list,
     )
-    reward_co_occurrence_with_time_window.__name__ = f"reward_co_occurrence"
+    reward_co_occurrence_with_time_window.__name__ = (
+        f"reward_co_occurrence_information_content"
+    )
 
     patient_seq_length_stats = pl.read_parquet(
         os.path.join(
