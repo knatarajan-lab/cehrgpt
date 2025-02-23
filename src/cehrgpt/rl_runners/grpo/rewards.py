@@ -49,9 +49,7 @@ def reward_co_occurrence_information_content(
     time_window_starts, time_window_ends, co_occurrence_matrices = zip(
         *co_occurrence_list
     )
-    time_window_weights = [
-        1 / np.sqrt(time_window_start) for time_window_start in time_window_starts
-    ]
+    time_window_weights = [math.sqrt(i) for i in range(len(time_window_starts), 0, -1)]
     rewards = []
     for prompt, completion in zip(prompts, completions):
         reward = 0.0
@@ -105,7 +103,7 @@ def reward_length(
             log_std = length_stats[demographic_group].get("log_std")
             if not pd.isnull(log_std) and not pd.isnull(log_mean) and log_std > 0.0:
                 log_seq_length = math.log(len(completion))
-                reward += norm.pdf(log_seq_length, log_mean, log_std)
+                reward += np.exp(-np.abs(log_seq_length - log_mean) / log_std)
         rewards.append(reward)
     return rewards
 
