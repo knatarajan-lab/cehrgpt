@@ -55,7 +55,10 @@ def main(args):
         spark.read.parquet(
             os.path.join(args.patient_events_dir, "att_events", "artificial_tokens")
         )
-        .where(f.col("standard_concept_id").cast(IntegerType()).isNotNull())
+        .where(
+            f.col("standard_concept_id").isin(["[VS]", "[VE]"])
+            | f.col("standard_concept_id").cast(IntegerType()).isNotNull()
+        )
         .select("person_id", "standard_concept_id", "date", "datetime")
     )
     patient_events = patient_events.unionByName(visit_type_tokens)
