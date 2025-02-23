@@ -147,6 +147,36 @@ class CehrGptPatient:
     def get_events(self) -> List[CehrGptEvent]:
         return itertools.chain.from_iterable(visit.events for visit in self.visits)
 
+    def to_meds(self, subject_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        events = []
+        subject_id = self.patient_id if self.patient_id else subject_id
+        events.append(
+            {
+                "subject_id": subject_id,
+                "time": None,
+                "code": f"GENDER//{self.gender}",
+                "numeric_value": None,
+            }
+        )
+        events.append(
+            {
+                "subject_id": subject_id,
+                "time": self.birth_datetime,
+                "code": f"MEDS_BIRTH",
+                "numeric_value": None,
+            }
+        )
+        for event in self.get_events():
+            events.append(
+                {
+                    "subject_id": subject_id,
+                    "time": event.time,
+                    "code": event.code,
+                    "numeric_value": event.numeric_value,
+                }
+            )
+        return events
+
 
 def parse_datetime(datetime_str: str) -> datetime.datetime:
     """Parse datetime string to datetime object, handling multiple formats."""

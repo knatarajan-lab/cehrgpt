@@ -1,11 +1,7 @@
 import os
-<<<<<<< HEAD
-from functools import partial
-from typing import Optional, Union
-=======
 import pickle
+from functools import partial
 from typing import List, Optional, Union
->>>>>>> d1bb97e (updated the dev branch)
 
 import numpy as np
 import torch
@@ -25,19 +21,16 @@ from cehrbert.runners.runner_util import (
     load_parquet_as_dataset,
 )
 from datasets import Dataset, DatasetDict, IterableDatasetDict, load_from_disk
-<<<<<<< HEAD
-from transformers import EarlyStoppingCallback, Trainer, TrainingArguments, set_seed
-from transformers.trainer_utils import is_main_process
-=======
 from transformers import (
     AutoConfig,
     AutoModel,
     AutoTokenizer,
+    EarlyStoppingCallback,
     Trainer,
     TrainingArguments,
     set_seed,
 )
->>>>>>> d1bb97e (updated the dev branch)
+from transformers.trainer_utils import is_main_process
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset
@@ -402,48 +395,12 @@ def main():
                         f"streaming: {data_args.streaming}"
                     )
 
-<<<<<<< HEAD
             # Create the CEHR-GPT tokenizer if it's not available in the output folder
             cehrgpt_tokenizer = load_and_create_tokenizer(
                 data_args=data_args,
                 model_args=model_args,
                 cehrgpt_args=cehrgpt_args,
                 dataset=dataset,
-=======
-        # Create the CEHR-GPT tokenizer if it's not available in the output folder
-        cehrgpt_tokenizer = load_and_create_tokenizer(
-            data_args=data_args,
-            model_args=model_args,
-            cehrgpt_args=cehrgpt_args,
-            dataset=dataset,
-        )
-        # Retrain the tokenizer in case we want to pretrain the model further using different datasets
-        if cehrgpt_args.expand_tokenizer:
-            tokenizer_output_path = os.path.expanduser(training_args.output_dir)
-            if not tokenizer_exists(tokenizer_output_path):
-                cehrgpt_tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
-                    cehrgpt_tokenizer=cehrgpt_tokenizer,
-                    dataset=dataset["train"],
-                    data_args=data_args,
-                    concept_name_mapping={},
-                    pretrained_concept_embedding_model=PretrainedEmbeddings(
-                        cehrgpt_args.pretrained_embedding_path
-                    ),
-                )
-                cehrgpt_tokenizer.save_pretrained(tokenizer_output_path)
-
-        # sort the patient features chronologically and tokenize the data
-        processed_dataset = create_cehrgpt_pretraining_dataset(
-            dataset=dataset, cehrgpt_tokenizer=cehrgpt_tokenizer, data_args=data_args
-        )
-        # only save the data to the disk if it is not streaming
-        if not data_args.streaming:
-            processed_dataset.save_to_disk(str(prepared_ds_path))
-            stats = processed_dataset.cleanup_cache_files()
-            LOG.info(
-                "Clean up the cached files for the cehrgpt pretraining dataset: %s",
-                stats,
->>>>>>> d1bb97e (updated the dev branch)
             )
 
             # Retrain the tokenizer in case we want to pretrain the model further using different datasets
@@ -537,24 +494,11 @@ def main():
     else:
         processed_dataset = processed_dataset.filter(filter_func, **filter_args)
 
-<<<<<<< HEAD
     model = load_and_create_model(model_args, cehrgpt_args, cehrgpt_tokenizer)
 
     # Try to update motor tte vocab size if the new configuration is different from the existing one
     if cehrgpt_args.include_motor_time_to_event:
         model.update_motor_tte_vocab_size(cehrgpt_tokenizer.motor_tte_vocab_size)
-=======
-    # If we choose to continue to train an existing model, we need to check whether the tokenizer exists in the
-    # output_dir, and the tokenizer will be saved if it does not exist.
-    if cehrgpt_args.continue_pretrain and not tokenizer_exists(
-        os.path.expanduser(training_args.output_dir)
-    ):
-        cehrgpt_tokenizer.save_pretrained(os.path.expanduser(training_args.output_dir))
-
-    model = load_and_create_model(
-        model_args, cehrgpt_args, training_args, cehrgpt_tokenizer
-    )
->>>>>>> d1bb97e (updated the dev branch)
 
     # Expand tokenizer to adapt to the new pretraining dataset
     if model.config.vocab_size < cehrgpt_tokenizer.vocab_size:
@@ -714,7 +658,6 @@ def main():
 
     trainer = trainer_class(
         model=model,
-<<<<<<< HEAD
         data_collator=data_collator_fn(
             tokenizer=cehrgpt_tokenizer,
             max_length=(
@@ -730,9 +673,6 @@ def main():
             motor_tte_vocab_size=model.config.motor_tte_vocab_size,
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
         ),
-=======
-        data_collator=data_collator,
->>>>>>> d1bb97e (updated the dev branch)
         train_dataset=processed_dataset["train"],
         eval_dataset=(
             processed_dataset["validation"]
