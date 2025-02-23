@@ -259,8 +259,11 @@ def main(args):
                     <= len(row["concept_ids"])
                     <= max_seq_allowed
                 ):
+                    # Demographics plus the [VS] token
                     random_prompts.append(
-                        cehrgpt_tokenizer.encode(row["concept_ids"][:START_TOKEN_SIZE])
+                        cehrgpt_tokenizer.encode(
+                            row["concept_ids"][: START_TOKEN_SIZE + 1]
+                        )
                     )
                 iter += 1
                 if not random_prompts and iter > 10:
