@@ -50,7 +50,7 @@ def main(args):
     )
     patient_events = spark.read.parquet(
         os.path.join(args.patient_events_dir, "clinical_events")
-    ).select("person_id", "standard_concept_id", "date", "datetime")
+    ).select("person_id", "standard_concept_id", "date", "datetime", "priority")
     visit_type_tokens = (
         spark.read.parquet(
             os.path.join(args.patient_events_dir, "att_events", "artificial_tokens")
@@ -59,7 +59,7 @@ def main(args):
             f.col("standard_concept_id").isin(["[VS]", "[VE]"])
             | f.col("standard_concept_id").cast(IntegerType()).isNotNull()
         )
-        .select("person_id", "standard_concept_id", "date", "datetime")
+        .select("person_id", "standard_concept_id", "date", "datetime", "priority")
     )
     patient_events = patient_events.unionByName(visit_type_tokens)
     start_age_events = spark.read.parquet(
@@ -96,6 +96,15 @@ def main(args):
     patient_events = patient_events.join(qualified_persons, "person_id")
     if args.use_sample:
         patient_events = patient_events.sample(args.sample_frac)
+
+    # Assuming 'artificial_tokens' is your DataFrame
+    patient_events = patient_events.withColumn(
+        "datetime",
+        f.from_unixtime(
+            f.unix_timestamp("datetime") + (f.col("priority") / 1000),
+            "yyyy-MM-dd HH:mm:ss.SSS",
+        ),
+    ).drop("priority")
 
     co_occurrence_raw_count_by_demographic_group = (
         patient_events.alias("past")
