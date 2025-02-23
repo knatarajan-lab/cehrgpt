@@ -57,7 +57,12 @@ def reward_co_occurrence_information_content(
             age, gender, race = prompt[1:4]
             demographic_group = DemographicGroup(age_group_func(age), race, gender)
             for i, current_concept_id in enumerate(completion):
-                if not current_concept_id.isnumeric():
+                # We allow clinical concepts and [VS] and [VE]
+                if (
+                    not current_concept_id.isnumeric()
+                    and not is_visit_start(current_concept_id)
+                    and not is_visit_end(current_concept_id)
+                ):
                     continue
                 time_interval = 0
                 for j in range(i + 1, len(completion)):
@@ -68,7 +73,11 @@ def reward_co_occurrence_information_content(
                         )
                         continue
 
-                    if not future_concept_id.isnumeric():
+                    if (
+                        not future_concept_id.isnumeric()
+                        and not is_visit_start(future_concept_id)
+                        and not is_visit_end(future_concept_id)
+                    ):
                         continue
 
                     for z, (weight, time_window_start, time_window_end) in enumerate(
