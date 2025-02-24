@@ -22,6 +22,22 @@
             margin-top: 20px;
             text-align: center;
         }
+        #copy-url-container {
+            margin-top: 10px;
+            text-align: center;
+            display: none;
+        }
+        #result-url {
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
+            word-break: break-all;
+        }
+        .copy-success {
+            color: #28a745;
+            margin-left: 10px;
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -43,6 +59,12 @@
 
         <div id="download-container" style="display: none;">
             <button id="download-btn" class="btn btn-primary">Download Patient Data</button>
+        </div>
+
+        <div id="copy-url-container" style="display: none;">
+            <button id="copy-url-btn" class="btn btn-outline-secondary">Copy Result URL</button>
+            <span id="copy-success" class="copy-success">✓ Copied!</span>
+            <div id="result-url" class="mt-2"></div>
         </div>
 
         <div id="dashboard-container" class="mt-4"></div>
@@ -90,6 +112,26 @@
                 document.body.removeChild(link);
             }
 
+            function copyResultUrl() {
+                if (!resultUrl) {
+                    alert('Result URL is not available.');
+                    return;
+                }
+
+                // Extract just the part after "/results/"
+                const urlParts = resultUrl.split('/results/');
+                const cacheKey = urlParts.length > 1 ? urlParts[1] : resultUrl;
+
+                // Copy to clipboard
+                navigator.clipboard.writeText(cacheKey).then(function() {
+                    // Show success message
+                    $('#copy-success').fadeIn().delay(1500).fadeOut();
+                }).catch(function(err) {
+                    console.error('Failed to copy URL:', err);
+                    alert('Failed to copy URL: ' + err);
+                });
+            }
+
             function updateTaskStatus() {
                 $.ajax({
                     url: `/status/${taskId}`,
@@ -101,6 +143,9 @@
                         const errorContainer = $('#error-container');
                         const userQueryContainer = $('#user-query-text');
                         const downloadContainer = $('#download-container');
+                        const copyUrlContainer = $('#copy-url-container');
+                        const resultUrlDisplay = $('#result-url');
+
 
                         // Display user query
                         userQueryContainer.text(response.query || 'No query provided');
@@ -109,6 +154,7 @@
                         dashboardContainer.hide();
                         errorContainer.hide();
                         downloadContainer.hide();
+                        copyUrlContainer.hide();
                         progressBar.removeClass('bg-success bg-danger');
 
                         switch(response.state) {
@@ -121,6 +167,15 @@
                             case 'SUCCESS':
                                 progressBar.css('width', '100%').text('100%').addClass('bg-success');
                                 statusMessage.text('Task completed successfully!');
+
+                                // Store the full result URL
+                                resultUrl = response.result_url;
+                                // Extract just the part after "/results/"
+                                const urlParts = resultUrl.split('/results/');
+                                const cacheKey = urlParts.length > 1 ? urlParts[1] : resultUrl;
+                                // Display only the cache key portion
+                                resultUrlDisplay.text(cacheKey);
+                                copyUrlContainer.show();
 
                                 // Fetch and display results
                                 $.ajax({
@@ -182,6 +237,9 @@
 
             // Attach download button event
             $('#download-btn').on('click', downloadPatientData);
+
+            // Attach copy URL button event
+            $('#copy-url-btn').on('click', copyResultUrl);
 
             // Initial status check and polling
             updateTaskStatus();
