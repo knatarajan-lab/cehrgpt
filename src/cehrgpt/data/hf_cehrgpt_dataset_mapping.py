@@ -36,7 +36,7 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
         record["input_ids"] = self._concept_tokenizer.encode(record["concept_ids"])
         # There is a possibility that concept_value_masks does not exist, we need to manually add it
         if "concept_value_masks" not in record:
-            record["value_indicators"] = np.zeros_like(
+            record["concept_value_masks"] = np.zeros_like(
                 record["concept_ids"], dtype=bool
             )
             record["concept_values"] = np.zeros_like(record["concept_ids"], dtype=float)
