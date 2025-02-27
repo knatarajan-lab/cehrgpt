@@ -34,7 +34,14 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
         # If any concept has a value associated with it, we normalize the value
         record["input_ids"] = self._concept_tokenizer.encode(record["concept_ids"])
-        record["value_indicators"] = record["concept_value_masks"]
+        if "concept_value_masks" in record:
+            record["value_indicators"] = record["concept_value_masks"]
+        else:
+            record["value_indicators"] = np.zeros_like(
+                record["concept_ids"], dtype=bool
+            )
+            record["concept_values"] = np.zeros_like(record["concept_ids"], dtype=float)
+
         if "number_as_values" not in record or "concept_as_values" not in record:
             record["number_as_values"] = [
                 float(value) if isinstance(value, float) else None
