@@ -97,9 +97,6 @@ class HFFineTuningMapping(HFCehrGptTokenizationMapping):
         record = super().transform(record)
         record.update(
             {
-                "age_at_index": (
-                    record["age"] if "age" in record else record["age_at_index"]
-                ),
                 "classifier_label": int(record["label"] > 0),
                 "index_date": (
                     convert_date_to_posix_time(record["index_date"])
@@ -108,6 +105,14 @@ class HFFineTuningMapping(HFCehrGptTokenizationMapping):
                 ),
             }
         )
+        if "age" in record or "age_at_index" in record:
+            record.update(
+                {
+                    "age_at_index": (
+                        record["age"] if "age" in record else record["age_at_index"]
+                    )
+                }
+            )
         return record
 
     def remove_columns(self):

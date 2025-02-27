@@ -1574,11 +1574,14 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
             self.age_batch_norm.train()
         return normalized_age
 
+    def parallelize(self, device_map=None):
+        self.cehrgpt.parallelize(device_map=device_map)
+
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor],
-        age_at_index: torch.FloatTensor,
-        classifier_label: Optional[torch.FloatTensor],
+        input_ids: torch.LongTensor,
+        classifier_label: torch.FloatTensor,
+        age_at_index: Optional[torch.FloatTensor] = None,
         value_indicators: Optional[torch.BoolTensor] = None,
         values: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
@@ -1604,18 +1607,22 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
             return_dict=return_dict,
         )
 
-        # Disable autocasting for precision-sensitive operations
-        with torch.autocast(device_type="cuda", enabled=False):
-            normalized_age = self._apply_age_norm(age_at_index)
-
-        # In case the model is in bfloat16
-        if cehrgpt_output.last_hidden_state.dtype != normalized_age.dtype:
-            normalized_age = normalized_age.to(cehrgpt_output.last_hidden_state.dtype)
-
         # In fine-tuning, the sequences are left-padded, so we use the last element as the pooler
         output_pooler = cehrgpt_output.last_hidden_state[..., -1, :]
         next_input = self.dropout(output_pooler)
-        next_input = torch.cat([next_input, normalized_age], dim=1)
+
+        # Only when age_at_index is provided, otherwise we can ignore this.
+        if age_at_index is not None:
+            # Disable autocasting for precision-sensitive operations
+            with torch.autocast(device_type="cuda", enabled=False):
+                normalized_age = self._apply_age_norm(age_at_index)
+            # In case the model is in bfloat16
+            if cehrgpt_output.last_hidden_state.dtype != normalized_age.dtype:
+                normalized_age = normalized_age.to(
+                    cehrgpt_output.last_hidden_state.dtype
+                )
+            next_input = torch.cat([next_input, normalized_age], dim=1)
+
         next_input = self.dense_layer(next_input)
         next_input = nn.functional.relu(next_input)
         next_input = self.dense_dropout(next_input)
@@ -1632,9 +1639,6 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
             hidden_states=cehrgpt_output.last_hidden_state,
             attentions=cehrgpt_output.attentions,
         )
-
-    def parallelize(self, device_map=None):
-        self.cehrgpt.parallelize(device_map=device_map)
 
     def deparallelize(self):
         self.cehrgpt.deparallelize()
