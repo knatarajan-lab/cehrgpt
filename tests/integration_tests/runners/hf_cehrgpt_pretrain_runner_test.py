@@ -86,6 +86,10 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "true",
             "--entropy_penalty",
             "true",
+            "--validation_split_num",
+            "10",
+            "--streaming",
+            "true",
         ]
         train_main()
         # Teacher force the prompt to consist of [year][age][gender][race][VS] then inject the random vector before [VS]

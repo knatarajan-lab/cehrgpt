@@ -918,12 +918,12 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         map_statistics_partial = partial(map_statistics, size=SAMPLE_SIZE)
 
         if data_args.streaming:
+            first_example = next(iter(dataset))
             parts = dataset.map(
                 partial(agg_helper, map_func=map_statistics_partial),
                 batched=True,
                 batch_size=data_args.preprocessing_batch_size,
-                new_fingerprint="invalid",
-                remove_columns=dataset.column_names,
+                remove_columns=first_example.keys(),
             )
         else:
             parts = dataset.map(
