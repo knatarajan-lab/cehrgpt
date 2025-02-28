@@ -157,134 +157,95 @@ def load_finetuned_model(
 
 def create_dataset_splits(data_args: DataTrainingArguments, seed: int):
     """
-    Creates training, validation, and testing dataset splits based on specified splitting strategies.
+    Splits a dataset into training, validation, and testing subsets using specified parameters from `data_args`.
 
-    This function splits a dataset into training, validation, and test sets, using either chronological,
-    patient-based, or random splitting strategies, depending on the parameters provided in `data_args`.
-
-    - **Chronological split**: Sorts by a specified date and splits based on historical and future data.
-    - **Patient-based split**: Splits by unique patient IDs to ensure that patients in each split are distinct.
-    - **Random split**: Performs a straightforward random split of the dataset.
-
-    If `data_args.test_data_folder` is provided, a test set is loaded directly from it. Otherwise,
-    the test set is created by further splitting the validation set based on `test_eval_ratio`.
+    This function accommodates both streaming and batch data processing scenarios. In streaming mode,
+    the function performs stateful shuffling and manual splitting based on predefined record counts.
+    In batch mode, it leverages built-in functions to split the dataset randomly according to specified percentages.
 
     Parameters:
-        data_args (DataTrainingArguments): A configuration object containing data-related arguments, including:
-            - `data_folder` (str): Path to the main dataset.
-            - `test_data_folder` (str, optional): Path to an optional test dataset.
-            - `chronological_split` (bool): Whether to split chronologically.
-            - `split_by_patient` (bool): Whether to split by unique patient IDs.
-            - `validation_split_percentage` (float): Percentage of data to use for validation.
-            - `test_eval_ratio` (float): Ratio of test to validation data when creating a test set from validation.
-            - `preprocessing_num_workers` (int): Number of processes for parallel data filtering.
-            - `preprocessing_batch_size` (int): Batch size for batched operations.
-        seed (int): Random seed for reproducibility of splits.
+        data_args (DataTrainingArguments): Configuration object containing data-related parameters, which includes:
+            - data_folder (str): Path to the dataset directory.
+            - test_data_folder (str, optional): Path to the directory containing separate test data.
+            - streaming (bool): Flag to indicate if the dataset should be processed as a stream.
+            - validation_split_num (int, optional): Number of records to use for validation when streaming.
+            - validation_split_percentage (float): Percentage of data to allocate to validation in batch mode.
+            - test_eval_ratio (float, optional): Ratio of validation set size to allocate to test set creation if no separate test dataset is provided.
+            - chronological_split (bool, optional): Flag to indicate if splits should be made based on chronological order (not implemented in the current function).
+            - split_by_patient (bool, optional): Flag to indicate if splits should ensure no patient overlap (not implemented in the current function).
+        seed (int): Seed for random number generation to ensure reproducibility of splits.
 
     Returns:
-        Tuple[Dataset, Dataset, Dataset]: A tuple containing:
-            - `train_set` (Dataset): Training split of the dataset.
-            - `validation_set` (Dataset): Validation split of the dataset.
-            - `test_set` (Dataset): Test split of the dataset.
+        Tuple[Dataset, Dataset, Dataset]: A tuple containing training, validation, and testing datasets in that order.
 
     Raises:
-        FileNotFoundError: If `data_args.data_folder` or `data_args.test_data_folder` does not exist.
-        ValueError: If incompatible arguments are passed for splitting strategies.
+        ValueError: If `validation_split_num` is not defined or is zero when required in streaming mode.
 
-    Example Usage:
-        data_args = DataTrainingArguments(
-            data_folder="data/",
-            validation_split_percentage=0.1,
-            test_eval_ratio=0.2,
-            chronological_split=True
-        )
-        train_set, validation_set, test_set = create_dataset_splits(data_args, seed=42)
+    Examples:
+        >>> data_args = DataTrainingArguments(
+                data_folder="data/",
+                validation_split_percentage=0.1,
+                test_eval_ratio=0.2,
+                streaming=True,
+                validation_split_num=500
+            )
+        >>> train_set, validation_set, test_set = create_dataset_splits(data_args, seed=42)
     """
-    dataset = load_parquet_as_dataset(data_args.data_folder)
+    dataset = load_parquet_as_dataset(
+        data_args.data_folder, streaming=data_args.streaming
+    )
     test_set = (
         None
         if not data_args.test_data_folder
         else load_parquet_as_dataset(data_args.test_data_folder)
     )
 
-    if data_args.chronological_split:
-        # Chronological split by sorting on `index_date`
-        dataset = dataset.sort("index_date")
-        total_size = len(dataset)
-        train_end = int((1 - data_args.validation_split_percentage) * total_size)
-
-        # Perform the split
-        train_set = dataset.select(range(0, train_end))
-        validation_set = dataset.select(range(train_end, total_size))
-
-        if test_set is None:
-            test_valid_split = validation_set.train_test_split(
-                test_size=data_args.test_eval_ratio, seed=seed
-            )
-            validation_set, test_set = (
-                test_valid_split["train"],
-                test_valid_split["test"],
-            )
-
-    elif data_args.split_by_patient:
-        # Patient-based split
-        LOG.info("Using the split_by_patient strategy")
-        unique_patient_ids = dataset.unique("person_id")
-        LOG.info(f"There are {len(unique_patient_ids)} patients in total")
-
-        np.random.seed(seed)
-        np.random.shuffle(unique_patient_ids)
-
-        train_end = int(
-            len(unique_patient_ids) * (1 - data_args.validation_split_percentage)
-        )
-        train_patient_ids = set(unique_patient_ids[:train_end])
-
-        if test_set is None:
-            validation_end = int(
-                train_end
-                + len(unique_patient_ids)
-                * data_args.validation_split_percentage
-                * data_args.test_eval_ratio
-            )
-            val_patient_ids = set(unique_patient_ids[train_end:validation_end])
-            test_patient_ids = set(unique_patient_ids[validation_end:])
+    if data_args.streaming:
+        # When streaming, we apply a stateful shuffle if possible, or a basic shuffle if not.
+        dataset = dataset.shuffle(
+            buffer_size=10000, seed=seed
+        )  # Buffer size may need to be adjusted based on memory.
+        # Assume validation_split_num indicates how many records to use for validation.
+        # The ratio of test to validation needs to be handled manually.
+        if (
+            hasattr(data_args, "validation_split_num")
+            and data_args.validation_split_num > 0
+        ):
+            # Assume test_eval_ratio is a fraction of the validation size for creating test data.
+            # Here, we handle it manually by defining 'take' sizes based on a theoretical total data size.
+            validation_take_size = data_args.validation_split_num
+            test_take_size = int(validation_take_size * data_args.test_eval_ratio)
+            # Collect the validation set.
+            validation_set = dataset.take(validation_take_size)
+            # Skip validation set to continue to test set collection.
+            train_set = dataset.skip(validation_take_size)
+            # Collect the test set if not already provided.
+            if test_set is None and test_take_size > 0:
+                test_set = validation_set.take(test_take_size)
+                # Skip the test set to adjust for training set.
+                validation_set = validation_set.skip(test_take_size)
         else:
-            val_patient_ids, test_patient_ids = (
-                set(unique_patient_ids[train_end:]),
-                None,
+            raise ValueError(
+                "validation_split_num must be defined and greater than 0 for streaming datasets."
             )
-
-        # Helper function to apply patient-based filtering
-        def filter_by_patient_ids(patient_ids):
-            return dataset.filter(
-                lambda batch: [pid in patient_ids for pid in batch["person_id"]],
-                num_proc=data_args.preprocessing_num_workers,
-                batched=True,
-                batch_size=data_args.preprocessing_batch_size,
-            )
-
-        # Generate splits
-        train_set = filter_by_patient_ids(train_patient_ids)
-        validation_set = filter_by_patient_ids(val_patient_ids)
-        if test_set is None:
-            test_set = filter_by_patient_ids(test_patient_ids)
-
     else:
-        # Random split
-        train_val = dataset.train_test_split(
+        # Perform a random split for training, validation, and possibly test datasets in batch context.
+        train_val_split = dataset.train_test_split(
             test_size=data_args.validation_split_percentage, seed=seed
         )
-        train_set, validation_set = train_val["train"], train_val["test"]
+        train_set = train_val_split["train"]
+        validation_set = train_val_split["test"]
 
-        if test_set is None:
+        if (
+            test_set is None
+            and hasattr(data_args, "test_eval_ratio")
+            and data_args.test_eval_ratio > 0
+        ):
             test_valid_split = validation_set.train_test_split(
                 test_size=data_args.test_eval_ratio, seed=seed
             )
-            validation_set, test_set = (
-                test_valid_split["train"],
-                test_valid_split["test"],
-            )
+            validation_set = test_valid_split["train"]
+            test_set = test_valid_split["test"]
 
     return train_set, validation_set, test_set
 
