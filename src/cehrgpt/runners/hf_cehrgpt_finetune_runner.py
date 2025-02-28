@@ -623,7 +623,11 @@ def do_predict(
     test_losses = []
     with torch.no_grad():
         for index, batch in enumerate(tqdm(test_dataloader, desc="Predicting")):
-            person_ids = batch.pop("person_id").numpy().squeeze().astype(int)
+            person_ids = (
+                batch.pop("person_id").numpy().squeeze().astype(int)
+                if "person_id" in batch
+                else None
+            )
             index_dates = (
                 map(
                     datetime.fromtimestamp,
