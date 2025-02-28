@@ -7,11 +7,12 @@ class CehrGPTGRPOArguments:
     demographics_prompt_dir: Optional[str] = dataclasses.field(
         metadata={"help": "The name of the dataset to use (via the datasets library)."}
     )
-    aggregate_data_dir: Optional[str] = dataclasses.field(
-        metadata={"help": "The name of the dataset to use (via the datasets library)."}
-    )
     vocabulary_dir: Optional[str] = dataclasses.field(
         metadata={"help": "The directory that contains the OHDSI vocabulary data"}
+    )
+    aggregate_data_dir: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={"help": "The name of the dataset to use (via the datasets library)."},
     )
 
 
