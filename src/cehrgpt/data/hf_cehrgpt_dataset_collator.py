@@ -152,7 +152,10 @@ class CehrGptDataCollator:
 
     def fine_tuning_data_hook(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
         batch = {}
-        if "person_id" in examples[0]:
+        if (
+            "person_id" in examples[0]
+            and getattr(examples[0], "person_id", None) is not None
+        ):
             batch["person_id"] = torch.cat(
                 [
                     self._convert_to_tensor(example["person_id"]).reshape(-1, 1)
@@ -161,7 +164,10 @@ class CehrGptDataCollator:
                 dim=0,
             ).to(torch.int32)
 
-        if "index_date" in examples[0]:
+        if (
+            "index_date" in examples[0]
+            and getattr(examples[0], "index_date", None) is not None
+        ):
             batch["index_date"] = torch.cat(
                 [
                     self._convert_to_tensor(example["index_date"]).reshape(-1, 1)
@@ -170,7 +176,10 @@ class CehrGptDataCollator:
                 dim=0,
             ).to(torch.float32)
 
-        if "age_at_index" in examples[0]:
+        if (
+            "age_at_index" in examples[0]
+            and getattr(examples[0], "age_at_index", None) is not None
+        ):
             batch["age_at_index"] = torch.cat(
                 [
                     self._convert_to_tensor(example["age_at_index"]).reshape(-1, 1)
