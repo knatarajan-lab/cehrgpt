@@ -352,6 +352,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         categorical_lab_stats: Dict[Tuple[str, str], int],
         concept_name_mapping: Dict[str, str],
         pretrained_concept_embedding_model: PretrainedEmbeddings = None,
+        padding_side: Optional[str] = "left",
     ):
         self._tokenizer = tokenizer
         self._value_tokenizer = value_tokenizer
@@ -382,6 +383,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             for _ in self.get_vocab().keys()
             if self._pretrained_concept_embedding_model.is_concept_available(_)
         ]
+        self.padding_side = padding_side
 
         super().__init__()
 
@@ -485,7 +487,14 @@ class CehrGptTokenizer(PreTrainedTokenizer):
 
     def __call__(self, *args, **kwargs):
         kwargs["is_split_into_words"] = True
-        return super().__call__(*args, **kwargs)
+        # Overwrite the padding_size due to the GRPO default behavior
+        padding_size = kwargs.get("padding_side", None)
+        if padding_size and padding_size != self.padding_side:
+            kwargs["padding_side"] = self.padding_side
+        output = super().__call__(*args, **kwargs)
+        if "token_type_ids" in output:
+            output.pop("token_type_ids")
+        return output
 
     def tokenize(self, text: TextInput, **kwargs) -> List[str]:
         return [text]

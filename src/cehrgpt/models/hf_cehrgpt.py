@@ -1580,7 +1580,7 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
     def forward(
         self,
         input_ids: torch.LongTensor,
-        classifier_label: torch.FloatTensor,
+        classifier_label: Optional[torch.FloatTensor] = None,
         age_at_index: Optional[torch.FloatTensor] = None,
         value_indicators: Optional[torch.BoolTensor] = None,
         values: Optional[torch.LongTensor] = None,
@@ -1612,16 +1612,18 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
         next_input = self.dropout(output_pooler)
 
         # Only when age_at_index is provided, otherwise we can ignore this.
-        if age_at_index is not None:
-            # Disable autocasting for precision-sensitive operations
+        if age_at_index is None:
+            normalized_age = torch.zeros(
+                (next_input.shape[0], 1), dtype=torch.float, device=next_input.device
+            )
+        else:
+            # Disable auto-casting for precision-sensitive operations
             with torch.autocast(device_type="cuda", enabled=False):
                 normalized_age = self._apply_age_norm(age_at_index)
-            # In case the model is in bfloat16
-            if cehrgpt_output.last_hidden_state.dtype != normalized_age.dtype:
-                normalized_age = normalized_age.to(
-                    cehrgpt_output.last_hidden_state.dtype
-                )
-            next_input = torch.cat([next_input, normalized_age], dim=1)
+        # In case the model is in bfloat16
+        if cehrgpt_output.last_hidden_state.dtype != normalized_age.dtype:
+            normalized_age = normalized_age.to(cehrgpt_output.last_hidden_state.dtype)
+        next_input = torch.cat([next_input, normalized_age], dim=1)
 
         next_input = self.dense_layer(next_input)
         next_input = nn.functional.relu(next_input)
