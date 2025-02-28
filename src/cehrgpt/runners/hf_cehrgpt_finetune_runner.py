@@ -417,7 +417,8 @@ def main():
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
-    processed_dataset.set_format("pt")
+    if not data_args.streaming:
+        processed_dataset.set_format("pt")
 
     if cehrgpt_args.few_shot_predict:
         # At least we need two examples to have a validation set for early stopping
