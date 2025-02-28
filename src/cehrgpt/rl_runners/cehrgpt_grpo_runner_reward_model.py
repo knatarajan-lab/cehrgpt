@@ -39,9 +39,11 @@ def main():
     cehrgpt_model.generation_config.eos_token_id = cehrgpt_tokenizer.end_token_id
     cehrgpt_model.generation_config.bos_token_id = cehrgpt_tokenizer.end_token_id
 
-    reward_tokenizer = CehrGptTokenizer.from_pretrained(model_args.reward_model_path)
+    reward_tokenizer = CehrGptTokenizer.from_pretrained(
+        cehrgpt_grpo_args.reward_model_path
+    )
     reward_model = CehrGptForClassification.from_pretrained(
-        model_args.reward_model_path
+        cehrgpt_grpo_args.reward_model_path
     )
 
     concept = pl.read_parquet(

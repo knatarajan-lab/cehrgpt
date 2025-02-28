@@ -14,6 +14,10 @@ class CehrGPTGRPOArguments:
         default=None,
         metadata={"help": "The name of the dataset to use (via the datasets library)."},
     )
+    reward_model_path: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={"help": "The path to the reward model"},
+    )
 
 
 @dataclasses.dataclass
