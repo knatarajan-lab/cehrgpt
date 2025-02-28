@@ -957,23 +957,29 @@ class CehrGptTokenizer(PreTrainedTokenizer):
 
         # There could be cases where the value columns are missing, in which case, we need to add
         # default values to those columns
-        dataset = dataset.map(
-            lambda batch: (
-                {
-                    "concept_value_masks": [
-                        [0 for _ in cons] for cons in batch["concept_ids"]
-                    ],
-                    "concept_values": [
-                        [0.0 for _ in cons] for cons in batch["concept_ids"]
-                    ],
-                }
-                if "concept_value_masks" not in batch
+        if getattr(next(iter(dataset)), "concept_value_masks", None) is None:
+            additional_kwarg = (
+                {"num_proc": data_args.preprocessing_num_workers}
+                if not data_args.streaming
                 else {}
-            ),
-            batched=True,
-            batch_size=data_args.preprocessing_batch_size,
-            num_proc=data_args.preprocessing_num_workers,
-        )
+            )
+            dataset = dataset.map(
+                lambda batch: (
+                    {
+                        "concept_value_masks": [
+                            [0 for _ in cons] for cons in batch["concept_ids"]
+                        ],
+                        "concept_values": [
+                            [0.0 for _ in cons] for cons in batch["concept_ids"]
+                        ],
+                    }
+                    if "concept_value_masks" not in batch
+                    else {}
+                ),
+                batched=True,
+                batch_size=data_args.preprocessing_batch_size,
+                **additional_kwarg,
+            )
 
         concept_tokenizer = cls.train_concept_tokenizer(
             dataset,
