@@ -243,8 +243,8 @@ def main():
             # If streaming is enabled, we need to manually split the data into train/val
             if data_args.streaming and data_args.validation_split_num:
                 dataset = dataset.shuffle(buffer_size=10_000, seed=training_args.seed)
-                train_set = dataset.skip(data_args.validation_split_num)
                 val_set = dataset.take(data_args.validation_split_num)
+                train_set = dataset.skip(data_args.validation_split_num)
                 dataset = DatasetDict({"train": train_set, "test": val_set})
             elif data_args.validation_split_percentage:
                 dataset = dataset.train_test_split(
