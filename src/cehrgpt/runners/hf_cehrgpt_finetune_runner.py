@@ -211,19 +211,24 @@ def create_dataset_splits(data_args: DataTrainingArguments, seed: int):
             hasattr(data_args, "validation_split_num")
             and data_args.validation_split_num > 0
         ):
-            # Assume test_eval_ratio is a fraction of the validation size for creating test data.
-            # Here, we handle it manually by defining 'take' sizes based on a theoretical total data size.
+            # Assume validation_take_size and test_take_size are calculated based on total expected records
             validation_take_size = data_args.validation_split_num
             test_take_size = int(validation_take_size * data_args.test_eval_ratio)
-            # Collect the validation set.
-            validation_set = dataset.take(validation_take_size)
-            # Skip validation set to continue to test set collection.
-            train_set = dataset.skip(validation_take_size)
-            # Collect the test set if not already provided.
-            if test_set is None and test_take_size > 0:
-                test_set = validation_set.take(test_take_size)
-                # Skip the test set to adjust for training set.
-                validation_set = validation_set.skip(test_take_size)
+
+            # Stream through the dataset, taking validation and test subsets sequentially
+            combined_validation_test_set = dataset.take(validation_take_size)
+            # The remainder is the training set, but to correctly separate validation and test sets:
+            # We need to ensure that we take and skip the right amounts in one sequence without revisiting
+            if test_take_size > 0 and test_set is None:
+                test_set = combined_validation_test_set.take(test_take_size)
+                validation_set = combined_validation_test_set.skip(test_take_size)
+            else:
+                validation_set = combined_validation_test_set
+
+            # For the training set, you'd normally continue streaming the rest after handling validation and test
+            train_set = dataset.skip(
+                validation_take_size
+            )  # This assumes you can continue streaming after the take
         else:
             raise ValueError(
                 "validation_split_num must be defined and greater than 0 for streaming datasets."
