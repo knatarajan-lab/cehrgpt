@@ -3,19 +3,27 @@ import os
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as f
 
+all_value_columns = [
+    "concept_value_masks",
+    "concept_values",
+    "concept_as_values",
+    "number_as_values",
+]
+
 
 def main(args):
     spark = SparkSession.builder.appName("Create the reward dataset").getOrCreate()
     real_data = spark.read.parquet(args.real_data_dir)
+    value_columns = [c for c in real_data.columns if c in all_value_columns]
     real_data = (
         real_data.sample(args.real_sample_frac)
-        .select("concept_ids")
+        .select(["concept_ids"] + value_columns)
         .withColumn("label", f.lit(1))
     )
     synthetic_data = spark.read.parquet(args.synthetic_data_dir)
     synthetic_data = (
         synthetic_data.sample(args.synthetic_sample_frac)
-        .select("concept_ids")
+        .select(["concept_ids"] + value_columns)
         .withColumn("label", f.lit(0))
     )
     real_data.unionByName(synthetic_data).write.mode("overwrite").parquet(
