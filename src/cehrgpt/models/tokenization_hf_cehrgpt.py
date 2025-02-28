@@ -194,6 +194,12 @@ def map_statistics(batch: Dict[str, Any], size=10_000) -> Dict[str, Any]:
     else:
         batch_value_units = [[NA for _ in cons] for cons in batch["concept_ids"]]
 
+    if "concept_value_masks" not in batch:
+        batch["concept_value_masks"] = [
+            [0 for _ in cons] for cons in batch["concept_ids"]
+        ]
+        batch["concept_values"] = [[0.0 for _ in cons] for cons in batch["concept_ids"]]
+
     if "number_as_values" not in batch:
         batched_number_as_values = [
             [value if isinstance(value, float) else None for value in concept_values]
