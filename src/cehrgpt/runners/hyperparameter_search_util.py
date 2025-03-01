@@ -123,7 +123,7 @@ def create_objective(
 ):
     def objective(trial):
         args = copy.deepcopy(training_args)
-        args.output_dir = f"{args.output_dir}/runs/{trial.number}"
+        args.output_dir = os.path.join(args.output_dir, f"runs/{trial.number}")
         os.makedirs(args.output_dir, exist_ok=True)
         args.learning_rate = trial.suggest_float(
             "learning_rate", cehrgpt_args.lr_low, cehrgpt_args.lr_high
