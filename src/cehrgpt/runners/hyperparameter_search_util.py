@@ -156,19 +156,41 @@ def create_objective(
         )
 
         # Train the model
-        trainer.train(resume_from_checkpoint=checkpoint)
-
+        train_result = trainer.train(resume_from_checkpoint=checkpoint)
+        trainer.save_model()
+        metrics = train_result.metrics
+        trainer.log_metrics("train", metrics)
+        trainer.save_metrics("train", metrics)
+        evaluate = trainer.evaluate()
         # Save actual training epochs to a JSON file in the trial's output directory
-        epochs_info = {"actual_epochs": trainer.state.epoch}
+        epochs_info = {
+            "actual_epochs": trainer.state.epoch,
+            "eval_loss": evaluate["eval_loss"],
+        }
         epochs_file_path = os.path.join(args.output_dir, "epochs_info.json")
-        with open(epochs_file_path, "w") as f:
-            json.dump(epochs_info, f)
-        # Get the number of epochs the model actually trained
-        # Save the actual_epochs into the trial's user attributes for later retrieval
-        trial.set_user_attr("actual_epochs", trainer.state.epoch)
+
+        actual_epochs = trainer.state.epoch
+        eval_loss = evaluate["eval_loss"]
+
+        should_update_file = True
+        if os.path.exists(epochs_file_path):
+            with open(epochs_file_path, "r") as f:
+                existing_data = json.load(f)
+                # Update only if the new eval_loss is smaller (better) than the existing eval_loss
+                if existing_data["eval_loss"] <= epochs_info["eval_loss"]:
+                    should_update_file = False
+                    actual_epochs = existing_data["actual_epochs"]
+                    eval_loss = existing_data["eval_loss"]
+
+        if should_update_file:
+            with open(epochs_file_path, "w") as f:
+                json.dump(epochs_info, f)
+
+        trial.set_user_attr("actual_epochs", actual_epochs)
+        trial.set_user_attr("eval_loss", eval_loss)
 
         # Return the evaluation metric to guide the hyperparameter search
-        return trainer.evaluate()["eval_loss"]
+        return eval_loss
 
     return objective
 
