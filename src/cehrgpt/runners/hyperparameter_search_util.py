@@ -1,8 +1,10 @@
 import copy
+import os
 from typing import Callable, Union
 
 import optuna
 from cehrbert.runners.hf_runner_argument_dataclass import ModelArguments
+from cehrbert.runners.runner_util import get_last_hf_checkpoint
 from datasets import Dataset, DatasetDict, IterableDataset
 from transformers import (
     EarlyStoppingCallback,
@@ -122,6 +124,7 @@ def create_objective(
     def objective(trial):
         args = copy.deepcopy(training_args)
         args.output_dir = f"{args.output_dir}/runs/{trial.number}"
+        os.makedirs(args.output_dir, exist_ok=True)
         args.learning_rate = trial.suggest_float(
             "learning_rate", cehrgpt_args.lr_low, cehrgpt_args.lr_high
         )
@@ -133,6 +136,7 @@ def create_objective(
         args.per_device_train_batch_size = trial.suggest_categorical(
             "per_device_train_batch_size", cehrgpt_args.hyperparameter_batch_sizes
         )
+        checkpoint = get_last_hf_checkpoint(args)
 
         trainer = Trainer(
             model_init=model_init,
@@ -146,7 +150,7 @@ def create_objective(
         )
 
         # Train the model
-        trainer.train()
+        trainer.train(resume_from_checkpoint=checkpoint)
 
         # Get the number of epochs the model actually trained for
         actual_epochs = (
