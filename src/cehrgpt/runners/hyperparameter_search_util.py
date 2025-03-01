@@ -3,7 +3,7 @@ from typing import Callable, Tuple
 
 import optuna
 from cehrbert.runners.hf_runner_argument_dataclass import ModelArguments
-from datasets import Dataset, DatasetDict
+from datasets import Dataset, DatasetDict, IterableDataset
 from transformers import (
     EarlyStoppingCallback,
     Trainer,
@@ -119,10 +119,15 @@ def sample_dataset(data: Dataset, percentage: float, seed: int) -> Dataset:
     if percentage == 1.0:
         return data
 
-    return data.train_test_split(
-        test_size=percentage,
-        seed=seed,
-    )["test"]
+    if isinstance(data, Dataset):
+        return data.train_test_split(
+            test_size=percentage,
+            seed=seed,
+        )["test"]
+    else:
+        raise RuntimeError(
+            "IterableDataset is not supported for hyperparameter search."
+        )
 
 
 def perform_hyperparameter_search(

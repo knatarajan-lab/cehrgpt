@@ -39,6 +39,7 @@ from transformers import (
     set_seed,
 )
 from transformers.tokenization_utils_base import LARGE_INTEGER
+from transformers.trainer_utils import IntervalStrategy
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
@@ -470,7 +471,6 @@ def main():
 
     if training_args.do_train:
         if cehrgpt_args.hyperparameter_tuning:
-            model_args.early_stopping_patience = LARGE_INTEGER
             training_args = perform_hyperparameter_search(
                 partial(model_init, model_args, training_args, tokenizer),
                 processed_dataset,
@@ -582,7 +582,7 @@ def retrain_with_full_set(
     )
     Path(training_args.output_dir).mkdir(exist_ok=True)
     # Disable evaluation
-    training_args.evaluation_strategy = "no"
+    training_args.eval_strategy = IntervalStrategy("no")
     checkpoint = get_last_hf_checkpoint(training_args)
     final_trainer = Trainer(
         model=model_init(model_args, training_args, tokenizer),
