@@ -130,7 +130,7 @@ def create_objective(
             "learning_rate", cehrgpt_args.lr_low, cehrgpt_args.lr_high
         )
         args.weight_decay = trial.suggest_float(
-            "weight_decays",
+            "weight_decay",
             cehrgpt_args.weight_decays_low,
             cehrgpt_args.weight_decays_high,
         )
