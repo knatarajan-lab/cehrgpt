@@ -1,3 +1,4 @@
+import copy
 from typing import Callable, Union
 
 import optuna
@@ -119,15 +120,17 @@ def create_objective(
     cehrgpt_args: CehrGPTArguments,
 ):
     def objective(trial):
-        training_args.learning_rate = trial.suggest_float(
+        args = copy.deepcopy(training_args)
+        args.output_dir = f"{args.output_dir}/runs/{trial.number}"
+        args.learning_rate = trial.suggest_float(
             "learning_rate", cehrgpt_args.lr_low, cehrgpt_args.lr_high
         )
-        training_args.weight_decay = trial.suggest_float(
+        args.weight_decay = trial.suggest_float(
             "weight_decays",
             cehrgpt_args.weight_decays_low,
             cehrgpt_args.weight_decays_high,
         )
-        training_args.per_device_train_batch_size = trial.suggest_categorical(
+        args.per_device_train_batch_size = trial.suggest_categorical(
             "per_device_train_batch_size", cehrgpt_args.hyperparameter_batch_sizes
         )
 
@@ -139,7 +142,7 @@ def create_objective(
             callbacks=[
                 EarlyStoppingCallback(model_args.early_stopping_patience),
             ],
-            args=training_args,
+            args=args,
         )
 
         # Train the model
