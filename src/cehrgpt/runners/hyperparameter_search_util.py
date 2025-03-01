@@ -162,32 +162,37 @@ def create_objective(
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         evaluate = trainer.evaluate()
-        # Save actual training epochs to a JSON file in the trial's output directory
-        epochs_info = {
-            "actual_epochs": trainer.state.epoch,
-            "eval_loss": evaluate["eval_loss"],
-        }
+
         epochs_file_path = os.path.join(args.output_dir, "epochs_info.json")
 
         actual_epochs = trainer.state.epoch
         eval_loss = evaluate["eval_loss"]
+        total_steps = trainer.state.global_step
 
         should_update_file = True
         if os.path.exists(epochs_file_path):
             with open(epochs_file_path, "r") as f:
                 existing_data = json.load(f)
                 # Update only if the new eval_loss is smaller (better) than the existing eval_loss
-                if existing_data["eval_loss"] <= epochs_info["eval_loss"]:
+                if existing_data["eval_loss"] <= eval_loss:
                     should_update_file = False
                     actual_epochs = existing_data["actual_epochs"]
                     eval_loss = existing_data["eval_loss"]
+                    total_steps = existing_data["total_steps"]
 
         if should_update_file:
+            # Save actual training epochs to a JSON file in the trial's output directory
+            epochs_info = {
+                "actual_epochs": actual_epochs,
+                "eval_loss": eval_loss,
+                "total_steps": total_steps,
+            }
             with open(epochs_file_path, "w") as f:
                 json.dump(epochs_info, f)
 
         trial.set_user_attr("actual_epochs", actual_epochs)
         trial.set_user_attr("eval_loss", eval_loss)
+        trial.set_user_attr("total_steps", total_steps)
 
         # Return the evaluation metric to guide the hyperparameter search
         return eval_loss
@@ -273,6 +278,8 @@ def perform_hyperparameter_search(
         study.optimize(objective, n_trials=cehrgpt_args.n_trials)
         # Retrieve the best trial's actual epochs
         best_trial = study.best_trial
+        actual_epochs = best_trial.user_attrs["actual_epochs"]
+        total_steps = best_trial.user_attrs["total_steps"]
 
         LOG.info(
             "The best trial is run-%s with the val_loss of %s",
@@ -281,15 +288,34 @@ def perform_hyperparameter_search(
         )
         LOG.info(
             "The number of epochs run for the best trial %s",
-            best_trial.user_attrs["actual_epochs"],
+            actual_epochs,
         )
-        best_trial_epochs = best_trial.user_attrs["actual_epochs"]
-        best_trial_epochs -= model_args.early_stopping_patience
         LOG.info(
-            "The total number of epochs after subtracting from best_trial_epochs is %s",
-            best_trial_epochs,
+            "The total number of optimization steps is %s",
+            total_steps,
         )
-        training_args.num_train_epochs = best_trial_epochs
+        if cehrgpt_args.adjust_training_steps_in_full_retrain:
+            train_size, val_size = (1, 1)
+            if isinstance(sampled_train, Dataset):
+                train_size, val_size = len(sampled_train), len(sampled_val)
+            elif isinstance(sampled_train, IterableDataset):
+                train_size = 1
+                for _ in sampled_train:
+                    train_size += 1
+                val_size = 1
+                for _ in sampled_val:
+                    val_size += 1
+
+            # We adjust the number of training steps based on the percentage of training set w.r.t. (train and val)
+            ratio = (train_size + val_size) / len(train_size)
+            training_args.max_steps = total_steps * ratio
+        else:
+            actual_epochs -= model_args.early_stopping_patience
+            LOG.info(
+                "The total number of epochs after subtracting from best_trial_epochs is %s",
+                actual_epochs,
+            )
+            training_args.num_train_epochs = actual_epochs
         # Update training arguments with best hyperparameters and set epochs based on adjusted effective epochs
         for k, v in best_trial.params.items():
             LOG.info("The best parameter %s in the best trial is %s", k, v)

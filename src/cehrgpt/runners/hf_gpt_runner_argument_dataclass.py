@@ -46,6 +46,12 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether we want to retrain the model on the full set after early stopping"
         },
     )
+    adjust_training_steps_in_full_retrain: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to retrain the model on the full set using total number of optimization steps"
+        },
+    )
     expand_tokenizer: Optional[bool] = dataclasses.field(
         default=False,
         metadata={
