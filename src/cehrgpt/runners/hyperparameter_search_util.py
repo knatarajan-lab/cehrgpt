@@ -251,6 +251,12 @@ def perform_hyperparameter_search(
         study.optimize(objective, n_trials=cehrgpt_args.n_trials)
         # Retrieve the best trial's actual epochs
         best_trial = study.best_trial
+
+        LOG.info(
+            "The best trial is run-%s with the val_loss of %s",
+            best_trial.number,
+            best_trial.value,
+        )
         LOG.info(
             "The number of epochs run for the best trial %s",
             best_trial.user_attrs["actual_epochs"],
@@ -263,7 +269,7 @@ def perform_hyperparameter_search(
         )
         training_args.num_train_epochs = best_trial_epochs
         # Update training arguments with best hyperparameters and set epochs based on adjusted effective epochs
-        for k, v in best_trial.hyperparameters.items():
+        for k, v in best_trial.params.items():
             LOG.info("The best parameter %s in the best trial is %s", k, v)
             setattr(training_args, k, v)
 
