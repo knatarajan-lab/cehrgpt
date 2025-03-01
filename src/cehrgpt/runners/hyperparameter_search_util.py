@@ -16,6 +16,7 @@ from transformers import (
 from transformers.utils import logging
 
 from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
+from cehrgpt.runners.gpt_runner_util import estimate_train_eval_sizes
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 
 LOG = logging.get_logger("transformers")
@@ -295,19 +296,9 @@ def perform_hyperparameter_search(
             total_steps,
         )
         if cehrgpt_args.adjust_training_steps_in_full_retrain:
-            train_size, val_size = (1, 1)
-            if isinstance(sampled_train, Dataset):
-                train_size, val_size = len(sampled_train), len(sampled_val)
-            elif isinstance(sampled_train, IterableDataset):
-                train_size = 1
-                for _ in sampled_train:
-                    train_size += 1
-                val_size = 1
-                for _ in sampled_val:
-                    val_size += 1
-
+            train_size, val_size = estimate_train_eval_sizes(sampled_train, sampled_val)
             # We adjust the number of training steps based on the percentage of training set w.r.t. (train and val)
-            ratio = (train_size + val_size) / len(train_size)
+            ratio = (train_size + val_size) / train_size
             training_args.max_steps = total_steps * ratio
         else:
             actual_epochs -= model_args.early_stopping_patience

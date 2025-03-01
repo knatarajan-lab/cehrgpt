@@ -38,7 +38,6 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
-from transformers.tokenization_utils_base import LARGE_INTEGER
 from transformers.trainer_utils import IntervalStrategy
 from transformers.utils import is_flash_attn_2_available, logging
 
@@ -51,7 +50,7 @@ from cehrgpt.models.hf_cehrgpt import (
 )
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
-from cehrgpt.runners.gpt_runner_util import parse_runner_args
+from cehrgpt.runners.gpt_runner_util import estimate_train_eval_sizes, parse_runner_args
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.runners.hyperparameter_search_util import perform_hyperparameter_search
 
@@ -72,10 +71,15 @@ class UpdateNumEpochsBeforeEarlyStoppingCallback(TrainerCallback):
         )
         self._num_epochs_before_early_stopping = 0
         self._best_val_loss = float("inf")
+        self._global_step = 0
 
     @property
     def num_epochs_before_early_stopping(self):
         return self._num_epochs_before_early_stopping
+
+    @property
+    def total_steps(self):
+        return self._global_step
 
     def on_train_begin(
         self,
@@ -91,6 +95,7 @@ class UpdateNumEpochsBeforeEarlyStoppingCallback(TrainerCallback):
                 "num_epochs_before_early_stopping"
             ]
             self._best_val_loss = metrics["best_val_loss"]
+            self._global_step = metrics["global_step"]
 
     def on_evaluate(self, args, state, control, **kwargs):
         # Ensure metrics is available in kwargs
@@ -100,6 +105,7 @@ class UpdateNumEpochsBeforeEarlyStoppingCallback(TrainerCallback):
             if metrics["eval_loss"] < self._best_val_loss:
                 self._num_epochs_before_early_stopping = round(state.epoch)
                 self._best_val_loss = metrics["eval_loss"]
+                self._global_step = state.global_step
 
     def on_save(
         self,
@@ -113,6 +119,7 @@ class UpdateNumEpochsBeforeEarlyStoppingCallback(TrainerCallback):
                 {
                     "num_epochs_before_early_stopping": self._num_epochs_before_early_stopping,
                     "best_val_loss": self._best_val_loss,
+                    "global_step": self._global_step,
                 },
                 f,
             )
@@ -522,11 +529,21 @@ def main():
                 final_num_epochs = (
                     update_num_epoch_before_early_stopping_callback.num_epochs_before_early_stopping
                 )
-                training_args.num_train_epochs = final_num_epochs
-                LOG.info(
-                    "Num Epochs before early stopping: %s",
-                    training_args.num_train_epochs,
+                total_steps = (
+                    update_num_epoch_before_early_stopping_callback.total_steps
                 )
+                if cehrgpt_args.adjust_training_steps_in_full_retrain:
+                    train_size, val_size = estimate_train_eval_sizes(
+                        processed_dataset["train"], processed_dataset["validation"]
+                    )
+                    ratio = (train_size + val_size) / train_size
+                    training_args.max_steps = total_steps * ratio
+                else:
+                    training_args.num_train_epochs = final_num_epochs
+                    LOG.info(
+                        "Num Epochs before early stopping: %s",
+                        training_args.num_train_epochs,
+                    )
                 retrain_with_full_set(
                     model_args,
                     training_args,

@@ -1,12 +1,13 @@
 import dataclasses
 import os
 import sys
-from typing import Tuple
+from typing import Tuple, Union
 
 from cehrbert.runners.hf_runner_argument_dataclass import (
     DataTrainingArguments,
     ModelArguments,
 )
+from datasets import Dataset, IterableDataset
 from transformers import HfArgumentParser, TrainingArguments
 from transformers.utils import logging
 from trl.trainer.dpo_config import DPOConfig
@@ -97,3 +98,19 @@ def parse_dpo_runner_args() -> (
         (CehrGPTArguments, DataTrainingArguments, ModelArguments, DPOConfig)
     )
     return cehrgpt_args, data_args, model_args, dpo_config
+
+
+def estimate_train_eval_sizes(
+    train_set: Union[Dataset, IterableDataset], val_set: Union[Dataset, IterableDataset]
+) -> Tuple[int, int]:
+    train_size, val_size = (1, 1)
+    if isinstance(train_set, Dataset):
+        train_size, val_size = len(train_set), len(val_set)
+    elif isinstance(train_set, IterableDataset):
+        train_size = 1
+        for _ in train_set:
+            train_size += 1
+        val_size = 1
+        for _ in val_set:
+            val_size += 1
+    return train_size, val_size
