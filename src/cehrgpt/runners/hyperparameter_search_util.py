@@ -1,5 +1,4 @@
-from functools import partial
-from typing import Callable, Tuple
+from typing import Callable, Union
 
 import optuna
 from cehrbert.runners.hf_runner_argument_dataclass import ModelArguments
@@ -69,26 +68,6 @@ class OptunaMetricCallback(TrainerCallback):
             metrics.update({"optuna_best_metric": metrics["eval_loss"]})
 
 
-# Define the hyperparameter search space with parameters
-def hp_space(
-    trial: optuna.Trial,
-    lr_range: Tuple[float, float] = (1e-5, 5e-5),
-    batch_sizes=None,
-    weight_decays: Tuple[float, float] = (1e-4, 1e-2),
-    num_train_epochs: Tuple[float, ...] = 10,
-):
-    if batch_sizes is None:
-        batch_sizes = [4, 8]
-    return {
-        "learning_rate": trial.suggest_float("learning_rate", *lr_range, log=True),
-        "per_device_train_batch_size": trial.suggest_categorical(
-            "per_device_train_batch_size", batch_sizes
-        ),
-        "weight_decay": trial.suggest_float("weight_decay", *weight_decays, log=True),
-        "num_train_epochs": trial.suggest_int("num_train_epochs", *num_train_epochs),
-    }
-
-
 def sample_dataset(data: Dataset, percentage: float, seed: int) -> Dataset:
     """
     Samples a subset of the given dataset based on a specified percentage.
@@ -128,6 +107,56 @@ def sample_dataset(data: Dataset, percentage: float, seed: int) -> Dataset:
         raise RuntimeError(
             "IterableDataset is not supported for hyperparameter search."
         )
+
+
+def create_objective(
+    model_init: Callable,
+    train_dataset: Union[Dataset, IterableDataset],
+    eval_dataset: Union[Dataset, IterableDataset],
+    data_collator: CehrGptDataCollator,
+    training_args: TrainingArguments,
+    model_args: ModelArguments,
+    cehrgpt_args: CehrGPTArguments,
+):
+    def objective(trial):
+        training_args.learning_rate = trial.suggest_float(
+            "learning_rate", cehrgpt_args.lr_low, cehrgpt_args.lr_high
+        )
+        training_args.weight_decay = trial.suggest_float(
+            "weight_decays",
+            cehrgpt_args.weight_decays_low,
+            cehrgpt_args.weight_decays_high,
+        )
+        training_args.per_device_train_batch_size = trial.suggest_categorical(
+            "per_device_train_batch_size", cehrgpt_args.hyperparameter_batch_sizes
+        )
+
+        trainer = Trainer(
+            model_init=model_init,
+            data_collator=data_collator,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            callbacks=[
+                EarlyStoppingCallback(model_args.early_stopping_patience),
+            ],
+            args=training_args,
+        )
+
+        # Train the model
+        trainer.train()
+
+        # Get the number of epochs the model actually trained for
+        actual_epochs = (
+            trainer.state.epoch
+        )  # Assuming this property correctly reflects the actual number of epochs
+
+        # Save the actual_epochs into the trial's user attributes for later retrieval
+        trial.set_user_attr("actual_epochs", actual_epochs)
+
+        # Return the evaluation metric to guide the hyperparameter search
+        return trainer.evaluate()["eval_loss"]
+
+    return objective
 
 
 def perform_hyperparameter_search(
@@ -192,37 +221,36 @@ def perform_hyperparameter_search(
             cehrgpt_args.hyperparameter_tuning_percentage,
             training_args.seed,
         )
-        hyperparam_trainer = Trainer(
+
+        objective = create_objective(
             model_init=model_init,
-            data_collator=data_collator,
             train_dataset=sampled_train,
             eval_dataset=sampled_val,
-            callbacks=[
-                EarlyStoppingCallback(model_args.early_stopping_patience),
-                OptunaMetricCallback(),
-            ],
-            args=training_args,
+            data_collator=data_collator,
+            training_args=training_args,
+            model_args=model_args,
+            cehrgpt_args=cehrgpt_args,
         )
-        # Perform hyperparameter search
-        best_trial = hyperparam_trainer.hyperparameter_search(
-            direction="minimize",
-            hp_space=partial(
-                hp_space,
-                lr_range=(cehrgpt_args.lr_low, cehrgpt_args.lr_high),
-                weight_decays=(
-                    cehrgpt_args.weight_decays_low,
-                    cehrgpt_args.weight_decays_high,
-                ),
-                batch_sizes=cehrgpt_args.hyperparameter_batch_sizes,
-                num_train_epochs=cehrgpt_args.hyperparameter_num_train_epochs,
-            ),
-            backend="optuna",
-            n_trials=cehrgpt_args.n_trials,
-            compute_objective=lambda m: m["optuna_best_metric"],
+
+        # Now my_objective can be passed directly to an optimizer
+        study = optuna.create_study(direction="minimize")
+        study.optimize(objective, n_trials=cehrgpt_args.n_trials)
+        # Retrieve the best trial's actual epochs
+        best_trial = study.best_trial
+        LOG.info(
+            "The number of epochs run for the best trial %s",
+            best_trial.user_attrs["actual_epochs"],
         )
-        LOG.info("Best hyperparameters: %s", best_trial.hyperparameters)
+        best_trial_epochs = best_trial.user_attrs["actual_epochs"]
+        best_trial_epochs -= model_args.early_stopping_patience
+        LOG.info(
+            "The total number of epochs after subtracting from best_trial_epochs is %s",
+            best_trial_epochs,
+        )
+        training_args.num_train_epochs = best_trial_epochs
         # Update training arguments with best hyperparameters and set epochs based on adjusted effective epochs
         for k, v in best_trial.hyperparameters.items():
+            LOG.info("The best parameter %s in the best trial is %s", k, v)
             setattr(training_args, k, v)
 
     return training_args
