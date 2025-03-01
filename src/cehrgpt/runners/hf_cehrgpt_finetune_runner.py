@@ -537,7 +537,7 @@ def main():
                         processed_dataset["train"], processed_dataset["validation"]
                     )
                     ratio = (train_size + val_size) / train_size
-                    training_args.max_steps = total_steps * ratio
+                    training_args.max_steps = int(total_steps * ratio)
                 else:
                     training_args.num_train_epochs = final_num_epochs
                     LOG.info(

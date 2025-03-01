@@ -299,7 +299,7 @@ def perform_hyperparameter_search(
             train_size, val_size = estimate_train_eval_sizes(sampled_train, sampled_val)
             # We adjust the number of training steps based on the percentage of training set w.r.t. (train and val)
             ratio = (train_size + val_size) / train_size
-            training_args.max_steps = total_steps * ratio
+            training_args.max_steps = int(total_steps * ratio)
         else:
             actual_epochs -= model_args.early_stopping_patience
             LOG.info(
