@@ -273,7 +273,8 @@ def model_init(
     )
     if model.config.max_position_embeddings < model_args.max_position_embeddings:
         LOG.info(
-            f"Increase model.config.max_position_embeddings to {model_args.max_position_embeddings}"
+            f"Increase model.config.max_position_embeddings to %s",
+            model_args.max_position_embeddings,
         )
         model.config.max_position_embeddings = model_args.max_position_embeddings
         model.resize_position_embeddings(model_args.max_position_embeddings)

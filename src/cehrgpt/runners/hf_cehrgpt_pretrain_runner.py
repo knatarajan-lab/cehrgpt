@@ -349,6 +349,14 @@ def main():
                 cehrgpt_tokenizer.pretrained_embeddings,
             )
 
+    if model.config.max_position_embeddings < model_args.max_position_embeddings:
+        LOG.info(
+            f"Increase model.config.max_position_embeddings to %s",
+            model_args.max_position_embeddings,
+        )
+        model.config.max_position_embeddings = model_args.max_position_embeddings
+        model.resize_position_embeddings(model_args.max_position_embeddings)
+
     if model.config.add_cross_attention:
         # register cehrgpt in the huggingface model list
         register_cehrgpt_in_hf()
