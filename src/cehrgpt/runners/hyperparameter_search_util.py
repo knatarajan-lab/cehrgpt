@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 from typing import Callable, Union
 
@@ -150,15 +151,18 @@ def create_objective(
             data_collator=data_collator,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
-            callbacks=[
-                EarlyStoppingCallback(model_args.early_stopping_patience),
-            ],
+            callbacks=[EarlyStoppingCallback(model_args.early_stopping_patience)],
             args=args,
         )
 
         # Train the model
         trainer.train(resume_from_checkpoint=checkpoint)
 
+        # Save actual training epochs to a JSON file in the trial's output directory
+        epochs_info = {"actual_epochs": trainer.state.epoch}
+        epochs_file_path = os.path.join(args.output_dir, "epochs_info.json")
+        with open(epochs_file_path, "w") as f:
+            json.dump(epochs_info, f)
         # Get the number of epochs the model actually trained
         # Save the actual_epochs into the trial's user attributes for later retrieval
         trial.set_user_attr("actual_epochs", trainer.state.epoch)
