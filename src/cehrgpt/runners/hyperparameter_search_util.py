@@ -136,6 +136,13 @@ def create_objective(
         args.per_device_train_batch_size = trial.suggest_categorical(
             "per_device_train_batch_size", cehrgpt_args.hyperparameter_batch_sizes
         )
+        LOG.info(
+            "Trial %s: learning_rate %s, weight_decay %s, per_device_train_batch_size %s",
+            trial.number,
+            args.learning_rate,
+            args.weight_decay,
+            args.per_device_train_batch_size,
+        )
         checkpoint = get_last_hf_checkpoint(args)
 
         trainer = Trainer(
@@ -152,13 +159,9 @@ def create_objective(
         # Train the model
         trainer.train(resume_from_checkpoint=checkpoint)
 
-        # Get the number of epochs the model actually trained for
-        actual_epochs = (
-            trainer.state.epoch
-        )  # Assuming this property correctly reflects the actual number of epochs
-
+        # Get the number of epochs the model actually trained
         # Save the actual_epochs into the trial's user attributes for later retrieval
-        trial.set_user_attr("actual_epochs", actual_epochs)
+        trial.set_user_attr("actual_epochs", trainer.state.epoch)
 
         # Return the evaluation metric to guide the hyperparameter search
         return trainer.evaluate()["eval_loss"]
