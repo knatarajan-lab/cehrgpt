@@ -87,14 +87,11 @@ def load_and_create_model(
     attn_implementation = (
         "flash_attention_2" if is_flash_attn_2_available() else "eager"
     )
-    torch_dtype = torch.bfloat16 if training_args.bf16 else torch.float32
     model_abspath = os.path.expanduser(model_args.model_name_or_path)
     if cehrgpt_args.continue_pretrain:
         try:
             pretrained = CEHRGPT2LMHeadModel.from_pretrained(
-                model_abspath,
-                attn_implementation=attn_implementation,
-                torch_dtype=torch_dtype,
+                model_abspath, attn_implementation=attn_implementation
             )
             # We need to instantiate some layers for cross attention for the pretrained model
             if (
