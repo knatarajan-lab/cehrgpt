@@ -138,7 +138,6 @@ def load_pretrained_tokenizer(
 
 def load_finetuned_model(
     model_args: ModelArguments,
-    training_args: TrainingArguments,
     model_name_or_path: str,
 ) -> CEHRGPTPreTrainedModel:
     if model_args.finetune_model_type == FineTuneModelType.POOLING.value:
@@ -157,7 +156,7 @@ def load_finetuned_model(
         return finetune_model_cls.from_pretrained(
             model_name_or_path,
             attn_implementation=attn_implementation,
-            # torch_dtype=torch_dtype,
+            torch_dtype=model_args.torch_dtype,
         )
     except ValueError:
         raise ValueError(f"Can not load the finetuned model from {model_name_or_path}")
@@ -268,9 +267,7 @@ def model_init(
     training_args: TrainingArguments,
     tokenizer: CehrGptTokenizer,
 ):
-    model = load_finetuned_model(
-        model_args, training_args, model_args.model_name_or_path
-    )
+    model = load_finetuned_model(model_args, model_args.model_name_or_path)
     if model.config.max_position_embeddings < model_args.max_position_embeddings:
         LOG.info(
             f"Increase model.config.max_position_embeddings to %s",
@@ -635,7 +632,7 @@ def do_predict(
 
     # Load model and LoRA adapters if applicable
     model = (
-        load_finetuned_model(model_args, training_args, training_args.output_dir)
+        load_finetuned_model(model_args, training_args.output_dir)
         if not model_args.use_lora
         else load_lora_model(model_args, training_args, cehrgpt_args)
     )
@@ -712,9 +709,7 @@ def load_lora_model(
     cehrgpt_args: CehrGPTArguments,
 ) -> PeftModel:
     LOG.info("Loading base model from %s", model_args.model_name_or_path)
-    model = load_finetuned_model(
-        model_args, training_args, model_args.model_name_or_path
-    )
+    model = load_finetuned_model(model_args, model_args.model_name_or_path)
     # Enable include_values when include_values is set to be False during pre-training
     if model_args.include_values and not model.cehrgpt.include_values:
         model.cehrgpt.include_values = True
