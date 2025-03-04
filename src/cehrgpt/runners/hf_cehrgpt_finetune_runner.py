@@ -478,6 +478,7 @@ def main():
     )
 
     if training_args.do_train:
+
         if cehrgpt_args.hyperparameter_tuning:
             training_args = perform_hyperparameter_search(
                 partial(model_init, model_args, training_args, tokenizer),
@@ -487,71 +488,64 @@ def main():
                 model_args,
                 cehrgpt_args,
             )
-            # Always retrain with the full set when hyperparameter tuning is set to true
+
+        # Initialize Trainer for final training on the combined train+val set
+        trainer = Trainer(
+            model=model_init(model_args, training_args, tokenizer),
+            data_collator=data_collator,
+            args=training_args,
+            train_dataset=processed_dataset["train"],
+            eval_dataset=processed_dataset["validation"],
+            callbacks=[
+                EarlyStoppingCallback(model_args.early_stopping_patience),
+                UpdateNumEpochsBeforeEarlyStoppingCallback(training_args.output_dir),
+            ],
+            tokenizer=tokenizer,
+        )
+        # Train the model on the combined train + val set
+        checkpoint = get_last_hf_checkpoint(training_args)
+        train_result = trainer.train(resume_from_checkpoint=checkpoint)
+        trainer.save_model()  # Saves the tokenizer too for easy upload
+        metrics = train_result.metrics
+        trainer.log_metrics("train", metrics)
+        trainer.save_metrics("train", metrics)
+        trainer.save_state()
+
+        # Retrain the model with full set using the num of epoches before early stopping
+        if cehrgpt_args.retrain_with_full:
+            update_num_epoch_before_early_stopping_callback = None
+            for callback in trainer.callback_handler.callbacks:
+                if isinstance(callback, UpdateNumEpochsBeforeEarlyStoppingCallback):
+                    update_num_epoch_before_early_stopping_callback = callback
+
+            if update_num_epoch_before_early_stopping_callback is None:
+                raise RuntimeError(
+                    f"{UpdateNumEpochsBeforeEarlyStoppingCallback} must be included as a callback!"
+                )
+            final_num_epochs = (
+                update_num_epoch_before_early_stopping_callback.num_epochs_before_early_stopping
+            )
+            total_steps = update_num_epoch_before_early_stopping_callback.total_steps
+            if cehrgpt_args.adjust_training_steps_in_full_retrain:
+                train_size, val_size = estimate_train_eval_sizes(
+                    processed_dataset["train"], processed_dataset["validation"]
+                )
+                ratio = (train_size + val_size) / train_size
+                training_args.max_steps = int(total_steps * ratio)
+            else:
+                training_args.num_train_epochs = final_num_epochs
+                LOG.info(
+                    "Num Epochs before early stopping: %s",
+                    training_args.num_train_epochs,
+                )
+
             retrain_with_full_set(
-                model_args, training_args, tokenizer, processed_dataset, data_collator
+                model_args,
+                training_args,
+                tokenizer,
+                processed_dataset,
+                data_collator,
             )
-        else:
-            # Initialize Trainer for final training on the combined train+val set
-            trainer = Trainer(
-                model=model_init(model_args, training_args, tokenizer),
-                data_collator=data_collator,
-                args=training_args,
-                train_dataset=processed_dataset["train"],
-                eval_dataset=processed_dataset["validation"],
-                callbacks=[
-                    EarlyStoppingCallback(model_args.early_stopping_patience),
-                    UpdateNumEpochsBeforeEarlyStoppingCallback(
-                        training_args.output_dir
-                    ),
-                ],
-                tokenizer=tokenizer,
-            )
-            # Train the model on the combined train + val set
-            checkpoint = get_last_hf_checkpoint(training_args)
-            train_result = trainer.train(resume_from_checkpoint=checkpoint)
-            trainer.save_model()  # Saves the tokenizer too for easy upload
-            metrics = train_result.metrics
-            trainer.log_metrics("train", metrics)
-            trainer.save_metrics("train", metrics)
-            trainer.save_state()
-
-            # Retrain the model with full set using the num of epoches before earlying stopping
-            if cehrgpt_args.retrain_with_full:
-                update_num_epoch_before_early_stopping_callback = None
-                for callback in trainer.callback_handler.callbacks:
-                    if isinstance(callback, UpdateNumEpochsBeforeEarlyStoppingCallback):
-                        update_num_epoch_before_early_stopping_callback = callback
-
-                if update_num_epoch_before_early_stopping_callback is None:
-                    raise RuntimeError(
-                        f"{UpdateNumEpochsBeforeEarlyStoppingCallback} must be included as a callback!"
-                    )
-                final_num_epochs = (
-                    update_num_epoch_before_early_stopping_callback.num_epochs_before_early_stopping
-                )
-                total_steps = (
-                    update_num_epoch_before_early_stopping_callback.total_steps
-                )
-                if cehrgpt_args.adjust_training_steps_in_full_retrain:
-                    train_size, val_size = estimate_train_eval_sizes(
-                        processed_dataset["train"], processed_dataset["validation"]
-                    )
-                    ratio = (train_size + val_size) / train_size
-                    training_args.max_steps = int(total_steps * ratio)
-                else:
-                    training_args.num_train_epochs = final_num_epochs
-                    LOG.info(
-                        "Num Epochs before early stopping: %s",
-                        training_args.num_train_epochs,
-                    )
-                retrain_with_full_set(
-                    model_args,
-                    training_args,
-                    tokenizer,
-                    processed_dataset,
-                    data_collator,
-                )
 
     if training_args.do_predict:
         test_dataloader = DataLoader(

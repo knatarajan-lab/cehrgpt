@@ -295,18 +295,18 @@ def perform_hyperparameter_search(
             "The total number of optimization steps is %s",
             total_steps,
         )
-        if cehrgpt_args.adjust_training_steps_in_full_retrain:
-            train_size, val_size = estimate_train_eval_sizes(sampled_train, sampled_val)
-            # We adjust the number of training steps based on the percentage of training set w.r.t. (train and val)
-            ratio = (train_size + val_size) / train_size
-            training_args.max_steps = int(total_steps * ratio)
-        else:
-            actual_epochs -= model_args.early_stopping_patience
-            LOG.info(
-                "The total number of epochs after subtracting from best_trial_epochs is %s",
-                actual_epochs,
-            )
-            training_args.num_train_epochs = actual_epochs
+        # if cehrgpt_args.adjust_training_steps_in_full_retrain:
+        #     train_size, val_size = estimate_train_eval_sizes(sampled_train, sampled_val)
+        #     # We adjust the number of training steps based on the percentage of training set w.r.t. (train and val)
+        #     ratio = (train_size + val_size) / train_size
+        #     training_args.max_steps = int(total_steps * ratio)
+        # else:
+        #     actual_epochs -= model_args.early_stopping_patience
+        #     LOG.info(
+        #         "The total number of epochs after subtracting from best_trial_epochs is %s",
+        #         actual_epochs,
+        #     )
+        #     training_args.num_train_epochs = actual_epochs
         # Update training arguments with best hyperparameters and set epochs based on adjusted effective epochs
         for k, v in best_trial.params.items():
             LOG.info("The best parameter %s in the best trial is %s", k, v)
