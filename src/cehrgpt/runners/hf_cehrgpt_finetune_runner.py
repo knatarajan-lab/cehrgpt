@@ -505,8 +505,8 @@ def main():
             ],
             tokenizer=tokenizer,
             compute_metrics=lambda eval_prediction: compute_metrics(
-                references=eval_prediction.label_ids.tolist(),
-                probs=eval_prediction.predictions[1].tolist(),
+                references=np.squeeze(eval_prediction.label_ids).tolist(),
+                probs=np.squeeze(eval_prediction.predictions).tolist(),
             ),
         )
         # Train the model on the combined train + val set

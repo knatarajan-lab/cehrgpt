@@ -3,6 +3,7 @@ import json
 import os
 from typing import Callable, Union
 
+import numpy as np
 import optuna
 from cehrbert.runners.hf_cehrbert_finetune_runner import compute_metrics
 from cehrbert.runners.hf_runner_argument_dataclass import ModelArguments
@@ -156,8 +157,8 @@ def create_objective(
             callbacks=[EarlyStoppingCallback(model_args.early_stopping_patience)],
             args=args,
             compute_metrics=lambda eval_prediction: compute_metrics(
-                references=eval_prediction.label_ids.tolist(),
-                probs=eval_prediction.predictions[1].tolist(),
+                references=np.squeeze(eval_prediction.label_ids).tolist(),
+                probs=np.squeeze(eval_prediction.predictions).tolist(),
             ),
         )
 
