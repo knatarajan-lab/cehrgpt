@@ -4,6 +4,7 @@ import os
 from typing import Callable, Union
 
 import optuna
+from cehrbert.runners.hf_cehrbert_finetune_runner import compute_metrics
 from cehrbert.runners.hf_runner_argument_dataclass import ModelArguments
 from cehrbert.runners.runner_util import get_last_hf_checkpoint
 from datasets import Dataset, DatasetDict, IterableDataset
@@ -154,6 +155,10 @@ def create_objective(
             eval_dataset=eval_dataset,
             callbacks=[EarlyStoppingCallback(model_args.early_stopping_patience)],
             args=args,
+            compute_metrics=lambda eval_prediction: compute_metrics(
+                references=eval_prediction.label_ids.tolist(),
+                probs=eval_prediction.predictions.tolist(),
+            ),
         )
 
         # Train the model
