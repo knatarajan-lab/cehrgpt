@@ -81,6 +81,7 @@ def load_and_create_tokenizer(
 def load_and_create_model(
     model_args: ModelArguments,
     cehrgpt_args: CehrGPTArguments,
+    training_args: TrainingArguments,
     tokenizer: CehrGptTokenizer,
 ) -> CEHRGPT2LMHeadModel:
     attn_implementation = (
@@ -89,10 +90,13 @@ def load_and_create_model(
     model_abspath = os.path.expanduser(model_args.model_name_or_path)
     if cehrgpt_args.continue_pretrain:
         try:
+            torch_dtype = torch.bfloat16 if training_args.bf16 else torch.float32
             pretrained = CEHRGPT2LMHeadModel.from_pretrained(
                 model_abspath,
                 attn_implementation=attn_implementation,
-                torch_dtype=model_args.torch_dtype,
+                torch_dtype=(
+                    model_args.torch_dtype if model_args.torch_dtype else torch_dtype
+                ),
             )
             # We need to instantiate some layers for cross attention for the pretrained model
             if (
@@ -323,7 +327,9 @@ def main():
     ):
         cehrgpt_tokenizer.save_pretrained(os.path.expanduser(training_args.output_dir))
 
-    model = load_and_create_model(model_args, cehrgpt_args, cehrgpt_tokenizer)
+    model = load_and_create_model(
+        model_args, cehrgpt_args, training_args, cehrgpt_tokenizer
+    )
 
     # Expand tokenizer to adapt to the new pretraining dataset
     if model.config.vocab_size < cehrgpt_tokenizer.vocab_size:
