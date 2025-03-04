@@ -1229,9 +1229,13 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             value_indicators=value_indicators,
             next_value_logits=value_logits,
             past_key_values=transformer_outputs.past_key_values,
-            hidden_states=transformer_outputs.hidden_states,
-            attentions=transformer_outputs.attentions,
-            cross_attentions=transformer_outputs.cross_attentions,
+            hidden_states=(
+                transformer_outputs.hidden_states if output_hidden_states else None
+            ),
+            attentions=transformer_outputs.attentions if output_attentions else None,
+            cross_attentions=(
+                transformer_outputs.cross_attentions if output_attentions else None
+            ),
             token_loss=token_loss,
             time_token_loss=time_token_loss,
             time_to_visit_loss=time_to_visit_loss,
@@ -1638,8 +1642,10 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
         return CehrGptSequenceClassifierOutput(
             loss=loss,
             logits=logits,
-            hidden_states=cehrgpt_output.last_hidden_state,
-            attentions=cehrgpt_output.attentions,
+            hidden_states=(
+                cehrgpt_output.last_hidden_state if output_attentions else None
+            ),
+            attentions=cehrgpt_output.attentions if output_attentions else None,
         )
 
     def deparallelize(self):
