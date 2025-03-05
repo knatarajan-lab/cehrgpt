@@ -1,6 +1,8 @@
-from typing import Dict, List
+import os
+from typing import Dict, List, Optional, Union
 
 from transformers import PretrainedConfig
+from transformers.utils import CONFIG_NAME
 
 
 class CEHRGPTConfig(PretrainedConfig):
@@ -203,3 +205,36 @@ class CEHRGPTConfig(PretrainedConfig):
     @property
     def lab_token_exists(self) -> bool:
         return self.lab_token_ids is not None and len(self.lab_token_ids) > 0
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        pretrained_model_name_or_path: Union[str, os.PathLike],
+        cache_dir: Optional[Union[str, os.PathLike]] = None,
+        force_download: bool = False,
+        local_files_only: bool = False,
+        token: Optional[Union[str, bool]] = None,
+        revision: str = "main",
+        **kwargs,
+    ) -> "PretrainedConfig":
+
+        is_local = os.path.isdir(pretrained_model_name_or_path)
+        if is_local:
+            configuration_file = kwargs.pop("_configuration_file", CONFIG_NAME)
+            full_filename = os.path.join(
+                pretrained_model_name_or_path, configuration_file
+            )
+            if not os.path.exists(full_filename):
+                raise FileNotFoundError(
+                    f"The CEHRGPT config file could not be found at {full_filename}"
+                )
+
+        return super().from_pretrained(
+            pretrained_model_name_or_path,
+            cache_dir=cache_dir,
+            force_download=force_download,
+            local_files_only=local_files_only,
+            token=token,
+            revision=revision,
+            **kwargs,
+        )

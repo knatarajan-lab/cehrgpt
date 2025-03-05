@@ -30,7 +30,6 @@ from transformers.utils import is_flash_attn_2_available, logging
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
 from cehrgpt.models.config import CEHRGPTConfig
-from cehrgpt.models.encoder_decoder.monkey_patch_cehrgpt import register_cehrgpt_in_hf
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.monkey_patch_cehrgpt import register_cehrgpt_in_hf
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
