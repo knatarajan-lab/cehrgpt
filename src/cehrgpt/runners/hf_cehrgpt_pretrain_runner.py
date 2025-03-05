@@ -17,14 +17,7 @@ from cehrbert.runners.runner_util import (
     load_parquet_as_dataset,
 )
 from datasets import Dataset, DatasetDict, IterableDatasetDict, load_from_disk
-from transformers import (
-    AutoConfig,
-    AutoModel,
-    AutoTokenizer,
-    Trainer,
-    TrainingArguments,
-    set_seed,
-)
+from transformers import AutoModel, AutoTokenizer, Trainer, TrainingArguments, set_seed
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset

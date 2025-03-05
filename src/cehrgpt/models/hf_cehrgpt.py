@@ -19,11 +19,7 @@ from transformers.generation.streamers import BaseStreamer
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.models.gpt2.modeling_gpt2 import GPT2Attention, GPT2Block
 from transformers.pytorch_utils import Conv1D
-from transformers.utils import (
-    is_accelerate_available,
-    is_flash_attn_2_available,
-    logging,
-)
+from transformers.utils import is_flash_attn_2_available, logging
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 
 from cehrgpt.models.config import CEHRGPTConfig
@@ -37,9 +33,6 @@ from cehrgpt.models.hf_modeling_outputs import (
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
-
-if is_accelerate_available():
-    from accelerate.hooks import add_hook_to_module
 
 logger = logging.get_logger(__name__)
 

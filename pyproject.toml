@@ -31,7 +31,7 @@ dependencies = [
     "cehrbert==1.3.6",
     "openai==1.61.1",
     "optuna==4.0.0",
-    "trl==0.15.0",
+    "transformers==4.45.0",
     "networkx==3.2.1",
     "polars",
     "flask<3.0.0",
