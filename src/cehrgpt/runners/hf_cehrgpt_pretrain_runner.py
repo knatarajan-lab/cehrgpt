@@ -88,16 +88,16 @@ def load_and_create_model(
     attn_implementation = (
         "flash_attention_2" if is_flash_attn_2_available() else "eager"
     )
+    torch_dtype = torch.bfloat16 if training_args.bf16 else torch.float32
+    torch_dtype = model_args.torch_dtype if model_args.torch_dtype else torch_dtype
+    setattr(model_args, "torch_dtype", torch_dtype)
     model_abspath = os.path.expanduser(model_args.model_name_or_path)
     if cehrgpt_args.continue_pretrain:
         try:
-            torch_dtype = torch.bfloat16 if training_args.bf16 else torch.float32
             pretrained = CEHRGPT2LMHeadModel.from_pretrained(
                 model_abspath,
                 attn_implementation=attn_implementation,
-                torch_dtype=(
-                    model_args.torch_dtype if model_args.torch_dtype else torch_dtype
-                ),
+                torch_dtype=torch_dtype,
             )
             # We need to instantiate some layers for cross attention for the pretrained model
             if (
@@ -114,7 +114,9 @@ def load_and_create_model(
             raise e
     try:
         model_config = CEHRGPTConfig.from_pretrained(
-            model_abspath, attn_implementation=attn_implementation
+            model_abspath,
+            attn_implementation=attn_implementation,
+            torch_dtype=torch_dtype,
         )
     except Exception as e:
         LOG.warning(e)
@@ -124,6 +126,7 @@ def load_and_create_model(
             pretrained_embedding_dim = tokenizer.pretrained_embeddings.shape[1]
         else:
             pretrained_embedding_dim = model_args.hidden_size
+
         model_config = CEHRGPTConfig(
             vocab_size=tokenizer.vocab_size,
             value_vocab_size=tokenizer.value_vocab_size,
