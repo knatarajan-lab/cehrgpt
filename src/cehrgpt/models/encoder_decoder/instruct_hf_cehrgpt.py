@@ -9,9 +9,9 @@ from transformers.models.encoder_decoder import EncoderDecoderModel
 
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.hf_modeling_outputs import CehrGptGenerateDecoderOnlyOutput
+from cehrgpt.models.monkey_patch_cehrgpt import register_cehrgpt_in_hf
 
 from .instruct_hf_modeling_outputs import InstructCehrGptCausalLMOutput
-from .monkey_patch_cehrgpt import register_cehrgpt_in_hf
 
 
 class InstructCEHRGPTModel(EncoderDecoderModel):

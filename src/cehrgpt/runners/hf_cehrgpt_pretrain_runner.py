@@ -32,6 +32,7 @@ from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.encoder_decoder.monkey_patch_cehrgpt import register_cehrgpt_in_hf
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
+from cehrgpt.models.monkey_patch_cehrgpt import register_cehrgpt_in_hf
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
@@ -112,7 +113,7 @@ def load_and_create_model(
             )
             raise e
     try:
-        model_config = AutoConfig.from_pretrained(
+        model_config = CEHRGPTConfig.from_pretrained(
             model_abspath, attn_implementation=attn_implementation
         )
     except Exception as e:

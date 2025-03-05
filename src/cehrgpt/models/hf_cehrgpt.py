@@ -29,6 +29,7 @@ from cehrgpt.models.hf_modeling_outputs import (
     CehrGptOutputWithPast,
     CehrGptSequenceClassifierOutput,
 )
+from cehrgpt.models.monkey_patch_cehrgpt import register_cehrgpt_in_hf
 
 logger = logging.get_logger(__name__)
 
@@ -923,6 +924,13 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
     def enable_cross_attention(self):
         self.cehrgpt.enable_cross_attention()
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+        register_cehrgpt_in_hf()
+        return super().from_pretrained(
+            pretrained_model_name_or_path, *model_args, **kwargs
+        )
 
     def prepare_inputs_for_generation(
         self,
