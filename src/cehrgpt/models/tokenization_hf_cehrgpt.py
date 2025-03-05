@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import scipy.stats as stats
+import torch
 import transformers
 from cehrbert.models.hf_models.tokenization_utils import (
     agg_helper,
