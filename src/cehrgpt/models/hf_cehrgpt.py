@@ -49,7 +49,7 @@ def _get_unpad_data(attention_mask):
     seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
     indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
     max_seqlen_in_batch = seqlens_in_batch.max().item()
-    cu_seqlens = F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
+    cu_seqlens = f.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
     return (
         indices,
         cu_seqlens,
@@ -75,6 +75,7 @@ class GPT2FlashAttention(GPT2Attention):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
+        **kwargs,
     ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor]], ...]:
         # Prepare query, key, and value
         if encoder_hidden_states is not None:
@@ -133,6 +134,18 @@ class GPT2FlashAttention(GPT2Attention):
             outputs += (attn_weights,)
 
         return outputs
+
+    def _split_heads(self, tensor, num_heads, attn_head_size):
+        """Splits hidden_size dim into attn_head_size and num_heads."""
+        new_shape = tensor.size()[:-1] + (num_heads, attn_head_size)
+        tensor = tensor.view(new_shape)
+        return tensor.permute(0, 2, 1, 3)  # (batch, head, seq_length, head_features)
+
+    def _merge_heads(self, tensor, num_heads, attn_head_size):
+        """Merges attn_head_size dim and num_attn_heads dim into hidden_size."""
+        tensor = tensor.permute(0, 2, 1, 3).contiguous()
+        new_shape = tensor.size()[:-2] + (num_heads * attn_head_size,)
+        return tensor.view(new_shape)
 
     def _flash_attention_forward(
         self,
