@@ -11,10 +11,8 @@ from cehrgpt.runners.hf_cehrgpt_finetune_runner import create_dataset_splits
 
 def mock_load_parquet_as_dataset(folder_path, streaming=False):
     data = {
-        "index_date": np.sort(
-            np.random.choice(
-                np.arange("2021-01-01", "2022-01-01", dtype="datetime64[D]"), 100
-            )
+        "index_date": np.random.choice(
+            np.arange("2021-01-01", "2022-01-01", dtype="datetime64[D]"), 100
         ),
         "person_id": np.asarray(range(0, 100)),
     }
