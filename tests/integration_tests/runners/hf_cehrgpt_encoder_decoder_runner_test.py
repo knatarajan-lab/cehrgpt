@@ -97,6 +97,8 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "false",
             "--include_values",
             "true",
+            "--report_to",
+            "none",
         ]
         train_main()
 
