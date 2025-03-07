@@ -35,6 +35,7 @@ from cehrgpt.models.tokenization_hf_cehrgpt import END_TOKEN
 # TODO: move these to cehrbert_data
 STOP_TOKENS = ["VE", "[VE]", END_TOKEN]
 
+OOV = "[OOV]"
 CURRENT_PATH = Path(__file__).parent
 START_TOKEN_SIZE = 4
 ATT_TIME_TOKENS = generate_artificial_time_tokens()
@@ -297,6 +298,8 @@ def gpt_to_omop_converter_batch(
         inpatient_visit_indicator = False
 
         for event_idx, event in enumerate(clinical_events, 0):
+            if event == OOV:
+                continue
             # For bad sequences, we don't proceed further and break from the for loop
             if bad_sequence:
                 break
