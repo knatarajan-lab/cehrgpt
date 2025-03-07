@@ -1766,6 +1766,7 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        **kwargs,
     ) -> CehrGptSequenceClassifierOutput:
         cehrgpt_output = self.cehrgpt(
             input_ids=input_ids,
