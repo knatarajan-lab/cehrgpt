@@ -9,9 +9,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
-
-from .utils import (
+from cehrgpt.analysis.privacy.utils import (
     batched_pairwise_euclidean_distance_indices,
     create_demographics,
     create_gender_encoder,
@@ -21,6 +19,7 @@ from .utils import (
     find_match_self,
     scale_age,
 )
+from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 RANDOM_SEE = 42
 logging.basicConfig(
