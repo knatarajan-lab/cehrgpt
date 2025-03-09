@@ -1404,13 +1404,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             Tensor: Scalar loss value (mean negative log-likelihood)
         """
         batch_motor_end_index = batch_motor_end_index.sum().item()
-        # Shift motor_time_to_event_vectors by 1 because some of the time intervals are 0
-        motor_time_to_event_vectors = (
-            motor_time_to_event_vectors.reshape((-1, self.config.motor_tte_vocab_size))[
-                :batch_motor_end_index
-            ]
-            + 1
-        )
+        motor_time_to_event_vectors = motor_time_to_event_vectors.reshape(
+            (-1, self.config.motor_tte_vocab_size)
+        )[:batch_motor_end_index]
         motor_censor_indicators = motor_censor_indicators.reshape(
             (-1, self.config.motor_tte_vocab_size)
         )[:batch_motor_end_index]
@@ -1421,15 +1417,21 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             f"Received ve_token_features.shape[0]: {ve_token_features.shape[0]}, "
             f"motor_time_to_event_vectors.shape[0]: {motor_time_to_event_vectors.shape[0]}"
         )
+
+        # Apply natural log transformation (log(t + 1)) for numerical stability
+        log_tte = torch.log(motor_time_to_event_vectors + 2).clamp(
+            min=1e-6
+        )  # log(1 + t)
+
         # Get Weibull parameters from model
         scale, concentration = self.motor_tte(ve_token_features)
         dist = Weibull(scale=scale, concentration=concentration)
 
         # Compute log-likelihood terms
-        log_pdf = dist.log_prob(motor_time_to_event_vectors)
-        log_survival = torch.log(
-            1 - dist.cdf(motor_time_to_event_vectors).clamp(max=1 - 1e-6) + 1e-6
-        )
+        log_pdf = dist.log_prob(log_tte)
+        log_survival = torch.log(1 - dist.cdf(log_tte).clamp(max=1 - 1e-6) + 1e-6)
+
+        # Masked log-likelihood (event vs. censored)
         motor_loss = (
             1 - motor_censor_indicators
         ) * log_pdf + motor_censor_indicators * log_survival
