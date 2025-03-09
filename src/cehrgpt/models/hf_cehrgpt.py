@@ -758,8 +758,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
     def forward(
         self,
         input_ids: Optional[torch.LongTensor],
-        value_indicators: Optional[torch.BoolTensor],
-        values: Optional[torch.LongTensor],
+        value_indicators: Optional[torch.BoolTensor] = None,
+        values: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
