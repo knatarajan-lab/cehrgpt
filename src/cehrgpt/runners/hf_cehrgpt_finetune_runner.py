@@ -357,6 +357,51 @@ def model_init(
     return model
 
 
+def prepare_dataset(
+    data_args: DataTrainingArguments,
+    training_args: TrainingArguments,
+):
+    # If the data is in the MEDS format, we need to convert it to the CEHR-BERT format
+    if data_args.is_data_in_meds:
+        meds_extension_path = get_meds_extension_path(
+            data_folder=data_args.cohort_folder,
+            dataset_prepared_path=data_args.dataset_prepared_path,
+        )
+        try:
+            LOG.info(
+                f"Trying to load the MEDS extension from disk at {meds_extension_path}..."
+            )
+            dataset = load_from_disk(meds_extension_path)
+            if data_args.streaming:
+                if isinstance(dataset, DatasetDict):
+                    dataset = {
+                        k: v.to_iterable_dataset(
+                            num_shards=training_args.dataloader_num_workers
+                        )
+                        for k, v in dataset.items()
+                    }
+                else:
+                    dataset = dataset.to_iterable_dataset(
+                        num_shards=training_args.dataloader_num_workers
+                    )
+        except Exception as e:
+            LOG.exception(e)
+            dataset = create_dataset_from_meds_reader(data_args, is_pretraining=False)
+            if not data_args.streaming:
+                dataset.save_to_disk(meds_extension_path)
+        train_set = dataset["train"]
+        validation_set = dataset["validation"]
+        test_set = dataset["test"]
+    else:
+        train_set, validation_set, test_set = create_dataset_splits(
+            data_args=data_args, seed=training_args.seed
+        )
+    # Organize them into a single DatasetDict
+    return DatasetDict(
+        {"train": train_set, "validation": validation_set, "test": test_set}
+    )
+
+
 def main():
     cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
     tokenizer = load_pretrained_tokenizer(model_args)
@@ -382,48 +427,8 @@ def main():
                 shutil.rmtree(prepared_ds_path)
 
     if processed_dataset is None:
-        # If the data is in the MEDS format, we need to convert it to the CEHR-BERT format
-        if data_args.is_data_in_meds:
-            meds_extension_path = get_meds_extension_path(
-                data_folder=data_args.cohort_folder,
-                dataset_prepared_path=data_args.dataset_prepared_path,
-            )
-            try:
-                LOG.info(
-                    f"Trying to load the MEDS extension from disk at {meds_extension_path}..."
-                )
-                dataset = load_from_disk(meds_extension_path)
-                if data_args.streaming:
-                    if isinstance(dataset, DatasetDict):
-                        dataset = {
-                            k: v.to_iterable_dataset(
-                                num_shards=training_args.dataloader_num_workers
-                            )
-                            for k, v in dataset.items()
-                        }
-                    else:
-                        dataset = dataset.to_iterable_dataset(
-                            num_shards=training_args.dataloader_num_workers
-                        )
-            except Exception as e:
-                LOG.exception(e)
-                dataset = create_dataset_from_meds_reader(
-                    data_args, is_pretraining=False
-                )
-                if not data_args.streaming:
-                    dataset.save_to_disk(meds_extension_path)
-            train_set = dataset["train"]
-            validation_set = dataset["validation"]
-            test_set = dataset["test"]
-        else:
-            train_set, validation_set, test_set = create_dataset_splits(
-                data_args=data_args, seed=training_args.seed
-            )
         # Organize them into a single DatasetDict
-        final_splits = DatasetDict(
-            {"train": train_set, "validation": validation_set, "test": test_set}
-        )
-
+        final_splits = prepare_dataset(data_args, training_args)
         if cehrgpt_args.expand_tokenizer:
             new_tokenizer_path = os.path.expanduser(training_args.output_dir)
             try:

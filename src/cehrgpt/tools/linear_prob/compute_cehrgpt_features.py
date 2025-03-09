@@ -1,0 +1,148 @@
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+import torch
+from cehrbert.runners.runner_util import generate_prepared_ds_path
+from datasets import concatenate_datasets, load_from_disk
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from transformers.utils import is_flash_attn_2_available, logging
+
+from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
+from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
+from cehrgpt.models.hf_cehrgpt import CEHRGPT2Model
+from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.runners.gpt_runner_util import parse_runner_args
+from cehrgpt.runners.hf_cehrgpt_finetune_runner import prepare_dataset
+
+LOG = logging.get_logger("transformers")
+
+
+def main():
+    cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+
+    cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
+        model_args.tokenizer_name_or_path
+    )
+    cehrgpt_model = (
+        CEHRGPT2Model.from_pretrained(
+            model_args.model_name_or_path,
+            attn_implementation=(
+                "flash_attention_2" if is_flash_attn_2_available() else "eager"
+            ),
+            torch_dtype=(
+                torch.bfloat16 if is_flash_attn_2_available() else torch.float32
+            ),
+        )
+        .eval()
+        .to(device)
+    )
+    prepared_ds_path = generate_prepared_ds_path(
+        data_args, model_args, data_folder=data_args.cohort_folder
+    )
+    processed_dataset = None
+    if any(prepared_ds_path.glob("*")):
+        LOG.info(f"Loading prepared dataset from disk at {prepared_ds_path}...")
+        processed_dataset = load_from_disk(str(prepared_ds_path))
+        LOG.info("Prepared dataset loaded from disk...")
+
+    if processed_dataset is None:
+        # Organize them into a single DatasetDict
+        final_splits = prepare_dataset(data_args, training_args)
+        processed_dataset = create_cehrgpt_finetuning_dataset(
+            dataset=final_splits,
+            cehrgpt_tokenizer=cehrgpt_tokenizer,
+            data_args=data_args,
+        )
+        if not data_args.streaming:
+            processed_dataset.save_to_disk(prepared_ds_path)
+
+    data_collator = CehrGptDataCollator(
+        tokenizer=cehrgpt_tokenizer,
+        max_length=(
+            cehrgpt_model.config.max_position_embeddings - 1
+            if cehrgpt_model.config.causal_sfm
+            else cehrgpt_model.config.max_position_embeddings
+        ),
+        include_values=model_args.include_values,
+        pretraining=False,
+        include_ttv_prediction=False,
+        use_sub_time_tokenization=False,
+        include_demographics=cehrgpt_args.include_demographics,
+    )
+
+    train_loader = DataLoader(
+        dataset=concatenate_datasets(
+            [processed_dataset["train"], processed_dataset["validation"]]
+        ),
+        batch_size=training_args.per_device_eval_batch_size,
+        num_workers=training_args.dataloader_num_workers,
+        collate_fn=data_collator,
+        pin_memory=training_args.dataloader_pin_memory,
+    )
+
+    test_dataloader = DataLoader(
+        dataset=processed_dataset["test"],
+        batch_size=training_args.per_device_eval_batch_size,
+        num_workers=training_args.dataloader_num_workers,
+        collate_fn=data_collator,
+        pin_memory=training_args.dataloader_pin_memory,
+    )
+
+    data_loaders = [("train", train_loader), ("test", test_dataloader)]
+
+    for split, data_loader in data_loaders:
+
+        # Ensure prediction folder exists
+        feature_output_folder = Path(training_args.output_dir) / split / "features"
+        feature_output_folder.mkdir(parents=True, exist_ok=True)
+
+        LOG.info("Generating features for %s set at %s", split, feature_output_folder)
+
+        with torch.no_grad():
+            for index, batch in enumerate(
+                tqdm(data_loader, desc="Generating features")
+            ):
+                batch.pop("age_at_index")
+                person_ids = batch.pop("person_id").numpy().squeeze().astype(int)
+                index_dates = (
+                    map(
+                        datetime.fromtimestamp,
+                        batch.pop("index_date").numpy().squeeze(axis=-1).tolist(),
+                    )
+                    if "index_date" in batch
+                    else None
+                )
+                labels = (
+                    batch.pop("classifier_label")
+                    .float()
+                    .cpu()
+                    .numpy()
+                    .squeeze()
+                    .astype(bool)
+                )
+                batch = {k: v.to(device) for k, v in batch.items()}
+                # Forward pass
+                cehrgpt_output = cehrgpt_model(
+                    **batch, output_attentions=False, output_hidden_states=False
+                )
+                features = cehrgpt_output.last_hidden_state[..., -1, :].detach().numpy()
+
+                features_pd = pd.DataFrame(
+                    {
+                        "subject_id": person_ids,
+                        "prediction_time": index_dates,
+                        "features": features,
+                        "boolean_value": labels,
+                    }
+                )
+                features_pd.to_parquet(feature_output_folder / f"{index}.parquet")
+
+
+if __name__ == "__main__":
+    main()
