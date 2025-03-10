@@ -420,6 +420,11 @@ def main():
                 )
                 if not data_args.streaming:
                     dataset.save_to_disk(meds_extension_path)
+                    stats = dataset.cleanup_cache_files()
+                    LOG.info(
+                        "Clean up the cached files for the cehrgpt dataset transformed from the MEDS: %s",
+                        stats,
+                    )
             train_set = dataset["train"]
             validation_set = dataset["validation"]
             test_set = dataset["test"]
@@ -460,6 +465,11 @@ def main():
         )
         if not data_args.streaming:
             processed_dataset.save_to_disk(prepared_ds_path)
+            stats = processed_dataset.cleanup_cache_files()
+            LOG.info(
+                "Clean up the cached files for the  cehrgpt finetuning dataset : %s",
+                stats,
+            )
 
     # Set seed before initializing model.
     set_seed(training_args.seed)

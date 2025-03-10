@@ -224,6 +224,11 @@ def main():
                 )
                 if not data_args.streaming:
                     dataset.save_to_disk(meds_extension_path)
+                    stats = dataset.cleanup_cache_files()
+                    LOG.info(
+                        "Clean up the cached files for the cehrgpt dataset transformed from the MEDS: %s",
+                        stats,
+                    )
         else:
             # Load the dataset from the parquet files
             dataset = load_parquet_as_dataset(
@@ -285,6 +290,11 @@ def main():
         # only save the data to the disk if it is not streaming
         if not data_args.streaming:
             processed_dataset.save_to_disk(prepared_ds_path)
+            stats = processed_dataset.cleanup_cache_files()
+            LOG.info(
+                "Clean up the cached files for the cehrgpt pretraining dataset: %s",
+                stats,
+            )
 
     def filter_func(examples):
         if cehrgpt_args.drop_long_sequences:
