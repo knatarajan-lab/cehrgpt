@@ -21,6 +21,7 @@ from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
+from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
@@ -212,7 +213,14 @@ def main():
             except FileNotFoundError as e:
                 LOG.exception(e)
                 dataset = create_dataset_from_meds_reader(
-                    data_args, is_pretraining=True
+                    data_args=data_args,
+                    dataset_mappings=[
+                        MedToCehrGPTDatasetMapping(
+                            data_args=data_args,
+                            is_pretraining=True,
+                            include_inpatient_hour_token=cehrgpt_args.include_inpatient_hour_token,
+                        )
+                    ],
                 )
                 if not data_args.streaming:
                     dataset.save_to_disk(meds_extension_path)

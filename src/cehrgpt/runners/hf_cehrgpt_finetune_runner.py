@@ -43,6 +43,7 @@ from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
+from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
 from cehrgpt.models.hf_cehrgpt import (
     CEHRGPTConfig,
     CehrGptForClassification,
@@ -408,7 +409,14 @@ def main():
             except Exception as e:
                 LOG.exception(e)
                 dataset = create_dataset_from_meds_reader(
-                    data_args, is_pretraining=False
+                    data_args=data_args,
+                    dataset_mappings=[
+                        MedToCehrGPTDatasetMapping(
+                            data_args=data_args,
+                            is_pretraining=False,
+                            include_inpatient_hour_token=cehrgpt_args.include_inpatient_hour_token,
+                        )
+                    ],
                 )
                 if not data_args.streaming:
                     dataset.save_to_disk(meds_extension_path)
