@@ -229,6 +229,7 @@ def main():
                         "Clean up the cached files for the cehrgpt dataset transformed from the MEDS: %s",
                         stats,
                     )
+                    dataset = load_from_disk(str(meds_extension_path))
         else:
             # Load the dataset from the parquet files
             dataset = load_parquet_as_dataset(
@@ -295,6 +296,7 @@ def main():
                 "Clean up the cached files for the cehrgpt pretraining dataset: %s",
                 stats,
             )
+            processed_dataset = load_from_disk(str(prepared_ds_path))
 
     def filter_func(examples):
         if cehrgpt_args.drop_long_sequences:

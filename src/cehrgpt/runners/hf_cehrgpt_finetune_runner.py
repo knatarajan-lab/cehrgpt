@@ -425,6 +425,8 @@ def main():
                         "Clean up the cached files for the cehrgpt dataset transformed from the MEDS: %s",
                         stats,
                     )
+                    dataset = load_from_disk(str(meds_extension_path))
+
             train_set = dataset["train"]
             validation_set = dataset["validation"]
             test_set = dataset["test"]
@@ -470,6 +472,7 @@ def main():
                 "Clean up the cached files for the  cehrgpt finetuning dataset : %s",
                 stats,
             )
+            processed_dataset = load_from_disk(str(prepared_ds_path))
 
     # Set seed before initializing model.
     set_seed(training_args.seed)
