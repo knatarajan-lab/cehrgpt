@@ -95,7 +95,7 @@ def load_and_create_model(
             )
             raise e
     try:
-        model_config = AutoConfig.from_pretrained(
+        model_config = CEHRGPTConfig.from_pretrained(
             model_abspath, attn_implementation=attn_implementation
         )
     except Exception as e:
