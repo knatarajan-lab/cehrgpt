@@ -83,11 +83,25 @@ def load_and_create_model(
     model_abspath = os.path.expanduser(model_args.model_name_or_path)
     if cehrgpt_args.continue_pretrain:
         try:
-            return CEHRGPT2LMHeadModel.from_pretrained(
+            pretrained_model = CEHRGPT2LMHeadModel.from_pretrained(
                 model_abspath,
                 attn_implementation=attn_implementation,
                 torch_dtype=torch_dtype,
             )
+            if (
+                pretrained_model.config.max_position_embeddings
+                < model_args.max_position_embeddings
+            ):
+                LOG.info(
+                    f"Increase model.config.max_position_embeddings to {model_args.max_position_embeddings}"
+                )
+                pretrained_model.config.max_position_embeddings = (
+                    model_args.max_position_embeddings
+                )
+                pretrained_model.resize_position_embeddings(
+                    model_args.max_position_embeddings
+                )
+            return pretrained_model
         except Exception as e:
             LOG.error(
                 f"When continue_pretrain is set to True, it assumes that CEHR-GPT has been trained "
@@ -95,7 +109,7 @@ def load_and_create_model(
             )
             raise e
     try:
-        model_config = AutoConfig.from_pretrained(
+        model_config = CEHRGPTConfig.from_pretrained(
             model_abspath, attn_implementation=attn_implementation
         )
     except Exception as e:
