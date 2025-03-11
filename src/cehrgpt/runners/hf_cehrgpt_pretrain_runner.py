@@ -237,7 +237,7 @@ def main():
                     ],
                 )
                 if not data_args.streaming:
-                    dataset.save_to_disk(meds_extension_path)
+                    dataset.save_to_disk(str(meds_extension_path))
                     stats = dataset.cleanup_cache_files()
                     LOG.info(
                         "Clean up the cached files for the cehrgpt dataset transformed from the MEDS: %s",
@@ -304,7 +304,7 @@ def main():
         )
         # only save the data to the disk if it is not streaming
         if not data_args.streaming:
-            processed_dataset.save_to_disk(prepared_ds_path)
+            processed_dataset.save_to_disk(str(prepared_ds_path))
             stats = processed_dataset.cleanup_cache_files()
             LOG.info(
                 "Clean up the cached files for the cehrgpt pretraining dataset: %s",
