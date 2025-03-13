@@ -47,29 +47,53 @@ class ModelTimeEmbedding(torch.nn.Module):
         return loss, y
 
 
-def generate_simulation_data(sample_size: int = 1000) -> np.ndarray:
+def generate_simulation_data(sample_size: int = 1000, seed: int = 42) -> np.ndarray:
+    np.random.seed(seed)  # Set the seed for reproducibility
+
+    # Define input values and time stamps
     x_values = [0, 1]
     time_stamp_values = list(range(0, 21))
+
+    # Generate random choices for features and time stamps
     x1 = np.random.choice(x_values, size=sample_size)
     x2 = np.random.choice(x_values, size=sample_size)
     t1 = np.random.choice(time_stamp_values, size=sample_size)
     t2 = t1 + np.random.choice(time_stamp_values, size=sample_size)
-    is_xor = (t2 - t1) <= 7
-    is_and = ((t2 - t1) > 7) & ((t2 - t1) <= 14)
+
+    # Define conditions based on time differences
+    time_diff = t2 - t1
+    # Complex condition involving modulo operation
+    is_custom_func_1 = (x1 == 1) & (time_diff % 4 == 0)
+    is_custom_func_2 = (x1 == 0) & (time_diff % 3 == 0)
+    is_xor = time_diff <= 7
+    is_and = (time_diff > 7) & (time_diff <= 14)
+    is_or = (time_diff > 14) & (time_diff <= 21)
+
+    # Logical operations based on x1 and x2
     xor = (x2 != x1).astype(int)
     logical_and = (x2 & x1).astype(int)
     logical_or = (x2 | x1).astype(int)
-    y = np.where(is_xor, xor, np.where(is_and, logical_and, logical_or))
-    return np.concatenate(
-        [
-            x1[:, None],
-            x2[:, None],
-            t1[:, None],
-            t2[:, None],
-            y[:, None],
-        ],
-        axis=1,
+    # Additional complexity: introduce a new rule based on a more complex condition
+    custom_func_1_result = (x2 == 0).astype(int)  # For example, use a different rule
+    custom_func_2_result = (x2 == 1).astype(int)  # For example, use a different rule
+
+    # Determine output based on multiple conditions
+    y = np.where(
+        is_custom_func_1,
+        custom_func_1_result,
+        np.where(
+            is_custom_func_2,
+            custom_func_2_result,
+            np.where(
+                is_xor,
+                xor,
+                np.where(is_and, logical_and, np.where(is_or, logical_or, 0)),
+            ),
+        ),
     )
+
+    # Return the data as a single numpy array with features and output
+    return np.column_stack((x1, x2, t1, t2, y))
 
 
 def create_time_embedding_tokenizer(simulated_data):
