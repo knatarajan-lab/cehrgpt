@@ -4,6 +4,9 @@
 venv*
 dist/*
 
+*png
+*json
+
 *ipynb_checkpoints/
 *h5
 *logs
