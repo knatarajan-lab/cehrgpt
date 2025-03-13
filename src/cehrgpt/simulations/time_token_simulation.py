@@ -133,6 +133,7 @@ def main(args):
     time_token_tokenizer = create_time_token_tokenizer(simulated_data)
     time_embedding_model = ModelTimeToken(len(time_token_tokenizer) + 1).to(device)
     time_embedding_optimizer = optim.Adam(time_embedding_model.parameters(), lr=0.001)
+    steps = []
     roc_aucs = []
     accuracies = []
     for step in range(args.n_steps):
@@ -151,9 +152,10 @@ def main(args):
             accuracy, roc_auc = eval_step(
                 simulated_data, time_token_tokenizer, time_embedding_model
             )
+            steps.append(step)
             roc_aucs.append(roc_auc)
             accuracies.append(accuracy)
-    return {"roc_auc": roc_aucs, "accuracy": accuracies}
+    return {"steps": steps, "roc_auc": roc_aucs, "accuracy": accuracies}
 
 
 if __name__ == "__main__":

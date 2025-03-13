@@ -49,15 +49,17 @@ class ModelTimeEmbedding(torch.nn.Module):
 
 def generate_simulation_data(sample_size: int = 1000) -> np.ndarray:
     x_values = [0, 1]
-    time_stamp_values = list(range(0, 14))
+    time_stamp_values = list(range(0, 21))
     x1 = np.random.choice(x_values, size=sample_size)
     x2 = np.random.choice(x_values, size=sample_size)
     t1 = np.random.choice(time_stamp_values, size=sample_size)
     t2 = t1 + np.random.choice(time_stamp_values, size=sample_size)
     is_xor = (t2 - t1) <= 7
+    is_and = ((t2 - t1) > 7) & ((t2 - t1) <= 14)
     xor = (x2 != x1).astype(int)
     logical_and = (x2 & x1).astype(int)
-    y = np.where(is_xor, xor, logical_and)
+    logical_or = (x2 | x1).astype(int)
+    y = np.where(is_xor, xor, np.where(is_and, logical_and, logical_or))
     return np.concatenate(
         [
             x1[:, None],
@@ -176,6 +178,7 @@ def main(args):
         device
     )
     time_embedding_optimizer = optim.Adam(time_embedding_model.parameters(), lr=0.001)
+    steps = []
     roc_aucs = []
     accuracies = []
     for step in range(args.n_steps):
@@ -198,9 +201,10 @@ def main(args):
                 time_embedding_model,
                 time_embedding_optimizer,
             )
+            steps.append(step)
             roc_aucs.append(roc_auc)
             accuracies.append(accuracy)
-    return {"roc_auc": roc_aucs, "accuracy": accuracies}
+    return {"steps": steps, "roc_auc": roc_aucs, "accuracy": accuracies}
 
 
 if __name__ == "__main__":
