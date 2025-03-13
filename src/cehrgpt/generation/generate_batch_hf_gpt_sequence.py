@@ -192,6 +192,7 @@ def main(args):
     LOG.info(f"Top P {args.top_p}")
     LOG.info(f"Top K {args.top_k}")
     LOG.info(f"Loading demographic_info at {args.demographic_data_path}")
+    LOG.info(f"MEDS format: {args.meds_format}")
 
     dataset = load_parquet_as_dataset(args.demographic_data_path)
     total_rows = len(dataset)
@@ -199,6 +200,7 @@ def main(args):
     num_of_batches = args.num_of_patients // args.batch_size + 1
     sequence_to_flush = []
     current_person_id = 1
+    prompt_size = 2 if args.meds_format else START_TOKEN_SIZE
     for i in range(num_of_batches):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
 
@@ -215,7 +217,7 @@ def main(args):
                     <= max_seq_allowed
                 ):
                     random_prompts.append(
-                        cehrgpt_tokenizer.encode(row["concept_ids"][:START_TOKEN_SIZE])
+                        cehrgpt_tokenizer.encode(row["concept_ids"][:prompt_size])
                     )
                 iter += 1
                 if not random_prompts and iter > 10:
@@ -324,6 +326,11 @@ def create_arg_parser():
     base_arg_parser.add_argument(
         "--drop_long_sequences",
         dest="drop_long_sequences",
+        action="store_true",
+    )
+    base_arg_parser.add_argument(
+        "--meds_format",
+        dest="meds_format",
         action="store_true",
     )
     return base_arg_parser
