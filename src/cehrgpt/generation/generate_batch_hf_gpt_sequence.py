@@ -8,7 +8,9 @@ import numpy as np
 import pandas as pd
 import torch
 from cehrbert.runners.runner_util import load_parquet_as_dataset
+from torch import Tensor
 from transformers import GenerationConfig
+from transformers.generation.utils import GenerateOutput
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.cehrgpt_args import create_inference_base_arg_parser
@@ -70,6 +72,48 @@ def normalize_value(
     )
 
 
+def extract_output_from_model_response(
+    results: GenerateOutput,
+    cehrgpt_tokenizer: CehrGptTokenizer,
+    skip_special_tokens: bool = False,
+) -> Dict[str, Any]:
+
+    sequences = [
+        cehrgpt_tokenizer.decode(
+            seq.cpu().numpy(), skip_special_tokens=skip_special_tokens
+        )
+        for seq in results.sequences
+    ]
+    sequence_vals: Optional[Tensor] = results.get("sequence_vals", None)
+    if sequence_vals is not None:
+        values = [
+            cehrgpt_tokenizer.decode_value(
+                values.cpu().numpy(), skip_special_tokens=skip_special_tokens
+            )
+            for values in sequence_vals
+        ]
+    else:
+        values = []
+        for seq in sequences:
+            v = np.zeros_like(seq)
+            v.fill(NA)
+            values.append(v)
+
+    sequence_val_masks: Optional[Tensor] = results.get("sequence_val_masks", None)
+    if sequence_val_masks is not None:
+        value_indicators = sequence_val_masks.cpu().numpy()
+    else:
+        value_indicators = []
+        for seq in sequences:
+            value_indicators.append(np.zeros_like(seq, dtype=np.int32).astype(bool))
+
+    return {
+        "sequences": sequences,
+        "values": values,
+        "value_indicators": value_indicators,
+    }
+
+
 def generate_single_batch(
     model: CEHRGPT2LMHeadModel,
     tokenizer: CehrGptTokenizer,
@@ -114,27 +158,9 @@ def generate_single_batch(
             lab_token_ids=tokenizer.lab_token_ids,
         )
 
-    sequences = [
-        tokenizer.decode(seq.cpu().numpy(), skip_special_tokens=False)
-        for seq in results.sequences
-    ]
-    if results.sequence_vals is not None:
-        values = [
-            tokenizer.decode_value(values.cpu().numpy(), skip_special_tokens=False)
-            for values in results.sequence_vals
-        ]
-    else:
-        values = np.zeros_like(sequences)
-        values.fill(NA)
-    if results.sequence_val_masks is not None:
-        value_indicators = results.sequence_val_masks.cpu().numpy()
-    else:
-        value_indicators = np.zeros_like(sequences, dtype=np.int32).astype(bool)
-    return {
-        "sequences": sequences,
-        "values": values,
-        "value_indicators": value_indicators,
-    }
+    return extract_output_from_model_response(
+        results, tokenizer, skip_special_tokens=False
+    )
 
 
 def main(args):

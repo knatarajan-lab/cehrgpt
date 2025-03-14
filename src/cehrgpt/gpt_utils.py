@@ -1,7 +1,8 @@
 import random
 import re
+from collections.abc import Iterable
 from datetime import date, timedelta
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Dict, Generic, List, Optional, Sequence, Tuple, TypeVar, Union
 
 from cehrgpt.cehrgpt_args import SamplingStrategy
 from cehrgpt.models.special_tokens import (
@@ -17,6 +18,86 @@ from cehrgpt.models.special_tokens import (
 # Regular expression pattern to match inpatient attendance tokens
 INPATIENT_ATT_PATTERN = re.compile(r"(?:VS-|i-)D(\d+)(?:-VE)?")
 DEMOGRAPHIC_PROMPT_SIZE = 4
+
+# Define type variables at the module level
+K = TypeVar("K")
+V = TypeVar("V")
+
+
+class ProbabilisticCache(Generic[K, V]):
+    """
+    A generic probabilistic cache implementation that stores items up to a specified capacity.
+
+    This cache randomly evicts items when the capacity is reached.
+    It is designed to handle generic key-value pairs and can be used with any data types that are hashable.
+
+    Attributes:
+        cache (Dict[K, V]): The dictionary that holds the cache items.
+        capacity (int): The maximum number of items the cache can hold.
+        access_count (Dict[K, int]): A dictionary tracking the number of accesses for each key.
+
+    Args:
+        capacity (int): The maximum capacity of the cache, defaulting to 10,000.
+    """
+
+    def __init__(self, capacity: int = 10000):
+        self.cache: Dict[K, V] = {}
+        self.capacity = capacity
+        self.access_count: Dict[K, int] = {}
+
+    @staticmethod
+    def is_key_valid(key: K) -> bool:
+        # We don't want to cache the data if the key is None
+        if key is None:
+            return False
+        # We don't want to cache the data if any element of the key is None
+        if isinstance(key, Iterable) and not isinstance(key, (str, bytes)):
+            if any(item is None for item in key):
+                return False
+        return True
+
+    def add_data(self, key: K, data: V) -> None:
+        """
+        Add data to the cache based on the provided key and value.
+
+        If the key already exists,
+        increment its access count. If the key does not exist and the cache is full, randomly evict an item
+        before adding the new key-value pair.
+
+        Args:
+            key (K): The key associated with the item to be accessed or added.
+            data (V): The value associated with the key.
+        """
+        # We don't want to cache the data if the key is None
+        if not self.is_key_valid(key):
+            return
+
+        # We update the cache only if this is a new key
+        if key not in self.cache:
+            if len(self.cache) < self.capacity:
+                self.cache[key] = data
+            else:
+                # Eviction policy example, simple random eviction
+                evicted_key = random.choice(list(self.cache.keys()))
+                del self.cache[evicted_key]
+                self.cache[key] = data
+
+    def get_data(self, key: K) -> Optional[V]:
+        """
+        Retrieve an item from the cache.
+
+        If the item exists, increment its access count and return the value.
+        If the item does not exist, return None.
+
+        Args:
+            key (K): The key of the item to be retrieved.
+
+        Returns:
+            Optional[V]: The value associated with the key if present in the cache; otherwise, None.
+        """
+        if not self.is_key_valid(key):
+            return None
+        return self.cache.get(key, None)
 
 
 class RandomSampleCache:
@@ -138,8 +219,13 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
                 att_date_delta = extract_time_interval_in_days(current_token)
                 data_cursor = data_cursor + timedelta(days=att_date_delta)
 
+        # If there are no other starting points, we deploy a right truncation strategy
         if len(starting_points) == 0:
-            return 0, 0, concept_ids[:DEMOGRAPHIC_PROMPT_SIZE]
+            return (
+                DEMOGRAPHIC_PROMPT_SIZE,
+                min(max_seq_len, seq_length),
+                concept_ids[:DEMOGRAPHIC_PROMPT_SIZE],
+            )
 
         random_starting_index, random_starting_year, random_starting_age = (
             random.choice(starting_points)
@@ -151,7 +237,7 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
             start_race,
         ]
         # Remove the number of demographic tokens
-        random_end_index = random_starting_index
+        random_end_index = random_starting_index + max_seq_len - DEMOGRAPHIC_PROMPT_SIZE
         for i in reversed(
             range(
                 random_starting_index,
@@ -165,7 +251,11 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
         return random_starting_index, random_end_index, demographic_tokens
 
     except Exception:
-        return 0, max_seq_len - 1, []
+        return (
+            DEMOGRAPHIC_PROMPT_SIZE,
+            min(max_seq_len, seq_length),
+            concept_ids[:DEMOGRAPHIC_PROMPT_SIZE],
+        )
 
 
 def get_cehrgpt_output_folder(args, cehrgpt_tokenizer) -> str:

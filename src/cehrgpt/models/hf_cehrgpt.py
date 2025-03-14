@@ -713,6 +713,26 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.ln_f = self.ln_f.to("cpu")
         torch.cuda.empty_cache()
 
+    def enable_cross_attention(self):
+        if not self.config.add_cross_attention:
+            self.config.add_cross_attention = True
+            if (
+                getattr(self.config, "_attn_implementation", "eager")
+                == "flash_attention_2"
+            ):
+                attention_class = GPT2FlashAttention
+            else:
+                attention_class = GPT2Attention
+            for i in range(len(self.h)):
+                layer = self.h[i]
+                device = layer.attn.bias.device
+                layer.crossattention = attention_class(
+                    config=self.config, is_cross_attention=True, layer_idx=i
+                ).to(device)
+                layer.ln_cross_attn = nn.LayerNorm(
+                    self.config.hidden_size, eps=self.config.layer_norm_epsilon
+                ).to(device)
+
     def update_attn_bias(self, max_position_embeddings: int):
         for i in range(len(self.h)):
             self.h[i].attn.register_buffer(
@@ -760,6 +780,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         input_ids: Optional[torch.LongTensor],
         value_indicators: Optional[torch.BoolTensor],
         values: Optional[torch.LongTensor],
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.FloatTensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -867,6 +889,25 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 )  # fp16 compatibility
                 attention_mask = (1.0 - attention_mask) * torch.finfo(self.dtype).min
 
+        # If a 2D or 3D attention mask is provided for the cross-attention
+        # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
+        if self.config.add_cross_attention and encoder_hidden_states is not None:
+            encoder_batch_size, encoder_sequence_length, _ = (
+                encoder_hidden_states.size()
+            )
+            encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
+            if encoder_attention_mask is None:
+                encoder_attention_mask = torch.ones(encoder_hidden_shape, device=device)
+            if (
+                getattr(self.config, "_attn_implementation", "eager")
+                != "flash_attention_2"
+            ):
+                encoder_attention_mask = self.invert_attention_mask(
+                    encoder_attention_mask
+                )
+        else:
+            encoder_attention_mask = None
+
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
         # attention_probs has shape bsz x n_heads x N x N
@@ -943,6 +984,9 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
 
         presents = () if use_cache else None
         all_self_attentions = () if output_attentions else None
+        all_cross_attentions = (
+            () if output_attentions and self.config.add_cross_attention else None
+        )
         all_hidden_states = () if output_hidden_states else None
         for i, (block, layer_past) in enumerate(zip(self.h, past_key_values)):
             # Model parallel
@@ -968,8 +1012,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                     None,
                     attention_mask,
                     head_mask[i],
-                    None,
-                    None,
+                    encoder_hidden_states,
+                    encoder_attention_mask,
                     use_cache,
                     output_attentions,
                 )
@@ -979,8 +1023,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                     layer_past=layer_past,
                     attention_mask=attention_mask,
                     head_mask=head_mask[i],
-                    encoder_hidden_states=None,
-                    encoder_attention_mask=None,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_attention_mask,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
                 )
@@ -993,6 +1037,10 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 all_self_attentions = all_self_attentions + (
                     outputs[2 if use_cache else 1],
                 )
+                if self.config.add_cross_attention:
+                    all_cross_attentions = all_cross_attentions + (
+                        outputs[3 if use_cache else 2],
+                    )
 
             # Model Parallel: If it's the last layer for that device, put things on the next device
             if self.model_parallel:
@@ -1015,6 +1063,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                     presents,
                     all_hidden_states,
                     all_self_attentions,
+                    all_cross_attentions,
                 ]
                 if v is not None
             )
@@ -1024,6 +1073,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             past_key_values=presents,
             hidden_states=all_hidden_states,
             attentions=all_self_attentions,
+            cross_attentions=all_cross_attentions,
         )
 
 
@@ -1115,6 +1165,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
     def update_attn_bias(self, max_position_embeddings: int):
         self.cehrgpt.update_attn_bias(max_position_embeddings)
 
+    def enable_cross_attention(self):
+        self.cehrgpt.enable_cross_attention()
+
     def prepare_inputs_for_generation(
         self,
         input_ids,
@@ -1142,6 +1195,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         attention_mask = kwargs.get("attention_mask", None)
         position_ids = kwargs.get("position_ids", None)
         random_vectors = kwargs.get("random_vectors", None)
+        encoder_hidden_states = kwargs.get("encoder_hidden_states", None)
+        encoder_attention_mask = kwargs.get("encoder_attention_mask", None)
 
         if attention_mask is not None and position_ids is None:
             # create position_ids on the fly for batch generation
@@ -1205,6 +1260,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 "position_ids": position_ids,
                 "attention_mask": attention_mask,
                 "random_vectors": random_vectors,
+                "encoder_hidden_states": encoder_hidden_states,
+                "encoder_attention_mask": encoder_attention_mask,
             }
         )
 
@@ -1215,6 +1272,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         input_ids: Optional[torch.LongTensor] = None,
         value_indicators: Optional[torch.BoolTensor] = None,
         values: Optional[torch.LongTensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.FloatTensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -1245,6 +1304,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             input_ids,
             value_indicators=value_indicators,
             values=values,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1413,6 +1474,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             past_key_values=transformer_outputs.past_key_values,
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
+            cross_attentions=transformer_outputs.cross_attentions,
             token_loss=token_loss,
             time_token_loss=time_token_loss,
             time_to_visit_loss=time_to_visit_loss,
