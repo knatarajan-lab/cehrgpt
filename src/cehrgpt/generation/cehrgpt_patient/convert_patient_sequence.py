@@ -271,6 +271,10 @@ class PatientSequenceConverter:
                 race_concept_id=int(race_token.get_name()),
                 race=concept_map.get(race_token.name, None),
                 visits=visits,
+                highlight_gender=gender_token.highlight_concept_id,
+                highlight_race=race_token.highlight_concept_id,
+                highlight_birth_datetime=age_token.highlight_concept_id
+                | year_token.highlight_concept_id,
             )
         return None
 
@@ -358,6 +362,7 @@ class PatientSequenceConverter:
                     visit_id=visit_id,
                     domain=domain,
                     record_id=record_id,
+                    highlight_concept_id=token.highlight_concept_id,
                 )
                 if event not in events:
                     events.append(event)
@@ -390,6 +395,7 @@ def get_cehrgpt_patient_converter(
     numeric_values: Optional[List[float]] = None,
     text_values: Optional[List[str]] = None,
     units: Optional[List[str]] = None,
+    highlight_concept_ids: Optional[List[bool]] = None,
 ) -> PatientSequenceConverter:
     cehrgpt_tokens = translate_to_cehrgpt_tokens(
         concept_ids=concept_ids,
@@ -397,5 +403,6 @@ def get_cehrgpt_patient_converter(
         numeric_values=numeric_values,
         text_values=text_values,
         units=units,
+        highlight_concept_ids=highlight_concept_ids,
     )
     return PatientSequenceConverter(tokens=cehrgpt_tokens)

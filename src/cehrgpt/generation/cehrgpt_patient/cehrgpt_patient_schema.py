@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional
 
+from termcolor import colored
+
 from cehrgpt.gpt_utils import is_inpatient_visit_type_token
 
 
@@ -19,6 +21,7 @@ class CehrGptEvent:
     code_label: Optional[str] = None
     visit_id: Optional[int] = None
     record_id: Optional[int] = None
+    highlight_concept_id: Optional[bool] = False
 
     def get_code_label(self):
         if self.code_label:
@@ -104,9 +107,12 @@ class CehrGptVisit:
         if is_inpatient_visit_type_token(self.visit_concept_id):
             group_by_date = defaultdict(lambda: defaultdict(list))
             for event in self.events:
-                group_by_date[event.time.date()][event.domain].append(
-                    event.get_code_label()
+                event_label = (
+                    colored(event.get_code_label(), "red", attrs=["bold"])
+                    if event.highlight_concept_id
+                    else event.get_code_label()
                 )
+                group_by_date[event.time.date()][event.domain].append(event_label)
             for date, domain_concepts in group_by_date.items():
                 narrative += (
                     f"\tOn day {(date - self.visit_start_datetime.date()).days}:\n"
@@ -118,7 +124,12 @@ class CehrGptVisit:
         else:
             group_by_domain = defaultdict(list)
             for event in self.events:
-                group_by_domain[event.domain].append(event.get_code_label())
+                event_label = (
+                    colored(event.get_code_label(), "red", attrs=["bold"])
+                    if event.highlight_concept_id
+                    else event.get_code_label()
+                )
+                group_by_domain[event.domain].append(event_label)
             for domain in sorted(group_by_domain):
                 narrative += f"\t{domain}:\n"
                 for concept in group_by_domain[domain]:
@@ -134,11 +145,25 @@ class CehrGptPatient:
     race_concept_id: int
     race: str
     patient_id: Optional[int] = None
-    visits: List[CehrGptVisit] = field(default_factory=list)
+    visits: List[CehrGptVisit] = (field(default_factory=list),)
+    highlight_gender: Optional[bool] = (False,)
+    highlight_race: Optional[bool] = (False,)
+    highlight_birth_datetime: Optional[bool] = (False,)
 
     def get_narrative(self) -> str:
+
+        gender_str = (
+            colored(self.gender, "red", attrs=["bold"])
+            if self.highlight_gender
+            else self.gender
+        )
+        race_str = (
+            colored(self.race, "red", attrs=["bold"])
+            if self.highlight_race
+            else self.race
+        )
         narrative = (
-            f"Patient Demographics:\n\tGender: {self.gender}\n\tRace: {self.race}\n"
+            f"Patient Demographics:\n\tGender: {gender_str}\n\tRace: {race_str}\n"
         )
         for visit in self.visits:
             narrative += visit.get_narrative(self.birth_datetime)

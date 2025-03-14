@@ -63,6 +63,7 @@ class CEHRGPTToken:
     numeric_value: Optional[float] = None
     text_value: Optional[str] = None
     unit: Optional[str] = None
+    highlight_concept_id: Optional[bool] = False
 
     def get_name(self) -> Union[int, str]:
         if self.type in [TokenType.YEAR, TokenType.AGE]:
@@ -77,6 +78,7 @@ def make_cehrgpt_token(
     numeric_value: Optional[float] = None,
     text_value: Optional[str] = None,
     unit: Optional[str] = None,
+    highlight_concept_id: Optional[bool] = False,
     pre_token: Optional[str] = None,
     next_token: Optional[str] = None,
 ) -> CEHRGPTToken:
@@ -94,6 +96,7 @@ def make_cehrgpt_token(
         numeric_value (Optional[float]): An optional numeric value associated with the token, default is None.
         text_value (Optional[str]): An optional text value associated with the token, default is None.
         unit (Optional[str]): An optional unit of measure associated with the token, default is None.
+        highlight_concept_id (Optional[bool]): An indicator for highlighting the concept in the narrative form
         pre_token (Optional[str]):
         next_token (Optional[str]):
 
@@ -153,6 +156,7 @@ def make_cehrgpt_token(
         numeric_value=numeric_value,
         text_value=text_value,
         unit=unit,
+        highlight_concept_id=highlight_concept_id,
     )
 
 
@@ -162,6 +166,7 @@ def translate_to_cehrgpt_tokens(
     numeric_values: Optional[List[float]] = None,
     text_values: Optional[List[float]] = None,
     units: Optional[List[str]] = None,
+    highlight_concept_ids: Optional[List[bool]] = None,
 ) -> List[CEHRGPTToken]:
     cehrgpt_tokens: List[CEHRGPTToken] = []
     for event_index, event in enumerate(concept_ids):
@@ -174,6 +179,11 @@ def translate_to_cehrgpt_tokens(
         )
         text_value = text_values[event_index] if text_values is not None else None
         unit = units[event_index] if units is not None else None
+        highlight_concept_id = (
+            highlight_concept_ids[event_index]
+            if highlight_concept_ids is not None
+            else None
+        )
         cehrgpt_tokens.append(
             make_cehrgpt_token(
                 event,
@@ -182,6 +192,7 @@ def translate_to_cehrgpt_tokens(
                 numeric_value,
                 text_value,
                 unit,
+                highlight_concept_id,
                 prev_event,
                 next_event,
             )
