@@ -1755,7 +1755,7 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
         self,
         input_ids: Optional[torch.LongTensor],
         age_at_index: torch.FloatTensor,
-        classifier_label: Optional[torch.FloatTensor],
+        classifier_label: Optional[torch.FloatTensor] = None,
         value_indicators: Optional[torch.BoolTensor] = None,
         values: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
