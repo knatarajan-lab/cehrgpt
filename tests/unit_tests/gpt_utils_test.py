@@ -37,7 +37,7 @@ class TestRandomSampleCache(unittest.TestCase):
 class TestRandomSliceGPTSequence(unittest.TestCase):
     def test_random_slice_gpt_sequence_with_empty_starting_points(self):
         result = random_slice_gpt_sequence(["year:2020", "age:30", "male", "race"], 10)
-        self.assertEqual((0, 0, ["year:2020", "age:30", "male", "race"]), result)
+        self.assertEqual((4, 4, ["year:2020", "age:30", "male", "race"]), result)
 
     def test_random_slice_gpt_sequence_with_valid_data(self):
 
@@ -106,14 +106,14 @@ class TestRandomSliceGPTSequence(unittest.TestCase):
         # The pat sequence is shorter than max_seq_len, it should return the original demographic prompt
         concept_ids = ["year:2020", "age:30", "male", "race", "VS", "C", "C", "VE"]
         result = random_slice_gpt_sequence(concept_ids, 10)
-        self.assertTrue(result[0] == 0)
-        self.assertTrue(result[1] == 0)
+        self.assertTrue(result[0] == 4)
+        self.assertTrue(result[1] == 8)
         self.assertEqual(result[2], ["year:2020", "age:30", "male", "race"])
 
     def test_random_slice_gpt_sequence_with_invalid_data(self):
         concept_ids = ["year:2020", "age:30", "male", "race", "invalid"]
         result = random_slice_gpt_sequence(concept_ids, 10)
-        self.assertEqual(result, (0, 0, ["year:2020", "age:30", "male", "race"]))
+        self.assertEqual(result, (4, 5, ["year:2020", "age:30", "male", "race"]))
 
 
 class TestTokenFunctions(unittest.TestCase):

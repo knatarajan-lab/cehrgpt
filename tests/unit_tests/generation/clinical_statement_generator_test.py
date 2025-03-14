@@ -5,7 +5,8 @@ from unittest.mock import MagicMock
 import networkx as nx
 
 from cehrgpt.generation.cehrgpt_patient.cehrgpt_patient_schema import CehrGptEvent
-from cehrgpt.llm.clinical_statement_generator import (
+from cehrgpt.generation.cehrgpt_patient.clinical_statement_generator import (
+    DEFAULT_CLINICAL_STATEMENT,
     ClinicalStatementGenerator,
     ConditionDrugKnowledgeGraph,
 )
@@ -25,17 +26,17 @@ class TestClinicalStatementGenerator(unittest.TestCase):
         )
         self.generator = ClinicalStatementGenerator(
             condition_drug_knowledge_graph=self.condition_drug_knowledge_graph,
-            allowed_conditions=[1, 3],
+            allowed_clinical_conditions=[1, 3],
             n_conditions=1,
         )
 
     def test_get_indications(self):
         # Test to ensure caching and retrieval of indications
         indications = self.generator.get_indications(1)
-        self.assertEqual(indications, [2, 200, 201])
+        self.assertDictEqual(indications, {2: 2, 200: 2, 201: 2})
         # Check if repeated calls use the cache
         indications = self.generator.get_indications(1)
-        self.assertEqual(indications, [2, 200, 201])
+        self.assertDictEqual(indications, {2: 2, 200: 2, 201: 2})
 
     def test_is_allowed_condition(self):
         event_allowed = CehrGptEvent(
@@ -55,11 +56,11 @@ class TestClinicalStatementGenerator(unittest.TestCase):
             concept_name_mapping={"1": "Diabetes"},
             concept_domain_mapping={"1": "condition"},
         )
-        self.assertIsNone(clinical_statement)
+        self.assertEqual(clinical_statement, DEFAULT_CLINICAL_STATEMENT)
 
     def test_generate_clinical_statement_with_data(self):
         # Testing generation of clinical statement with mock data
-        self.generator.get_indications = MagicMock(return_value=[200])
+        self.generator.get_indications = MagicMock(return_value={200: 200})
         clinical_statement = self.generator.generate_clinical_statement(
             concept_ids=[
                 "year:2021",
@@ -83,7 +84,7 @@ class TestClinicalStatementGenerator(unittest.TestCase):
         )
         self.assertIn("Race", clinical_statement)
         self.assertIn("Gender", clinical_statement)
-        self.assertIn("Diagnosis age", clinical_statement)
+        self.assertIn("Age", clinical_statement)
         self.assertIn("Condition", clinical_statement)
         self.assertIn("Drug", clinical_statement)
 

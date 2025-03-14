@@ -339,7 +339,9 @@ class PatientSequenceConverter:
             elif token.type == TokenType.INPATIENT_HOUR:
                 datetime_cursor.add_hours(extract_hours_from_hour_token(token.name))
             elif token.type in clinical_token_types or token.type == TokenType.DEATH:
-                domain = domain_map.get(token.name, None)
+                domain = domain_map.get(
+                    token.name, "Death" if token.type == TokenType.DEATH else "Unknown"
+                )
                 record_id = (
                     self.id_generator.get_next_id_by_domain(domain)
                     if self.id_generator
