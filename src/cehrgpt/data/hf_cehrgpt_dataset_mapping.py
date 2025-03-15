@@ -61,9 +61,12 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
             return ["visits", "birth_datetime", "index_date"]
         else:
             return [
+                "patient_id",
                 "visits",
                 "birth_datetime",
-                "visit_concept_ids",
+                "race",
+                "gender",
+                "ethnicity",
             ]
 
     @staticmethod
