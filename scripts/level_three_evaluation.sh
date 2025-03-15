@@ -27,7 +27,7 @@ python -u -m cehrbert_data.prediction_cohorts.cad_cabg_cohort \
     -i "$OMOP_FOLDER" \
     -o "$OMOP_FOLDER/cohorts/cad_cabg/" \
     -dl 1985-01-01 -du 2023-12-31 \
-    -l 18 -u 100 -ow 360 -ps 0 -pw 360 -f \
+    -l 18 -u 100 -ow 360 -ps 0 -pw 360 -hw 30 -f \
     --att_type cehr_bert \
     --ehr_table_list condition_occurrence procedure_occurrence drug_exposure -iv
 
@@ -56,9 +56,10 @@ python -u -m cehrbert_data.prediction_cohorts.hf_readmission \
   -c hf_readmission_bow \
   -i "$OMOP_FOLDER" \
   -o "$OMOP_FOLDER/cohorts/hf_readmission" \
-  -dl 1985-01-01 -du 2023-12-31 -l 18 -u 100 -ow 360 -ps 0 -pw 30 -f \
+  -dl 1985-01-01 -du 2023-12-31 -l 18 -u 100 -ow 360 -ps 1 -pw 30 -f \
   --att_type cehr_bert \
-  --ehr_table_list condition_occurrence procedure_occurrence drug_exposure -iv
+  --ehr_table_list condition_occurrence procedure_occurrence drug_exposure -iv \
+  --is_remove_index_prediction_starts
 
 # Run predictions on HF Readmission
 echo "Run predictions on hf_readmission"
@@ -85,9 +86,10 @@ python -u -m cehrbert_data.prediction_cohorts.copd_readmission \
   -c copd_readmission_bow \
   -i "$OMOP_FOLDER" \
   -o "$OMOP_FOLDER/cohorts/copd_readmission" \
-  -dl 1985-01-01 -du 2023-12-31 -l 18 -u 100 -ow 720 -ps 0 -pw 360 -f \
+  -dl 1985-01-01 -du 2023-12-31 -l 18 -u 100 -ow 360 -ps 1 -pw 30 -f \
   --att_type cehr_bert \
-  --ehr_table_list condition_occurrence procedure_occurrence drug_exposure -iv
+  --ehr_table_list condition_occurrence procedure_occurrence drug_exposure -iv \
+  --is_remove_index_prediction_starts
 
 # Run predictions on COPD Readmission
 echo "Run predictions on copd_readmission"
@@ -143,7 +145,7 @@ python -u -m cehrbert_data.prediction_cohorts.afib_ischemic_stroke \
   -c afib_ischemic_stroke_bow \
   -i "$OMOP_FOLDER" \
   -o "$OMOP_FOLDER/cohorts/afib_ischemic_stroke" \
-  -dl 1985-01-01 -du 2023-12-31 -l 18 -u 100 -ow 720 -ps 0 -pw 360 -f \
+  -dl 1985-01-01 -du 2023-12-31 -l 18 -u 100 -ow 720 -ps 0 -pw 360 -hw 30 -f \
   --att_type cehr_bert \
   --ehr_table_list condition_occurrence procedure_occurrence drug_exposure -iv
 
