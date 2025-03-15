@@ -1,18 +1,103 @@
 import random
 import re
+from collections.abc import Iterable
 from datetime import date, timedelta
-from typing import List, Sequence, Tuple
+from typing import Dict, Generic, List, Optional, Sequence, Tuple, TypeVar, Union
 
 from cehrgpt.cehrgpt_args import SamplingStrategy
 from cehrgpt.models.special_tokens import (
-    DISCHARGE_CONCEPT_IDS,
+    DISCHARGE_CONCEPT_LIST,
     END_TOKEN,
-    VISIT_CONCEPT_IDS,
+    GENDER_CONCEPT_LIST,
+    INPATIENT_VISIT_CONCEPT_LIST,
+    OUTPATIENT_VISIT_CONCEPT_LIST,
+    RACE_CONCEPT_LIST,
+    START_TOKEN,
 )
 
 # Regular expression pattern to match inpatient attendance tokens
 INPATIENT_ATT_PATTERN = re.compile(r"(?:VS-|i-)D(\d+)(?:-VE)?")
 DEMOGRAPHIC_PROMPT_SIZE = 4
+
+# Define type variables at the module level
+K = TypeVar("K")
+V = TypeVar("V")
+
+
+class ProbabilisticCache(Generic[K, V]):
+    """
+    A generic probabilistic cache implementation that stores items up to a specified capacity.
+
+    This cache randomly evicts items when the capacity is reached.
+    It is designed to handle generic key-value pairs and can be used with any data types that are hashable.
+
+    Attributes:
+        cache (Dict[K, V]): The dictionary that holds the cache items.
+        capacity (int): The maximum number of items the cache can hold.
+        access_count (Dict[K, int]): A dictionary tracking the number of accesses for each key.
+
+    Args:
+        capacity (int): The maximum capacity of the cache, defaulting to 10,000.
+    """
+
+    def __init__(self, capacity: int = 10000):
+        self.cache: Dict[K, V] = {}
+        self.capacity = capacity
+        self.access_count: Dict[K, int] = {}
+
+    @staticmethod
+    def is_key_valid(key: K) -> bool:
+        # We don't want to cache the data if the key is None
+        if key is None:
+            return False
+        # We don't want to cache the data if any element of the key is None
+        if isinstance(key, Iterable) and not isinstance(key, (str, bytes)):
+            if any(item is None for item in key):
+                return False
+        return True
+
+    def add_data(self, key: K, data: V) -> None:
+        """
+        Add data to the cache based on the provided key and value.
+
+        If the key already exists,
+        increment its access count. If the key does not exist and the cache is full, randomly evict an item
+        before adding the new key-value pair.
+
+        Args:
+            key (K): The key associated with the item to be accessed or added.
+            data (V): The value associated with the key.
+        """
+        # We don't want to cache the data if the key is None
+        if not self.is_key_valid(key):
+            return
+
+        # We update the cache only if this is a new key
+        if key not in self.cache:
+            if len(self.cache) < self.capacity:
+                self.cache[key] = data
+            else:
+                # Eviction policy example, simple random eviction
+                evicted_key = random.choice(list(self.cache.keys()))
+                del self.cache[evicted_key]
+                self.cache[key] = data
+
+    def get_data(self, key: K) -> Optional[V]:
+        """
+        Retrieve an item from the cache.
+
+        If the item exists, increment its access count and return the value.
+        If the item does not exist, return None.
+
+        Args:
+            key (K): The key of the item to be retrieved.
+
+        Returns:
+            Optional[V]: The value associated with the key if present in the cache; otherwise, None.
+        """
+        if not self.is_key_valid(key):
+            return None
+        return self.cache.get(key, None)
 
 
 class RandomSampleCache:
@@ -134,8 +219,13 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
                 att_date_delta = extract_time_interval_in_days(current_token)
                 data_cursor = data_cursor + timedelta(days=att_date_delta)
 
+        # If there are no other starting points, we deploy a right truncation strategy
         if len(starting_points) == 0:
-            return 0, 0, concept_ids[:DEMOGRAPHIC_PROMPT_SIZE]
+            return (
+                DEMOGRAPHIC_PROMPT_SIZE,
+                min(max_seq_len, seq_length),
+                concept_ids[:DEMOGRAPHIC_PROMPT_SIZE],
+            )
 
         random_starting_index, random_starting_year, random_starting_age = (
             random.choice(starting_points)
@@ -147,7 +237,7 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
             start_race,
         ]
         # Remove the number of demographic tokens
-        random_end_index = random_starting_index
+        random_end_index = random_starting_index + max_seq_len - DEMOGRAPHIC_PROMPT_SIZE
         for i in reversed(
             range(
                 random_starting_index,
@@ -155,13 +245,17 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
             )
         ):
             current_token = concept_ids[i]
-            if current_token == "VE":
+            if is_visit_end(current_token):
                 random_end_index = i
                 break
         return random_starting_index, random_end_index, demographic_tokens
 
     except Exception:
-        return 0, max_seq_len - 1, []
+        return (
+            DEMOGRAPHIC_PROMPT_SIZE,
+            min(max_seq_len, seq_length),
+            concept_ids[:DEMOGRAPHIC_PROMPT_SIZE],
+        )
 
 
 def get_cehrgpt_output_folder(args, cehrgpt_tokenizer) -> str:
@@ -198,26 +292,70 @@ def is_clinical_event(token: str) -> bool:
     return token.isnumeric()
 
 
-def is_visit_start(token: str):
+def is_seq_start(token: str) -> bool:
+    return token in ["START", "[START]", START_TOKEN]
+
+
+def is_seq_end(token: str) -> bool:
+    return token in ["END", "[END]", END_TOKEN]
+
+
+def is_year_token(token: str) -> bool:
+    return token.upper().startswith("YEAR")
+
+
+def is_age_token(token: str) -> bool:
+    return token.upper().startswith("AGE")
+
+
+def is_gender_token(token: str) -> bool:
+    return token in GENDER_CONCEPT_LIST
+
+
+def is_race_token(token: str) -> bool:
+    return token in RACE_CONCEPT_LIST
+
+
+def is_visit_start(token: Optional[str]):
     """
     Check if the token indicates the start of a visit.
 
     :param token: Token to check.
     :return: True if the token is a visit start token, False otherwise.
     """
-    return token in ["VS", "[VS]"]
+    return token is not None and token in ["VS", "[VS]"]
 
 
-def is_visit_end(token: str) -> bool:
-    return token in ["VE", "[VE]"]
+def is_visit_end(token: Optional[str]) -> bool:
+    return token is not None and token in ["VE", "[VE]"]
 
 
-def is_att_token(token: str):
+def is_death_token(token: str) -> bool:
+    return token == "[DEATH]"
+
+
+def is_outpatient_visit_type_token(token: Union[str, int]) -> bool:
+    return str(token) in OUTPATIENT_VISIT_CONCEPT_LIST
+
+
+def is_inpatient_visit_type_token(token: Union[str, int]) -> bool:
+    return str(token) in INPATIENT_VISIT_CONCEPT_LIST
+
+
+def is_visit_type_token(token: Union[str, int]) -> bool:
+    return is_inpatient_visit_type_token(token) | is_outpatient_visit_type_token(token)
+
+
+def is_discharge_type_token(token: Union[str, int]) -> bool:
+    return str(token) in DISCHARGE_CONCEPT_LIST
+
+
+def is_visit_att_tokens(token: str) -> bool:
     """
-    Check if the token is an attention token.
+    Check if the token is a between visit ATT token.
 
     :param token: Token to check.
-    :return: True if the token is an attention token, False otherwise.
+    :return: True if the token is an ATT token, False otherwise.
     """
     if bool(re.match(r"^D\d+", token)):  # day tokens
         return True
@@ -229,19 +367,53 @@ def is_att_token(token: str):
         return True
     elif token == "LT":
         return True
-    elif token[:3] == "VS-":  # VS-D7-VE
+    return False
+
+
+def is_inpatient_att_token(token: str):
+    """
+    Check if the token is an inpatient ATT token.
+
+    :param token: Token to check.
+    :return: True if the token is an inpatient ATT token, False otherwise.
+    """
+    return (
+        INPATIENT_ATT_PATTERN.match(token)
+        or token.startswith("i-LT")
+        or token.startswith("VS-LT")
+    )
+
+
+def is_inpatient_hour_token(token: str):
+    """
+    Check if the token is an inpatient hour token.
+
+    :param token: Token to check.
+    :return: True if the token is an inpatient hour token, False otherwise.
+    """
+    return token.startswith("i-H")
+
+
+def is_att_token(token: str):
+    """
+    Check if the token is an ATT token including inpatient and between visit ATT tokens.
+
+    :param token: Token to check.
+    :return: True if the token is an ATT token, False otherwise.
+    """
+    if is_visit_att_tokens(token):  # day tokens
         return True
-    elif token[:2] == "i-" and not token.startswith(
-        "i-H"
-    ):  # i-D7 and exclude hour tokens
+    elif is_inpatient_att_token(token):
         return True
     return False
 
 
 def is_artificial_token(token: str) -> bool:
-    if token in VISIT_CONCEPT_IDS:
+    if is_inpatient_att_token(token):
         return True
-    if token in DISCHARGE_CONCEPT_IDS:
+    if is_outpatient_visit_type_token(token):
+        return True
+    if is_discharge_type_token(token):
         return True
     if is_visit_start(token):
         return True
@@ -254,17 +426,14 @@ def is_artificial_token(token: str) -> bool:
     return False
 
 
-def is_inpatient_att_token(token: str):
-    """
-    Check if the token is an inpatient ATT token.
-
-    :param token: Token to check.
-    :return: True if the token is an inpatient ATT token, False otherwise.
-    """
-    return INPATIENT_ATT_PATTERN.match(token)
+def extract_hours_from_hour_token(token: str) -> int:
+    # event.startswith("i-H")
+    if is_inpatient_hour_token(token):
+        return int(token[3:])
+    raise ValueError(f"Invalid inpatient hour token {token}")
 
 
-def extract_time_interval_in_days(token: str):
+def extract_time_interval_in_days(token: str) -> int:
     """
     Extract the time interval in days from a token.
 
@@ -287,12 +456,14 @@ def extract_time_interval_in_days(token: str):
             part = token.split("-")[1]
             if part.startswith("LT"):
                 return 365 * 3
-            return int(part[1:])
+            # recursively call itself
+            return extract_time_interval_in_days(part)
         elif token[:2] == "i-":  # i-D7
             part = token.split("-")[1]
             if part.startswith("LT"):
                 return 365 * 3
-            return int(token.split("-")[1][1:])
+            # recursively call itself
+            return extract_time_interval_in_days(part)
     except Exception:
         raise ValueError(f"Invalid time token: {token}")
     raise ValueError(f"Invalid time token: {token}")

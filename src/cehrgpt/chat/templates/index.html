@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Synthetic Patient Data Generator</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/main.css') }}" rel="stylesheet">
+</head>
+<body>
+    <div class="main-wrapper">
+        <!-- Chat Section -->
+        <div class="chat-section">
+            <div class="container-fluid">
+                <div class="chat-container">
+                    <!-- Just the empty container - JavaScript will populate it -->
+                    <div class="chat-messages">
+                        <!-- Welcome message in its own container -->
+                        <div class="welcome-message">
+                            <div class="message assistant-message">
+                                <div class="message-content">
+                                    <div class="system-message">Welcome! I can help you generate synthetic patient data. What kind of patient data would you like to create?</div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Chat box for dynamic messages -->
+                        <div id="chat-box">
+                        </div>
+                    </div>
+                    <div class="input-container">
+                        <div class="input-box">
+                            <form id="chat-form">
+                                <textarea
+                                    id="message-input"
+                                    class="message-input"
+                                    placeholder="Type your message here..."
+                                    rows="1"
+                                ></textarea>
+                                <div class="button-container">
+                                    <button type="button" id="batch-data" class="btn btn-secondary">Batch</button>
+                                    <button type="submit" class="btn btn-primary">Send</button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+
+    <!-- React Scripts -->
+    <script src="https://unpkg.com/react@17/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@17/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/prop-types@15.7.2/prop-types.js"></script>
+    <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+
+    <!-- Recharts -->
+    <script src="https://unpkg.com/recharts@2.1.12/umd/Recharts.js"></script>
+
+    <!-- Application Scripts -->
+    <script src="{{ url_for('static', filename='js/utils.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/formatters.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script type="text/babel" src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>

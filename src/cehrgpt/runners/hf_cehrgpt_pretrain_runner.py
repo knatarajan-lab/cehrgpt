@@ -1,5 +1,6 @@
 import os
-from typing import Optional, Union
+import pickle
+from typing import List, Optional, Union
 
 import torch
 from cehrbert.data_generators.hf_data_generator.meds_utils import (
@@ -16,13 +17,21 @@ from cehrbert.runners.runner_util import (
     load_parquet_as_dataset,
 )
 from datasets import Dataset, DatasetDict, IterableDatasetDict, load_from_disk
-from transformers import AutoConfig, Trainer, TrainingArguments, set_seed
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoTokenizer,
+    Trainer,
+    TrainingArguments,
+    set_seed,
+)
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
 from cehrgpt.models.config import CEHRGPTConfig
+from cehrgpt.models.encoder_decoder.monkey_patch_cehrgpt import register_cehrgpt_in_hf
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
@@ -88,6 +97,7 @@ def load_and_create_model(
                 attn_implementation=attn_implementation,
                 torch_dtype=torch_dtype,
             )
+
             if (
                 pretrained_model.config.max_position_embeddings
                 < model_args.max_position_embeddings
@@ -101,7 +111,15 @@ def load_and_create_model(
                 pretrained_model.resize_position_embeddings(
                     model_args.max_position_embeddings
                 )
+
+            # We need to instantiate some layers for cross attention for the pretrained model
+            if (
+                cehrgpt_args.add_cross_attention
+                and not pretrained_model.config.add_cross_attention
+            ):
+                pretrained_model.enable_cross_attention()
             return pretrained_model
+
         except Exception as e:
             LOG.error(
                 f"When continue_pretrain is set to True, it assumes that CEHR-GPT has been trained "
@@ -138,6 +156,7 @@ def load_and_create_model(
             n_pretrained_embeddings_layers=cehrgpt_args.n_pretrained_embeddings_layers,
             use_pretrained_embeddings=len(tokenizer.pretrained_token_ids) > 0,
             pretrained_embedding_dim=pretrained_embedding_dim,
+            add_cross_attention=cehrgpt_args.add_cross_attention,
             **model_args.as_dict(),
         )
     model = CEHRGPT2LMHeadModel(model_config)
@@ -281,10 +300,8 @@ def main():
         )
         # Retrain the tokenizer in case we want to pretrain the model further using different datasets
         if cehrgpt_args.expand_tokenizer:
-            new_tokenizer_path = os.path.expanduser(training_args.output_dir)
-            try:
-                cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(new_tokenizer_path)
-            except Exception:
+            tokenizer_output_path = os.path.expanduser(training_args.output_dir)
+            if not tokenizer_exists(tokenizer_output_path):
                 cehrgpt_tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
                     cehrgpt_tokenizer=cehrgpt_tokenizer,
                     dataset=dataset["train"],
@@ -294,9 +311,7 @@ def main():
                         cehrgpt_args.pretrained_embedding_path
                     ),
                 )
-                cehrgpt_tokenizer.save_pretrained(
-                    os.path.expanduser(training_args.output_dir)
-                )
+                cehrgpt_tokenizer.save_pretrained(tokenizer_output_path)
 
         # sort the patient features chronologically and tokenize the data
         processed_dataset = create_cehrgpt_pretraining_dataset(
@@ -339,6 +354,13 @@ def main():
     else:
         processed_dataset = processed_dataset.filter(filter_func, **filter_args)
 
+    # If we choose to continue to train an existing model, we need to check whether the tokenizer exists in the
+    # output_dir, and the tokenizer will be saved if it does not exist.
+    if cehrgpt_args.continue_pretrain and not tokenizer_exists(
+        os.path.expanduser(training_args.output_dir)
+    ):
+        cehrgpt_tokenizer.save_pretrained(os.path.expanduser(training_args.output_dir))
+
     model = load_and_create_model(
         model_args, cehrgpt_args, training_args, cehrgpt_tokenizer
     )
@@ -363,6 +385,100 @@ def main():
                 cehrgpt_tokenizer.pretrained_embeddings,
             )
 
+    if model.config.add_cross_attention:
+        # register cehrgpt in the huggingface model list
+        register_cehrgpt_in_hf()
+        model.config.add_cross_attention = True
+        import polars as pl
+
+        from cehrgpt.data.encoder_decoder.instruct_cehrgpt_dataset_collator import (
+            InstructCehrGptDataCollator,
+        )
+        from cehrgpt.generation.cehrgpt_patient.clinical_statement_generator import (
+            ClinicalStatementGenerator,
+            ConditionDrugKnowledgeGraph,
+        )
+        from cehrgpt.models.encoder_decoder.instruct_hf_cehrgpt import (
+            InstructCEHRGPTModel,
+        )
+        from cehrgpt.omop.vocab_utils import (
+            create_drug_ingredient_to_brand_drug_map,
+            generate_concept_maps,
+        )
+
+        if (
+            not cehrgpt_args.encoder_model_name_or_path
+            or not cehrgpt_args.encoder_tokenizer_name_or_path
+        ):
+            raise RuntimeError(
+                "When add_cross_attention is set to True, "
+                "encoder_model_name_or_path and encoder_tokenizer_name_or_path must be provided"
+            )
+        if not cehrgpt_args.knowledge_graph_path:
+            raise RuntimeError(
+                "When add_cross_attention is set to True, "
+                "knowledge_graph_path must be provided"
+            )
+        if not cehrgpt_args.vocabulary_dir:
+            raise RuntimeError(
+                "When add_cross_attention is set to True, "
+                "vocabulary_dir must be provided"
+            )
+
+        encoder_tokenizer = AutoTokenizer.from_pretrained(
+            cehrgpt_args.encoder_tokenizer_name_or_path
+        )
+        encoder_tokenizer.save_pretrained(training_args.output_dir)
+        encoder_model = AutoModel.from_pretrained(
+            cehrgpt_args.encoder_model_name_or_path
+        )
+        setattr(
+            encoder_model.config, "encoder_trainable", cehrgpt_args.encoder_trainable
+        )
+        model = InstructCEHRGPTModel.from_encoder_decoder_pretrained(
+            encoder_model=encoder_model, decoder_model=model
+        )
+        with open(cehrgpt_args.knowledge_graph_path, "rb") as f:
+            knowledge_graph = pickle.load(f)
+        concept = pl.read_parquet(
+            os.path.join(cehrgpt_args.vocabulary_dir, "concept", "*parquet")
+        )
+        concept_ancestor = pl.read_parquet(
+            os.path.join(cehrgpt_args.vocabulary_dir, "concept_ancestor", "*parquet")
+        )
+        drug_ingredient_to_brand_drug_map = create_drug_ingredient_to_brand_drug_map(
+            concept, concept_ancestor
+        )
+        concept_map, concept_domain = generate_concept_maps(concept)
+        clinical_statement_generator = ClinicalStatementGenerator(
+            condition_drug_knowledge_graph=ConditionDrugKnowledgeGraph(
+                knowledge_graph=knowledge_graph,
+                drug_ingredient_to_brand_drug_map=drug_ingredient_to_brand_drug_map,
+            ),
+            allowed_clinical_conditions=load_allowed_clinical_conditions(cehrgpt_args),
+        )
+        data_collator = InstructCehrGptDataCollator(
+            clinical_statement_generator=clinical_statement_generator,
+            concept_name_mapping=concept_map,
+            concept_domain_mapping=concept_domain,
+            encoder_tokenizer=encoder_tokenizer,
+            tokenizer=cehrgpt_tokenizer,
+            max_length=model_args.max_position_embeddings,
+            shuffle_records=data_args.shuffle_records,
+            include_ttv_prediction=model_args.include_ttv_prediction,
+            use_sub_time_tokenization=model_args.use_sub_time_tokenization,
+            include_values=model_args.include_values,
+        )
+    else:
+        data_collator = CehrGptDataCollator(
+            tokenizer=cehrgpt_tokenizer,
+            max_length=model_args.max_position_embeddings,
+            shuffle_records=data_args.shuffle_records,
+            include_ttv_prediction=model_args.include_ttv_prediction,
+            use_sub_time_tokenization=model_args.use_sub_time_tokenization,
+            include_values=model_args.include_values,
+        )
+
     # Detecting last checkpoint.
     last_checkpoint = get_last_hf_checkpoint(training_args)
 
@@ -374,14 +490,7 @@ def main():
 
     trainer = Trainer(
         model=model,
-        data_collator=CehrGptDataCollator(
-            tokenizer=cehrgpt_tokenizer,
-            max_length=model_args.max_position_embeddings,
-            shuffle_records=data_args.shuffle_records,
-            include_ttv_prediction=model_args.include_ttv_prediction,
-            use_sub_time_tokenization=model_args.use_sub_time_tokenization,
-            include_values=model_args.include_values,
-        ),
+        data_collator=data_collator,
         train_dataset=processed_dataset["train"],
         eval_dataset=processed_dataset["test"],
         args=training_args,
@@ -400,6 +509,31 @@ def main():
     trainer.log_metrics("train", metrics)
     trainer.save_metrics("train", metrics)
     trainer.save_state()
+
+
+def load_allowed_clinical_conditions(
+    cehrgpt_args: CehrGPTArguments,
+) -> Optional[List[int]]:
+    try:
+        with open(cehrgpt_args.allowed_clinical_conditions_path, "rb") as f:
+            allowed_conditions = pickle.load(f)
+            if not isinstance(allowed_conditions, list):
+                allowed_conditions = None
+            else:
+                allowed_conditions = [
+                    int(_)
+                    for _ in allowed_conditions
+                    if isinstance(int, _) or str.isnumeric(str(_))
+                ]
+    except Exception as e:
+        LOG.warning(
+            "The allowed encoder conditions cannot be loaded at %s.\n Setting allowed_conditions=None\n."
+            "Caught exception: %s",
+            cehrgpt_args.allowed_clinical_conditions_path,
+            e,
+        )
+        allowed_conditions = None
+    return allowed_conditions
 
 
 if __name__ == "__main__":

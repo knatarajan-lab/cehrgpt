@@ -492,11 +492,21 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         return encoded.ids
 
     def decode(
-        self, concept_token_ids: List[int], skip_special_tokens: bool = True, **kwargs
+        self,
+        concept_token_ids: List[int],
+        skip_special_tokens: bool = True,
+        use_concept_name: bool = False,
+        **kwargs,
     ) -> List[str]:
-        return self._tokenizer.decode(
+        concept_ids = self._tokenizer.decode(
             concept_token_ids, skip_special_tokens=skip_special_tokens
         ).split(" ")
+        if use_concept_name:
+            return [
+                self._concept_name_mapping.get(str(concept_id), str(concept_id))
+                for concept_id in concept_ids
+            ]
+        return concept_ids
 
     def encode_value(self, concept_values: Sequence[str]) -> Sequence[int]:
         encoded = self._value_tokenizer.encode(concept_values, is_pretokenized=True)
