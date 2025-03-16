@@ -32,7 +32,6 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
     def __init__(
         self,
         data_args: DataTrainingArguments,
-        is_pretraining: bool = True,
         include_inpatient_hour_token: bool = True,
     ):
         self._time_token_function = get_att_function(data_args.att_function_type)
@@ -41,7 +40,6 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
             data_args.inpatient_att_function_type
         )
         self._include_demographic_prompt = data_args.include_demographic_prompt
-        self._is_pretraining = is_pretraining
         self._include_inpatient_hour_token = include_inpatient_hour_token
 
     """
@@ -57,14 +55,7 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
     """
 
     def remove_columns(self):
-        if self._is_pretraining:
-            return ["visits", "birth_datetime", "index_date"]
-        else:
-            return [
-                "visits",
-                "birth_datetime",
-                "visit_concept_ids",
-            ]
+        return ["patient_id", "visits", "birth_datetime"]
 
     @staticmethod
     def _update_cehrgpt_record(

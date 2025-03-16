@@ -226,17 +226,16 @@ def main():
                         )
             except FileNotFoundError as e:
                 LOG.exception(e)
-                dataset = create_dataset_from_meds_reader(
-                    data_args=data_args,
-                    dataset_mappings=[
-                        MedToCehrGPTDatasetMapping(
-                            data_args=data_args,
-                            is_pretraining=True,
-                            include_inpatient_hour_token=cehrgpt_args.include_inpatient_hour_token,
-                        )
-                    ],
-                )
                 if not data_args.streaming:
+                    dataset = create_dataset_from_meds_reader(
+                        data_args=data_args,
+                        dataset_mappings=[
+                            MedToCehrGPTDatasetMapping(
+                                data_args=data_args,
+                                include_inpatient_hour_token=cehrgpt_args.include_inpatient_hour_token,
+                            )
+                        ],
+                    )
                     dataset.save_to_disk(str(meds_extension_path))
                     stats = dataset.cleanup_cache_files()
                     LOG.info(
