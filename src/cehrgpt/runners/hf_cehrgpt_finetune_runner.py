@@ -413,7 +413,6 @@ def main():
                     dataset_mappings=[
                         MedToCehrGPTDatasetMapping(
                             data_args=data_args,
-                            is_pretraining=False,
                             include_inpatient_hour_token=cehrgpt_args.include_inpatient_hour_token,
                         )
                     ],
