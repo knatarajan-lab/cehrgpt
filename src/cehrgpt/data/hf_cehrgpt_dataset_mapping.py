@@ -61,12 +61,9 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
             return ["visits", "birth_datetime", "index_date"]
         else:
             return [
-                "patient_id",
                 "visits",
                 "birth_datetime",
-                "race",
-                "gender",
-                "ethnicity",
+                "visit_concept_ids",
             ]
 
     @staticmethod
@@ -148,8 +145,6 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
                     code=self._time_token_function(time_delta),
                 )
 
-            # Add the VS token to the patient timeline to mark the start of a visit
-            relativedelta(visit["visit_start_datetime"], birth_datetime).years
             # Calculate the week number since the epoch time
             date = (
                 visit["visit_start_datetime"]
@@ -193,16 +188,30 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
                         e["time"] - datetime.datetime(year=1970, month=1, day=1)
                     ).days // 7
                     # Calculate the time diff in days w.r.t the previous measurement
-                    meas_time_diff = (e["time"] - date_cursor).days
+                    time_diff_days = (e["time"] - date_cursor).days
                     # Update the date_cursor if the time diff between two neighboring measurements is greater than and
                     # equal to 1 day
-                    if meas_time_diff > 0:
-                        date_cursor = e["time"]
-                        if self._inpatient_time_token_function:
+                    if self._inpatient_time_token_function and time_diff_days > 0:
+                        # This generates an artificial time token depending on the choice of the time token functions
+                        self._update_cehrgpt_record(
+                            cehrgpt_record,
+                            code=f"i-{self._inpatient_time_token_function(time_diff_days)}",
+                        )
+
+                    if self._include_inpatient_hour_token:
+                        # if the time difference in days is greater than 0, we calculate the hour interval
+                        # with respect to the midnight of the day
+                        time_diff_hours = (
+                            e["time"].hour
+                            if time_diff_days > 0
+                            else int((e["time"] - date_cursor).total_seconds() // 3600)
+                        )
+
+                        if time_diff_hours > 0:
                             # This generates an artificial time token depending on the choice of the time token functions
                             self._update_cehrgpt_record(
                                 cehrgpt_record,
-                                code=f"i-{self._inpatient_time_token_function(meas_time_diff)}",
+                                code=f"i-H{time_diff_hours}",
                             )
                 else:
                     # For outpatient visits, we use the visit time stamp to calculate age and time because we assume
@@ -240,6 +249,9 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
                         numeric_value,
                     )
                 )
+                # Update the date cursor
+                if date_cursor != e["time"]:
+                    date_cursor = e["time"]
 
             # For inpatient or ER visits, we want to discharge_facility to the end of the visit
             if is_er_or_inpatient:
