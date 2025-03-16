@@ -139,3 +139,9 @@ class CehrGPTArguments:
             "help": "The number of feed forward layers for transforming pretrained embeddings to internal embeddings"
         },
     )
+    meds_repartition: Optional[bool] = dataclasses.field(
+        default=True,
+        metadata={
+            "help": "A flag to indicate whether we want to repartition the meds train tune sets"
+        },
+    )
