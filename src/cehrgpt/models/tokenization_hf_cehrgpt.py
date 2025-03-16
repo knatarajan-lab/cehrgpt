@@ -752,6 +752,16 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         new_categorical_lab_stats = new_tokenizer._categorical_lab_stats
         new_concept_name_mapping = new_tokenizer._concept_name_mapping
 
+        # There could be cases if the new token contains the existing tokens as a substring, the tokenizer will split it
+        new_tokens_copy = []
+        for token in new_tokens:
+            encode = cehrgpt_tokenizer_copy._tokenizer.encode(
+                [token], is_pretokenized=True
+            )
+            if len(encode.ids) > 1:
+                token = ".".join(token)
+            new_tokens_copy.append(token)
+        new_tokens = new_tokens_copy
         # Add new tokens to the existing tokenizer
         cehrgpt_tokenizer_copy._tokenizer.add_tokens(
             [
