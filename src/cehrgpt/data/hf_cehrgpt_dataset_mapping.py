@@ -243,7 +243,7 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
                 )
                 # Update the date cursor,
                 # we only want to update the time stamp when data_cursor is less than the event time
-                if date_cursor < e["time"]:
+                if date_cursor < e["time"] or date_cursor is None:
                     date_cursor = e["time"]
 
             # For inpatient or ER visits, we want to discharge_facility to the end of the visit
