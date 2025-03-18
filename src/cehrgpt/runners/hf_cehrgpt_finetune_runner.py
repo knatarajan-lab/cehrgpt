@@ -407,7 +407,7 @@ def main():
                             num_shards=training_args.dataloader_num_workers
                         )
             except Exception as e:
-                LOG.exception(e)
+                LOG.warning(e)
                 dataset = create_dataset_from_meds_reader(
                     data_args=data_args,
                     dataset_mappings=[

@@ -225,7 +225,7 @@ def main():
                             num_shards=training_args.dataloader_num_workers
                         )
             except FileNotFoundError as e:
-                LOG.exception(e)
+                LOG.warning(e)
                 if not data_args.streaming:
                     dataset = create_dataset_from_meds_reader(
                         data_args=data_args,
