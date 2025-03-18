@@ -107,7 +107,6 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
         for i, visit in enumerate(
             sorted(record["visits"], key=lambda e: e["visit_start_datetime"])
         ):
-
             events = visit["events"]
 
             # Skip this visit if the number measurements in the event is zero
@@ -116,7 +115,9 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
 
             visit_start_datetime = visit["visit_start_datetime"]
             time_delta = (
-                (visit_start_datetime - date_cursor).days if date_cursor else None
+                max((visit_start_datetime - date_cursor).days, 0)
+                if date_cursor
+                else None
             )
             date_cursor = visit_start_datetime
 
@@ -240,8 +241,9 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
                         numeric_value,
                     )
                 )
-                # Update the date cursor
-                if date_cursor != e["time"]:
+                # Update the date cursor,
+                # we only want to update the time stamp when data_cursor is less than the event time
+                if date_cursor < e["time"]:
                     date_cursor = e["time"]
 
             # For inpatient or ER visits, we want to discharge_facility to the end of the visit
