@@ -114,7 +114,7 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
         self._update_cehrgpt_record(cehrgpt_record, race)
 
         # Use a data cursor to keep track of time
-        date_cursor: Optional[datetime.datetime] = None
+        datetime_cursor: Optional[datetime.datetime] = None
         visit: VisitObject
         # Loop through all the visits
         for i, visit in enumerate(visits):
@@ -126,12 +126,16 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
             visit_start_datetime: datetime.datetime = get_value(
                 visit, "visit_start_datetime"
             )
+            # If visit_end_datetime is populated for the inpatient visit, we update the datetime_cursor
+            visit_end_datetime: Optional[datetime.datetime] = get_value(
+                visit, "visit_end_datetime"
+            )
             time_delta = (
-                max((visit_start_datetime - date_cursor).days, 0)
-                if date_cursor
+                max((visit_start_datetime - datetime_cursor).days, 0)
+                if datetime_cursor
                 else None
             )
-            date_cursor = visit_start_datetime
+            datetime_cursor = visit_start_datetime
 
             # We assume the first measurement to be the visit type of the current visit
             visit_type = get_value(visit, "visit_type")
@@ -183,8 +187,8 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
                 # because the patient can stay in the hospital for a period of time.
                 if is_er_or_inpatient:
                     # Calculate the time diff in days w.r.t the previous measurement
-                    time_diff_days = (event_time - date_cursor).days
-                    # Update the date_cursor if the time diff between two neighboring measurements is greater than and
+                    time_diff_days = (event_time - datetime_cursor).days
+                    # Update the datetime_cursor if the time diff between two neighboring measurements is greater than and
                     # equal to 1 day
                     if self._inpatient_time_token_function and time_diff_days > 0:
                         # This generates an artificial time token depending on the choice of the time token functions
@@ -199,7 +203,9 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
                         time_diff_hours = (
                             event_time.hour
                             if time_diff_days > 0
-                            else int((event_time - date_cursor).total_seconds() // 3600)
+                            else int(
+                                (event_time - datetime_cursor).total_seconds() // 3600
+                            )
                         )
 
                         if time_diff_hours > 0:
@@ -244,19 +250,19 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
                         numeric_value,
                     )
                 )
-                # Update the date cursor,
                 # we only want to update the time stamp when data_cursor is less than the event time
-                if date_cursor < event_time or date_cursor is None:
-                    date_cursor = event_time
+                if datetime_cursor < event_time or datetime_cursor is None:
+                    datetime_cursor = event_time
+                    # We need to bound the datetime_cursor if the current visit is an admission type of visit
+                    # as the associated events could be generated after the visits are complete
+                    if is_er_or_inpatient and visit_end_datetime is not None:
+                        datetime_cursor = max(datetime_cursor, visit_end_datetime)
 
             # For inpatient or ER visits, we want to discharge_facility to the end of the visit
             if is_er_or_inpatient:
-                # If visit_end_datetime is populated for the inpatient visit, we update the date_cursor
-                visit_end_datetime: Optional[datetime.datetime] = get_value(
-                    visit, "visit_end_datetime"
-                )
-                if visit_end_datetime:
-                    date_cursor = visit_end_datetime
+                # If visit_end_datetime is populated for the inpatient visit, we update the datetime_cursor
+                if visit_end_datetime is not None:
+                    datetime_cursor = visit_end_datetime
 
                 if self._include_auxiliary_token:
                     # Reuse the age and date calculated for the last event in the patient timeline for the discharge
