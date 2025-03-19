@@ -228,9 +228,7 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
                     if (
                         event_time.date(),
                         code,
-                        numeric_value,
                         text_value,
-                        concept_value_mask,
                     ) in existing_outpatient_events:
                         continue
 
@@ -249,9 +247,7 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
                     (
                         event_time.date(),
                         code,
-                        numeric_value,
                         text_value,
-                        concept_value_mask,
                     )
                 )
                 # we only want to update the time stamp when data_cursor is less than the event time
