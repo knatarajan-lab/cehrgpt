@@ -130,7 +130,6 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
             visit_end_datetime: Optional[datetime.datetime] = get_value(
                 visit, "visit_end_datetime"
             )
-            datetime_cursor = visit_start_datetime
 
             # We assume the first measurement to be the visit type of the current visit
             visit_type = get_value(visit, "visit_type")
@@ -149,6 +148,7 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
                     code=self._time_token_function(time_delta),
                 )
 
+            datetime_cursor = visit_start_datetime
             # Add a [VS] token
             self._update_cehrgpt_record(
                 cehrgpt_record,
