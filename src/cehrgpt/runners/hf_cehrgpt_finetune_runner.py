@@ -466,8 +466,12 @@ def main():
                 )
                 tokenizer.save_pretrained(os.path.expanduser(training_args.output_dir))
 
+        cache_file_collector = CacheFileCollector()
         processed_dataset = create_cehrgpt_finetuning_dataset(
-            dataset=final_splits, cehrgpt_tokenizer=tokenizer, data_args=data_args
+            dataset=final_splits,
+            cehrgpt_tokenizer=tokenizer,
+            data_args=data_args,
+            cache_file_collector=cache_file_collector,
         )
         if not data_args.streaming:
             processed_dataset.save_to_disk(str(prepared_ds_path))
@@ -476,6 +480,7 @@ def main():
                 "Clean up the cached files for the  cehrgpt finetuning dataset : %s",
                 stats,
             )
+            cache_file_collector.remove_cache_files()
             processed_dataset = load_from_disk(str(prepared_ds_path))
 
     # Set seed before initializing model.

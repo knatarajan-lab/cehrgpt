@@ -302,9 +302,13 @@ def main():
                     os.path.expanduser(training_args.output_dir)
                 )
 
+        cache_file_collector = CacheFileCollector()
         # sort the patient features chronologically and tokenize the data
         processed_dataset = create_cehrgpt_pretraining_dataset(
-            dataset=dataset, cehrgpt_tokenizer=cehrgpt_tokenizer, data_args=data_args
+            dataset=dataset,
+            cehrgpt_tokenizer=cehrgpt_tokenizer,
+            data_args=data_args,
+            cache_file_collector=cache_file_collector,
         )
         # only save the data to the disk if it is not streaming
         if not data_args.streaming:
@@ -314,6 +318,7 @@ def main():
                 "Clean up the cached files for the cehrgpt pretraining dataset: %s",
                 stats,
             )
+            cache_file_collector.remove_cache_files()
             processed_dataset = load_from_disk(str(prepared_ds_path))
 
     def filter_func(examples):
