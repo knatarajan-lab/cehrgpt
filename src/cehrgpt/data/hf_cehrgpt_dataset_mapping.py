@@ -170,7 +170,7 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
                     )
 
             # Keep track of the existing outpatient events, we don't want to add them again
-            existing_outpatient_events = list()
+            existing_duplicate_events = list()
             for e in events:
                 # If the event doesn't have a time stamp, we skip it
                 event_time: datetime.datetime = e["time"]
@@ -187,6 +187,13 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
                 )
                 is_numeric_type = int(numeric_value is not None)
                 code = replace_escape_chars(e["code"])
+
+                # Create the event identity
+                event_identity = (
+                    (event_time, code, text_value, unit)
+                    if is_er_or_inpatient
+                    else (event_time.date(), code, text_value, unit)
+                )
 
                 # Add a medical token to the patient timeline
                 # If this is an inpatient visit, we use the event time stamps to calculate age and date
@@ -220,17 +227,9 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
                                 cehrgpt_record,
                                 code=f"i-H{time_diff_hours}",
                             )
-                else:
-                    # For outpatient visits, we use the visit time stamp to calculate age and time because we assume
-                    # the outpatient visits start and end on the same day.
-                    # We check whether the date/code/value combination already exists in the existing events
-                    # If they exist, we do not add them to the patient timeline for outpatient visits.
-                    if (
-                        event_time.date(),
-                        code,
-                        text_value,
-                    ) in existing_outpatient_events:
-                        continue
+
+                if event_identity in existing_duplicate_events:
+                    continue
 
                 self._update_cehrgpt_record(
                     cehrgpt_record,
@@ -243,13 +242,7 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
                     ),
                     is_numeric_type=is_numeric_type,
                 )
-                existing_outpatient_events.append(
-                    (
-                        event_time.date(),
-                        code,
-                        text_value,
-                    )
-                )
+                existing_duplicate_events.append(event_identity)
                 # we only want to update the time stamp when data_cursor is less than the event time
                 if datetime_cursor < event_time or datetime_cursor is None:
                     datetime_cursor = event_time
