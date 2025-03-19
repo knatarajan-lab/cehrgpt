@@ -102,7 +102,7 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
             visits = sorted(visits, key=lambda _: get_value(_, "visit_start_datetime"))
 
         # Add the demographic tokens
-        first_visit = record["visits"][0]
+        first_visit = visits[0]
         first_visit_start_datetime: datetime.datetime = get_value(
             first_visit, "visit_start_datetime"
         )
