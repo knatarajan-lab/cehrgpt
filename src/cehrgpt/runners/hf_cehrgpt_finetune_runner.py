@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import torch
 from cehrbert.data_generators.hf_data_generator.meds_utils import (
+    CacheFileCollector,
     create_dataset_from_meds_reader,
 )
 from cehrbert.runners.hf_cehrbert_finetune_runner import compute_metrics
@@ -408,6 +409,7 @@ def main():
                         )
             except Exception as e:
                 LOG.warning(e)
+                cache_file_collector = CacheFileCollector()
                 dataset = create_dataset_from_meds_reader(
                     data_args=data_args,
                     dataset_mappings=[
@@ -416,6 +418,7 @@ def main():
                             include_inpatient_hour_token=cehrgpt_args.include_inpatient_hour_token,
                         )
                     ],
+                    cache_file_collector=cache_file_collector,
                 )
                 if not data_args.streaming:
                     dataset.save_to_disk(str(meds_extension_path))
@@ -424,6 +427,8 @@ def main():
                         "Clean up the cached files for the cehrgpt dataset transformed from the MEDS: %s",
                         stats,
                     )
+                    # Clean up the files created from the data generator
+                    cache_file_collector.remove_cache_files()
                     dataset = load_from_disk(str(meds_extension_path))
 
             train_set = dataset["train"]
