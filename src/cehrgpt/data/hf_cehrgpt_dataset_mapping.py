@@ -163,6 +163,16 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
                 cehrgpt_record,
                 code=visit_type,
             )
+            # We need to insert an inpatient hour token right after the visit type, we calculate the hour interval
+            # with respect to the midnight of the day
+            if is_er_or_inpatient and self._include_inpatient_hour_token:
+                if datetime_cursor.hour > 0:
+                    # This generates an artificial time token depending on the choice of the time token functions
+                    self._update_cehrgpt_record(
+                        cehrgpt_record,
+                        code=f"i-H{datetime_cursor.hour}",
+                    )
+
             # Keep track of the existing outpatient events, we don't want to add them again
             existing_outpatient_events = list()
             for e in events:
