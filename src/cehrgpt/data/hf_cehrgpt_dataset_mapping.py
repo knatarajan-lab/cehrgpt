@@ -130,11 +130,6 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
             visit_end_datetime: Optional[datetime.datetime] = get_value(
                 visit, "visit_end_datetime"
             )
-            time_delta = (
-                max((visit_start_datetime - datetime_cursor).days, 0)
-                if datetime_cursor
-                else None
-            )
             datetime_cursor = visit_start_datetime
 
             # We assume the first measurement to be the visit type of the current visit
@@ -146,7 +141,8 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
             )
 
             # Add artificial time tokens to the patient timeline if timedelta exists
-            if time_delta is not None:
+            if datetime_cursor is not None:
+                time_delta = max((visit_start_datetime - datetime_cursor).days, 0)
                 # This generates an artificial time token depending on the choice of the time token functions
                 self._update_cehrgpt_record(
                     cehrgpt_record,
