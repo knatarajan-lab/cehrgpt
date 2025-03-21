@@ -28,7 +28,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "cehrbert @ git+https://github.com/cumc-dbmi/cehrbert.git@enhance_meds_to_omop_logic",
+    "cehrbert==1.3.9",
     "openai==1.54.3",
     "optuna==4.0.0",
     "transformers==4.40.0",
