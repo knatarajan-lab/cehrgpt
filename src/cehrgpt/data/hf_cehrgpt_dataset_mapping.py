@@ -249,7 +249,7 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
                     # We need to bound the datetime_cursor if the current visit is an admission type of visit
                     # as the associated events could be generated after the visits are complete
                     if is_er_or_inpatient and visit_end_datetime is not None:
-                        datetime_cursor = max(datetime_cursor, visit_end_datetime)
+                        datetime_cursor = min(datetime_cursor, visit_end_datetime)
 
             # For inpatient or ER visits, we want to discharge_facility to the end of the visit
             if is_er_or_inpatient:
