@@ -26,6 +26,7 @@ from cehrbert.runners.runner_util import (
     load_parquet_as_dataset,
 )
 from datasets import DatasetDict, concatenate_datasets, load_from_disk
+from fsspec.core import OpenFiles
 from peft import LoraConfig, PeftModel, get_peft_model
 from scipy.special import expit as sigmoid
 from torch.utils.data import DataLoader
@@ -441,7 +442,6 @@ def main():
         final_splits = DatasetDict(
             {"train": train_set, "validation": validation_set, "test": test_set}
         )
-        cache_file_collector.add_cache_files(final_splits)
 
         if cehrgpt_args.expand_tokenizer:
             new_tokenizer_path = os.path.expanduser(training_args.output_dir)
