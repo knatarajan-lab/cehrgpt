@@ -166,6 +166,7 @@ def main():
         training_args.dataloader_num_workers = 0
         training_args.dataloader_prefetch_factor = None
 
+    cache_file_collector = CacheFileCollector()
     prepared_ds_path = generate_prepared_ds_path(data_args, model_args)
     if os.path.exists(os.path.join(data_args.data_folder, "dataset_dict.json")):
         LOG.info(f"Loading prepared dataset from disk at {data_args.data_folder}...")
@@ -227,7 +228,6 @@ def main():
                         )
             except FileNotFoundError as e:
                 LOG.warning(e)
-                cache_file_collector = CacheFileCollector()
                 dataset = create_dataset_from_meds_reader(
                     data_args=data_args,
                     dataset_mappings=[
@@ -276,6 +276,8 @@ def main():
                     f"streaming: {data_args.streaming}"
                 )
 
+            cache_file_collector.add_cache_files(dataset)
+
         # Create the CEHR-GPT tokenizer if it's not available in the output folder
         cehrgpt_tokenizer = load_and_create_tokenizer(
             data_args=data_args,
@@ -302,7 +304,6 @@ def main():
                     os.path.expanduser(training_args.output_dir)
                 )
 
-        cache_file_collector = CacheFileCollector()
         # sort the patient features chronologically and tokenize the data
         processed_dataset = create_cehrgpt_pretraining_dataset(
             dataset=dataset,
@@ -318,8 +319,9 @@ def main():
                 "Clean up the cached files for the cehrgpt pretraining dataset: %s",
                 stats,
             )
-            cache_file_collector.remove_cache_files()
             processed_dataset = load_from_disk(str(prepared_ds_path))
+
+    cache_file_collector.remove_cache_files()
 
     def filter_func(examples):
         if cehrgpt_args.drop_long_sequences:

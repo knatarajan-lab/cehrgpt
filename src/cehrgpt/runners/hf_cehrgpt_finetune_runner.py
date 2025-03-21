@@ -365,7 +365,7 @@ def main():
     prepared_ds_path = generate_prepared_ds_path(
         data_args, model_args, data_folder=data_args.cohort_folder
     )
-
+    cache_file_collector = CacheFileCollector()
     processed_dataset = None
     if any(prepared_ds_path.glob("*")):
         LOG.info(f"Loading prepared dataset from disk at {prepared_ds_path}...")
@@ -409,7 +409,6 @@ def main():
                         )
             except Exception as e:
                 LOG.warning(e)
-                cache_file_collector = CacheFileCollector()
                 dataset = create_dataset_from_meds_reader(
                     data_args=data_args,
                     dataset_mappings=[
@@ -442,6 +441,7 @@ def main():
         final_splits = DatasetDict(
             {"train": train_set, "validation": validation_set, "test": test_set}
         )
+        cache_file_collector.add_cache_files(final_splits)
 
         if cehrgpt_args.expand_tokenizer:
             new_tokenizer_path = os.path.expanduser(training_args.output_dir)
@@ -466,7 +466,6 @@ def main():
                 )
                 tokenizer.save_pretrained(os.path.expanduser(training_args.output_dir))
 
-        cache_file_collector = CacheFileCollector()
         processed_dataset = create_cehrgpt_finetuning_dataset(
             dataset=final_splits,
             cehrgpt_tokenizer=tokenizer,
@@ -480,9 +479,9 @@ def main():
                 "Clean up the cached files for the  cehrgpt finetuning dataset : %s",
                 stats,
             )
-            cache_file_collector.remove_cache_files()
             processed_dataset = load_from_disk(str(prepared_ds_path))
 
+    cache_file_collector.remove_cache_files()
     # Set seed before initializing model.
     set_seed(training_args.seed)
 

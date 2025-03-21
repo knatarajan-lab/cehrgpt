@@ -41,10 +41,8 @@ def create_cehrgpt_pretraining_dataset(
         num_proc=data_args.preprocessing_num_workers,
         batch_size=data_args.preprocessing_batch_size,
         streaming=data_args.streaming,
+        cache_file_collector=cache_file_collector,
     )
-    if cache_file_collector is not None:
-        cache_file_collector.cache_files.extend(dataset.cache_files)
-
     if not data_args.streaming:
         if isinstance(dataset, DatasetDict):
             all_columns = dataset["train"].column_names
@@ -73,9 +71,8 @@ def create_cehrgpt_finetuning_dataset(
             num_proc=data_args.preprocessing_num_workers,
             batch_size=data_args.preprocessing_batch_size,
             streaming=data_args.streaming,
+            cache_file_collector=cache_file_collector,
         )
-        if cache_file_collector is not None:
-            cache_file_collector.cache_files.extend(dataset.cache_files)
 
     if not data_args.streaming:
         if isinstance(dataset, DatasetDict):
