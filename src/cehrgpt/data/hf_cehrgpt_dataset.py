@@ -33,7 +33,7 @@ def create_cehrgpt_pretraining_dataset(
     cehrgpt_tokenizer: CehrGptTokenizer,
     data_args: DataTrainingArguments,
     cache_file_collector: Optional[CacheFileCollector] = None,
-) -> Dataset:
+) -> Union[Dataset, DatasetDict]:
     required_columns = TRANSFORMER_COLUMNS + CEHRGPT_COLUMNS
     dataset = apply_cehrbert_dataset_mapping(
         dataset,
@@ -59,7 +59,7 @@ def create_cehrgpt_finetuning_dataset(
     cehrgpt_tokenizer: CehrGptTokenizer,
     data_args: DataTrainingArguments,
     cache_file_collector: Optional[CacheFileCollector] = None,
-) -> Dataset:
+) -> Union[Dataset, DatasetDict]:
     required_columns = TRANSFORMER_COLUMNS + CEHRGPT_COLUMNS + FINETUNING_COLUMNS
     mapping_functions = [
         HFFineTuningMapping(cehrgpt_tokenizer),
