@@ -284,9 +284,11 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
         cehrgpt_record["num_of_concepts"] = len(cehrgpt_record["concept_ids"])
         cehrgpt_record["num_of_visits"] = len(visits)
 
-        if "label" in record:
+        if record.get("index_date", None):
+            cehrgpt_record["index_date"] = record["index_date"]
+        if record.get("label", None):
             cehrgpt_record["label"] = record["label"]
-        if "age_at_index" in record:
+        if record.get("age_at_index", None):
             cehrgpt_record["age_at_index"] = record["age_at_index"]
 
         return cehrgpt_record
