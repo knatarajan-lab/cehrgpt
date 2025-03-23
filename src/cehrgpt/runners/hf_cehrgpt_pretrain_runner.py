@@ -276,8 +276,6 @@ def main():
                     f"streaming: {data_args.streaming}"
                 )
 
-            cache_file_collector.add_cache_files(dataset)
-
         # Create the CEHR-GPT tokenizer if it's not available in the output folder
         cehrgpt_tokenizer = load_and_create_tokenizer(
             data_args=data_args,
