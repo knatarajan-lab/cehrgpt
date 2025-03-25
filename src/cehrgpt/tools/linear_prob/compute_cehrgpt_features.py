@@ -1,4 +1,5 @@
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -54,6 +55,19 @@ def main():
         LOG.info(f"Loading prepared dataset from disk at {prepared_ds_path}...")
         processed_dataset = load_from_disk(str(prepared_ds_path))
         LOG.info("Prepared dataset loaded from disk...")
+        if cehrgpt_args.expand_tokenizer:
+            if tokenizer_exists(training_args.output_dir):
+                cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
+                    training_args.output_dir
+                )
+            else:
+                LOG.warning(
+                    f"CehrGptTokenizer must exist in {training_args.output_dir} "
+                    f"when the dataset has been processed and expand_tokenizer is set to True. "
+                    f"Please delete the processed dataset at {prepared_ds_path}."
+                )
+                processed_dataset = None
+                shutil.rmtree(prepared_ds_path)
 
     if processed_dataset is None:
         # Organize them into a single DatasetDict
@@ -82,6 +96,11 @@ def main():
         )
         if not data_args.streaming:
             processed_dataset.save_to_disk(prepared_ds_path)
+
+    LOG.info(f"cehrgpt_model.config.vocab_size: {cehrgpt_model.config.vocab_size}")
+    LOG.info(f"cehrgpt_tokenizer.vocab_size: {cehrgpt_tokenizer.vocab_size}")
+    if cehrgpt_model.config.vocab_size < cehrgpt_tokenizer.vocab_size:
+        cehrgpt_model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)
 
     # Remove any cached files
     cache_file_collector.remove_cache_files()
