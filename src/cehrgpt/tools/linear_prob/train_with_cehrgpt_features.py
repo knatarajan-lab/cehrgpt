@@ -2,6 +2,7 @@ import argparse
 import functools
 import json
 from pathlib import Path
+from typing import Any, Dict
 
 import lightgbm as lgb
 import numpy as np
@@ -47,6 +48,15 @@ def lightgbm_objective(trial, *, train_data, dev_data, num_trees=None):
     return error
 
 
+def prepare_gbm_dataset(df: pd.DataFrame) -> Dict[str, Any]:
+    return {
+        "subject_id": df["subject_id"].tolist(),
+        "prediction_time": df["prediction_time"].tolist(),
+        "features": np.stack(df["features"].apply(lambda x: np.array(x).flatten())),
+        "boolean_value": df["boolean_value"].to_numpy(),
+    }
+
+
 def main(args):
     features_data_dir = Path(args.features_data_dir)
     output_dir = Path(args.output_dir)
@@ -61,18 +71,24 @@ def main(args):
         exit(0)
 
     feature_train = pd.read_parquet(features_data_dir / "train" / "features")
-    # Check if features need flattening and flatten if necessary
-    train_features = np.stack(
-        feature_train["features"].apply(lambda x: np.array(x).flatten())
-    )
-    train_labels = feature_train["boolean_value"].to_numpy()
-
     feature_test = pd.read_parquet(features_data_dir / "test" / "features")
-    # Similarly flatten test features
-    test_features = np.stack(
-        feature_test["features"].apply(lambda x: np.array(x).flatten())
-    )
-    if not logistic_test_result_file.exists():
+
+    if logistic_test_result_file.exists():
+        print(
+            f"The results for logistic regression already exist at {logistic_test_result_file}"
+        )
+    else:
+        # Check if features need flattening and flatten if necessary
+        train_features = np.stack(
+            feature_train["features"].apply(lambda x: np.array(x).flatten())
+        )
+        train_labels = feature_train["boolean_value"].to_numpy()
+
+        # Similarly flatten test features
+        test_features = np.stack(
+            feature_test["features"].apply(lambda x: np.array(x).flatten())
+        )
+        test_labels = feature_test["boolean_value"].to_numpy()
         # Train logistic regression
         model = LogisticRegressionCV(scoring="roc_auc")
         model.fit(train_features, train_labels)
@@ -80,8 +96,8 @@ def main(args):
 
         logistic_predictions = pd.DataFrame(
             {
-                "subject_id": feature_test["subject_ids"].tolist(),
-                "prediction_time": feature_test["prediction_times"].tolist(),
+                "subject_id": feature_test["subject_id"].tolist(),
+                "prediction_time": feature_test["prediction_time"].tolist(),
                 "predicted_boolean_probability": y_pred.tolist(),
                 "predicted_boolean_value": None,
                 "boolean_value": feature_test["boolean_value"].astype(bool).tolist(),
@@ -94,9 +110,7 @@ def main(args):
         )
 
         roc_auc = roc_auc_score(feature_test["boolean_value"], y_pred)
-        precision, recall, _ = precision_recall_curve(
-            feature_test["boolean_value"], y_pred
-        )
+        precision, recall, _ = precision_recall_curve(test_labels, y_pred)
         pr_auc = auc(recall, precision)
 
         metrics = {"roc_auc": roc_auc, "pr_auc": pr_auc}
@@ -104,27 +118,38 @@ def main(args):
         with open(logistic_test_result_file, "w") as f:
             json.dump(metrics, f, indent=4)
 
-    if not gbm_test_result_file.exists():
+    if gbm_test_result_file.exists():
+        print(f"The results for GBM already exist at {gbm_test_result_file}")
+    else:
         lightgbm_study = optuna.create_study()  # Create a new study.
-        train_df, dev_df = train_test_split(feature_train, test_size=0.2)
+        train_split, dev_split = train_test_split(feature_train, test_size=0.2)
+        train_data = prepare_gbm_dataset(train_split)
+        dev_data = prepare_gbm_dataset(dev_split)
         lightgbm_study.optimize(
-            functools.partial(lightgbm_objective, train_data=train_df, dev_data=dev_df),
+            functools.partial(
+                lightgbm_objective, train_data=train_data, dev_data=dev_data
+            ),
             n_trials=10,
         )
         print("Computing predictions")
         best_num_trees = lightgbm_study.best_trial.user_attrs["num_trees"]
         best_params = lightgbm_study.best_trial.params
         best_params.update({"objective": "binary", "metric": "auc", "verbosity": -1})
+        full_train_set = prepare_gbm_dataset(feature_train)
         dtrain_final = lgb.Dataset(
-            feature_train["features"], label=feature_train["boolean_value"]
+            full_train_set["features"], label=full_train_set["boolean_value"]
         )
         gbm_final = lgb.train(best_params, dtrain_final, num_boost_round=best_num_trees)
-        lightgbm_preds = gbm_final.predict(feature_test["features"], raw_score=False)
+
+        test_features = np.stack(
+            feature_test["features"].apply(lambda x: np.array(x).flatten())
+        )
+        lightgbm_preds = gbm_final.predict(test_features, raw_score=False)
 
         lightgbm_predictions = pd.DataFrame(
             {
-                "subject_id": feature_test["subject_ids"].tolist(),
-                "prediction_time": feature_test["prediction_times"].tolist(),
+                "subject_id": feature_test["subject_id"].tolist(),
+                "prediction_time": feature_test["prediction_time"].tolist(),
                 "predicted_boolean_probability": lightgbm_preds.tolist(),
                 "predicted_boolean_value": None,
                 "boolean_value": feature_test["boolean_value"].astype(bool).tolist(),
