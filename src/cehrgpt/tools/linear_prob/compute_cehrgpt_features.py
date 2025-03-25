@@ -151,7 +151,9 @@ def main():
             for index, batch in enumerate(
                 tqdm(data_loader, desc="Generating features")
             ):
-                batch.pop("age_at_index")
+                prediction_time_ages = (
+                    batch.pop("age_at_index").numpy().squeeze().astype(float)
+                )
                 person_ids = batch.pop("person_id").numpy().squeeze().astype(int)
                 index_dates = (
                     map(
@@ -190,6 +192,7 @@ def main():
                         "subject_id": person_ids,
                         "prediction_time": index_dates,
                         "boolean_value": labels,
+                        "age_at_index": prediction_time_ages,
                     }
                 )
                 # Adding features as a separate column where each row contains a feature array
