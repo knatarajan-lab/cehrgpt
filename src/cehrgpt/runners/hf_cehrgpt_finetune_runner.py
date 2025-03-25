@@ -523,8 +523,8 @@ def do_predict(
                 {
                     "subject_id": person_ids,
                     "prediction_time": index_dates,
-                    "boolean_prediction_probability": probabilities,
-                    "boolean_prediction": logits,
+                    "predicted_boolean_probability": probabilities,
+                    "predicted_boolean_value": None,
                     "boolean_value": labels,
                 }
             )
