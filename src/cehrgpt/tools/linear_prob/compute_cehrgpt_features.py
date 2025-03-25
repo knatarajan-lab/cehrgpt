@@ -137,6 +137,21 @@ def main():
         pin_memory=training_args.dataloader_pin_memory,
     )
 
+    # Loading demographics
+    print("Loading demographics as a dictionary")
+    demographics_df = pd.read_parquet(
+        data_args.cohort_folder,
+        columns=["person_id", "index_date", "gender_concept_id", "race_concept_id"],
+    )
+    demographics_df["index_date"] = demographics_df.index_date.dt.date
+    demographics_dict = {
+        (row["person_id"], row["index_date"]): {
+            "gender_concept_id": row["gender_concept_id"],
+            "race_concept_id": row["race_concept_id"],
+        }
+        for _, row in demographics_df.iterrows()
+    }
+
     data_loaders = [("train", train_loader), ("test", test_dataloader)]
 
     for split, data_loader in data_loaders:
@@ -186,6 +201,17 @@ def main():
 
                 # Flatten features or handle them as a list of arrays (one array per row)
                 features_list = [feature for feature in features]
+                race_concept_ids = []
+                gender_concept_ids = []
+                for person_id, index_date in zip(person_ids, index_dates):
+                    key = (person_id, index_date.date())
+                    if key in demographics_dict:
+                        demographics = demographics_dict[key]
+                        gender_concept_ids.append(demographics["gender_concept_id"])
+                        race_concept_ids.append(demographics["race_concept_id"])
+                    else:
+                        gender_concept_ids.append(0)
+                        race_concept_ids.append(0)
 
                 features_pd = pd.DataFrame(
                     {
@@ -193,6 +219,8 @@ def main():
                         "prediction_time": index_dates,
                         "boolean_value": labels,
                         "age_at_index": prediction_time_ages,
+                        "race_concept_id": race_concept_ids,
+                        "gender_concept_ids": gender_concept_ids,
                     }
                 )
                 # Adding features as a separate column where each row contains a feature array
