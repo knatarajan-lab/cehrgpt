@@ -96,6 +96,10 @@ def main():
         )
         if not data_args.streaming:
             processed_dataset.save_to_disk(prepared_ds_path)
+            processed_dataset.cleanup_cache_files()
+
+        # Remove all the cached files if processed_dataset.cleanup_cache_files() did not remove them already
+        cache_file_collector.remove_cache_files()
 
     LOG.info(f"cehrgpt_model.config.vocab_size: {cehrgpt_model.config.vocab_size}")
     LOG.info(f"cehrgpt_tokenizer.vocab_size: {cehrgpt_tokenizer.vocab_size}")
