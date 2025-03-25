@@ -61,8 +61,8 @@ def prepare_dataset(
     one_hot_race = race_encoder.transform(df[["gender_concept_id"]].to_numpy())
 
     features = np.stack(df["features"].apply(lambda x: np.array(x).flatten()))
-    concatenated_features = np.concatenate(
-        [scaled_age, one_hot_gender, one_hot_race, features], axis=1
+    concatenated_features = np.hstack(
+        [scaled_age, one_hot_gender.toarray(), one_hot_race.toarray(), features]
     )
     return {
         "subject_id": df["subject_id"].tolist(),
