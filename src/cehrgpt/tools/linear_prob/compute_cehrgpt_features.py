@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from cehrgpt.models.hf_cehrgpt import CEHRGPT2Model
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.data_utils import prepare_finetune_dataset
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
+from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
 
 LOG = logging.get_logger("transformers")
 
@@ -58,6 +60,20 @@ def main():
         final_splits = prepare_finetune_dataset(
             data_args, training_args, cehrgpt_args, cache_file_collector
         )
+        if cehrgpt_args.expand_tokenizer:
+            new_tokenizer_path = os.path.expanduser(training_args.output_dir)
+            if tokenizer_exists(new_tokenizer_path):
+                cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(new_tokenizer_path)
+            else:
+                cehrgpt_tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
+                    cehrgpt_tokenizer=cehrgpt_tokenizer,
+                    dataset=final_splits["train"],
+                    data_args=data_args,
+                    concept_name_mapping={},
+                )
+                cehrgpt_tokenizer.save_pretrained(
+                    os.path.expanduser(training_args.output_dir)
+                )
         processed_dataset = create_cehrgpt_finetuning_dataset(
             dataset=final_splits,
             cehrgpt_tokenizer=cehrgpt_tokenizer,
