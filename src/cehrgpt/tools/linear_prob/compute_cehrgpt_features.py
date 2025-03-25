@@ -137,16 +137,26 @@ def main():
                 cehrgpt_output = cehrgpt_model(
                     **batch, output_attentions=False, output_hidden_states=False
                 )
-                features = cehrgpt_output.last_hidden_state[..., -1, :].detach().numpy()
+                features = (
+                    cehrgpt_output.last_hidden_state[..., -1, :]
+                    .cpu()
+                    .float()
+                    .detach()
+                    .numpy()
+                )
+
+                # Flatten features or handle them as a list of arrays (one array per row)
+                features_list = [feature for feature in features]
 
                 features_pd = pd.DataFrame(
                     {
                         "subject_id": person_ids,
                         "prediction_time": index_dates,
-                        "features": features,
                         "boolean_value": labels,
                     }
                 )
+                # Adding features as a separate column where each row contains a feature array
+                features_pd["features"] = features_list
                 features_pd.to_parquet(feature_output_folder / f"{index}.parquet")
 
 
