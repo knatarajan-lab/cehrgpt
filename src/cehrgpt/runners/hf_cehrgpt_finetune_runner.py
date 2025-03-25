@@ -26,7 +26,6 @@ from cehrbert.runners.runner_util import (
     load_parquet_as_dataset,
 )
 from datasets import DatasetDict, concatenate_datasets, load_from_disk
-from fsspec.core import OpenFiles
 from peft import LoraConfig, PeftModel, get_peft_model
 from scipy.special import expit as sigmoid
 from torch.utils.data import DataLoader
@@ -54,6 +53,7 @@ from cehrgpt.models.hf_cehrgpt import (
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
+from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.runners.hyperparameter_search_util import perform_hyperparameter_search
 
@@ -156,6 +156,72 @@ def load_finetuned_model(
         )
     except ValueError:
         raise ValueError(f"Can not load the finetuned model from {model_name_or_path}")
+
+
+def prepare_dataset(
+    data_args: DataTrainingArguments,
+    training_args: TrainingArguments,
+    cehrgpt_args: CehrGPTArguments,
+    cache_file_collector: CacheFileCollector,
+) -> DatasetDict:
+    # If the data is in the MEDS format, we need to convert it to the CEHR-BERT format
+    if data_args.is_data_in_meds:
+        meds_extension_path = get_meds_extension_path(
+            data_folder=data_args.cohort_folder,
+            dataset_prepared_path=data_args.dataset_prepared_path,
+        )
+        try:
+            LOG.info(
+                f"Trying to load the MEDS extension from disk at {meds_extension_path}..."
+            )
+            dataset = load_from_disk(meds_extension_path)
+            if data_args.streaming:
+                if isinstance(dataset, DatasetDict):
+                    dataset = {
+                        k: v.to_iterable_dataset(
+                            num_shards=training_args.dataloader_num_workers
+                        )
+                        for k, v in dataset.items()
+                    }
+                else:
+                    dataset = dataset.to_iterable_dataset(
+                        num_shards=training_args.dataloader_num_workers
+                    )
+        except Exception as e:
+            LOG.warning(e)
+            dataset = create_dataset_from_meds_reader(
+                data_args=data_args,
+                dataset_mappings=[
+                    MedToCehrGPTDatasetMapping(
+                        data_args=data_args,
+                        include_inpatient_hour_token=cehrgpt_args.include_inpatient_hour_token,
+                    )
+                ],
+                cache_file_collector=cache_file_collector,
+            )
+            if not data_args.streaming:
+                dataset.save_to_disk(str(meds_extension_path))
+                stats = dataset.cleanup_cache_files()
+                LOG.info(
+                    "Clean up the cached files for the cehrgpt dataset transformed from the MEDS: %s",
+                    stats,
+                )
+                # Clean up the files created from the data generator
+                cache_file_collector.remove_cache_files()
+                dataset = load_from_disk(str(meds_extension_path))
+
+        train_set = dataset["train"]
+        validation_set = dataset["validation"]
+        test_set = dataset["test"]
+    else:
+        train_set, validation_set, test_set = create_dataset_splits(
+            data_args=data_args, seed=training_args.seed
+        )
+    # Organize them into a single DatasetDict
+    final_splits = DatasetDict(
+        {"train": train_set, "validation": validation_set, "test": test_set}
+    )
+    return final_splits
 
 
 def create_dataset_splits(data_args: DataTrainingArguments, seed: int):
@@ -385,71 +451,18 @@ def main():
                 shutil.rmtree(prepared_ds_path)
 
     if processed_dataset is None:
-        # If the data is in the MEDS format, we need to convert it to the CEHR-BERT format
-        if data_args.is_data_in_meds:
-            meds_extension_path = get_meds_extension_path(
-                data_folder=data_args.cohort_folder,
-                dataset_prepared_path=data_args.dataset_prepared_path,
-            )
-            try:
-                LOG.info(
-                    f"Trying to load the MEDS extension from disk at {meds_extension_path}..."
-                )
-                dataset = load_from_disk(meds_extension_path)
-                if data_args.streaming:
-                    if isinstance(dataset, DatasetDict):
-                        dataset = {
-                            k: v.to_iterable_dataset(
-                                num_shards=training_args.dataloader_num_workers
-                            )
-                            for k, v in dataset.items()
-                        }
-                    else:
-                        dataset = dataset.to_iterable_dataset(
-                            num_shards=training_args.dataloader_num_workers
-                        )
-            except Exception as e:
-                LOG.warning(e)
-                dataset = create_dataset_from_meds_reader(
-                    data_args=data_args,
-                    dataset_mappings=[
-                        MedToCehrGPTDatasetMapping(
-                            data_args=data_args,
-                            include_inpatient_hour_token=cehrgpt_args.include_inpatient_hour_token,
-                        )
-                    ],
-                    cache_file_collector=cache_file_collector,
-                )
-                if not data_args.streaming:
-                    dataset.save_to_disk(str(meds_extension_path))
-                    stats = dataset.cleanup_cache_files()
-                    LOG.info(
-                        "Clean up the cached files for the cehrgpt dataset transformed from the MEDS: %s",
-                        stats,
-                    )
-                    # Clean up the files created from the data generator
-                    cache_file_collector.remove_cache_files()
-                    dataset = load_from_disk(str(meds_extension_path))
 
-            train_set = dataset["train"]
-            validation_set = dataset["validation"]
-            test_set = dataset["test"]
-        else:
-            train_set, validation_set, test_set = create_dataset_splits(
-                data_args=data_args, seed=training_args.seed
-            )
-        # Organize them into a single DatasetDict
-        final_splits = DatasetDict(
-            {"train": train_set, "validation": validation_set, "test": test_set}
+        final_splits = prepare_dataset(
+            data_args, training_args, cehrgpt_args, cache_file_collector
         )
 
         if cehrgpt_args.expand_tokenizer:
             new_tokenizer_path = os.path.expanduser(training_args.output_dir)
-            try:
+            if tokenizer_exists(new_tokenizer_path):
                 tokenizer = CehrGptTokenizer.from_pretrained(new_tokenizer_path)
-            except Exception:
-                # Try to use the defined pretrained embeddings if exists,
-                # Otherwise we default to the pretrained model embedded in the pretrained model
+            else:
+                # Try to use the defined pretrained embeddings if exists, Otherwise we default to the pretrained model
+                # embedded in the pretrained model
                 pretrained_concept_embedding_model = PretrainedEmbeddings(
                     cehrgpt_args.pretrained_embedding_path
                 )
@@ -481,6 +494,7 @@ def main():
             )
             processed_dataset = load_from_disk(str(prepared_ds_path))
 
+    # Remove any cached files if there are any
     cache_file_collector.remove_cache_files()
     # Set seed before initializing model.
     set_seed(training_args.seed)
