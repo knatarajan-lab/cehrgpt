@@ -6,7 +6,7 @@ import pandas as pd
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import Dataset
 
-from cehrgpt.runners.hf_cehrgpt_finetune_runner import create_dataset_splits
+from cehrgpt.runners.data_utils import create_dataset_splits
 
 
 # Mock dataset loading function
@@ -25,7 +25,7 @@ def load_parquet_as_dataset(folder_path):
 class TestCreateDatasetSplits(unittest.TestCase):
 
     @patch(
-        "cehrgpt.runners.hf_cehrgpt_finetune_runner.load_parquet_as_dataset",
+        "cehrgpt.runners.data_utils.load_parquet_as_dataset",
         side_effect=load_parquet_as_dataset,
     )
     def test_chronological_split(self, mock_load_dataset):
@@ -55,7 +55,7 @@ class TestCreateDatasetSplits(unittest.TestCase):
         self.assertAlmostEqual(len(test_set) / total_size, 0.1, delta=0.05)
 
     @patch(
-        "cehrgpt.runners.hf_cehrgpt_finetune_runner.load_parquet_as_dataset",
+        "cehrgpt.runners.data_utils.load_parquet_as_dataset",
         side_effect=load_parquet_as_dataset,
     )
     def test_split_by_patient(self, mock_load_dataset):
@@ -87,7 +87,7 @@ class TestCreateDatasetSplits(unittest.TestCase):
         )
 
     @patch(
-        "cehrgpt.runners.hf_cehrgpt_finetune_runner.load_parquet_as_dataset",
+        "cehrgpt.runners.data_utils.load_parquet_as_dataset",
         side_effect=load_parquet_as_dataset,
     )
     def test_random_split(self, mock_load_dataset):
