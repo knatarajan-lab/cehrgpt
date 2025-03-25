@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 import torch
+from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
 from cehrbert.runners.runner_util import generate_prepared_ds_path
 from datasets import concatenate_datasets, load_from_disk
 from torch.utils.data import DataLoader
@@ -13,8 +14,8 @@ from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2Model
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.runners.data_utils import prepare_finetune_dataset
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
-from cehrgpt.runners.hf_cehrgpt_finetune_runner import prepare_dataset
 
 LOG = logging.get_logger("transformers")
 
@@ -45,6 +46,7 @@ def main():
     prepared_ds_path = generate_prepared_ds_path(
         data_args, model_args, data_folder=data_args.cohort_folder
     )
+    cache_file_collector = CacheFileCollector()
     processed_dataset = None
     if any(prepared_ds_path.glob("*")):
         LOG.info(f"Loading prepared dataset from disk at {prepared_ds_path}...")
@@ -53,14 +55,18 @@ def main():
 
     if processed_dataset is None:
         # Organize them into a single DatasetDict
-        final_splits = prepare_dataset(data_args, training_args)
+        final_splits = prepare_finetune_dataset(data_args, training_args)
         processed_dataset = create_cehrgpt_finetuning_dataset(
             dataset=final_splits,
             cehrgpt_tokenizer=cehrgpt_tokenizer,
             data_args=data_args,
+            cache_file_collector=cache_file_collector,
         )
         if not data_args.streaming:
             processed_dataset.save_to_disk(prepared_ds_path)
+
+    # Remove any cached files
+    cache_file_collector.remove_cache_files()
 
     data_collator = CehrGptDataCollator(
         tokenizer=cehrgpt_tokenizer,
