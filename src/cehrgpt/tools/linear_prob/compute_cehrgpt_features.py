@@ -101,7 +101,17 @@ def main():
     LOG.info(f"cehrgpt_tokenizer.vocab_size: {cehrgpt_tokenizer.vocab_size}")
     if cehrgpt_model.config.vocab_size < cehrgpt_tokenizer.vocab_size:
         cehrgpt_model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)
-
+    if (
+        cehrgpt_model.config.max_position_embeddings
+        < model_args.max_position_embeddings
+    ):
+        LOG.info(
+            f"Increase model.config.max_position_embeddings to {model_args.max_position_embeddings}"
+        )
+        cehrgpt_model.config.max_position_embeddings = (
+            model_args.max_position_embeddings
+        )
+        cehrgpt_model.resize_position_embeddings(model_args.max_position_embeddings)
     # Remove any cached files
     cache_file_collector.remove_cache_files()
 
@@ -140,7 +150,7 @@ def main():
     # Loading demographics
     print("Loading demographics as a dictionary")
     demographics_df = pd.read_parquet(
-        data_args.cohort_folder,
+        data_args.data_folder,
         columns=["person_id", "index_date", "gender_concept_id", "race_concept_id"],
     )
     demographics_df["index_date"] = demographics_df.index_date.dt.date
@@ -170,7 +180,7 @@ def main():
                     batch.pop("age_at_index").numpy().squeeze().astype(float)
                 )
                 person_ids = batch.pop("person_id").numpy().squeeze().astype(int)
-                index_dates = (
+                index_dates = list(
                     map(
                         datetime.fromtimestamp,
                         batch.pop("index_date").numpy().squeeze(axis=-1).tolist(),
@@ -219,12 +229,12 @@ def main():
                         "prediction_time": index_dates,
                         "boolean_value": labels,
                         "age_at_index": prediction_time_ages,
-                        "race_concept_id": race_concept_ids,
-                        "gender_concept_ids": gender_concept_ids,
                     }
                 )
                 # Adding features as a separate column where each row contains a feature array
                 features_pd["features"] = features_list
+                features_pd["race_concept_id"] = race_concept_ids
+                features_pd["gender_concept_id"] = gender_concept_ids
                 features_pd.to_parquet(feature_output_folder / f"{index}.parquet")
 
 

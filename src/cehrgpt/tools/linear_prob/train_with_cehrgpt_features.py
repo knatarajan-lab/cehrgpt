@@ -170,8 +170,8 @@ def main(args):
         gbm_pr_auc = auc(gbm_recall, gbm_precision)
         final_lightgbm_auroc = lightgbm_objective(
             lightgbm_study.best_trial,
-            train_data=feature_train,
-            dev_data=feature_test,
+            train_data=train_data,
+            dev_data=dev_data,
             num_trees=lightgbm_study.best_trial.user_attrs["num_trees"],
         )
         lightgbm_results = {
