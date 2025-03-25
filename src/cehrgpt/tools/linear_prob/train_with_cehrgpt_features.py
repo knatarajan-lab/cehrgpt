@@ -65,8 +65,8 @@ def prepare_dataset(
         [scaled_age, one_hot_gender.toarray(), one_hot_race.toarray(), features]
     )
     return {
-        "subject_id": df["subject_id"].tolist(),
-        "prediction_time": df["prediction_time"].tolist(),
+        "subject_id": df["subject_id"].to_numpy(),
+        "prediction_time": df["prediction_time"].to_numpy(),
         "features": concatenated_features,
         "boolean_value": df["boolean_value"].to_numpy(),
     }
@@ -116,13 +116,23 @@ def main(args):
             f"The results for logistic regression already exist at {logistic_test_result_file}"
         )
     else:
-        train_dataset = prepare_dataset(feature_train, feature_processor)
-        test_dataset = prepare_dataset(feature_test, feature_processor)
-        # Train logistic regression
-        model = LogisticRegressionCV(scoring="roc_auc")
-        model.fit(train_dataset["features"], train_dataset["boolean_value"])
-        y_pred = model.predict_log_proba(test_dataset["features"])[:, 1]
+        logistic_model_file = logistic_dir / "model.pickle"
+        if logistic_model_file.exists():
+            print(
+                f"The logistic regression model already exist, loading it from {logistic_model_file}"
+            )
+            with open(logistic_model_file, "rb") as f:
+                model = pickle.load(f)
+        else:
+            train_dataset = prepare_dataset(feature_train, feature_processor)
+            # Train logistic regression
+            model = LogisticRegressionCV(scoring="roc_auc")
+            model.fit(train_dataset["features"], train_dataset["boolean_value"])
+            with open(logistic_model_file, "wb") as f:
+                pickle.dump(model, f)
 
+        test_dataset = prepare_dataset(feature_test, feature_processor)
+        y_pred = model.predict_log_proba(test_dataset["features"])[:, 1]
         logistic_predictions = pd.DataFrame(
             {
                 "subject_id": test_dataset["subject_id"].tolist(),
@@ -152,25 +162,37 @@ def main(args):
     if gbm_test_result_file.exists():
         print(f"The results for GBM already exist at {gbm_test_result_file}")
     else:
-        lightgbm_study = optuna.create_study()  # Create a new study.
-        train_split, dev_split = train_test_split(feature_train, test_size=0.2)
-        train_data = prepare_dataset(train_split, feature_processor)
-        dev_data = prepare_dataset(dev_split, feature_processor)
-        lightgbm_study.optimize(
-            functools.partial(
-                lightgbm_objective, train_data=train_data, dev_data=dev_data
-            ),
-            n_trials=10,
-        )
-        print("Computing predictions")
-        best_num_trees = lightgbm_study.best_trial.user_attrs["num_trees"]
-        best_params = lightgbm_study.best_trial.params
-        best_params.update({"objective": "binary", "metric": "auc", "verbosity": -1})
-        full_train_set = prepare_dataset(feature_train)
-        dtrain_final = lgb.Dataset(
-            full_train_set["features"], label=full_train_set["boolean_value"]
-        )
-        gbm_final = lgb.train(best_params, dtrain_final, num_boost_round=best_num_trees)
+        gbm_model_file = gbm_dir / "model.pickle"
+        if gbm_model_file.exists():
+            print(f"The GBM model already exist, loading it from {gbm_model_file}")
+            with open(gbm_model_file, "rb") as f:
+                gbm_final = pickle.load(f)
+        else:
+            lightgbm_study = optuna.create_study()  # Create a new study.
+            train_split, dev_split = train_test_split(feature_train, test_size=0.2)
+            train_data = prepare_dataset(train_split, feature_processor)
+            dev_data = prepare_dataset(dev_split, feature_processor)
+            lightgbm_study.optimize(
+                functools.partial(
+                    lightgbm_objective, train_data=train_data, dev_data=dev_data
+                ),
+                n_trials=10,
+            )
+            print("Computing predictions")
+            best_num_trees = lightgbm_study.best_trial.user_attrs["num_trees"]
+            best_params = lightgbm_study.best_trial.params
+            best_params.update(
+                {"objective": "binary", "metric": "auc", "verbosity": -1}
+            )
+            full_train_set = prepare_dataset(feature_train)
+            dtrain_final = lgb.Dataset(
+                full_train_set["features"], label=full_train_set["boolean_value"]
+            )
+            gbm_final = lgb.train(
+                best_params, dtrain_final, num_boost_round=best_num_trees
+            )
+            with open(gbm_model_file, "wb") as f:
+                pickle.dump(gbm_final, f)
 
         test_data = prepare_dataset(feature_test, feature_processor)
         lightgbm_preds = gbm_final.predict(test_data["features"], raw_score=False)
@@ -190,23 +212,13 @@ def main(args):
             gbm_test_predictions / "test_gbm_predictions.parquet"
         )
 
-        final_lightgbm_auroc2 = -roc_auc_score(
-            test_data["boolean_value"], lightgbm_preds
-        )
+        gbm_auroc = -roc_auc_score(test_data["boolean_value"], lightgbm_preds)
         gbm_precision, gbm_recall, _ = precision_recall_curve(
             test_data["boolean_value"], lightgbm_preds
         )
         gbm_pr_auc = auc(gbm_recall, gbm_precision)
-        final_lightgbm_auroc = lightgbm_objective(
-            lightgbm_study.best_trial,
-            train_data=train_data,
-            dev_data=dev_data,
-            num_trees=lightgbm_study.best_trial.user_attrs["num_trees"],
-        )
         lightgbm_results = {
-            "label_name": features_data_dir.name,
-            "final_lightgbm_auroc": final_lightgbm_auroc,
-            "final_lightgbm_auroc2": final_lightgbm_auroc2,
+            "roc_auc": gbm_auroc,
             "pr_auc": gbm_pr_auc,
         }
         print("gbm:", features_data_dir.name, lightgbm_results)
