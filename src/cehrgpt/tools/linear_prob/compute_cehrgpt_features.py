@@ -55,7 +55,9 @@ def main():
 
     if processed_dataset is None:
         # Organize them into a single DatasetDict
-        final_splits = prepare_finetune_dataset(data_args, training_args)
+        final_splits = prepare_finetune_dataset(
+            data_args, training_args, cehrgpt_args, cache_file_collector
+        )
         processed_dataset = create_cehrgpt_finetuning_dataset(
             dataset=final_splits,
             cehrgpt_tokenizer=cehrgpt_tokenizer,
