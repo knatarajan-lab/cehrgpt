@@ -1,3 +1,4 @@
+import glob
 import os
 import shutil
 from datetime import datetime
@@ -100,6 +101,21 @@ def main():
 
         # Remove all the cached files if processed_dataset.cleanup_cache_files() did not remove them already
         cache_file_collector.remove_cache_files()
+
+    # Getting the existing features
+    existing_features = pd.concat(
+        [
+            pd.read_parquet(f, columns=["subject_id"])
+            for f in glob.glob(os.path.join(training_args.output_dir, "*", "features"))
+        ],
+        ignore_index=True,
+    )
+    existing_person_ids = existing_features.subject_id.tolist()
+    processed_dataset = processed_dataset.filter(
+        lambda _batch: [_ not in existing_person_ids for _ in _batch["person_id"]],
+        num_proc=data_args.preprocessing_num_workers,
+        batch_size=data_args.preprocessing_batch_size,
+    )
 
     LOG.info(f"cehrgpt_model.config.vocab_size: {cehrgpt_model.config.vocab_size}")
     LOG.info(f"cehrgpt_tokenizer.vocab_size: {cehrgpt_tokenizer.vocab_size}")
