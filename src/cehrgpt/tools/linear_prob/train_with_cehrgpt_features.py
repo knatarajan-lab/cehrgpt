@@ -184,7 +184,7 @@ def main(args):
             best_params.update(
                 {"objective": "binary", "metric": "auc", "verbosity": -1}
             )
-            full_train_set = prepare_dataset(feature_train)
+            full_train_set = prepare_dataset(feature_train, feature_processor)
             dtrain_final = lgb.Dataset(
                 full_train_set["features"], label=full_train_set["boolean_value"]
             )
