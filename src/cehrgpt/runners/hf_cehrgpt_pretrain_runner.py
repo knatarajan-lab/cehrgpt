@@ -3,6 +3,7 @@ from typing import Optional, Union
 
 import torch
 from cehrbert.data_generators.hf_data_generator.meds_utils import (
+    CacheFileCollector,
     create_dataset_from_meds_reader,
 )
 from cehrbert.runners.hf_runner_argument_dataclass import (
@@ -16,7 +17,7 @@ from cehrbert.runners.runner_util import (
     load_parquet_as_dataset,
 )
 from datasets import Dataset, DatasetDict, IterableDatasetDict, load_from_disk
-from transformers import AutoConfig, Trainer, TrainingArguments, set_seed
+from transformers import Trainer, TrainingArguments, set_seed
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset
@@ -165,6 +166,7 @@ def main():
         training_args.dataloader_num_workers = 0
         training_args.dataloader_prefetch_factor = None
 
+    cache_file_collector = CacheFileCollector()
     prepared_ds_path = generate_prepared_ds_path(data_args, model_args)
     if os.path.exists(os.path.join(data_args.data_folder, "dataset_dict.json")):
         LOG.info(f"Loading prepared dataset from disk at {data_args.data_folder}...")
@@ -225,23 +227,26 @@ def main():
                             num_shards=training_args.dataloader_num_workers
                         )
             except FileNotFoundError as e:
-                LOG.exception(e)
+                LOG.warning(e)
+                dataset = create_dataset_from_meds_reader(
+                    data_args=data_args,
+                    dataset_mappings=[
+                        MedToCehrGPTDatasetMapping(
+                            data_args=data_args,
+                            include_inpatient_hour_token=cehrgpt_args.include_inpatient_hour_token,
+                        )
+                    ],
+                    cache_file_collector=cache_file_collector,
+                )
                 if not data_args.streaming:
-                    dataset = create_dataset_from_meds_reader(
-                        data_args=data_args,
-                        dataset_mappings=[
-                            MedToCehrGPTDatasetMapping(
-                                data_args=data_args,
-                                include_inpatient_hour_token=cehrgpt_args.include_inpatient_hour_token,
-                            )
-                        ],
-                    )
                     dataset.save_to_disk(str(meds_extension_path))
                     stats = dataset.cleanup_cache_files()
                     LOG.info(
                         "Clean up the cached files for the cehrgpt dataset transformed from the MEDS: %s",
                         stats,
                     )
+                    # Clean up the files created from the data generator
+                    cache_file_collector.remove_cache_files()
                     dataset = load_from_disk(str(meds_extension_path))
         else:
             # Load the dataset from the parquet files
@@ -299,7 +304,10 @@ def main():
 
         # sort the patient features chronologically and tokenize the data
         processed_dataset = create_cehrgpt_pretraining_dataset(
-            dataset=dataset, cehrgpt_tokenizer=cehrgpt_tokenizer, data_args=data_args
+            dataset=dataset,
+            cehrgpt_tokenizer=cehrgpt_tokenizer,
+            data_args=data_args,
+            cache_file_collector=cache_file_collector,
         )
         # only save the data to the disk if it is not streaming
         if not data_args.streaming:
@@ -310,6 +318,8 @@ def main():
                 stats,
             )
             processed_dataset = load_from_disk(str(prepared_ds_path))
+
+    cache_file_collector.remove_cache_files()
 
     def filter_func(examples):
         if cehrgpt_args.drop_long_sequences:

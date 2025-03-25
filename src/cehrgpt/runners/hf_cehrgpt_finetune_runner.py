@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import torch
 from cehrbert.data_generators.hf_data_generator.meds_utils import (
+    CacheFileCollector,
     create_dataset_from_meds_reader,
 )
 from cehrbert.runners.hf_cehrbert_finetune_runner import compute_metrics
@@ -25,6 +26,7 @@ from cehrbert.runners.runner_util import (
     load_parquet_as_dataset,
 )
 from datasets import DatasetDict, concatenate_datasets, load_from_disk
+from fsspec.core import OpenFiles
 from peft import LoraConfig, PeftModel, get_peft_model
 from scipy.special import expit as sigmoid
 from torch.utils.data import DataLoader
@@ -364,7 +366,7 @@ def main():
     prepared_ds_path = generate_prepared_ds_path(
         data_args, model_args, data_folder=data_args.cohort_folder
     )
-
+    cache_file_collector = CacheFileCollector()
     processed_dataset = None
     if any(prepared_ds_path.glob("*")):
         LOG.info(f"Loading prepared dataset from disk at {prepared_ds_path}...")
@@ -407,7 +409,7 @@ def main():
                             num_shards=training_args.dataloader_num_workers
                         )
             except Exception as e:
-                LOG.exception(e)
+                LOG.warning(e)
                 dataset = create_dataset_from_meds_reader(
                     data_args=data_args,
                     dataset_mappings=[
@@ -416,6 +418,7 @@ def main():
                             include_inpatient_hour_token=cehrgpt_args.include_inpatient_hour_token,
                         )
                     ],
+                    cache_file_collector=cache_file_collector,
                 )
                 if not data_args.streaming:
                     dataset.save_to_disk(str(meds_extension_path))
@@ -424,6 +427,8 @@ def main():
                         "Clean up the cached files for the cehrgpt dataset transformed from the MEDS: %s",
                         stats,
                     )
+                    # Clean up the files created from the data generator
+                    cache_file_collector.remove_cache_files()
                     dataset = load_from_disk(str(meds_extension_path))
 
             train_set = dataset["train"]
@@ -462,7 +467,10 @@ def main():
                 tokenizer.save_pretrained(os.path.expanduser(training_args.output_dir))
 
         processed_dataset = create_cehrgpt_finetuning_dataset(
-            dataset=final_splits, cehrgpt_tokenizer=tokenizer, data_args=data_args
+            dataset=final_splits,
+            cehrgpt_tokenizer=tokenizer,
+            data_args=data_args,
+            cache_file_collector=cache_file_collector,
         )
         if not data_args.streaming:
             processed_dataset.save_to_disk(str(prepared_ds_path))
@@ -473,6 +481,7 @@ def main():
             )
             processed_dataset = load_from_disk(str(prepared_ds_path))
 
+    cache_file_collector.remove_cache_files()
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
