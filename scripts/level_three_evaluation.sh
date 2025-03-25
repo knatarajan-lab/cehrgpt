@@ -27,9 +27,10 @@ python -u -m cehrbert_data.prediction_cohorts.cad_cabg_cohort \
     -i "$OMOP_FOLDER" \
     -o "$OMOP_FOLDER/cohorts/cad_cabg/" \
     -dl 1985-01-01 -du 2023-12-31 \
-    -l 18 -u 100 -ow 360 -ps 0 -pw 360 -hw 30 -f \
+    -l 18 -u 100 -ow 360 -ps 0 -pw 360 -f \
     --att_type cehr_bert \
-    --ehr_table_list condition_occurrence procedure_occurrence drug_exposure -iv
+    --ehr_table_list condition_occurrence procedure_occurrence drug_exposure -iv \
+    --is_remove_index_prediction_starts
 
 # Run Predictions on CAD CABG
 echo "Run predictions on cad_cabg"
@@ -145,9 +146,10 @@ python -u -m cehrbert_data.prediction_cohorts.afib_ischemic_stroke \
   -c afib_ischemic_stroke_bow \
   -i "$OMOP_FOLDER" \
   -o "$OMOP_FOLDER/cohorts/afib_ischemic_stroke" \
-  -dl 1985-01-01 -du 2023-12-31 -l 18 -u 100 -ow 720 -ps 0 -pw 360 -hw 30 -f \
+  -dl 1985-01-01 -du 2023-12-31 -l 18 -u 100 -ow 720 -ps 0 -pw 360 -f \
   --att_type cehr_bert \
-  --ehr_table_list condition_occurrence procedure_occurrence drug_exposure -iv
+  --ehr_table_list condition_occurrence procedure_occurrence drug_exposure -iv \
+  --is_remove_index_prediction_starts
 
 # Run predictions on AFIB Ischemic Stroke
 echo "Run predictions on afib_ischemic_stroke"
