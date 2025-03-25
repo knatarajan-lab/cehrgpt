@@ -26,8 +26,8 @@ def lightgbm_objective(trial, *, train_data, dev_data, num_trees=None):
         "min_child_samples": trial.suggest_int("min_child_samples", 5, 100),
     }
 
-    dtrain = lgb.Dataset(train_data["features"], label=train_data["boolean_values"])
-    ddev = lgb.Dataset(dev_data["features"], label=dev_data["boolean_values"])
+    dtrain = lgb.Dataset(train_data["features"], label=train_data["boolean_value"])
+    ddev = lgb.Dataset(dev_data["features"], label=dev_data["boolean_value"])
 
     if num_trees is None:
         callbacks = [lgb.early_stopping(10)]
@@ -39,7 +39,7 @@ def lightgbm_objective(trial, *, train_data, dev_data, num_trees=None):
 
     y_pred = gbm.predict(dev_data["features"], raw_score=True)
 
-    error = -roc_auc_score(dev_data["boolean_values"], y_pred)
+    error = -roc_auc_score(dev_data["boolean_value"], y_pred)
 
     if num_trees is None:
         trial.set_user_attr("num_trees", gbm.best_iteration + 1)
@@ -84,7 +84,7 @@ def main(args):
                 "prediction_time": feature_test["prediction_times"].tolist(),
                 "predicted_boolean_probability": y_pred.tolist(),
                 "predicted_boolean_value": None,
-                "boolean_value": feature_test["boolean_values"].astype(bool).tolist(),
+                "boolean_value": feature_test["boolean_value"].astype(bool).tolist(),
             }
         )
         logistic_test_predictions = logistic_dir / "test_predictions"
@@ -116,7 +116,7 @@ def main(args):
         best_params = lightgbm_study.best_trial.params
         best_params.update({"objective": "binary", "metric": "auc", "verbosity": -1})
         dtrain_final = lgb.Dataset(
-            feature_train["features"], label=feature_train["boolean_values"]
+            feature_train["features"], label=feature_train["boolean_value"]
         )
         gbm_final = lgb.train(best_params, dtrain_final, num_boost_round=best_num_trees)
         lightgbm_preds = gbm_final.predict(feature_test["features"], raw_score=False)
@@ -127,7 +127,7 @@ def main(args):
                 "prediction_time": feature_test["prediction_times"].tolist(),
                 "predicted_boolean_probability": lightgbm_preds.tolist(),
                 "predicted_boolean_value": None,
-                "boolean_value": feature_test["boolean_values"].astype(bool).tolist(),
+                "boolean_value": feature_test["boolean_value"].astype(bool).tolist(),
             }
         )
         gbm_test_predictions = gbm_dir / "test_predictions"
@@ -137,7 +137,7 @@ def main(args):
         )
 
         final_lightgbm_auroc2 = -roc_auc_score(
-            feature_test["boolean_values"], lightgbm_preds
+            feature_test["boolean_value"], lightgbm_preds
         )
         gbm_precision, gbm_recall, _ = precision_recall_curve(
             feature_test["boolean_value"], lightgbm_preds
