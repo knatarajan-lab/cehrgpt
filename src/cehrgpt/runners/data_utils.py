@@ -8,7 +8,7 @@ from cehrbert.runners.runner_util import (
     get_meds_extension_path,
     load_parquet_as_dataset,
 )
-from datasets import DatasetDict, load_from_disk
+from datasets import DatasetDict, concatenate_datasets, load_from_disk
 from transformers import TrainingArguments
 from transformers.utils import logging
 
@@ -73,6 +73,31 @@ def prepare_finetune_dataset(
         train_set = dataset["train"]
         validation_set = dataset["validation"]
         test_set = dataset["test"]
+
+        if cehrgpt_args.meds_repartition:
+            train_val_set = concatenate_datasets([train_set, validation_set])
+            if data_args.streaming and data_args.validation_split_num:
+                train_val_set = train_val_set.shuffle(
+                    buffer_size=10_000, seed=training_args.seed
+                )
+                train_set = train_val_set.skip(data_args.validation_split_num)
+                validation_set = train_val_set.take(data_args.validation_split_num)
+            elif data_args.validation_split_percentage:
+                dataset = train_val_set.train_test_split(
+                    test_size=data_args.validation_split_percentage,
+                    seed=training_args.seed,
+                )
+                train_set = dataset["train"]
+                validation_set = dataset["test"]
+            else:
+                raise RuntimeError(
+                    f"Can not split the data. If streaming is enabled, validation_split_num needs to be "
+                    f"defined, otherwise validation_split_percentage needs to be provided. "
+                    f"The current values are:\n"
+                    f"validation_split_percentage: {data_args.validation_split_percentage}\n"
+                    f"validation_split_num: {data_args.validation_split_num}\n"
+                    f"streaming: {data_args.streaming}"
+                )
     else:
         train_set, validation_set, test_set = create_dataset_splits(
             data_args=data_args, seed=training_args.seed
