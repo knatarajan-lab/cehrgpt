@@ -538,7 +538,7 @@ def do_predict(
     # Compute metrics and save results
     metrics = compute_metrics(
         references=test_prediction_pd.boolean_value,
-        probs=test_prediction_pd.boolean_prediction_probability,
+        probs=test_prediction_pd.predicted_boolean_probability,
     )
     metrics["test_loss"] = np.mean(test_losses)
 
