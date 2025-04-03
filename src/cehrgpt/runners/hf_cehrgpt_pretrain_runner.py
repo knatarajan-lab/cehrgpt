@@ -49,6 +49,27 @@ def load_and_create_tokenizer(
     cehrgpt_args: CehrGPTArguments,
     dataset: Optional[Union[Dataset, DatasetDict]] = None,
 ) -> CehrGptTokenizer:
+
+    concept_name_mapping = {}
+    motor_time_to_event_codes = list()
+    if cehrgpt_args.concept_dir:
+        import pandas as pd
+
+        LOG.info("Loading concept data from disk at %s", cehrgpt_args.concept_dir)
+        concept_pd = pd.read_parquet(cehrgpt_args.concept_dir)
+        LOG.info(
+            "Creating concept name mapping and motor_time_to_event_codes from disk at %s",
+            cehrgpt_args.concept_dir,
+        )
+        for row in concept_pd.itertuples():
+            concept_name_mapping[str(getattr(row, "concept_id"))] = getattr(
+                row, "concept_name"
+            )
+            if (
+                getattr(row, "domain_id") == "Condition"
+                and getattr(row, "standard_concept") == "S"
+            ):
+                motor_time_to_event_codes.append(str(getattr(row, "concept_id")))
     # Try to load the pretrained tokenizer
     tokenizer_abspath = os.path.expanduser(model_args.tokenizer_name_or_path)
     try:
@@ -63,9 +84,10 @@ def load_and_create_tokenizer(
         LOG.info("Started training the tokenizer ...")
         tokenizer = CehrGptTokenizer.train_tokenizer(
             dataset,
-            {},
+            concept_name_mapping,
             data_args,
             PretrainedEmbeddings(cehrgpt_args.pretrained_embedding_path),
+            motor_time_to_event_codes,
         )
         LOG.info("Finished training the tokenizer ...")
         tokenizer.save_pretrained(tokenizer_abspath)
@@ -124,6 +146,7 @@ def load_and_create_model(
             pretrained_embedding_dim = tokenizer.pretrained_embeddings.shape[1]
         else:
             pretrained_embedding_dim = model_args.hidden_size
+
         model_config = CEHRGPTConfig(
             vocab_size=tokenizer.vocab_size,
             value_vocab_size=tokenizer.value_vocab_size,
