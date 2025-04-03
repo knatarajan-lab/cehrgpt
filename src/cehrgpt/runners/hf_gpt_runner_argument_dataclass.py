@@ -152,6 +152,7 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether we want to repartition the meds train tune sets"
         },
     )
+<<<<<<< HEAD
     use_early_stopping: Optional[bool] = dataclasses.field(
         default=True,
         metadata={"help": "A flag to indicate whether we want to use early stopping."},
@@ -180,4 +181,8 @@ class CehrGPTArguments:
     average_over_sequence: bool = dataclasses.field(
         default=False,
         metadata={"help": "Whether or not to average tokens per sequence"},
+    )
+    concept_dir: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={"help": "The directory where the concept data is stored."}
     )

@@ -55,6 +55,8 @@ TOKEN_TO_SUB_TIME_TOKEN_MAPPING_FILE_NAME = "token_to_sub_time_token_mapping.jso
 LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.pickle"
 LEGACY_LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.json"
 CONCEPT_MAPPING_FILE_NAME = "concept_name_mapping.json"
+MOTOR_TIME_TO_EVENT_CODES_FILE_NAME = "motor_time_to_event_codes.json"
+
 LOG = logging.get_logger("transformers")
 
 
@@ -353,6 +355,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         categorical_lab_stats: Dict[Tuple[str, str], int],
         concept_name_mapping: Dict[str, str],
         pretrained_concept_embedding_model: PretrainedEmbeddings = None,
+        motor_time_to_event_codes: Optional[List[str]] = None,
     ):
         self._tokenizer = tokenizer
         self._value_tokenizer = value_tokenizer
@@ -389,6 +392,9 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             for _ in self.get_vocab().keys()
             if self._pretrained_concept_embedding_model.is_concept_available(_)
         ]
+        self._motor_time_to_event_codes = (
+            motor_time_to_event_codes if motor_time_to_event_codes else []
+        )
 
         super().__init__()
 
@@ -510,6 +516,14 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     def pretrained_concept_embedding_model(self):
         return self._pretrained_concept_embedding_model
 
+    def is_motor_time_to_event_code(self, future_concept_id: str) -> bool:
+        if (
+            self._motor_time_to_event_codes
+            and future_concept_id in self._motor_time_to_event_codes
+        ):
+            return True
+        return False
+
     def get_vocab(self) -> Dict[str, int]:
         return self._tokenizer.get_vocab()
 
@@ -621,6 +635,11 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         with open(os.path.join(save_directory, CONCEPT_MAPPING_FILE_NAME), "w") as f:
             json.dump(self._concept_name_mapping, f)
 
+        with open(
+            os.path.join(save_directory, MOTOR_TIME_TO_EVENT_CODES_FILE_NAME), "w"
+        ) as f:
+            json.dump(self._motor_time_to_event_codes, f)
+
         self._pretrained_concept_embedding_model.save(save_directory)
 
         if push_to_hub:
@@ -730,6 +749,14 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             return None
         concept_name_mapping = load_json_file(concept_name_mapping_file)
 
+        # Load the MOTOR time to event codes file
+        motor_time_to_event_codes_file = transformers.utils.hub.cached_file(
+            pretrained_model_name_or_path, MOTOR_TIME_TO_EVENT_CODES_FILE_NAME, **kwargs
+        )
+        if not motor_time_to_event_codes_file:
+            return None
+        motor_time_to_event_codes = load_json_file(motor_time_to_event_codes_file)
+
         pretrained_embedding_model = PretrainedEmbeddings(pretrained_model_name_or_path)
 
         return CehrGptTokenizer(
@@ -741,6 +768,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             lab_stats["categorical_lab_stats"],
             concept_name_mapping,
             pretrained_embedding_model,
+            motor_time_to_event_codes,
         )
 
     @classmethod
@@ -763,6 +791,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         concept_name_mapping: Dict[str, str],
         data_args: DataTrainingArguments,
         pretrained_concept_embedding_model: PretrainedEmbeddings = None,
+        motor_time_to_event_codes: Optional[List[int]] = None,
     ):
         if not isinstance(cehrgpt_tokenizer, CehrGptTokenizer):
             raise ValueError(
@@ -775,6 +804,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             dataset=dataset,
             concept_name_mapping=concept_name_mapping,
             data_args=data_args,
+            motor_time_to_event_codes=motor_time_to_event_codes,
         )
 
         new_tokens = set(new_tokenizer.get_vocab().keys()) - set(
@@ -792,6 +822,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         new_numeric_lab_stats = new_tokenizer._numeric_lab_stats
         new_categorical_lab_stats = new_tokenizer._categorical_lab_stats
         new_concept_name_mapping = new_tokenizer._concept_name_mapping
+        new_motor_time_to_event_codes = new_tokenizer._motor_time_to_event_codes
 
         # Add new tokens to the existing tokenizer
         cehrgpt_tokenizer_copy._tokenizer.add_tokens(
@@ -840,6 +871,20 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             if token not in cehrgpt_tokenizer_copy._concept_name_mapping:
                 cehrgpt_tokenizer_copy._concept_name_mapping[token] = concept_name
 
+        # Merge motor_time_to_event_codes
+        if (
+            new_motor_time_to_event_codes
+            and cehrgpt_tokenizer_copy._motor_time_to_event_codes
+        ):
+            for motor_time_to_event_code in new_motor_time_to_event_codes:
+                if (
+                    motor_time_to_event_code
+                    not in cehrgpt_tokenizer_copy._motor_time_to_event_codes
+                ):
+                    cehrgpt_tokenizer_copy._motor_time_to_event_codes.append(
+                        motor_time_to_event_code
+                    )
+
         return CehrGptTokenizer(
             tokenizer=cehrgpt_tokenizer_copy._tokenizer,
             value_tokenizer=cehrgpt_tokenizer_copy._value_tokenizer,
@@ -849,6 +894,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             categorical_lab_stats=cehrgpt_tokenizer_copy._categorical_lab_stats,
             concept_name_mapping=cehrgpt_tokenizer_copy._concept_name_mapping,
             pretrained_concept_embedding_model=pretrained_concept_embedding_model,
+            motor_time_to_event_codes=cehrgpt_tokenizer_copy._motor_time_to_event_codes,
         )
 
     @classmethod
@@ -918,6 +964,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         concept_name_mapping: Dict[str, str],
         data_args: DataTrainingArguments,
         pretrained_concept_embedding_model: PretrainedEmbeddings = None,
+        motor_time_to_event_codes: Optional[List[str]] = None,
     ):
         """
         Train a huggingface word level tokenizer.
@@ -1022,7 +1069,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         # We will train a tokenizer specifically for time intervals
         sub_time_token_data = []
         token_to_sub_time_token_mapping = collections.defaultdict(list)
-        for token, token_id in concept_tokenizer.get_vocab().items():
+        vocab = concept_tokenizer.get_vocab()
+        for token, token_id in vocab.items():
             if is_att_token(token):
                 time_interval = extract_time_interval_in_days(token)
                 time_tuple = convert_time_interval_to_time_tuple(
@@ -1043,6 +1091,13 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         )
         att_tokenizer.train_from_iterator(sub_time_token_data, trainer=att_trainer)
 
+        # Prune motor_time_to_event_codes
+        motor_time_to_event_codes = [
+            concept_id
+            for concept_id in motor_time_to_event_codes
+            if concept_id in vocab
+        ]
+
         return CehrGptTokenizer(
             concept_tokenizer,
             value_tokenizer,
@@ -1052,6 +1107,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             categorical_lab_stats,
             concept_name_mapping,
             pretrained_concept_embedding_model,
+            motor_time_to_event_codes,
         )
 
     @classmethod
