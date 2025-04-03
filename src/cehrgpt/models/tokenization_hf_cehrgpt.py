@@ -25,6 +25,7 @@ from tokenizers.pre_tokenizers import WhitespaceSplit
 from tokenizers.trainers import WordLevelTrainer
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer
+from transformers.utils import logging
 
 from cehrgpt.gpt_utils import (
     convert_time_interval_to_time_tuple,
@@ -53,6 +54,7 @@ TOKEN_TO_SUB_TIME_TOKEN_MAPPING_FILE_NAME = "token_to_sub_time_token_mapping.jso
 LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.pickle"
 LEGACY_LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.json"
 CONCEPT_MAPPING_FILE_NAME = "concept_name_mapping.json"
+LOG = logging.get_logger("transformers")
 
 
 def truncated_sample(sample, standard_deviation):
@@ -888,6 +890,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         if isinstance(dataset, DatasetDict):
             dataset = dataset["train"]
 
+        LOG.info("Training the tokenizer for concepts")
         concept_tokenizer = cls.train_concept_tokenizer(
             dataset,
             feature_name="concept_ids",
@@ -900,6 +903,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             if concept_value_column not in row:
                 concept_value_column = "concept_values"
             break
+        LOG.info("Training the tokenizer for values")
         value_tokenizer = cls.train_concept_tokenizer(
             dataset,
             feature_name=concept_value_column,

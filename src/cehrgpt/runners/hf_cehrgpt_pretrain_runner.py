@@ -60,13 +60,16 @@ def load_and_create_tokenizer(
                 f"Failed to load the tokenizer from {tokenizer_abspath} with the error \n{e}\n"
                 f"Tried to create the tokenizer, however the dataset is not provided."
             )
+        LOG.info("Started training the tokenizer ...")
         tokenizer = CehrGptTokenizer.train_tokenizer(
             dataset,
             {},
             data_args,
             PretrainedEmbeddings(cehrgpt_args.pretrained_embedding_path),
         )
+        LOG.info("Finished training the tokenizer ...")
         tokenizer.save_pretrained(tokenizer_abspath)
+        LOG.info("Saved the tokenizer to %s", tokenizer_abspath)
 
     return tokenizer
 
