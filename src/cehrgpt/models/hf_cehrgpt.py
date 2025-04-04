@@ -1288,6 +1288,21 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         if labels is not None:
             # move labels to correct device to enable model parallelism
             labels = labels.to(lm_logits.device)
+
+            if self.config.causal_sfm:
+                # Ensure demographic_labels matches the dtype of original labels
+                demographic_labels = torch.full(
+                    (labels.shape[0], self.config.demographics_size),
+                    -100,
+                    dtype=labels.dtype,  # Match the original labels' dtype
+                    device=labels.device,  # Ensure on the same device
+                )
+                # Concatenate the demographic labels with the rest of the original labels
+                labels = torch.cat(
+                    (demographic_labels, labels[:, self.config.demographics_size :]),
+                    dim=1,
+                )
+
             # Shift so that tokens < n predict n
             shift_logits = lm_logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
