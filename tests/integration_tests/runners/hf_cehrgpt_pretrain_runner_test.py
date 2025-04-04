@@ -31,6 +31,9 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
         cls.pretrained_embedding_folder = os.path.join(
             root_folder, "sample_data", "pretrained_embeddings"
         )
+        cls.concept_dir = os.path.join(
+            root_folder, "sample_data", "omop_vocab", "concept"
+        )
         # Create a temporary directory to store model and tokenizer
         cls.temp_dir = tempfile.mkdtemp()
         cls.model_folder_path = os.path.join(cls.temp_dir, "model")
@@ -68,6 +71,8 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             self.dataset_prepared_path,
             "--pretrained_embedding_path",
             self.model_folder_path,
+            "--concept_dir",
+            self.concept_dir,
             "--max_steps",
             "100",
             "--save_steps",
@@ -89,6 +94,8 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "--validation_split_num",
             "10",
             "--streaming",
+            "true",
+            "--include_motor_time_to_event",
             "true",
         ]
         train_main()
