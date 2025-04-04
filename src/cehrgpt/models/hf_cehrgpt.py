@@ -1303,7 +1303,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         )
 
         # Apply natural log transformation (log(t + 1)) for numerical stability
-        log_tte = torch.log1p(motor_time_to_event_vectors).clamp(min=1e-6)  # log(1 + t)
+        log_tte = torch.log(motor_time_to_event_vectors + 2).clamp(
+            min=1e-6
+        )  # log(1 + t)
 
         # Get Weibull parameters from model
         scale, concentration = self.motor_tte(ve_token_features)
@@ -1463,6 +1465,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             if self.config.include_motor_time_to_event:
                 ve_token_id_indices = labels == self.config.ve_token_id
                 ve_token_features = hidden_states[ve_token_id_indices]
+                if torch.isnan(hidden_states).any():
+                    logger.warning(f"NaN values found hidden_states: {hidden_states}")
                 motor_tte_loss = self.motor_nll_loss(
                     ve_token_features,
                     motor_time_to_event_vectors,
@@ -1473,7 +1477,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
                 # We add another loss term when use_sub_time_tokenization is enabled, we need to recover the sub time token
         # predictions for year/month/token
-        if self.config.use_sub_time_tokenization:
+        if (
+            self.config.use_sub_time_tokenization
+            and sub_time_tokens is not None
+            and time_token_indicators is not None
+        ):
             # Split the last dimensions into three parts
             time_loss_fct = CrossEntropyLoss(reduction="none")
             time_token_logits = self.time_token_lm_head(
@@ -1500,7 +1508,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             )
             loss += time_token_loss
 
-        if time_to_visits is not None:
+        if self.config.include_ttv_prediction and time_to_visits is not None:
             # Get lambda and k parameters
             lambda_param, k_param = self.tte_head(hidden_states)
 
@@ -1511,7 +1519,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             # Move to the same device as lambda_param
             shift_time_to_visits = shift_time_to_visits.to(lambda_param.device)
-
+            log_shift_time_to_visits = torch.where(
+                shift_time_to_visits >= 0,
+                torch.log(shift_time_to_visits + 2).clamp(min=1e-6),
+                1e-6,
+            )
             time_to_visit_indicator = (shift_time_to_visits >= 0).to(
                 hidden_states.dtype
             )
@@ -1519,7 +1531,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             dist = Gamma(shifted_k_param.squeeze(-1), shifted_lambda_param.squeeze(-1))
 
             # Compute log-probs and apply the time_to_visit_indicator
-            log_probs = dist.log_prob(torch.clamp(shift_time_to_visits, min=0.0) + 1e-6)
+            log_probs = dist.log_prob(log_shift_time_to_visits)
             log_probs *= time_to_visit_indicator
             time_to_visit_loss = (
                 -log_probs.mean() * self.config.time_to_visit_loss_weight
