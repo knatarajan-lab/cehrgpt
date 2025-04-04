@@ -176,21 +176,13 @@ class CehrGptDataCollator:
             ]
             batch_motor_time_to_event_vectors = [
                 self._try_reverse_tensor(
-                    self._convert_to_tensor(
-                        self.create_time_to_event_labels(example)[
-                            "time_to_event_vectors"
-                        ]
-                    )
+                    self._convert_to_tensor(example["time_to_event_vectors"])
                 )
                 for example in examples_with_motor_tte
             ]
             batch_time_to_event_attention_mask = [
                 self._try_reverse_tensor(
-                    self._convert_to_tensor(
-                        self.create_time_to_event_labels(example)[
-                            "time_to_event_attention_mask"
-                        ]
-                    )
+                    self._convert_to_tensor(example["time_to_event_attention_mask"])
                 )
                 for example in examples_with_motor_tte
             ]
@@ -199,14 +191,18 @@ class CehrGptDataCollator:
                     batch_motor_time_to_event_vectors,
                     batch_first=True,
                     padding_value=-100,
-                ).to(torch.int64)
+                ).to(torch.int32)
+            )
+            batch["motor_time_to_event_vectors"] = torch.reshape(
+                batch["motor_time_to_event_vectors"],
+                (len(examples), -1, self.tokenizer.vocab_size),
             )
             batch["motor_time_to_event_attention_mask"] = self._try_reverse_tensor(
                 pad_sequence(
                     batch_time_to_event_attention_mask,
                     batch_first=True,
                     padding_value=False,
-                )
+                ).to(torch.bool)
             )
 
         if self.include_values:
@@ -299,22 +295,20 @@ class CehrGptDataCollator:
                         time_to_event += extract_time_interval_in_days(
                             future_concept_id
                         )
-                        if (
-                            self.tokenizer.is_motor_time_to_event_code(
-                                future_concept_id
-                            )
-                            and future_token_id not in time_to_event_dict
-                        ):
-                            time_to_event_dict[future_token_id] = time_to_event
-                time_to_event_vector = np.zeros(self.tokenizer.vocab_size)
+                    elif (
+                        self.tokenizer.is_motor_time_to_event_code(future_concept_id)
+                        and future_token_id not in time_to_event_dict
+                    ):
+                        time_to_event_dict[future_token_id] = time_to_event
+                time_to_event_vector = np.zeros(
+                    self.tokenizer.vocab_size, dtype=np.int32
+                )
                 time_to_event_vector[list(time_to_event_dict.keys())] = list(
                     time_to_event_dict.values()
                 )
                 time_to_event_vectors.append(time_to_event_vector)
-        record["time_to_event_vectors"] = np.asarray(time_to_event_vectors)
-        record["time_to_event_attention_mask"] = np.ones(
-            (1, len(time_to_event_vectors))
-        )
+        record["time_to_event_vectors"] = np.asarray(time_to_event_vectors).flatten()
+        record["time_to_event_attention_mask"] = np.ones(len(time_to_event_vectors))
         return record
 
     def random_sort(self, record: Dict[str, Any]) -> Dict[str, Any]:

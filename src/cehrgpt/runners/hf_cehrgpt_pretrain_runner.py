@@ -421,6 +421,7 @@ def main():
             shuffle_records=data_args.shuffle_records,
             include_ttv_prediction=model_args.include_ttv_prediction,
             use_sub_time_tokenization=model_args.use_sub_time_tokenization,
+            include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
             include_values=model_args.include_values,
         ),
         train_dataset=processed_dataset["train"],
