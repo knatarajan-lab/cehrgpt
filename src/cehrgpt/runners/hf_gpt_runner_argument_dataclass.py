@@ -152,7 +152,6 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether we want to repartition the meds train tune sets"
         },
     )
-<<<<<<< HEAD
     use_early_stopping: Optional[bool] = dataclasses.field(
         default=True,
         metadata={"help": "A flag to indicate whether we want to use early stopping."},
@@ -178,11 +177,21 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether we want to add end token in sample packing"
         },
     )
-    average_over_sequence: bool = dataclasses.field(
+    include_motor_time_to_event: Optional[bool] = dataclasses.field(
         default=False,
-        metadata={"help": "Whether or not to average tokens per sequence"},
+        metadata={
+            "help": "A flag to indicate whether we want to include the motor time to events"
+        },
+    )
+    motor_time_to_event_weight: Optional[float] = dataclasses.field(
+        default=1.0,
+        metadata={"help": "The MOTOR time to event loss weight"},
     )
     concept_dir: Optional[str] = dataclasses.field(
         default=None,
-        metadata={"help": "The directory where the concept data is stored."}
+        metadata={"help": "The directory where the concept data is stored."},
+    )
+    average_over_sequence: bool = dataclasses.field(
+        default=False,
+        metadata={"help": "Whether or not to average tokens per sequence"},
     )
