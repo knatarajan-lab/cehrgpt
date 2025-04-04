@@ -165,8 +165,13 @@ def load_and_create_model(
             n_pretrained_embeddings_layers=cehrgpt_args.n_pretrained_embeddings_layers,
             use_pretrained_embeddings=len(tokenizer.pretrained_token_ids) > 0,
             pretrained_embedding_dim=pretrained_embedding_dim,
+            include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
+            motor_tte_vocab_size=tokenizer.motor_tte_vocab_size,
+            motor_time_to_event_weight=cehrgpt_args.motor_time_to_event_weight,
+            ve_token_id=tokenizer.ve_token_id,
             **model_args.as_dict(),
         )
+
     model = CEHRGPT2LMHeadModel(model_config)
     if tokenizer.pretrained_token_ids:
         model.cehrgpt.update_pretrained_embeddings(
@@ -378,6 +383,10 @@ def main():
         model_args, cehrgpt_args, training_args, cehrgpt_tokenizer
     )
 
+    # Try to update motor tte vocab size if the new configuration is different from the existing one
+    if cehrgpt_args.include_motor_time_to_event:
+        model.update_motor_tte_vocab_size(cehrgpt_tokenizer.motor_tte_vocab_size)
+
     # Expand tokenizer to adapt to the new pretraining dataset
     if model.config.vocab_size < cehrgpt_tokenizer.vocab_size:
         model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)
@@ -416,6 +425,7 @@ def main():
             include_ttv_prediction=model_args.include_ttv_prediction,
             use_sub_time_tokenization=model_args.use_sub_time_tokenization,
             include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
+            motor_tte_vocab_size=cehrgpt_tokenizer.motor_tte_vocab_size,
             include_values=model_args.include_values,
         ),
         train_dataset=processed_dataset["train"],

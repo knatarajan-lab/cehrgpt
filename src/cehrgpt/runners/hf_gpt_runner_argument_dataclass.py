@@ -151,6 +151,10 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether we want to include the motor time to events"
         },
     )
+    motor_time_to_event_weight: Optional[float] = dataclasses.field(
+        default=1.0,
+        metadata={"help": "The MOTOR time to event loss weight"},
+    )
     concept_dir: Optional[str] = dataclasses.field(
         default=None,
         metadata={"help": "The directory where the concept data is stored."},
