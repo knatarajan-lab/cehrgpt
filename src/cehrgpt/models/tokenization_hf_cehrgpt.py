@@ -388,6 +388,9 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         self._motor_time_to_event_codes = (
             motor_time_to_event_codes if motor_time_to_event_codes else []
         )
+        self._motor_code_to_id_mapping = {
+            code: i for i, code in enumerate(sorted(self._motor_time_to_event_codes))
+        }
 
         super().__init__()
 
@@ -407,6 +410,10 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                 for _ in self._pretrained_concept_ids
             ]
         )
+
+    @property
+    def motor_tte_vocab_size(self) -> int:
+        return len(self._motor_code_to_id_mapping)
 
     @property
     def vocab_size(self) -> int:
@@ -453,6 +460,28 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         return PAD_TOKEN
 
     @property
+    def vs_token_id(self):
+        # We used VS for the historical data, currently, we use the new [VS] for the newer data
+        # so we need to check both cases.
+        if "VS" in self._tokenizer.get_vocab():
+            return self._convert_token_to_id("VS")
+        elif "[VS]" in self._tokenizer.get_vocab():
+            return self._convert_token_to_id("[VS]")
+        else:
+            raise RuntimeError("The tokenizer does not contain either VS or [VS]")
+
+    @property
+    def ve_token_id(self):
+        # We used VE for the historical data, currently, we use the new [VE] for the newer data
+        # so we need to check both cases.
+        if "VE" in self._tokenizer.get_vocab():
+            return self._convert_token_to_id("VE")
+        elif "[VE]" in self._tokenizer.get_vocab():
+            return self._convert_token_to_id("[VE]")
+        else:
+            raise RuntimeError("The tokenizer does not contain either VE or [VE]")
+
+    @property
     def numeric_concept_ids(self):
         return self._numeric_concept_ids
 
@@ -488,6 +517,11 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     @property
     def pretrained_concept_embedding_model(self):
         return self._pretrained_concept_embedding_model
+
+    def get_motor_token_id(self, concept_id: str) -> int:
+        if concept_id not in concept_id:
+            raise RuntimeError(f"Invalid motor concept id: {concept_id}")
+        return self._motor_code_to_id_mapping[concept_id]
 
     def is_motor_time_to_event_code(self, future_concept_id: str) -> bool:
         if (
