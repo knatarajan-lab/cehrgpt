@@ -1271,29 +1271,53 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         motor_censor_indicators,
         batch_motor_end_index,
     ):
+        """
+        Computes the negative log-likelihood (NLL) loss for time-to-event prediction using the Weibull distribution.
+
+        Applies a natural log transformation to the time-to-event targets to stabilize training and ensure valid inputs
+        to the distribution.
+
+        Args:
+            ve_token_features (Tensor): Hidden representations for the VE tokens. Shape: [N, hidden_dim]
+            motor_time_to_event_vectors (Tensor): Time-to-event targets. Shape: [B, T, motor_vocab_size] (flattened internally)
+            motor_censor_indicators (Tensor): Binary censoring indicators (1 = censored, 0 = event occurred).
+                                              Same shape as `motor_time_to_event_vectors`.
+            batch_motor_end_index (Tensor): Tensor indicating how many VE tokens in the current batch are valid.
+
+        Returns:
+            Tensor: Scalar loss value (mean negative log-likelihood)
+        """
         batch_motor_end_index = batch_motor_end_index.sum().item()
         motor_time_to_event_vectors = motor_time_to_event_vectors.reshape(
             (-1, self.config.motor_tte_vocab_size)
-        )[:batch_motor_end_index].clamp(min=1e-6)
+        )[:batch_motor_end_index]
         motor_censor_indicators = motor_censor_indicators.reshape(
             (-1, self.config.motor_tte_vocab_size)
         )[:batch_motor_end_index]
 
         assert ve_token_features.shape[0] == motor_time_to_event_vectors.shape[0], (
-            "The number of ve tokens in the labels needs to match up "
+            "The number of VE tokens in the labels needs to match up "
             "with the first dimension of motor_time_to_event_vectors. "
-            f"But received ve_token_features.shape[0]: {ve_token_features.shape[0]} and "
+            f"Received ve_token_features.shape[0]: {ve_token_features.shape[0]}, "
             f"motor_time_to_event_vectors.shape[0]: {motor_time_to_event_vectors.shape[0]}"
         )
+
+        # Apply natural log transformation (log(t + 1)) for numerical stability
+        log_tte = torch.log1p(motor_time_to_event_vectors).clamp(min=1e-6)  # log(1 + t)
+
+        # Get Weibull parameters from model
         scale, concentration = self.motor_tte(ve_token_features)
         dist = Weibull(scale=scale, concentration=concentration)
-        log_pdf = dist.log_prob(motor_time_to_event_vectors)
-        log_survival = torch.log(
-            1 - dist.cdf(motor_time_to_event_vectors).clamp(max=1 - 1e-6) + 1e-6
-        )
+
+        # Compute log-likelihood terms
+        log_pdf = dist.log_prob(log_tte)
+        log_survival = torch.log(1 - dist.cdf(log_tte).clamp(max=1 - 1e-6) + 1e-6)
+
+        # Masked log-likelihood (event vs. censored)
         motor_loss = (
             1 - motor_censor_indicators
         ) * log_pdf + motor_censor_indicators * log_survival
+
         return -torch.mean(motor_loss)
 
     def forward(
