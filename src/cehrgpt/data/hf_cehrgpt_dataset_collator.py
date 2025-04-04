@@ -1,5 +1,6 @@
+import copy
 import random
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -348,43 +349,88 @@ class CehrGptDataCollator:
         return batch
 
     def create_time_to_event_labels(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Generates time-to-event (TTE) labels and censoring indicators for each visit in a patient's timeline.
+
+        Processes the input sequence in reverse to compute the number of days from each visit (marked by [VE])
+        to the occurrence of future motor-related events.
+
+        Args:
+            record (Dict[str, Any]): A dictionary containing the encoded patient sequence with the key "input_ids".
+                This sequence includes [VS], [VE], time delta tokens, and motor TTE concept codes.
+
+        Returns:
+            Dict[str, Any]: The updated input record with added keys:
+                - "time_to_event_vectors": np.ndarray of shape [num_visits, motor_vocab_size], containing time-to-event values
+                - "censor_indicators": np.ndarray of shape [num_visits, motor_vocab_size], where 0 = event occurred, 1 = censored
+        """
         input_ids = record["input_ids"]
         if isinstance(input_ids, torch.Tensor):
             input_ids = input_ids.detach().tolist()
+
         concept_ids = self.tokenizer.decode(input_ids, skip_special_tokens=False)
         time_to_event_vectors = []
         censor_indicators = []
-        for i, (token_id, concept_id) in enumerate(zip(input_ids, concept_ids)):
-            if is_visit_end(concept_id):
-                time_to_event = 0
-                time_to_event_dict = {}
-                for future_token_id, future_concept_id in zip(
-                    input_ids[i + 1 :], concept_ids[i + 1 :]
-                ):
-                    if is_att_token(future_concept_id):
-                        time_to_event += extract_time_interval_in_days(
-                            future_concept_id
-                        )
-                    elif (
-                        self.tokenizer.is_motor_time_to_event_code(future_concept_id)
-                        and future_token_id not in time_to_event_dict
-                    ):
-                        time_to_event_dict[
-                            self.tokenizer.get_motor_token_id(future_concept_id)
-                        ] = time_to_event
 
-                time_to_event_vector = np.full(
-                    self.tokenizer.motor_tte_vocab_size, time_to_event, dtype=np.int32
-                )
-                censor_indicator = np.ones(
-                    self.tokenizer.motor_tte_vocab_size, dtype=np.int32
-                )
-                time_to_event_vector[list(time_to_event_dict.keys())] = list(
-                    time_to_event_dict.values()
-                )
-                censor_indicator[list(time_to_event_dict.keys())] = 0
-                time_to_event_vectors.append(time_to_event_vector)
-                censor_indicators.append(censor_indicator)
+        # First collect TTE data in reverse chronological order
+        time_to_event_data: List[Dict[str, int]] = []
+        time_to_event_dict: Dict[str, int] = {}
+        next_future_visit_concepts = set()
+        time_interval = 0
+
+        # Reverse walk through concept_ids to calculate TTE from each [VE] point
+        for concept_id in reversed(concept_ids):
+            if is_visit_end(concept_id):
+                # Update TTE for existing concepts, or add new ones seen in this visit
+                for existing_concept_id in list(time_to_event_dict.keys()):
+                    if existing_concept_id in next_future_visit_concepts:
+                        time_to_event_dict[existing_concept_id] = time_interval
+                    else:
+                        time_to_event_dict[existing_concept_id] += time_interval
+
+                for next_concept_id in next_future_visit_concepts:
+                    if next_concept_id not in time_to_event_dict:
+                        time_to_event_dict[next_concept_id] = time_interval
+
+                time_to_event_data.append(copy.deepcopy(time_to_event_dict))
+                time_interval = 0
+                next_future_visit_concepts.clear()
+
+            elif is_att_token(concept_id):
+                time_interval += extract_time_interval_in_days(concept_id)
+
+            elif self.tokenizer.is_motor_time_to_event_code(concept_id):
+                next_future_visit_concepts.add(concept_id)
+
+        # Reverse back to chronological order for final labels
+        time_to_event_data.reverse()
+
+        # Drop the last visit, since there's no future event beyond it
+        if time_to_event_data:
+            time_to_event_data.pop()
+
+        for visit_tte_data in time_to_event_data:
+            time_to_event_vector = np.full(
+                self.tokenizer.motor_tte_vocab_size,
+                fill_value=time_interval,
+                dtype=np.int32,
+            )
+            censor_indicator = np.ones(
+                self.tokenizer.motor_tte_vocab_size,
+                dtype=np.int32,
+            )
+
+            visit_token_ids = [
+                self.tokenizer.get_motor_token_id(concept_id)
+                for concept_id in visit_tte_data.keys()
+            ]
+            visit_tte_values = list(visit_tte_data.values())
+
+            time_to_event_vector[visit_token_ids] = visit_tte_values
+            censor_indicator[visit_token_ids] = 0  # not censored (event occurred)
+
+            time_to_event_vectors.append(time_to_event_vector)
+            censor_indicators.append(censor_indicator)
 
         record["time_to_event_vectors"] = np.asarray(time_to_event_vectors)
         record["censor_indicators"] = np.asarray(censor_indicators)

@@ -1422,7 +1422,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         )
 
         # Apply natural log transformation (log(t + 1)) for numerical stability
-        log_tte = torch.log1p(motor_time_to_event_vectors).clamp(min=1e-6)  # log(1 + t)
+        log_tte = torch.log(motor_time_to_event_vectors + 2).clamp(
+            min=1e-6
+        )  # log(1 + t)
 
         # Get Weibull parameters from model
         scale, concentration = self.motor_tte(ve_token_features)
@@ -1588,7 +1590,24 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             if self.config.include_motor_time_to_event:
                 ve_token_id_indices = labels == self.config.ve_token_id
+                rows_with_true = ve_token_id_indices.sum(dim=1) > 0
+                row_indices = torch.arange(
+                    ve_token_id_indices.shape[0], device=ve_token_id_indices.device
+                )[rows_with_true]
+                # Find the last True by converting boolean to float before flipping and finding argmax
+                last_indices = (
+                    ve_token_id_indices[rows_with_true]
+                    .float()
+                    .flip(dims=[1])
+                    .argmax(dim=1)
+                )
+                # Convert back to original indices
+                last_indices = ve_token_id_indices.size(1) - 1 - last_indices
+                # Only modify rows that have true values
+                ve_token_id_indices[row_indices, last_indices] = False
                 ve_token_features = hidden_states[ve_token_id_indices]
+                # Get rid of the last VE features because it's already reached the end of the patient sequence and
+                # there is nothing to predict.
                 motor_tte_loss = self.motor_nll_loss(
                     ve_token_features,
                     motor_time_to_event_vectors,
@@ -1597,9 +1616,13 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 )
                 loss += motor_tte_loss * self.config.motor_time_to_event_weight
 
-                # We add another loss term when use_sub_time_tokenization is enabled, we need to recover the sub time token
+            # We add another loss term when use_sub_time_tokenization is enabled, we need to recover the sub time token
             # predictions for year/month/token
-            if self.config.use_sub_time_tokenization:
+            if (
+                    self.config.use_sub_time_tokenization
+                    and sub_time_tokens is not None
+                    and time_token_indicators is not None
+            ):
                 # Split the last dimensions into three parts
                 time_loss_fct = CrossEntropyLoss(reduction="none")
                 time_token_logits = self.time_token_lm_head(
@@ -1626,7 +1649,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 time_token_loss = time_token_loss.sum() / total_num_tokens
                 loss += time_token_loss * self.config.time_token_loss_weight
 
-            if time_to_visits is not None:
+            if time_to_visits is not None and time_to_visits is not None:
                 # Get lambda and k parameters
                 lambda_param, k_param = self.tte_head(hidden_states)
 
@@ -1637,7 +1660,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
                 # Move to the same device as lambda_param
                 shift_time_to_visits = shift_time_to_visits.to(lambda_param.device)
-
                 time_to_visit_indicator = shift_time_to_visits >= 0
                 # Define the Gamma distribution
                 dist = Gamma(
@@ -1651,7 +1673,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 time_to_visit_loss = -log_probs.sum() / total_num_tokens
                 # Compute the loss
                 loss += time_to_visit_loss * self.config.time_to_visit_loss_weight
-
 
             if true_values is not None and true_value_indicators is not None:
                 true_values = true_values.to(value_logits.device)
