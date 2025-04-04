@@ -1080,6 +1080,13 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         )
         att_tokenizer.train_from_iterator(sub_time_token_data, trainer=att_trainer)
 
+        # Prune concept_name_mapping
+        concept_name_mapping = {
+            concept_id: concept_name_mapping[concept_id]
+            for concept_id in vocab.keys()
+            if concept_id in concept_name_mapping
+        }
+
         # Prune motor_time_to_event_codes
         motor_time_to_event_codes = [
             concept_id
