@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
+from transformers.utils import logging
 
 from cehrgpt.gpt_utils import (
     DEMOGRAPHIC_PROMPT_SIZE,
@@ -18,6 +19,7 @@ from cehrgpt.gpt_utils import (
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 INPATIENT_STAY_DURATION_LIMIT = 30
+LOG = logging.get_logger("transformers")
 
 
 class CehrGptDataCollator:
@@ -225,41 +227,49 @@ class CehrGptDataCollator:
             batch_motor_time_to_event_vectors = torch.concat(
                 batch_motor_time_to_event_vectors, dim=0
             ).to(torch.float32)
-            length, motor_tte_vocab_size = batch_motor_time_to_event_vectors.shape
-            padded_length = batch_size - length % batch_size
 
-            batch["motor_time_to_event_vectors"] = (
-                torch.concat(
-                    [
-                        batch_motor_time_to_event_vectors,
-                        torch.full((padded_length, motor_tte_vocab_size), 0.0),
-                    ],
-                    dim=0,
+            # If every example in the batch only contains one visit, there would be no labels generated for MOTOR TTE
+            # we only create the labels when any example has more than one visit
+            if batch_motor_time_to_event_vectors.dim() <= 1:
+                LOG.warning(
+                    "There are no MOTOR TTE labels generated for this batch "
+                    "because every example in this batch only contains one visit."
                 )
-                .reshape((batch_size, -1, motor_tte_vocab_size))
-                .to(torch.float32)
-            )
+            else:
+                length, motor_tte_vocab_size = batch_motor_time_to_event_vectors.shape
+                padded_length = batch_size - length % batch_size
+                batch["motor_time_to_event_vectors"] = (
+                    torch.concat(
+                        [
+                            batch_motor_time_to_event_vectors,
+                            torch.full((padded_length, motor_tte_vocab_size), 0.0),
+                        ],
+                        dim=0,
+                    )
+                    .reshape((batch_size, -1, motor_tte_vocab_size))
+                    .to(torch.float32)
+                )
 
-            batch_motor_censor_indicators = torch.concat(
-                batch_motor_censor_indicators, dim=0
-            ).to(torch.float32)
-            batch["motor_censor_indicators"] = (
-                torch.concat(
-                    [
-                        batch_motor_censor_indicators,
-                        torch.full((padded_length, motor_tte_vocab_size), 0.0),
-                    ],
-                    dim=0,
+                batch_motor_censor_indicators = torch.concat(
+                    batch_motor_censor_indicators, dim=0
+                ).to(torch.float32)
+                batch["motor_censor_indicators"] = (
+                    torch.concat(
+                        [
+                            batch_motor_censor_indicators,
+                            torch.full((padded_length, motor_tte_vocab_size), 0.0),
+                        ],
+                        dim=0,
+                    )
+                    .reshape((batch_size, -1, motor_tte_vocab_size))
+                    .to(torch.float32)
                 )
-                .reshape((batch_size, -1, motor_tte_vocab_size))
-                .to(torch.float32)
-            )
-            batch["motor_end_index"] = torch.concat(
-                [
-                    torch.full((length, 1), 1, dtype=torch.int32),
-                    torch.full((padded_length, 1), 0, dtype=torch.int32),
-                ]
-            ).reshape((batch_size, -1))
+                batch["motor_end_index"] = torch.concat(
+                    [
+                        torch.full((length, 1), 1, dtype=torch.int32),
+                        torch.full((padded_length, 1), 0, dtype=torch.int32),
+                    ]
+                ).reshape((batch_size, -1))
 
         if self.include_values:
             batch_value_indicators = [
