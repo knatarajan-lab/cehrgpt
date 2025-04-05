@@ -1464,9 +1464,24 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             if self.config.include_motor_time_to_event:
                 ve_token_id_indices = labels == self.config.ve_token_id
+                rows_with_true = ve_token_id_indices.sum(dim=1) > 0
+                row_indices = torch.arange(
+                    ve_token_id_indices.shape[0], device=ve_token_id_indices.device
+                )[rows_with_true]
+                # Find the last True by converting boolean to float before flipping and finding argmax
+                last_indices = (
+                    ve_token_id_indices[rows_with_true]
+                    .float()
+                    .flip(dims=[1])
+                    .argmax(dim=1)
+                )
+                # Convert back to original indices
+                last_indices = ve_token_id_indices.size(1) - 1 - last_indices
+                # Only modify rows that have true values
+                ve_token_id_indices[row_indices, last_indices] = False
                 ve_token_features = hidden_states[ve_token_id_indices]
-                if torch.isnan(hidden_states).any():
-                    logger.warning(f"NaN values found hidden_states: {hidden_states}")
+                # Get rid of the last VE features because it's already reached the end of the patient sequence and
+                # there is nothing to predict.
                 motor_tte_loss = self.motor_nll_loss(
                     ve_token_features,
                     motor_time_to_event_vectors,
@@ -1475,7 +1490,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 )
                 loss += motor_tte_loss * self.config.motor_time_to_event_weight
 
-                # We add another loss term when use_sub_time_tokenization is enabled, we need to recover the sub time token
+        # We add another loss term when use_sub_time_tokenization is enabled, we need to recover the sub time token
         # predictions for year/month/token
         if (
             self.config.use_sub_time_tokenization
