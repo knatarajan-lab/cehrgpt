@@ -41,9 +41,6 @@ if is_flash_attn_2_available():
 
 if is_accelerate_available():
     from accelerate.hooks import add_hook_to_module
-import os
-
-os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 logger = logging.get_logger(__name__)
 
