@@ -1404,9 +1404,13 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             Tensor: Scalar loss value (mean negative log-likelihood)
         """
         batch_motor_end_index = batch_motor_end_index.sum().item()
-        motor_time_to_event_vectors = motor_time_to_event_vectors.reshape(
-            (-1, self.config.motor_tte_vocab_size)
-        )[:batch_motor_end_index]
+        # Shift motor_time_to_event_vectors by 1 because some of the time intervals are 0
+        motor_time_to_event_vectors = (
+            motor_time_to_event_vectors.reshape((-1, self.config.motor_tte_vocab_size))[
+                :batch_motor_end_index
+            ]
+            + 1
+        )
         motor_censor_indicators = motor_censor_indicators.reshape(
             (-1, self.config.motor_tte_vocab_size)
         )[:batch_motor_end_index]
@@ -1417,25 +1421,18 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             f"Received ve_token_features.shape[0]: {ve_token_features.shape[0]}, "
             f"motor_time_to_event_vectors.shape[0]: {motor_time_to_event_vectors.shape[0]}"
         )
-
-        # Apply natural log transformation (log(t + 1)) for numerical stability
-        log_tte = torch.log(motor_time_to_event_vectors + 2).clamp(
-            min=1e-6
-        )  # log(1 + t)
-
         # Get Weibull parameters from model
         scale, concentration = self.motor_tte(ve_token_features)
         dist = Weibull(scale=scale, concentration=concentration)
 
         # Compute log-likelihood terms
-        log_pdf = dist.log_prob(log_tte)
-        log_survival = torch.log(1 - dist.cdf(log_tte).clamp(max=1 - 1e-6) + 1e-6)
-
-        # Masked log-likelihood (event vs. censored)
+        log_pdf = dist.log_prob(motor_time_to_event_vectors)
+        log_survival = torch.log(
+            1 - dist.cdf(motor_time_to_event_vectors).clamp(max=1 - 1e-6) + 1e-6
+        )
         motor_loss = (
             1 - motor_censor_indicators
         ) * log_pdf + motor_censor_indicators * log_survival
-
         return -torch.mean(motor_loss)
 
     def forward(
@@ -1698,6 +1695,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                         token_value_loss * self.config.lab_token_loss_weight
                     )
                 loss += token_value_loss * self.config.value_prediction_loss_weight
+
 
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]
