@@ -1459,7 +1459,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 # Regularization term: mean entropy scaled by alpha
                 loss += self.cehrgpt.config.entropy_penalty_alpha * entropy.mean()
 
-            if self.config.include_motor_time_to_event:
+            if (
+                self.config.include_motor_time_to_event
+                and motor_time_to_event_vectors is not None
+                and motor_censor_indicators is not None
+                and motor_end_index is not None
+            ):
                 ve_token_id_indices = labels == self.config.ve_token_id
                 rows_with_true = ve_token_id_indices.sum(dim=1) > 0
                 row_indices = torch.arange(
