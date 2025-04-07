@@ -415,9 +415,9 @@ class CehrGptDataCollator:
         # Reverse back to chronological order for final labels
         time_to_event_data.reverse()
 
-        # Drop the last visit, since there's no future event beyond it
-        if time_to_event_data:
-            time_to_event_data.pop()
+        # # Drop the last visit, since there's no future event beyond it
+        # if time_to_event_data:
+        #     time_to_event_data.pop()
 
         for visit_tte_data in time_to_event_data:
             time_to_event_vector = np.full(
