@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as f
 from torch import nn
-from torch.distributions import Gamma, LogNormal
+from torch.distributions import Gamma, Weibull
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
 from transformers import PreTrainedModel
@@ -1388,23 +1388,25 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         batch_motor_end_index,
     ):
         """
-        Computes the negative log-likelihood (NLL) loss using the LogNormal distribution.
+        Computes the negative log-likelihood (NLL) loss for time-to-event prediction using the Weibull distribution.
 
-        for modeling time-to-event data at each visit.
+        Applies a natural log transformation to the time-to-event targets to stabilize training and ensure valid inputs
+        to the distribution.
 
         Args:
-            ve_token_features (Tensor): Hidden representations for the [VE] tokens [num_visits, hidden_dim].
-            motor_time_to_event_vectors (Tensor): Raw time-to-event durations [B, T, motor_vocab_size] (flattened).
-            motor_censor_indicators (Tensor): Binary indicators (1 if censored, 0 if event occurred).
-            batch_motor_end_index (Tensor): Tensor indicating the number of valid [VE] tokens in the batch.
+            ve_token_features (Tensor): Hidden representations for the VE tokens. Shape: [N, hidden_dim]
+            motor_time_to_event_vectors (Tensor): Time-to-event targets. Shape: [B, T, motor_vocab_size] (flattened internally)
+            motor_censor_indicators (Tensor): Binary censoring indicators (1 = censored, 0 = event occurred).
+                                              Same shape as `motor_time_to_event_vectors`.
+            batch_motor_end_index (Tensor): Tensor indicating how many VE tokens in the current batch are valid.
 
         Returns:
-            Tensor: Scalar loss value (mean negative log-likelihood).
+            Tensor: Scalar loss value (mean negative log-likelihood)
         """
         batch_motor_end_index = batch_motor_end_index.sum().item()
         motor_time_to_event_vectors = motor_time_to_event_vectors.reshape(
             (-1, self.config.motor_tte_vocab_size)
-        )[:batch_motor_end_index].clamp(min=1e-3)
+        )[:batch_motor_end_index].clamp(min=1e-6)
         motor_censor_indicators = motor_censor_indicators.reshape(
             (-1, self.config.motor_tte_vocab_size)
         )[:batch_motor_end_index]
@@ -1415,10 +1417,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             f"Received ve_token_features.shape[0]: {ve_token_features.shape[0]}, "
             f"motor_time_to_event_vectors.shape[0]: {motor_time_to_event_vectors.shape[0]}"
         )
-
         # Get Weibull parameters from model
-        mu, sigma = self.motor_tte(ve_token_features)
-        dist = LogNormal(loc=mu, scale=sigma)
+        scale, concentration = self.motor_tte(ve_token_features)
+        dist = Weibull(scale=scale, concentration=concentration)
 
         # Compute log-likelihood terms
         log_pdf = dist.log_prob(motor_time_to_event_vectors)
