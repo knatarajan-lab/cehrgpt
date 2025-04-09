@@ -1087,12 +1087,13 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             if concept_id in concept_name_mapping
         }
 
-        # Prune motor_time_to_event_codes
-        motor_time_to_event_codes = [
-            concept_id
-            for concept_id in motor_time_to_event_codes
-            if concept_id in vocab
-        ]
+        if motor_time_to_event_codes:
+            # Prune motor_time_to_event_codes
+            motor_time_to_event_codes = [
+                concept_id
+                for concept_id in motor_time_to_event_codes
+                if concept_id in vocab
+            ]
 
         return CehrGptTokenizer(
             concept_tokenizer,
