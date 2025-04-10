@@ -1,3 +1,4 @@
+import functools
 import os
 from typing import Optional, Union
 
@@ -27,6 +28,7 @@ from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.runners.data_utils import data_collate_fn, get_torch_dtype
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 
@@ -416,9 +418,10 @@ def main():
     if not data_args.streaming:
         processed_dataset.set_format("pt")
 
-    trainer = Trainer(
-        model=model,
-        data_collator=CehrGptDataCollator(
+    collator = functools.partial(
+        data_collate_fn,
+        model_type=get_torch_dtype(model_args.torch_dtype),
+        collator=CehrGptDataCollator(
             tokenizer=cehrgpt_tokenizer,
             max_length=model_args.max_position_embeddings,
             shuffle_records=data_args.shuffle_records,
@@ -428,6 +431,11 @@ def main():
             motor_tte_vocab_size=cehrgpt_tokenizer.motor_tte_vocab_size,
             include_values=model_args.include_values,
         ),
+    )
+
+    trainer = Trainer(
+        model=model,
+        data_collator=collator,
         train_dataset=processed_dataset["train"],
         eval_dataset=processed_dataset["test"],
         args=training_args,
