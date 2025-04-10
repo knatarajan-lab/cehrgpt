@@ -1285,9 +1285,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             Tensor: Scalar loss value (mean negative log-likelihood)
         """
         batch_motor_end_index = batch_motor_end_index.sum().item()
-        motor_time_to_event_vectors = motor_time_to_event_vectors.reshape(
-            (-1, self.config.motor_tte_vocab_size)
-        )[:batch_motor_end_index].clamp(min=1e-2)
+        motor_time_to_event_vectors = (
+            motor_time_to_event_vectors.reshape((-1, self.config.motor_tte_vocab_size))[
+                :batch_motor_end_index
+            ]
+            + 1
+        )
         motor_censor_indicators = motor_censor_indicators.reshape(
             (-1, self.config.motor_tte_vocab_size)
         )[:batch_motor_end_index]
