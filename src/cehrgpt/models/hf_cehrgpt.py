@@ -279,7 +279,9 @@ class MotorTaskHead(nn.Module):
 
     def forward(self, x):
         # Ensure scale is positive
-        alpha_beta = f.softplus(self.linear(x))
+        alpha_beta_raw = self.linear(x)
+        alpha_beta_raw = torch.clamp(alpha_beta_raw, min=-10, max=10)
+        alpha_beta = f.softplus(alpha_beta_raw) + 1e-6
         lambda_p = alpha_beta[..., : self.motor_tte_vocab_size]
         beta = alpha_beta[..., self.motor_tte_vocab_size :]
         # Check for NaN values
@@ -1285,12 +1287,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             Tensor: Scalar loss value (mean negative log-likelihood)
         """
         batch_motor_end_index = batch_motor_end_index.sum().item()
-        motor_time_to_event_vectors = (
-            motor_time_to_event_vectors.reshape((-1, self.config.motor_tte_vocab_size))[
-                :batch_motor_end_index
-            ]
-            + 1
-        )
+        motor_time_to_event_vectors = motor_time_to_event_vectors.reshape(
+            (-1, self.config.motor_tte_vocab_size)
+        )[:batch_motor_end_index].clamp(min=1e-2)
+
         motor_censor_indicators = motor_censor_indicators.reshape(
             (-1, self.config.motor_tte_vocab_size)
         )[:batch_motor_end_index]
@@ -1561,7 +1561,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 shift_next_values.view(-1),
             )
             token_value_loss *= shift_value_indicators.view(-1)
-            loss += token_value_loss.mean()
+            loss += token_value_loss.mean() * self.cehrgpt.config.lab_token_penalty
 
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]
