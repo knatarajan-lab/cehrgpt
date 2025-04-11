@@ -1,16 +1,14 @@
 import argparse
 import json
 import pickle
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Union
 
-import lightgbm as lgb
 import numpy as np
-import optuna
 import pandas as pd
 from sklearn.linear_model import LogisticRegressionCV
 from sklearn.metrics import auc, precision_recall_curve, roc_auc_score
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
@@ -93,11 +91,15 @@ def main(args):
                 pickle.dump(model, f)
 
         test_dataset = prepare_dataset(feature_test, feature_processor)
+        index_dates = map(
+            datetime.fromtimestamp,
+            test_dataset["prediction_time"].tolist(),
+        )
         y_pred = model.predict_log_proba(test_dataset["features"])[:, 1]
         logistic_predictions = pd.DataFrame(
             {
                 "subject_id": test_dataset["subject_id"].tolist(),
-                "prediction_time": test_dataset["prediction_time"].tolist(),
+                "prediction_time": index_dates,
                 "predicted_boolean_probability": y_pred.tolist(),
                 "predicted_boolean_value": None,
                 "boolean_value": test_dataset["boolean_value"].astype(bool).tolist(),
@@ -106,7 +108,7 @@ def main(args):
         logistic_test_predictions = logistic_dir / "test_predictions"
         logistic_test_predictions.mkdir(exist_ok=True, parents=True)
         logistic_predictions.to_parquet(
-            logistic_test_predictions / "test_gbm_predictions.parquet"
+            logistic_test_predictions / "predictions.parquet"
         )
 
         roc_auc = roc_auc_score(test_dataset["boolean_value"], y_pred)
