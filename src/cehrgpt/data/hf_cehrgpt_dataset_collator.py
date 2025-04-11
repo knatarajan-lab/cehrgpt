@@ -212,11 +212,13 @@ class CehrGptDataCollator:
         if "index_date" in examples[0]:
             batch["index_date"] = torch.cat(
                 [
-                    self._convert_to_tensor(example["index_date"]).reshape(-1, 1)
+                    torch.tensor(example["index_date"], dtype=torch.float64).reshape(
+                        -1, 1
+                    )
                     for example in examples
                 ],
                 dim=0,
-            ).to(torch.float32)
+            )
 
         if "age_at_index" in examples[0]:
             batch["age_at_index"] = torch.cat(

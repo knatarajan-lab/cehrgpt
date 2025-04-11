@@ -524,7 +524,9 @@ def do_predict(
                     "subject_id": person_ids,
                     "prediction_time": index_dates,
                     "predicted_boolean_probability": probabilities,
-                    "predicted_boolean_value": None,
+                    "predicted_boolean_value": pd.Series(
+                        [None] * len(person_ids), dtype=bool
+                    ),
                     "boolean_value": labels,
                 }
             )

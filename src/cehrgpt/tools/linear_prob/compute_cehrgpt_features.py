@@ -1,6 +1,7 @@
 import glob
 import os
 import shutil
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -103,19 +104,38 @@ def main():
         cache_file_collector.remove_cache_files()
 
     # Getting the existing features
-    feature_folders = glob.glob(os.path.join(training_args.output_dir, "*", "features"))
+    feature_folders = glob.glob(
+        os.path.join(training_args.output_dir, "*", "features", "*.parquet")
+    )
     if feature_folders:
         existing_features = pd.concat(
-            [pd.read_parquet(f, columns=["subject_id"]) for f in feature_folders],
+            [
+                pd.read_parquet(f, columns=["subject_id", "prediction_time_posix"])
+                for f in feature_folders
+            ],
             ignore_index=True,
         )
-        existing_person_ids = existing_features.subject_id.tolist()
+        subject_prediction_tuples = set(
+            existing_features.apply(
+                lambda row: f"{int(row['subject_id'])}-{int(row['prediction_time_posix'])}",
+                axis=1,
+            ).tolist()
+        )
         processed_dataset = processed_dataset.filter(
-            lambda _batch: [_ not in existing_person_ids for _ in _batch["person_id"]],
+            lambda _batch: [
+                f"{int(subject)}-{int(time)}" not in subject_prediction_tuples
+                for subject, time in zip(_batch["person_id"], _batch["index_date"])
+            ],
             num_proc=data_args.preprocessing_num_workers,
             batch_size=data_args.preprocessing_batch_size,
+            batched=True,
         )
-    cache_file_collector.add_cache_files(processed_dataset)
+        LOG.info(
+            "The datasets after filtering (train: %s, validation: %s, test: %s)",
+            len(processed_dataset["train"]),
+            len(processed_dataset["validation"]),
+            len(processed_dataset["test"]),
+        )
 
     LOG.info(f"cehrgpt_model.config.vocab_size: {cehrgpt_model.config.vocab_size}")
     LOG.info(f"cehrgpt_tokenizer.vocab_size: {cehrgpt_tokenizer.vocab_size}")
@@ -132,8 +152,6 @@ def main():
             model_args.max_position_embeddings
         )
         cehrgpt_model.resize_position_embeddings(model_args.max_position_embeddings)
-    # Remove any cached files
-    cache_file_collector.remove_cache_files()
 
     data_collator = CehrGptDataCollator(
         tokenizer=cehrgpt_tokenizer,
@@ -169,9 +187,19 @@ def main():
 
     # Loading demographics
     print("Loading demographics as a dictionary")
-    demographics_df = pd.read_parquet(
-        data_args.data_folder,
-        columns=["person_id", "index_date", "gender_concept_id", "race_concept_id"],
+    demographics_df = pd.concat(
+        [
+            pd.read_parquet(
+                data_dir,
+                columns=[
+                    "person_id",
+                    "index_date",
+                    "gender_concept_id",
+                    "race_concept_id",
+                ],
+            )
+            for data_dir in [data_args.data_folder, data_args.test_data_folder]
+        ]
     )
     demographics_df["index_date"] = demographics_df.index_date.dt.date
     demographics_dict = {
@@ -199,14 +227,12 @@ def main():
                 prediction_time_ages = (
                     batch.pop("age_at_index").numpy().squeeze().astype(float)
                 )
-                person_ids = batch.pop("person_id").numpy().squeeze().astype(int)
-                index_dates = list(
-                    map(
-                        datetime.fromtimestamp,
-                        batch.pop("index_date").numpy().squeeze(axis=-1).tolist(),
-                    )
-                    if "index_date" in batch
-                    else None
+                person_ids = list(batch.pop("person_id").numpy().squeeze().astype(int))
+                prediction_time_posix = (
+                    batch.pop("index_date").numpy().squeeze(axis=-1).tolist()
+                )
+                prediction_time = list(
+                    map(datetime.fromtimestamp, prediction_time_posix)
                 )
                 labels = (
                     batch.pop("classifier_label")
@@ -221,8 +247,23 @@ def main():
                 cehrgpt_output = cehrgpt_model(
                     **batch, output_attentions=False, output_hidden_states=False
                 )
+                last_end_token = any(
+                    [
+                        cehrgpt_tokenizer.end_token_id == input_id
+                        for input_id in batch.pop("input_ids")
+                        .cpu()
+                        .numpy()
+                        .squeeze()
+                        .tolist()
+                    ]
+                )
+                last_token_index = -2 if last_end_token else -1
+                LOG.debug(
+                    "The last token is [END], we need to use the token index before that: %s",
+                    last_token_index,
+                )
                 features = (
-                    cehrgpt_output.last_hidden_state[..., -1, :]
+                    cehrgpt_output.last_hidden_state[..., last_token_index, :]
                     .cpu()
                     .float()
                     .detach()
@@ -233,7 +274,7 @@ def main():
                 features_list = [feature for feature in features]
                 race_concept_ids = []
                 gender_concept_ids = []
-                for person_id, index_date in zip(person_ids, index_dates):
+                for person_id, index_date in zip(person_ids, prediction_time):
                     key = (person_id, index_date.date())
                     if key in demographics_dict:
                         demographics = demographics_dict[key]
@@ -246,7 +287,8 @@ def main():
                 features_pd = pd.DataFrame(
                     {
                         "subject_id": person_ids,
-                        "prediction_time": index_dates,
+                        "prediction_time": prediction_time,
+                        "prediction_time_posix": prediction_time_posix,
                         "boolean_value": labels,
                         "age_at_index": prediction_time_ages,
                     }
@@ -255,7 +297,9 @@ def main():
                 features_pd["features"] = features_list
                 features_pd["race_concept_id"] = race_concept_ids
                 features_pd["gender_concept_id"] = gender_concept_ids
-                features_pd.to_parquet(feature_output_folder / f"{index}.parquet")
+                features_pd.to_parquet(
+                    feature_output_folder / f"{uuid.uuid4()}.parquet"
+                )
 
 
 if __name__ == "__main__":
