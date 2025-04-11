@@ -7,6 +7,7 @@ from typing import Any, Dict, Union
 
 import numpy as np
 import pandas as pd
+import polars as pl
 from sklearn.linear_model import LogisticRegressionCV
 from sklearn.metrics import auc, precision_recall_curve, roc_auc_score
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
@@ -96,7 +97,7 @@ def main(args):
             test_dataset["prediction_time"].tolist(),
         )
         y_pred = model.predict_log_proba(test_dataset["features"])[:, 1]
-        logistic_predictions = pd.DataFrame(
+        logistic_predictions = pl.DataFrame(
             {
                 "subject_id": test_dataset["subject_id"].tolist(),
                 "prediction_time": index_dates,
@@ -105,9 +106,12 @@ def main(args):
                 "boolean_value": test_dataset["boolean_value"].astype(bool).tolist(),
             }
         )
+        logistic_predictions = logistic_predictions.with_columns(
+            pl.col("predicted_boolean_value").cast(pl.Boolean())
+        )
         logistic_test_predictions = logistic_dir / "test_predictions"
         logistic_test_predictions.mkdir(exist_ok=True, parents=True)
-        logistic_predictions.to_parquet(
+        logistic_predictions.write_parquet(
             logistic_test_predictions / "predictions.parquet"
         )
 
