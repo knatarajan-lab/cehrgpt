@@ -117,12 +117,13 @@ def main():
         )
         subject_prediction_tuples = set(
             existing_features.apply(
-                lambda row: (row["subject_id"], row["prediction_time_posix"]), axis=1
-            )
+                lambda row: f"{int(row['subject_id'])}-{int(row['prediction_time_posix'])}",
+                axis=1,
+            ).tolist()
         )
         processed_dataset = processed_dataset.filter(
             lambda _batch: [
-                (subject, time) not in subject_prediction_tuples
+                f"{int(subject)}-{int(time)}" not in subject_prediction_tuples
                 for subject, time in zip(_batch["person_id"], _batch["index_date"])
             ],
             num_proc=data_args.preprocessing_num_workers,
