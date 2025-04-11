@@ -91,7 +91,7 @@ def main(args):
                 pickle.dump(model, f)
 
         test_dataset = prepare_dataset(feature_test, feature_processor)
-        y_pred = model.predict_log_proba(test_dataset["features"])[:, 1]
+        y_pred = model.predict_proba(test_dataset["features"])[:, 1]
         logistic_predictions = pl.DataFrame(
             {
                 "subject_id": test_dataset["subject_id"].tolist(),
