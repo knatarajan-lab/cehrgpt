@@ -118,7 +118,6 @@ def main():
             batch_size=data_args.preprocessing_batch_size,
             batched=True,
         )
-    cache_file_collector.add_cache_files(processed_dataset)
 
     LOG.info(f"cehrgpt_model.config.vocab_size: {cehrgpt_model.config.vocab_size}")
     LOG.info(f"cehrgpt_tokenizer.vocab_size: {cehrgpt_tokenizer.vocab_size}")
@@ -135,8 +134,6 @@ def main():
             model_args.max_position_embeddings
         )
         cehrgpt_model.resize_position_embeddings(model_args.max_position_embeddings)
-    # Remove any cached files
-    cache_file_collector.remove_cache_files()
 
     data_collator = CehrGptDataCollator(
         tokenizer=cehrgpt_tokenizer,
