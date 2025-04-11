@@ -20,7 +20,7 @@ def prepare_dataset(
     race_encoder = feature_processor["race_encoder"]
     scaled_age = age_scaler.transform(df[["age_at_index"]].to_numpy())
     one_hot_gender = gender_encoder.transform(df[["gender_concept_id"]].to_numpy())
-    one_hot_race = race_encoder.transform(df[["gender_concept_id"]].to_numpy())
+    one_hot_race = race_encoder.transform(df[["race_concept_id"]].to_numpy())
 
     features = np.stack(df["features"].apply(lambda x: np.array(x).flatten()))
     concatenated_features = np.hstack(
@@ -61,7 +61,7 @@ def main(args):
         gender_encoder = gender_encoder.fit(
             feature_train[["gender_concept_id"]].to_numpy()
         )
-        race_encoder = race_encoder.fit(feature_train[["gender_concept_id"]].to_numpy())
+        race_encoder = race_encoder.fit(feature_train[["race_concept_id"]].to_numpy())
         feature_processor = {
             "age_scaler": age_scaler,
             "gender_encoder": gender_encoder,
