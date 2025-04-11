@@ -114,6 +114,7 @@ def main():
             lambda _batch: [_ not in existing_person_ids for _ in _batch["person_id"]],
             num_proc=data_args.preprocessing_num_workers,
             batch_size=data_args.preprocessing_batch_size,
+            batched=True,
         )
     cache_file_collector.add_cache_files(processed_dataset)
 
