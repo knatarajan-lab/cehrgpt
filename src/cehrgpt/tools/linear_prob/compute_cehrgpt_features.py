@@ -110,24 +110,30 @@ def main():
     if feature_folders:
         existing_features = pd.concat(
             [
-                pd.read_parquet(f, columns=["subject_id", "prediction_time"])
+                pd.read_parquet(f, columns=["subject_id", "prediction_time_posix"])
                 for f in feature_folders
             ],
             ignore_index=True,
         )
-        subject_prediction_tuples = list(
+        subject_prediction_tuples = set(
             existing_features.apply(
-                lambda row: (row["subject_id"], row["prediction_time"]), axis=1
+                lambda row: (row["subject_id"], row["prediction_time_posix"]), axis=1
             )
         )
         processed_dataset = processed_dataset.filter(
             lambda _batch: [
-                (subject, datetime.fromtimestamp(time)) not in subject_prediction_tuples
+                (subject, time) not in subject_prediction_tuples
                 for subject, time in zip(_batch["person_id"], _batch["index_date"])
             ],
             num_proc=data_args.preprocessing_num_workers,
             batch_size=data_args.preprocessing_batch_size,
             batched=True,
+        )
+        LOG.info(
+            "The datasets after filtering (train: %s, validation: %s, test: %s)",
+            len(processed_dataset["train"]),
+            len(processed_dataset["validation"]),
+            len(processed_dataset["test"]),
         )
 
     LOG.info(f"cehrgpt_model.config.vocab_size: {cehrgpt_model.config.vocab_size}")
@@ -211,13 +217,11 @@ def main():
                     batch.pop("age_at_index").numpy().squeeze().astype(float)
                 )
                 person_ids = list(batch.pop("person_id").numpy().squeeze().astype(int))
-                index_dates = list(
-                    map(
-                        datetime.fromtimestamp,
-                        batch.pop("index_date").numpy().squeeze(axis=-1).tolist(),
-                    )
-                    if "index_date" in batch
-                    else None
+                prediction_time_posix = (
+                    batch.pop("index_date").numpy().squeeze(axis=-1).tolist()
+                )
+                prediction_time = list(
+                    map(datetime.fromtimestamp, prediction_time_posix)
                 )
                 labels = (
                     batch.pop("classifier_label")
@@ -259,7 +263,7 @@ def main():
                 features_list = [feature for feature in features]
                 race_concept_ids = []
                 gender_concept_ids = []
-                for person_id, index_date in zip(person_ids, index_dates):
+                for person_id, index_date in zip(person_ids, prediction_time):
                     key = (person_id, index_date.date())
                     if key in demographics_dict:
                         demographics = demographics_dict[key]
@@ -272,7 +276,8 @@ def main():
                 features_pd = pd.DataFrame(
                     {
                         "subject_id": person_ids,
-                        "prediction_time": index_dates,
+                        "prediction_time": prediction_time,
+                        "prediction_time_posix": prediction_time_posix,
                         "boolean_value": labels,
                         "age_at_index": prediction_time_ages,
                     }
