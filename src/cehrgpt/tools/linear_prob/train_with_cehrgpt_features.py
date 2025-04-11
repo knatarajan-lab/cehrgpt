@@ -1,7 +1,6 @@
 import argparse
 import json
 import pickle
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Union
 
@@ -92,15 +91,11 @@ def main(args):
                 pickle.dump(model, f)
 
         test_dataset = prepare_dataset(feature_test, feature_processor)
-        index_dates = map(
-            datetime.fromtimestamp,
-            test_dataset["prediction_time"].tolist(),
-        )
         y_pred = model.predict_log_proba(test_dataset["features"])[:, 1]
         logistic_predictions = pl.DataFrame(
             {
                 "subject_id": test_dataset["subject_id"].tolist(),
-                "prediction_time": index_dates,
+                "prediction_time": test_dataset["prediction_time"].tolist(),
                 "predicted_boolean_probability": y_pred.tolist(),
                 "predicted_boolean_value": None,
                 "boolean_value": test_dataset["boolean_value"].astype(bool).tolist(),
