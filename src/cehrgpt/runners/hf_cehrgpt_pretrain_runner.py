@@ -1,4 +1,5 @@
 import functools
+import math
 import os
 from typing import Optional, Union
 
@@ -18,7 +19,14 @@ from cehrbert.runners.runner_util import (
     load_parquet_as_dataset,
 )
 from datasets import Dataset, DatasetDict, IterableDatasetDict, load_from_disk
-from transformers import Trainer, TrainingArguments, set_seed
+from transformers import (
+    Trainer,
+    TrainerCallback,
+    TrainerControl,
+    TrainerState,
+    TrainingArguments,
+    set_seed,
+)
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset
@@ -33,6 +41,52 @@ from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 
 LOG = logging.get_logger("transformers")
+
+
+class MotorLossWeightUpdateCallback(TrainerCallback):
+
+    def __init__(
+        self,
+        warmup_motor_loss_weight: bool = False,
+        base: float = 1.05,
+    ):
+        self.warmup_motor_loss_weight = warmup_motor_loss_weight
+        self.base = base
+
+    def on_epoch_end(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ):
+        model: Optional[CEHRGPT2LMHeadModel] = kwargs.get("model", None)
+        if self.warmup_motor_loss_weight and model is not None:
+            motor_time_to_event_weight = getattr(
+                model.config, "motor_time_to_event_weight", None
+            )
+            if motor_time_to_event_weight:
+                LOG.info(
+                    "The current motor_time_to_event_weight: %",
+                    motor_time_to_event_weight,
+                )
+                new_weight = self.motor_loss_weight_warmup(
+                    motor_time_to_event_weight, state.epoch
+                )
+                model.config.motor_time_to_event_weight = new_weight
+                updated_weight = getattr(
+                    model.config, "motor_time_to_event_weight", None
+                )
+                LOG.info("The new motor_time_to_event_weight: %", updated_weight)
+
+    def motor_loss_weight_warmup(
+        self,
+        weight: float,
+        epoch: float,
+    ) -> float:
+        base = max(1.0, self.base)
+        new_weight = min(math.pow(base, epoch) * weight, 1.0)
+        return new_weight
 
 
 def tokenizer_exists(tokenizer_name_or_path: str) -> bool:
@@ -51,7 +105,6 @@ def load_and_create_tokenizer(
     cehrgpt_args: CehrGPTArguments,
     dataset: Optional[Union[Dataset, DatasetDict]] = None,
 ) -> CehrGptTokenizer:
-
     concept_name_mapping = {}
     motor_time_to_event_codes = list()
     if cehrgpt_args.concept_dir:
@@ -439,6 +492,7 @@ def main():
         train_dataset=processed_dataset["train"],
         eval_dataset=processed_dataset["test"],
         args=training_args,
+        callbacks=[MotorLossWeightUpdateCallback()],
     )
 
     checkpoint = None

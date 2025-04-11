@@ -155,6 +155,12 @@ class CehrGPTArguments:
         default=1.0,
         metadata={"help": "The MOTOR time to event loss weight"},
     )
+    warmup_motor_loss_weight: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to warm up the MOTOR loss weight over time"
+        },
+    )
     concept_dir: Optional[str] = dataclasses.field(
         default=None,
         metadata={"help": "The directory where the concept data is stored."},
