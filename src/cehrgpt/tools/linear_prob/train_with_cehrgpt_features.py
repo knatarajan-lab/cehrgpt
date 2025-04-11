@@ -59,8 +59,8 @@ def main(args):
     else:
         age_scaler, gender_encoder, race_encoder = (
             StandardScaler(),
-            OneHotEncoder(),
-            OneHotEncoder(),
+            OneHotEncoder(handle_unknown="ignore"),
+            OneHotEncoder(handle_unknown="ignore"),
         )
         age_scaler = age_scaler.fit(feature_train[["age_at_index"]].to_numpy())
         gender_encoder = gender_encoder.fit(
