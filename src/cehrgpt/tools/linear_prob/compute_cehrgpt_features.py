@@ -199,7 +199,7 @@ def main():
                 prediction_time_ages = (
                     batch.pop("age_at_index").numpy().squeeze().astype(float)
                 )
-                person_ids = batch.pop("person_id").numpy().squeeze().astype(int)
+                person_ids = list(batch.pop("person_id").numpy().squeeze().astype(int))
                 index_dates = list(
                     map(
                         datetime.fromtimestamp,
