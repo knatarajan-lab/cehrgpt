@@ -103,7 +103,9 @@ def main():
         cache_file_collector.remove_cache_files()
 
     # Getting the existing features
-    feature_folders = glob.glob(os.path.join(training_args.output_dir, "*", "features"))
+    feature_folders = glob.glob(
+        os.path.join(training_args.output_dir, "*", "features", "*.parquet")
+    )
     if feature_folders:
         existing_features = pd.concat(
             [pd.read_parquet(f, columns=["subject_id"]) for f in feature_folders],
@@ -228,7 +230,7 @@ def main():
                         for input_id in batch.pop("input_ids")
                         .cpu()
                         .numpy()
-                        .squeeze(axis=-1)
+                        .squeeze()
                         .tolist()
                     ]
                 )
