@@ -42,11 +42,8 @@ def main(args):
     feature_processor_path = output_dir / "feature_processor.pickle"
     logistic_dir = output_dir / "logistic"
     logistic_dir.mkdir(exist_ok=True, parents=True)
-    gbm_dir = output_dir / "gbm"
-    gbm_dir.mkdir(exist_ok=True, parents=True)
     logistic_test_result_file = logistic_dir / "metrics.json"
-    gbm_test_result_file = gbm_dir / "metrics.json"
-    if logistic_test_result_file.exists() and gbm_test_result_file.exists():
+    if logistic_test_result_file.exists():
         print("The models have been trained, and skip ...")
         exit(0)
 
