@@ -222,8 +222,23 @@ def main():
                 cehrgpt_output = cehrgpt_model(
                     **batch, output_attentions=False, output_hidden_states=False
                 )
+                last_end_token = any(
+                    [
+                        cehrgpt_tokenizer.end_token_id == input_id
+                        for input_id in batch.pop("input_ids")
+                        .cpu()
+                        .numpy()
+                        .squeeze(axis=-1)
+                        .tolist()
+                    ]
+                )
+                last_token_index = -2 if last_end_token else -1
+                LOG.debug(
+                    "The last token is [END], we need to use the token index before that: %s",
+                    last_token_index,
+                )
                 features = (
-                    cehrgpt_output.last_hidden_state[..., -1, :]
+                    cehrgpt_output.last_hidden_state[..., last_token_index, :]
                     .cpu()
                     .float()
                     .detach()
