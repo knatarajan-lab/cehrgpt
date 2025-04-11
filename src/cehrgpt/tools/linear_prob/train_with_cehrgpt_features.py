@@ -21,7 +21,7 @@ def prepare_dataset(
     scaled_age = age_scaler.transform(df[["age_at_index"]].to_numpy())
 
     one_hot_gender = gender_encoder.transform(
-        np.expand_dims(df.race_concept_id.to_numpy(), axis=1)
+        np.expand_dims(df.gender_concept_id.to_numpy(), axis=1)
     )
     one_hot_race = race_encoder.transform(
         np.expand_dims(df.race_concept_id.to_numpy(), axis=1)

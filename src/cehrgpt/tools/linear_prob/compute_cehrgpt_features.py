@@ -187,9 +187,19 @@ def main():
 
     # Loading demographics
     print("Loading demographics as a dictionary")
-    demographics_df = pd.read_parquet(
-        data_args.data_folder,
-        columns=["person_id", "index_date", "gender_concept_id", "race_concept_id"],
+    demographics_df = pd.concat(
+        [
+            pd.read_parquet(
+                data_dir,
+                columns=[
+                    "person_id",
+                    "index_date",
+                    "gender_concept_id",
+                    "race_concept_id",
+                ],
+            )
+            for data_dir in [data_args.data_folder, data_args.test_data_folder]
+        ]
     )
     demographics_df["index_date"] = demographics_df.index_date.dt.date
     demographics_dict = {
