@@ -108,12 +108,22 @@ def main():
     )
     if feature_folders:
         existing_features = pd.concat(
-            [pd.read_parquet(f, columns=["subject_id"]) for f in feature_folders],
+            [
+                pd.read_parquet(f, columns=["subject_id", "prediction_time"])
+                for f in feature_folders
+            ],
             ignore_index=True,
         )
-        existing_person_ids = existing_features.subject_id.tolist()
+        subject_prediction_tuples = list(
+            existing_features.apply(
+                lambda row: (row["subject_id"], row["prediction_time"]), axis=1
+            )
+        )
         processed_dataset = processed_dataset.filter(
-            lambda _batch: [_ not in existing_person_ids for _ in _batch["person_id"]],
+            lambda _batch: [
+                (subject, datetime.fromtimestamp(time)) not in subject_prediction_tuples
+                for subject, time in zip(_batch["person_id"], _batch["index_date"])
+            ],
             num_proc=data_args.preprocessing_num_workers,
             batch_size=data_args.preprocessing_batch_size,
             batched=True,
