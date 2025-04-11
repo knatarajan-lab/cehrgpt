@@ -1,6 +1,7 @@
 import glob
 import os
 import shutil
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -280,7 +281,9 @@ def main():
                 features_pd["features"] = features_list
                 features_pd["race_concept_id"] = race_concept_ids
                 features_pd["gender_concept_id"] = gender_concept_ids
-                features_pd.to_parquet(feature_output_folder / f"{index}.parquet")
+                features_pd.to_parquet(
+                    feature_output_folder / f"{uuid.uuid4()}.parquet"
+                )
 
 
 if __name__ == "__main__":
