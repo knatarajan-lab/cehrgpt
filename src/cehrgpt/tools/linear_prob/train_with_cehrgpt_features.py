@@ -28,7 +28,7 @@ def prepare_dataset(
     )
     return {
         "subject_id": df["subject_id"].to_numpy(),
-        "prediction_time": df["prediction_time"].to_numpy(),
+        "prediction_time": df["prediction_time"].tolist(),
         "features": concatenated_features,
         "boolean_value": df["boolean_value"].to_numpy(),
     }
@@ -95,7 +95,7 @@ def main(args):
         logistic_predictions = pl.DataFrame(
             {
                 "subject_id": test_dataset["subject_id"].tolist(),
-                "prediction_time": test_dataset["prediction_time"].tolist(),
+                "prediction_time": test_dataset["prediction_time"],
                 "predicted_boolean_probability": y_pred.tolist(),
                 "predicted_boolean_value": None,
                 "boolean_value": test_dataset["boolean_value"].astype(bool).tolist(),
