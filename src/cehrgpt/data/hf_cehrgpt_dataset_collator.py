@@ -18,6 +18,7 @@ from cehrgpt.gpt_utils import (
 )
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
+TIME_TO_EVENT_MAX_TIME = 3650
 INPATIENT_STAY_DURATION_LIMIT = 30
 LOG = logging.get_logger("transformers")
 
@@ -33,6 +34,7 @@ class CehrGptDataCollator:
         use_sub_time_tokenization: bool = False,
         include_motor_time_to_event: bool = False,
         motor_tte_vocab_size: int = 0,
+        motor_num_time_pieces: int = 16,
         pretraining: bool = True,
         include_demographics: bool = False,
         add_linear_prob_token: bool = False,
@@ -61,6 +63,8 @@ class CehrGptDataCollator:
 
         self.include_motor_time_to_event = include_motor_time_to_event
         self.motor_tte_vocab_size = motor_tte_vocab_size
+        self.motor_num_time_pieces = motor_num_time_pieces
+        self.motor_time_interval = TIME_TO_EVENT_MAX_TIME // motor_num_time_pieces
 
         if self.use_sub_time_tokenization:
             token_to_time_token_mapping = tokenizer.token_to_time_token_mapping
@@ -229,7 +233,13 @@ class CehrGptDataCollator:
                 )
                 for example in examples_with_motor_tte
             ]
-            batch_size = len(examples)
+            batch_motor_time_indicators = [
+                self._try_reverse_tensor(
+                    self._convert_to_tensor(example["time_indicators"])
+                )
+                for example in examples_with_motor_tte
+            ]
+
             batch_motor_time_to_event_vectors = torch.concat(
                 batch_motor_time_to_event_vectors, dim=0
             ).to(torch.float32)
@@ -242,21 +252,27 @@ class CehrGptDataCollator:
                     "because every example in this batch only contains one visit."
                 )
             else:
-                length, motor_tte_vocab_size = batch_motor_time_to_event_vectors.shape
+                batch_size = len(examples)
+                length, num_time_pieces, motor_tte_vocab_size = (
+                    batch_motor_time_to_event_vectors.shape
+                )
                 padded_length = batch_size - length % batch_size
                 batch["motor_time_to_event_vectors"] = (
                     torch.concat(
                         [
                             batch_motor_time_to_event_vectors,
-                            torch.full((padded_length, motor_tte_vocab_size), 0.0),
+                            torch.full(
+                                (padded_length, num_time_pieces, motor_tte_vocab_size),
+                                0.0,
+                            ),
                         ],
                         dim=0,
                     )
-                    .reshape((batch_size, -1, motor_tte_vocab_size))
+                    .reshape((batch_size, -1, num_time_pieces, motor_tte_vocab_size))
                     .to(torch.float32)
                 )
 
-                # Input to indicate whether the event has occurred
+                # Motor event indicators that indicate there is an event occurred in this time interval
                 batch_motor_event_indicators = torch.concat(
                     batch_motor_event_indicators, dim=0
                 ).to(torch.bool)
@@ -264,11 +280,11 @@ class CehrGptDataCollator:
                     torch.concat(
                         [
                             batch_motor_event_indicators,
-                            torch.full((padded_length, motor_tte_vocab_size), False),
+                            torch.full((padded_length, num_time_pieces, motor_tte_vocab_size), False),
                         ],
                         dim=0,
                     )
-                    .reshape((batch_size, -1, motor_tte_vocab_size))
+                    .reshape((batch_size, -1, num_time_pieces, motor_tte_vocab_size))
                     .to(torch.bool)
                 )
 
@@ -286,7 +302,25 @@ class CehrGptDataCollator:
                     ).to(torch.bool)
                 ).reshape((batch_size, -1))
 
-                # The end index to remove the padded visits
+                # Motor time indicators that indicate whether there are neither clinical events nor censor events
+                batch_motor_time_indicators = torch.concat(
+                    batch_motor_time_indicators, dim=0
+                ).to(torch.bool)
+                batch["motor_time_indicators"] = (
+                    torch.concat(
+                        [
+                            batch_motor_time_indicators,
+                            torch.full(
+                                (padded_length, num_time_pieces, motor_tte_vocab_size),
+                                0.0,
+                            ),
+                        ],
+                        dim=0,
+                    )
+                    .reshape((batch_size, -1, num_time_pieces, motor_tte_vocab_size))
+                    .to(torch.bool)
+                )
+
                 batch["motor_end_index"] = torch.concat(
                     [
                         torch.full((length, 1), 1, dtype=torch.int32),
@@ -472,9 +506,38 @@ class CehrGptDataCollator:
             time_to_event_vectors.append(time_to_event_vector)
             event_indicators.append(event_indicator)
 
-        record["time_to_event_vectors"] = np.asarray(time_to_event_vectors)
-        record["event_indicators"] = np.asarray(event_indicators)
-        record["time_to_event_to_include"] = np.asarray(time_to_event_to_include)
+        time_to_event_vectors = np.asarray(time_to_event_vectors)
+        event_indicators = np.asarray(event_indicators).astype(bool)
+        n_visits = len(time_to_event_vectors)
+
+        timepiece_time_to_event_vector = np.full(
+            (self.motor_num_time_pieces, n_visits, self.tokenizer.motor_tte_vocab_size),
+            fill_value=0,
+            dtype=np.int32,
+        )
+        timepiece_event_indicator = np.zeros(
+            (self.motor_num_time_pieces, n_visits, self.tokenizer.motor_tte_vocab_size),
+            dtype=np.int32,
+        )
+        timepiece_indicator = np.zeros(
+            (self.motor_num_time_pieces, n_visits, self.tokenizer.motor_tte_vocab_size),
+            dtype=np.int32,
+        )
+
+        # Putting the event time and censor time into the corresponding time bins
+        for bin_num in range(self.motor_num_time_pieces):
+            start = self.motor_time_interval * bin_num
+            end = self.motor_time_interval * (bin_num + 1)
+            time_in_bin = np.clip(time_to_event_vectors - start, 0, end - start)
+            timepiece_time_to_event_vector[bin_num] = time_in_bin
+            timepiece_event_indicator[bin_num, :] = (
+                event_indicators & (start <= time_in_bin) & (time_in_bin < end)
+            )
+            timepiece_indicator[bin_num, :] = (time_in_bin > 0) | event_indicators
+
+        record["time_to_event_vectors"] = timepiece_time_to_event_vector.swapaxes(0, 1)
+        record["event_indicators"] = timepiece_event_indicator.swapaxes(0, 1)
+        record["time_indicators"] = timepiece_indicator.swapaxes(0, 1)
         return record
 
     def random_sort(self, record: Dict[str, Any]) -> Dict[str, Any]:

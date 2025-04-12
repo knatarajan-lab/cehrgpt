@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as f
 from torch import nn
-from torch.distributions import Gamma, LogNormal
+from torch.distributions import Exponential, Gamma
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
 from transformers import PreTrainedModel
@@ -363,27 +363,31 @@ class GPT2FlashAttention(GPT2Attention):
 
 
 class MotorTaskHead(nn.Module):
-    def __init__(self, input_dim, motor_tte_vocab_size):
+    def __init__(self, input_dim, motor_tte_vocab_size, motor_num_time_pieces):
         super(MotorTaskHead, self).__init__()
         self.input_dim = input_dim
         self.motor_tte_vocab_size = motor_tte_vocab_size
+        self.motor_num_time_pieces = motor_num_time_pieces
         self.linear = nn.Sequential(
             nn.Linear(input_dim, input_dim // 2),
             gelu_new,
-            nn.Linear(input_dim // 2, motor_tte_vocab_size * 2),
+            nn.Linear(
+                input_dim // 2, motor_tte_vocab_size * self.motor_num_time_pieces
+            ),
         )
 
     def forward(self, x):
         # Ensure scale is positive
-        alpha_beta = f.softplus(self.linear(x))
-        lambda_p = alpha_beta[..., : self.motor_tte_vocab_size]
-        beta = alpha_beta[..., self.motor_tte_vocab_size :]
+        length = x.shape[0]
+        # (num_visits_in_batch, motor_tte_vocab_size * motor_num_time_pieces)
+        lambda_p = f.softplus(self.linear(x))
         # Check for NaN values
         if torch.isnan(lambda_p).any():
             logger.warning(f"NaN values found in scale_param. x: {x}")
-        if torch.isnan(beta).any():
-            logger.warning(f"NaN values found in k_param. x: {x}")
-        return lambda_p, beta
+        # (num_visits_in_batch,  motor_num_time_pieces, motor_tte_vocab_size,)
+        return lambda_p.view(
+            length, self.motor_num_time_pieces, self.motor_tte_vocab_size
+        )
 
 
 class VisitTimeToEventHead(nn.Module):
@@ -1191,7 +1195,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             )
 
         if self.config.include_motor_time_to_event:
-            self.motor_tte = MotorTaskHead(config.n_embd, config.motor_tte_vocab_size)
+            self.motor_tte = MotorTaskHead(
+                config.n_embd, config.motor_tte_vocab_size, config.motor_num_time_pieces
+            )
 
         # Model parallel
         self.model_parallel = False
@@ -1282,7 +1288,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         if update_motor_tte_layer:
             self.motor_tte = MotorTaskHead(
-                self.config.n_embd, self.config.motor_tte_vocab_size
+                self.config.n_embd,
+                self.config.motor_tte_vocab_size,
+                self.config.motor_num_time_pieces,
             )
 
     def prepare_inputs_for_generation(
@@ -1386,6 +1394,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         motor_time_to_event_vectors,
         motor_event_indicators,
         motor_time_to_event_to_include,
+        motor_time_indicators,
         batch_motor_end_index,
     ):
         """
@@ -1396,16 +1405,18 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         Args:
             ve_token_features (Tensor): Hidden representations for the [VE] tokens [num_visits, hidden_dim].
             motor_time_to_event_vectors (Tensor): Raw time-to-event durations [B, T, motor_vocab_size] (flattened).
-            motor_event_indicators (Tensor): Binary indicators (0 if censored, 1 if event occurred).
             motor_time_to_event_to_include: (Tensor): Bool indicators (True if included, False if not included).
+            motor_event_indicators (Tensor): Binary indicators (1 if censored, 0 if event occurred).
+            motor_time_indicators (Tensor): Binary indicators whether the time occurs in the current
+                time bucket (1 if censored, 0 if event occurred).
             batch_motor_end_index (Tensor): Tensor indicating the number of valid [VE] tokens in the batch.
 
         Returns:
             Tensor: Scalar loss value (mean negative log-likelihood).
         """
         batch_motor_end_index = batch_motor_end_index.sum().item()
-        motor_time_to_event_vectors = motor_time_to_event_vectors.reshape(
-            (-1, self.config.motor_tte_vocab_size)
+        motor_time_to_event_vectors = motor_time_to_event_vectors.view(
+            (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
         )[:batch_motor_end_index].clamp(min=1e-3)
         motor_event_indicators = motor_event_indicators.reshape(
             (-1, self.config.motor_tte_vocab_size)
@@ -1413,6 +1424,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         motor_time_to_event_to_include = motor_time_to_event_to_include.flatten()[
             :batch_motor_end_index
         ]
+        motor_time_indicators = motor_time_indicators.view(
+            (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
+        )[:batch_motor_end_index]
         assert ve_token_features.shape[0] == motor_time_to_event_vectors.shape[0], (
             "The number of VE tokens in the labels needs to match up "
             "with the first dimension of motor_time_to_event_vectors. "
@@ -1423,20 +1437,24 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             motor_time_to_event_to_include
         ]
         motor_event_indicators = motor_event_indicators[motor_time_to_event_to_include]
+        motor_time_indicators = motor_time_indicators[motor_time_to_event_to_include]
         ve_token_features = ve_token_features[motor_time_to_event_to_include]
 
-        # Get Weibull parameters from model
-        mu, sigma = self.motor_tte(ve_token_features)
-        dist = LogNormal(loc=mu, scale=sigma)
+        # Get Exponential parameters from model
+        lambda_p = self.motor_tte(ve_token_features)
+        # (num_visits_in_batch, num_of_pieces, motor_vocab_size)
+        dist = Exponential(lambda_p)
 
-        # Compute log-likelihood terms
-        log_pdf = dist.log_prob(motor_time_to_event_vectors)
-        log_survival = torch.log(
-            1 - dist.cdf(motor_time_to_event_vectors).clamp(max=1 - 1e-6) + 1e-6
+        # Compute event loss
+        tte_loss = torch.where(
+            motor_event_indicators,
+            -dist.log_prob(motor_time_to_event_vectors),
+            -torch.log(
+                1 - dist.cdf(motor_time_to_event_vectors).clamp(max=1 - 1e-6) + 1e-6
+            ),
         )
-        # Masked log-likelihood (event vs. censored)
-        motor_loss = torch.where(motor_event_indicators, log_pdf, log_survival)
-        return -torch.mean(motor_loss)
+        tte_loss = torch.where(motor_time_indicators, tte_loss, 0.0)
+        return torch.mean(tte_loss)
 
     def forward(
         self,
@@ -1457,6 +1475,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         motor_time_to_event_vectors: Optional[torch.FloatTensor] = None,
         motor_event_indicators: Optional[torch.BoolTensor] = None,
         motor_time_to_event_to_include: Optional[torch.BoolTensor] = None,
+        motor_time_indicators: Optional[torch.BoolTensor] = None,
         motor_end_index: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
@@ -1591,33 +1610,20 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 and motor_time_to_event_vectors is not None
                 and motor_event_indicators is not None
                 and motor_time_to_event_to_include is not None
+                and motor_time_indicators is not None
                 and motor_end_index is not None
             ):
                 ve_token_id_indices = labels == self.config.ve_token_id
-                # rows_with_true = ve_token_id_indices.sum(dim=1) > 0
-                # row_indices = torch.arange(
-                #     ve_token_id_indices.shape[0], device=ve_token_id_indices.device
-                # )[rows_with_true]
-                # # Find the last True by converting boolean to float before flipping and finding argmax
-                # last_indices = (
-                #     ve_token_id_indices[rows_with_true]
-                #     .float()
-                #     .flip(dims=[1])
-                #     .argmax(dim=1)
-                # )
-                # # Convert back to original indices
-                # last_indices = ve_token_id_indices.size(1) - 1 - last_indices
-                # Only modify rows that have true values
-                # ve_token_id_indices[row_indices, last_indices] = False
                 ve_token_features = hidden_states[ve_token_id_indices]
                 # Get rid of the last VE features because it's already reached the end of the patient sequence and
                 # there is nothing to predict.
                 motor_tte_loss = self.motor_nll_loss(
-                    ve_token_features,
-                    motor_time_to_event_vectors,
-                    motor_event_indicators,
-                    motor_time_to_event_to_include,
-                    motor_end_index,
+                    ve_token_features=ve_token_features,
+                    motor_time_to_event_vectors=motor_time_to_event_vectors,
+                    motor_event_indicators=motor_event_indicators,
+                    motor_time_to_event_to_include=motor_time_to_event_to_include,
+                    motor_time_indicators=motor_time_indicators,
+                    batch_motor_end_index=motor_end_index,
                 )
                 loss += motor_tte_loss * self.config.motor_time_to_event_weight
 
