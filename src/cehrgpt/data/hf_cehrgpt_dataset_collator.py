@@ -383,6 +383,7 @@ class CehrGptDataCollator:
         censor_indicators = []
 
         # First collect TTE data in reverse chronological order
+        censor_times = []
         time_to_event_data: List[Dict[str, int]] = []
         time_to_event_dict: Dict[str, int] = {}
         next_future_visit_concepts = set()
@@ -401,8 +402,12 @@ class CehrGptDataCollator:
                 for next_concept_id in next_future_visit_concepts:
                     if next_concept_id not in time_to_event_dict:
                         time_to_event_dict[next_concept_id] = time_interval
-
                 time_to_event_data.append(copy.deepcopy(time_to_event_dict))
+                # Record the censor time at the end of the visit
+                if censor_times:
+                    censor_times.append(censor_times[-1] + time_interval)
+                else:
+                    censor_times.append(time_interval)
                 time_interval = 0
                 next_future_visit_concepts.clear()
 
@@ -414,15 +419,12 @@ class CehrGptDataCollator:
 
         # Reverse back to chronological order for final labels
         time_to_event_data.reverse()
+        censor_times.reverse()
 
-        # # Drop the last visit, since there's no future event beyond it
-        # if time_to_event_data:
-        #     time_to_event_data.pop()
-
-        for visit_tte_data in time_to_event_data:
+        for censor_time, visit_tte_data in zip(censor_times, time_to_event_data):
             time_to_event_vector = np.full(
                 self.tokenizer.motor_tte_vocab_size,
-                fill_value=time_interval,
+                fill_value=censor_time,
                 dtype=np.int32,
             )
             censor_indicator = np.ones(
