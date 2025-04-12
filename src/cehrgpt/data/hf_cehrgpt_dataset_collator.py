@@ -437,7 +437,7 @@ class CehrGptDataCollator:
 
         concept_ids = self.tokenizer.decode(input_ids, skip_special_tokens=False)
         time_to_event_vectors = []
-        event_indicators = []
+        global_event_indicators = []
 
         # First collect TTE data in reverse chronological order
         censor_times = []
@@ -504,10 +504,10 @@ class CehrGptDataCollator:
             event_indicator[visit_token_ids] = 1  # not censored (event occurred)
 
             time_to_event_vectors.append(time_to_event_vector)
-            event_indicators.append(event_indicator)
+            global_event_indicators.append(event_indicator)
 
         time_to_event_vectors = np.asarray(time_to_event_vectors)
-        event_indicators = np.asarray(event_indicators).astype(bool)
+        global_event_indicators = np.asarray(global_event_indicators).astype(bool)
         n_visits = len(time_to_event_vectors)
 
         timepiece_time_to_event_vector = np.full(
@@ -530,10 +530,11 @@ class CehrGptDataCollator:
             end = self.motor_time_interval * (bin_num + 1)
             time_in_bin = np.clip(time_to_event_vectors - start, 0, end - start)
             timepiece_time_to_event_vector[bin_num] = time_in_bin
-            timepiece_event_indicator[bin_num, :] = (
-                event_indicators & (start <= time_in_bin) & (time_in_bin < end)
+            event_indicator = (
+                global_event_indicators & (start <= time_in_bin) & (time_in_bin < end)
             )
-            timepiece_indicator[bin_num, :] = (time_in_bin > 0) | event_indicators
+            timepiece_event_indicator[bin_num, :] = event_indicator
+            timepiece_indicator[bin_num, :] = time_in_bin > 0 | event_indicator
 
         record["time_to_event_vectors"] = timepiece_time_to_event_vector.swapaxes(0, 1)
         record["event_indicators"] = timepiece_event_indicator.swapaxes(0, 1)
