@@ -1385,6 +1385,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         ve_token_features,
         motor_time_to_event_vectors,
         motor_censor_indicators,
+        motor_time_to_event_to_include,
         batch_motor_end_index,
     ):
         """
@@ -1396,6 +1397,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             ve_token_features (Tensor): Hidden representations for the [VE] tokens [num_visits, hidden_dim].
             motor_time_to_event_vectors (Tensor): Raw time-to-event durations [B, T, motor_vocab_size] (flattened).
             motor_censor_indicators (Tensor): Binary indicators (1 if censored, 0 if event occurred).
+            motor_time_to_event_to_include: (Tensor): Bool indicators (True if included, False if not included).
             batch_motor_end_index (Tensor): Tensor indicating the number of valid [VE] tokens in the batch.
 
         Returns:
@@ -1408,13 +1410,22 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         motor_censor_indicators = motor_censor_indicators.reshape(
             (-1, self.config.motor_tte_vocab_size)
         )[:batch_motor_end_index]
-
+        motor_time_to_event_to_include = motor_time_to_event_to_include.flatten()[
+            :batch_motor_end_index
+        ]
         assert ve_token_features.shape[0] == motor_time_to_event_vectors.shape[0], (
             "The number of VE tokens in the labels needs to match up "
             "with the first dimension of motor_time_to_event_vectors. "
             f"Received ve_token_features.shape[0]: {ve_token_features.shape[0]}, "
             f"motor_time_to_event_vectors.shape[0]: {motor_time_to_event_vectors.shape[0]}"
         )
+        motor_time_to_event_vectors = motor_time_to_event_vectors[
+            motor_time_to_event_to_include
+        ]
+        motor_censor_indicators = motor_censor_indicators[
+            motor_time_to_event_to_include
+        ]
+        ve_token_features = ve_token_features[motor_time_to_event_to_include]
 
         # Get Weibull parameters from model
         mu, sigma = self.motor_tte(ve_token_features)
@@ -1450,6 +1461,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         sub_time_tokens: Optional[torch.LongTensor] = None,
         motor_time_to_event_vectors: Optional[torch.FloatTensor] = None,
         motor_censor_indicators: Optional[torch.FloatTensor] = None,
+        motor_time_to_event_to_include: Optional[torch.BoolTensor] = None,
         motor_end_index: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
@@ -1583,6 +1595,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 self.config.include_motor_time_to_event
                 and motor_time_to_event_vectors is not None
                 and motor_censor_indicators is not None
+                and motor_time_to_event_to_include is not None
                 and motor_end_index is not None
             ):
                 ve_token_id_indices = labels == self.config.ve_token_id
@@ -1608,6 +1621,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     ve_token_features,
                     motor_time_to_event_vectors,
                     motor_censor_indicators,
+                    motor_time_to_event_to_include,
                     motor_end_index,
                 )
                 loss += motor_tte_loss * self.config.motor_time_to_event_weight

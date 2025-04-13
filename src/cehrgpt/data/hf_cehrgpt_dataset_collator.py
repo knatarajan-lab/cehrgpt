@@ -223,6 +223,12 @@ class CehrGptDataCollator:
                 )
                 for example in examples_with_motor_tte
             ]
+            batch_motor_time_to_event_to_include = [
+                self._try_reverse_tensor(
+                    self._convert_to_tensor(example["time_to_event_to_include"])
+                )
+                for example in examples_with_motor_tte
+            ]
             batch_size = len(examples)
             batch_motor_time_to_event_vectors = torch.concat(
                 batch_motor_time_to_event_vectors, dim=0
@@ -264,6 +270,18 @@ class CehrGptDataCollator:
                     .reshape((batch_size, -1, motor_tte_vocab_size))
                     .to(torch.float32)
                 )
+                batch_motor_time_to_event_to_include = torch.concat(
+                    batch_motor_time_to_event_to_include, dim=0
+                ).to(torch.bool)
+                batch["motor_time_to_event_to_include"] = (
+                    torch.concat(
+                        [
+                            batch_motor_time_to_event_to_include,
+                            torch.full((padded_length,), False),
+                        ],
+                        dim=0,
+                    ).to(torch.bool)
+                ).reshape((batch_size, -1))
                 batch["motor_end_index"] = torch.concat(
                     [
                         torch.full((length, 1), 1, dtype=torch.int32),
@@ -386,6 +404,7 @@ class CehrGptDataCollator:
         censor_times = []
         time_to_event_data: List[Dict[str, int]] = []
         time_to_event_dict: Dict[str, int] = {}
+        time_to_event_to_keep: List[bool] = []
         next_future_visit_concepts = set()
         time_interval = 0
 
@@ -402,6 +421,10 @@ class CehrGptDataCollator:
                 for next_concept_id in next_future_visit_concepts:
                     if next_concept_id not in time_to_event_dict:
                         time_to_event_dict[next_concept_id] = time_interval
+
+                # If the next visit occurs on the same day as the previous one, we don't want to do TTE for the
+                # previous visit
+                time_to_event_to_keep.append(time_interval > 0)
                 time_to_event_data.append(copy.deepcopy(time_to_event_dict))
                 # Record the censor time at the end of the visit
                 if censor_times:
@@ -420,6 +443,7 @@ class CehrGptDataCollator:
         # Reverse back to chronological order for final labels
         time_to_event_data.reverse()
         censor_times.reverse()
+        time_to_event_to_keep.reverse()
 
         for censor_time, visit_tte_data in zip(censor_times, time_to_event_data):
             time_to_event_vector = np.full(
@@ -446,6 +470,7 @@ class CehrGptDataCollator:
 
         record["time_to_event_vectors"] = np.asarray(time_to_event_vectors)
         record["censor_indicators"] = np.asarray(censor_indicators)
+        record["time_to_event_to_include"] = np.asarray(time_to_event_to_keep)
         return record
 
     def random_sort(self, record: Dict[str, Any]) -> Dict[str, Any]:
