@@ -1384,7 +1384,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         self,
         ve_token_features,
         motor_time_to_event_vectors,
-        motor_censor_indicators,
+        motor_event_indicators,
         motor_time_to_event_to_include,
         batch_motor_end_index,
     ):
@@ -1396,7 +1396,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         Args:
             ve_token_features (Tensor): Hidden representations for the [VE] tokens [num_visits, hidden_dim].
             motor_time_to_event_vectors (Tensor): Raw time-to-event durations [B, T, motor_vocab_size] (flattened).
-            motor_censor_indicators (Tensor): Binary indicators (1 if censored, 0 if event occurred).
+            motor_event_indicators (Tensor): Binary indicators (0 if censored, 1 if event occurred).
             motor_time_to_event_to_include: (Tensor): Bool indicators (True if included, False if not included).
             batch_motor_end_index (Tensor): Tensor indicating the number of valid [VE] tokens in the batch.
 
@@ -1407,7 +1407,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         motor_time_to_event_vectors = motor_time_to_event_vectors.reshape(
             (-1, self.config.motor_tte_vocab_size)
         )[:batch_motor_end_index].clamp(min=1e-3)
-        motor_censor_indicators = motor_censor_indicators.reshape(
+        motor_event_indicators = motor_event_indicators.reshape(
             (-1, self.config.motor_tte_vocab_size)
         )[:batch_motor_end_index]
         motor_time_to_event_to_include = motor_time_to_event_to_include.flatten()[
@@ -1422,9 +1422,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         motor_time_to_event_vectors = motor_time_to_event_vectors[
             motor_time_to_event_to_include
         ]
-        motor_censor_indicators = motor_censor_indicators[
-            motor_time_to_event_to_include
-        ]
+        motor_event_indicators = motor_event_indicators[motor_time_to_event_to_include]
         ve_token_features = ve_token_features[motor_time_to_event_to_include]
 
         # Get Weibull parameters from model
@@ -1436,11 +1434,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         log_survival = torch.log(
             1 - dist.cdf(motor_time_to_event_vectors).clamp(max=1 - 1e-6) + 1e-6
         )
-
         # Masked log-likelihood (event vs. censored)
-        motor_loss = (
-            1 - motor_censor_indicators
-        ) * log_pdf + motor_censor_indicators * log_survival
+        motor_loss = torch.where(motor_event_indicators, log_pdf, log_survival)
         return -torch.mean(motor_loss)
 
     def forward(
@@ -1460,7 +1455,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         time_token_indicators: Optional[torch.BoolTensor] = None,
         sub_time_tokens: Optional[torch.LongTensor] = None,
         motor_time_to_event_vectors: Optional[torch.FloatTensor] = None,
-        motor_censor_indicators: Optional[torch.FloatTensor] = None,
+        motor_event_indicators: Optional[torch.BoolTensor] = None,
         motor_time_to_event_to_include: Optional[torch.BoolTensor] = None,
         motor_end_index: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
@@ -1594,7 +1589,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             if (
                 self.config.include_motor_time_to_event
                 and motor_time_to_event_vectors is not None
-                and motor_censor_indicators is not None
+                and motor_event_indicators is not None
                 and motor_time_to_event_to_include is not None
                 and motor_end_index is not None
             ):
@@ -1620,7 +1615,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 motor_tte_loss = self.motor_nll_loss(
                     ve_token_features,
                     motor_time_to_event_vectors,
-                    motor_censor_indicators,
+                    motor_event_indicators,
                     motor_time_to_event_to_include,
                     motor_end_index,
                 )
