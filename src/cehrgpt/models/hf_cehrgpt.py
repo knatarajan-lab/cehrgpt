@@ -1419,7 +1419,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
         )[:batch_motor_end_index].clamp(min=1e-3)
         motor_event_indicators = motor_event_indicators.reshape(
-            (-1, self.config.motor_tte_vocab_size)
+            (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
         )[:batch_motor_end_index]
         motor_time_to_event_to_include = motor_time_to_event_to_include.flatten()[
             :batch_motor_end_index

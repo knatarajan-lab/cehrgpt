@@ -280,7 +280,10 @@ class CehrGptDataCollator:
                     torch.concat(
                         [
                             batch_motor_event_indicators,
-                            torch.full((padded_length, num_time_pieces, motor_tte_vocab_size), False),
+                            torch.full(
+                                (padded_length, num_time_pieces, motor_tte_vocab_size),
+                                False,
+                            ),
                         ],
                         dim=0,
                     )
@@ -312,7 +315,7 @@ class CehrGptDataCollator:
                             batch_motor_time_indicators,
                             torch.full(
                                 (padded_length, num_time_pieces, motor_tte_vocab_size),
-                                0.0,
+                                False,
                             ),
                         ],
                         dim=0,
@@ -517,11 +520,11 @@ class CehrGptDataCollator:
         )
         timepiece_event_indicator = np.zeros(
             (self.motor_num_time_pieces, n_visits, self.tokenizer.motor_tte_vocab_size),
-            dtype=np.int32,
+            dtype=bool,
         )
         timepiece_indicator = np.zeros(
             (self.motor_num_time_pieces, n_visits, self.tokenizer.motor_tte_vocab_size),
-            dtype=np.int32,
+            dtype=bool,
         )
 
         # Putting the event time and censor time into the corresponding time bins
@@ -531,14 +534,17 @@ class CehrGptDataCollator:
             time_in_bin = np.clip(time_to_event_vectors - start, 0, end - start)
             timepiece_time_to_event_vector[bin_num] = time_in_bin
             event_indicator = (
-                global_event_indicators & (start <= time_in_bin) & (time_in_bin < end)
+                global_event_indicators
+                & (start <= time_to_event_vectors)
+                & (time_to_event_vectors < end)
             )
-            timepiece_event_indicator[bin_num, :] = event_indicator
-            timepiece_indicator[bin_num, :] = time_in_bin > 0 | event_indicator
+            timepiece_event_indicator[bin_num] = event_indicator
+            timepiece_indicator[bin_num] = time_in_bin > 0 | event_indicator
 
         record["time_to_event_vectors"] = timepiece_time_to_event_vector.swapaxes(0, 1)
         record["event_indicators"] = timepiece_event_indicator.swapaxes(0, 1)
         record["time_indicators"] = timepiece_indicator.swapaxes(0, 1)
+        record["time_to_event_to_include"] = np.asarray(time_to_event_to_include)
         return record
 
     def random_sort(self, record: Dict[str, Any]) -> Dict[str, Any]:
