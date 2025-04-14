@@ -329,7 +329,6 @@ def main():
 
     if training_args.do_train:
         if cehrgpt_args.hyperparameter_tuning:
-            model_args.early_stopping_patience = LARGE_INTEGER
             training_args = perform_hyperparameter_search(
                 partial(model_init, model_args, training_args, tokenizer),
                 processed_dataset,
