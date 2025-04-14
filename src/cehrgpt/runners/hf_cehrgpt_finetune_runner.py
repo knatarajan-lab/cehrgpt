@@ -338,6 +338,8 @@ def main():
                 model_args,
                 cehrgpt_args,
             )
+
+        if cehrgpt_args.retrain_with_full:
             # Always retrain with the full set when hyperparameter tuning is set to true
             retrain_with_full_set(
                 model_args, training_args, tokenizer, processed_dataset, data_collator
@@ -366,33 +368,6 @@ def main():
             trainer.log_metrics("train", metrics)
             trainer.save_metrics("train", metrics)
             trainer.save_state()
-
-            # Retrain the model with full set using the num of epoches before earlying stopping
-            if cehrgpt_args.retrain_with_full:
-                update_num_epoch_before_early_stopping_callback = None
-                for callback in trainer.callback_handler.callbacks:
-                    if isinstance(callback, UpdateNumEpochsBeforeEarlyStoppingCallback):
-                        update_num_epoch_before_early_stopping_callback = callback
-
-                if update_num_epoch_before_early_stopping_callback is None:
-                    raise RuntimeError(
-                        f"{UpdateNumEpochsBeforeEarlyStoppingCallback} must be included as a callback!"
-                    )
-                final_num_epochs = (
-                    update_num_epoch_before_early_stopping_callback.num_epochs_before_early_stopping
-                )
-                training_args.num_train_epochs = final_num_epochs
-                LOG.info(
-                    "Num Epochs before early stopping: %s",
-                    training_args.num_train_epochs,
-                )
-                retrain_with_full_set(
-                    model_args,
-                    training_args,
-                    tokenizer,
-                    processed_dataset,
-                    data_collator,
-                )
 
     if training_args.do_predict:
         test_dataloader = DataLoader(
