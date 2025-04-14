@@ -1443,7 +1443,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # Get Exponential parameters from model
         lambda_p = self.motor_tte(ve_token_features)
         # (num_visits_in_batch, num_of_pieces, motor_vocab_size)
-        dist = Exponential(lambda_p)
+        dist = Exponential(lambda_p.clamp(min=1e-3))
 
         # Compute event loss
         tte_loss = torch.where(
