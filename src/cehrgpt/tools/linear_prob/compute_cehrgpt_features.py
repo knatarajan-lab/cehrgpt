@@ -90,6 +90,13 @@ def main():
                 cehrgpt_tokenizer.save_pretrained(
                     os.path.expanduser(training_args.output_dir)
                 )
+
+            # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
+        if not data_args.streaming:
+            all_columns = final_splits["train"].column_names
+            if "visit_concept_ids" in all_columns:
+                final_splits = final_splits.remove_columns(["visit_concept_ids"])
+
         processed_dataset = create_cehrgpt_finetuning_dataset(
             dataset=final_splits,
             cehrgpt_tokenizer=cehrgpt_tokenizer,
