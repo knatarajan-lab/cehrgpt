@@ -18,7 +18,7 @@ from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2Model
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
-from cehrgpt.runners.data_utils import prepare_finetune_dataset
+from cehrgpt.runners.data_utils import get_torch_dtype, prepare_finetune_dataset
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
 
@@ -35,15 +35,14 @@ def main():
     cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
         model_args.tokenizer_name_or_path
     )
+    torch_dtype = get_torch_dtype(model_args.torch_dtype)
     cehrgpt_model = (
         CEHRGPT2Model.from_pretrained(
             model_args.model_name_or_path,
             attn_implementation=(
                 "flash_attention_2" if is_flash_attn_2_available() else "eager"
             ),
-            torch_dtype=(
-                torch.bfloat16 if is_flash_attn_2_available() else torch.float32
-            ),
+            torch_dtype=torch_dtype,
         )
         .eval()
         .to(device)
