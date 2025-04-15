@@ -35,6 +35,14 @@ def create_cehrgpt_pretraining_dataset(
     cache_file_collector: Optional[CacheFileCollector] = None,
 ) -> Union[Dataset, DatasetDict]:
     required_columns = TRANSFORMER_COLUMNS + CEHRGPT_COLUMNS
+    # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
+    if not data_args.streaming:
+        if isinstance(dataset, DatasetDict):
+            all_columns = dataset["train"].column_names
+        else:
+            all_columns = dataset.column_names
+        if "visit_concept_ids" in all_columns:
+            dataset.remove_columns(["visit_concept_ids"])
     dataset = apply_cehrbert_dataset_mapping(
         dataset,
         HFCehrGptTokenizationMapping(cehrgpt_tokenizer),
@@ -61,6 +69,14 @@ def create_cehrgpt_finetuning_dataset(
     cache_file_collector: Optional[CacheFileCollector] = None,
 ) -> Union[Dataset, DatasetDict]:
     required_columns = TRANSFORMER_COLUMNS + CEHRGPT_COLUMNS + FINETUNING_COLUMNS
+    # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
+    if not data_args.streaming:
+        if isinstance(dataset, DatasetDict):
+            all_columns = dataset["train"].column_names
+        else:
+            all_columns = dataset.column_names
+        if "visit_concept_ids" in all_columns:
+            dataset.remove_columns(["visit_concept_ids"])
     mapping_functions = [
         HFFineTuningMapping(cehrgpt_tokenizer),
     ]
