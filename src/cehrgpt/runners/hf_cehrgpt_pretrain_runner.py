@@ -305,6 +305,12 @@ def main():
                     os.path.expanduser(training_args.output_dir)
                 )
 
+        # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
+        if not data_args.streaming:
+            all_columns = dataset["train"].column_names
+            if "visit_concept_ids" in all_columns:
+                dataset = dataset.remove_columns(["visit_concept_ids"])
+
         # sort the patient features chronologically and tokenize the data
         processed_dataset = create_cehrgpt_pretraining_dataset(
             dataset=dataset,
