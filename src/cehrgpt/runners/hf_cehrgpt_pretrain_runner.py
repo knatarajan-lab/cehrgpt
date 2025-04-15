@@ -56,6 +56,8 @@ def load_and_create_tokenizer(
     motor_time_to_event_codes = list()
     if cehrgpt_args.concept_dir:
         import pandas as pd
+        from cehrbert_data.const.artificial_tokens import DEATH_TOKEN
+        from meds.schema import death_code
 
         LOG.info("Loading concept data from disk at %s", cehrgpt_args.concept_dir)
         concept_pd = pd.read_parquet(cehrgpt_args.concept_dir)
@@ -68,10 +70,15 @@ def load_and_create_tokenizer(
                 row, "concept_name"
             )
             if (
-                getattr(row, "domain_id") == "Condition"
+                getattr(row, "domain_id") in ["Condition", "Procedure", "Drug"]
                 and getattr(row, "standard_concept") == "S"
             ):
                 motor_time_to_event_codes.append(str(getattr(row, "concept_id")))
+        LOG.info(
+            "Adding death codes for MOTOR TTE predictions: %s",
+            [DEATH_TOKEN, death_code],
+        )
+        motor_time_to_event_codes.extend([DEATH_TOKEN, death_code])
     # Try to load the pretrained tokenizer
     tokenizer_abspath = os.path.expanduser(model_args.tokenizer_name_or_path)
     try:
