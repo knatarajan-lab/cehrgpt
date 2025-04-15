@@ -19,7 +19,13 @@ from cehrbert.runners.runner_util import (
     generate_prepared_ds_path,
     get_last_hf_checkpoint,
 )
-from datasets import DatasetDict, concatenate_datasets, load_from_disk
+from datasets import (
+    Dataset,
+    DatasetDict,
+    IterableDataset,
+    concatenate_datasets,
+    load_from_disk,
+)
 from peft import LoraConfig, PeftModel, get_peft_model
 from scipy.special import expit as sigmoid
 from torch.utils.data import DataLoader
@@ -270,6 +276,12 @@ def main():
                     pretrained_concept_embedding_model=pretrained_concept_embedding_model,
                 )
                 tokenizer.save_pretrained(os.path.expanduser(training_args.output_dir))
+
+        # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
+        if not data_args.streaming:
+            all_columns = final_splits["train"].column_names
+            if "visit_concept_ids" in all_columns:
+                final_splits = final_splits.remove_columns(["visit_concept_ids"])
 
         processed_dataset = create_cehrgpt_finetuning_dataset(
             dataset=final_splits,
