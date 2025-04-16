@@ -322,7 +322,10 @@ def main():
             for data_dir in [data_args.data_folder, data_args.test_data_folder]
         ]
     )
-    demographics_df["index_date"] = demographics_df.index_date.dt.date
+    # This is a pre-caution in case the index_date is not a datetime type
+    demographics_df["index_date"] = pd.to_datetime(
+        demographics_df["index_date"]
+    ).dt.date
     demographics_dict = {
         (row["person_id"], row["index_date"]): {
             "gender_concept_id": row["gender_concept_id"],
