@@ -232,9 +232,11 @@ def main():
                 tqdm(data_loader, desc="Generating features")
             ):
                 prediction_time_ages = (
-                    batch.pop("age_at_index").numpy().squeeze().astype(float)
+                    batch.pop("age_at_index").numpy().squeeze(axis=-1).astype(float)
                 )
-                person_ids = list(batch.pop("person_id").numpy().squeeze().astype(int))
+                person_ids = (
+                    batch.pop("person_id").numpy().squeeze(axis=-1).astype(int).tolist()
+                )
                 prediction_time_posix = (
                     batch.pop("index_date").numpy().squeeze(axis=-1).tolist()
                 )
@@ -246,7 +248,7 @@ def main():
                     .float()
                     .cpu()
                     .numpy()
-                    .squeeze()
+                    .squeeze(axis=-1)
                     .astype(bool)
                 )
                 batch = {k: v.to(device) for k, v in batch.items()}
