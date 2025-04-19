@@ -1,6 +1,7 @@
 import os
 from typing import Optional, Union
 
+import numpy as np
 import torch
 from cehrbert.data_generators.hf_data_generator.meds_utils import (
     CacheFileCollector,
@@ -17,7 +18,7 @@ from cehrbert.runners.runner_util import (
     load_parquet_as_dataset,
 )
 from datasets import Dataset, DatasetDict, IterableDatasetDict, load_from_disk
-from transformers import Trainer, TrainingArguments, set_seed
+from transformers import EarlyStoppingCallback, Trainer, TrainingArguments, set_seed
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset
@@ -31,6 +32,20 @@ from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 
 LOG = logging.get_logger("transformers")
+
+
+class CustomEarlyStoppingCallback(EarlyStoppingCallback):
+    def check_metric_value(self, args, state, control, metric_value):
+        # best_metric is set by code for load_best_model
+        operator = np.greater if args.greater_is_better else np.less
+        if state.best_metric is None or (
+            operator(metric_value, state.best_metric)
+            and abs(metric_value - state.best_metric) / state.best_metric
+            > self.early_stopping_threshold
+        ):
+            self.early_stopping_patience_counter = 0
+        else:
+            self.early_stopping_patience_counter += 1
 
 
 def tokenizer_exists(tokenizer_name_or_path: str) -> bool:
@@ -393,6 +408,15 @@ def main():
     if not data_args.streaming:
         processed_dataset.set_format("pt")
 
+    callbacks = []
+    if cehrgpt_args.use_early_stopping:
+        callbacks.append(
+            CustomEarlyStoppingCallback(
+                model_args.early_stopping_patience,
+                cehrgpt_args.early_stopping_threshold,
+            )
+        )
+
     trainer = Trainer(
         model=model,
         data_collator=CehrGptDataCollator(
@@ -406,6 +430,7 @@ def main():
         train_dataset=processed_dataset["train"],
         eval_dataset=processed_dataset["validation"],
         args=training_args,
+        callbacks=callbacks,
     )
 
     checkpoint = None
