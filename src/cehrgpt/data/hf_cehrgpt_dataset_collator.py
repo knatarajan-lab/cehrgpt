@@ -505,13 +505,13 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         current_attention_mask = []
         current_value_indicators = []
         current_values = []
-        for idx in range(0, len(examples)):
+        for idx, example in enumerate(examples):
+            input_ids = example["input_ids"]
             # We add the flattened example to the list either when the example exceeds the total max tokens or
             # when we reach the last example
-            if (
-                len(current_input_ids) + len(examples[idx]["input_ids"]) + 1
-                > self.max_tokens
-            ) or (idx == len(examples) - 1):
+            if (len(current_input_ids) + len(input_ids) + 1 > self.max_tokens) or (
+                idx == len(examples) - 1
+            ):
                 packed_example = {
                     "input_ids": current_input_ids,
                     "attention_mask": current_attention_mask,
@@ -523,6 +523,8 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                     packed_example.update({"values": current_values})
 
                 flattened_examples.append(packed_example)
+
+                # reset the inputs
                 current_input_ids = []
                 current_attention_mask = []
                 current_value_indicators = []
@@ -531,12 +533,8 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 if len(flattened_examples) >= self.world_size:
                     break
 
-            current_input_ids += examples[idx]["input_ids"] + [
-                self.tokenizer.pad_token_id
-            ]
-            current_attention_mask += np.ones_like(
-                examples[idx]["input_ids"]
-            ).tolist() + [0]
+            current_input_ids += input_ids + [self.tokenizer.pad_token_id]
+            current_attention_mask += np.ones_like(input_ids).tolist() + [0]
             if self.include_values:
                 current_value_indicators += examples[idx]["value_indicators"] + [False]
                 current_values += examples[idx]["values"] + [

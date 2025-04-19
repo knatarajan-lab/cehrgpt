@@ -45,12 +45,52 @@ if is_accelerate_available():
 logger = logging.get_logger(__name__)
 
 
+def create_sample_packing_attention_mask(attention_mask: torch.Tensor) -> torch.Tensor:
+    # Step 1: Create segment IDs
+    # Example logic: whenever a 0 appears, it's a boundary
+    cumsum_mask = (attention_mask == 0).cumsum(dim=-1)
+    segment_ids = cumsum_mask * attention_mask  # mask out the 0s themselves
+    # Step 2: Create 2D mask (batch size = 1)
+    seg = segment_ids[0]  # since batch=1
+    attn_matrix = (seg.unsqueeze(0) == seg.unsqueeze(1)).int()
+    # Optional: mask out padding (if needed)
+    attn_matrix = (
+        attn_matrix * attention_mask[0].unsqueeze(0) * attention_mask[0].unsqueeze(1)
+    )
+    return attn_matrix
+
+
+def is_sample_pack(attention_mask: torch.Tensor) -> bool:
+    if attention_mask.shape[0] == 1:
+        max_index = torch.nonzero(attention_mask)[-1, -1].item()
+        attention_mask_sub = attention_mask[:, : max_index + 1]
+        return attention_mask_sub.sum().item() < attention_mask_sub.shape[-1]
+    return False
+
+
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data
 def _get_unpad_data(attention_mask):
-    seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
-    indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
-    max_seqlen_in_batch = seqlens_in_batch.max().item()
-    cu_seqlens = F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
+    # This infers sample packing
+    if is_sample_pack(attention_mask):
+        max_index = torch.nonzero(attention_mask)[-1, -1].item()
+        padded_attention_mask = F.pad(attention_mask[:, : max_index + 1], (0, 1))
+        indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
+        cumsum_seqlens_in_batch = torch.cumsum(padded_attention_mask, dim=-1)[
+            padded_attention_mask == 0
+        ]
+        seqlens_in_batch = (
+            cumsum_seqlens_in_batch - F.pad(cumsum_seqlens_in_batch, (1, 0))[:-1]
+        )
+        max_seqlen_in_batch = seqlens_in_batch.max().item()
+        cu_seqlens = F.pad(cumsum_seqlens_in_batch, (1, 0))
+    else:
+        seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
+        indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
+        max_seqlen_in_batch = seqlens_in_batch.max().item()
+        cu_seqlens = F.pad(
+            torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0)
+        )
+
     return (
         indices,
         cu_seqlens,
@@ -223,7 +263,9 @@ class GPT2FlashAttention(GPT2Attention):
     def _upad_input(
         self, query_layer, key_layer, value_layer, attention_mask, query_length
     ):
-        indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(attention_mask)
+        indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(
+            attention_mask, sample_packing
+        )
         batch_size, kv_seq_len, num_key_value_heads, head_dim = key_layer.shape
 
         key_layer = index_first_axis(
@@ -850,12 +892,19 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 == "flash_attention_2"
             ):
                 attention_mask = attention_mask.view(batch_size, -1)
-                # We create a 3D attention mask from a 2D tensor mask.
-                # Sizes are [batch_size, 1, 1, to_seq_length]
-                # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
-                # this attention mask is more simple than the triangular masking of causal attention
-                # used in OpenAI GPT, we just need to prepare the broadcast dimension here.
-                attention_mask = attention_mask[:, None, None, :]
+
+                # If this is sample packing, we need to great the
+                if is_sample_pack(attention_mask):
+                    attention_mask = create_sample_packing_attention_mask(
+                        attention_mask
+                    )[None, None, :, :]
+                else:
+                    # We create a 3D attention mask from a 2D tensor mask.
+                    # Sizes are [batch_size, 1, 1, to_seq_length]
+                    # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
+                    # this attention mask is more simple than the triangular masking of causal attention
+                    # used in OpenAI GPT, we just need to prepare the broadcast dimension here.
+                    attention_mask = attention_mask[:, None, None, :]
 
                 # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
                 # masked positions, this operation will create a tensor which is 0.0 for
