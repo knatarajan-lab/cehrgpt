@@ -1,4 +1,5 @@
 import os
+from functools import partial
 from typing import Optional, Union
 
 import numpy as np
@@ -22,7 +23,10 @@ from transformers import EarlyStoppingCallback, Trainer, TrainingArguments, set_
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset
-from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
+from cehrgpt.data.hf_cehrgpt_dataset_collator import (
+    CehrGptDataCollator,
+    SamplePackingCehrGptDataCollator,
+)
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
@@ -30,6 +34,7 @@ from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
+from cehrgpt.runners.sample_packing_trainer import SamplePackingTrainer
 
 LOG = logging.get_logger("transformers")
 
@@ -139,6 +144,10 @@ def load_and_create_model(
             pretrained_embedding_dim = tokenizer.pretrained_embeddings.shape[1]
         else:
             pretrained_embedding_dim = model_args.hidden_size
+
+        if cehrgpt_args.sample_packing:
+            model_args.max_position_embeddings = cehrgpt_args.max_tokens_per_batch
+
         model_config = CEHRGPTConfig(
             vocab_size=tokenizer.vocab_size,
             value_vocab_size=tokenizer.value_vocab_size,
@@ -405,7 +414,7 @@ def main():
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
-    if not data_args.streaming:
+    if not data_args.streaming and not cehrgpt_args.sample_packing:
         processed_dataset.set_format("pt")
 
     callbacks = []
@@ -417,11 +426,30 @@ def main():
             )
         )
 
-    trainer = Trainer(
+    if cehrgpt_args.sample_packing:
+        trainer_class = partial(
+            SamplePackingTrainer, max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch
+        )
+        training_args.per_device_train_batch_size = 1
+        training_args.per_device_eval_batch_size = 1
+        data_collator_fn = partial(
+            SamplePackingCehrGptDataCollator,
+            cehrgpt_args.max_tokens_per_batch,
+            training_args.world_size,
+        )
+    else:
+        trainer_class = Trainer
+        data_collator_fn = CehrGptDataCollator
+
+    trainer = trainer_class(
         model=model,
-        data_collator=CehrGptDataCollator(
+        data_collator=data_collator_fn(
             tokenizer=cehrgpt_tokenizer,
-            max_length=model_args.max_position_embeddings,
+            max_length=(
+                cehrgpt_args.max_tokens_per_batch
+                if cehrgpt_args.sample_packing
+                else model_args.max_position_embeddings
+            ),
             shuffle_records=data_args.shuffle_records,
             include_ttv_prediction=model_args.include_ttv_prediction,
             use_sub_time_tokenization=model_args.use_sub_time_tokenization,
