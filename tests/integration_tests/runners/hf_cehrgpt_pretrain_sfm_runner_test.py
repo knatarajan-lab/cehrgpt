@@ -66,6 +66,8 @@ class HfCehrGptCausalRunnerIntegrationTest(unittest.TestCase):
             "--causal_sfm",
             "--demographics_size",
             "4",
+            "--use_early_stopping",
+            "false",
         ]
         train_main()
         # Teacher force the prompt to consist of [year][age][gender][race][VS] then inject the random vector before [VS]

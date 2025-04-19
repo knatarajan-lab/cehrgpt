@@ -145,3 +145,13 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether we want to repartition the meds train tune sets"
         },
     )
+    use_early_stopping: Optional[bool] = dataclasses.field(
+        default=True,
+        metadata={"help": "A flag to indicate whether we want to use early stopping."},
+    )
+    early_stopping_threshold: Optional[float] = dataclasses.field(
+        default=0.01,
+        metadata={
+            "help": "A threshold to denote how much the specified metric must improve to satisfy early stopping conditions."
+        },
+    )
