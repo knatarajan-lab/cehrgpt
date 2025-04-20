@@ -549,13 +549,15 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 if len(flattened_examples) >= self.world_size:
                     break
 
-            current_input_ids += input_ids + [self.tokenizer.pad_token_id]
-            current_attention_mask += np.ones_like(input_ids).tolist() + [0]
+            current_input_ids.extend(list(input_ids) + [self.tokenizer.pad_token_id])
+            current_attention_mask.extend(np.ones_like(input_ids).tolist() + [0])
             if self.include_values:
-                current_value_indicators += example["value_indicators"] + [False]
-                current_values += example["values"] + [
-                    self.tokenizer.pad_value_token_id
-                ]
+                current_value_indicators.extend(
+                    list(example["value_indicators"]) + [False]
+                )
+                current_values.extend(
+                    list(example["values"]) + [self.tokenizer.pad_value_token_id]
+                )
 
         # The final batch needs to be added
         if current_input_ids:
