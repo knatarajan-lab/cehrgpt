@@ -1,7 +1,7 @@
 from typing import Iterator, List
 
 import torch
-from torch.utils.data import Sampler
+from torch.utils.data import RandomSampler, Sampler
 from transformers import logging
 
 logger = logging.get_logger(__name__)
@@ -34,15 +34,13 @@ class SamplePackingSampler(Sampler):
         self.world_size = max(1, world_size)
         self.max_tokens = max_tokens
         self.drop_last = drop_last
+        self.sampler = RandomSampler(lengths)
 
     def __iter__(self) -> Iterator[List[int]]:
-        indices = torch.randperm(len(self.lengths))
         batch = []
         current_batch_tokens = 0
-
-        for idx in indices:
+        for idx in self.sampler:
             sample_length = self.lengths[idx]
-
             # If adding this sample would exceed max_tokens, yield the current batch
             if (
                 current_batch_tokens + sample_length > self.max_tokens * self.world_size
