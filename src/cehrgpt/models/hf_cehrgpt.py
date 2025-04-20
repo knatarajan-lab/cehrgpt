@@ -101,15 +101,16 @@ def _get_unpad_data(attention_mask):
 
         # Compute max_index of the last non-zero element
         nonzero = torch.nonzero(attention_mask, as_tuple=False).flatten()
-        if nonzero.numel() == 0:
-            return None, None, 0  # handle all-zero case
+
+        assert nonzero.numel() != 0, "there must be non-zero entries in attention_mask"
+
         max_index = nonzero[-1].item()
 
         # Pad the truncated attention mask
         padded_attention_mask = F.pad(attention_mask[: max_index + 1], (0, 1), value=0)
 
-        # Indices of all tokens
-        indices = torch.nonzero(attention_mask, as_tuple=False).flatten()
+        # Indices of all non-padding tokens (excluding trailing pad)
+        indices = torch.nonzero(padded_attention_mask[:-1], as_tuple=False).flatten()
 
         # Find where 0s occur (segment boundaries)
         cumsum_seqlens_in_batch = torch.cumsum(padded_attention_mask, dim=0)[
@@ -306,6 +307,11 @@ class GPT2FlashAttention(GPT2Attention):
     def _upad_input(
         self, query_layer, key_layer, value_layer, attention_mask, query_length
     ):
+        assert key_layer.shape[1] == attention_mask.shape[1], (
+            f"the key length must be equal to attention_mask length, "
+            f"but current key_layer.shape[1]: {key_layer.shape[1]} "
+            f"and attention_mask.shape[1]: {attention_mask.shape[1]}"
+        )
         indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(attention_mask)
         batch_size, kv_seq_len, num_key_value_heads, head_dim = key_layer.shape
 

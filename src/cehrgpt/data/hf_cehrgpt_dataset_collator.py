@@ -536,8 +536,8 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
             current_input_ids += input_ids + [self.tokenizer.pad_token_id]
             current_attention_mask += np.ones_like(input_ids).tolist() + [0]
             if self.include_values:
-                current_value_indicators += examples[idx]["value_indicators"] + [False]
-                current_values += examples[idx]["values"] + [
+                current_value_indicators += example["value_indicators"] + [False]
+                current_values += example["values"] + [
                     self.tokenizer.pad_value_token_id
                 ]
 
