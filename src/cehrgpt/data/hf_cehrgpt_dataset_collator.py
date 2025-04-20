@@ -290,6 +290,10 @@ class CehrGptDataCollator:
 
         # Return the record directly if the actual sequence length is less than the max sequence
         if seq_length <= new_max_length:
+            if self.include_ttv_prediction:
+                record["time_to_visits"] = torch.concat(
+                    [self._convert_to_tensor(self._convert_time_to_event(concept_ids))]
+                )
             if not sample_packing:
                 record["input_ids"] = torch.concat(
                     [
@@ -315,12 +319,11 @@ class CehrGptDataCollator:
                 if self.include_ttv_prediction:
                     record["time_to_visits"] = torch.concat(
                         [
-                            self._convert_to_tensor(
-                                self._convert_time_to_event(concept_ids)
-                            ),
+                            record["time_to_visits"],
                             self._convert_to_tensor([-100.0]),
                         ]
                     )
+
             return record
 
         if self.pretraining:
