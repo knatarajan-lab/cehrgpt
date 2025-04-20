@@ -62,7 +62,10 @@ def create_sample_packing_attention_mask(attention_mask: torch.Tensor) -> torch.
 
 def is_sample_pack(attention_mask: torch.Tensor) -> bool:
     if attention_mask.shape[0] == 1:
-        max_index = torch.nonzero(attention_mask)[-1, -1].item()
+        nonzero_indices = torch.nonzero(attention_mask)
+        if nonzero_indices.numel() == 0:
+            return False  # or True depending on your logic
+        max_index = nonzero_indices[-1, -1].item()
         attention_mask_sub = attention_mask[:, : max_index + 1]
         return attention_mask_sub.sum().item() < attention_mask_sub.shape[-1]
     return False
