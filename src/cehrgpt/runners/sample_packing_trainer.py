@@ -37,8 +37,14 @@ class SamplePackingTrainer(Trainer):
 
         LOG.info("Started computing lengths for the train dataset")
         # Calculate lengths of all sequences in dataset
-        lengths = [len(sample["input_ids"]) for sample in train_dataset]
-
+        lengths = [
+            (
+                sample["num_of_concepts"]
+                if "num_of_concepts" in sample
+                else len(sample["input_ids"])
+            )
+            for sample in train_dataset
+        ]
         LOG.info("Finished computing lengths for the train dataset")
 
         train_dataset = self.train_dataset
@@ -100,7 +106,15 @@ class SamplePackingTrainer(Trainer):
 
         LOG.info("Started computing lengths for the evaluation dataset")
         # Calculate lengths of all sequences in dataset
-        lengths = [len(sample["input_ids"]) for sample in eval_dataset]
+        lengths = [
+            (
+                sample["num_of_concepts"]
+                if "num_of_concepts" in sample
+                else len(sample["input_ids"])
+            )
+            for sample in eval_dataset
+        ]
+
         LOG.info("Finished computing lengths for the evaluation dataset")
 
         data_collator = self.data_collator
