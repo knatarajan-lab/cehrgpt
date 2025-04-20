@@ -79,6 +79,11 @@ class TestSamplePackingFunctions(unittest.TestCase):
         result = is_sample_pack(attention_mask)
         self.assertFalse(result, "Expected False for unpacked attention mask")
 
+        # Simulate an unpacked attention mask (no interleaved zeros)
+        attention_mask = torch.tensor([[1, 1, 1, 1, 1, 1], [1, 1, 1, 1, 0, 0]])
+        result = is_sample_pack(attention_mask)
+        self.assertFalse(result, "Expected False for unpacked attention mask")
+
     def test_get_unpad_data_with_unpacked_input(self):
         attention_mask = torch.tensor([[1, 1, 1, 1, 1, 1]])
         indices, cu_seqlens, max_seqlen = _get_unpad_data(attention_mask)

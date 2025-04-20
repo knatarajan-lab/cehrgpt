@@ -46,45 +46,84 @@ logger = logging.get_logger(__name__)
 
 
 def create_sample_packing_attention_mask(attention_mask: torch.Tensor) -> torch.Tensor:
-    # Step 1: Create segment IDs
-    # Example logic: whenever a 0 appears, it's a boundary
+    """
+    Create a block-diagonal attention mask for packed sequences within a batch.
+
+    Args:
+        attention_mask (torch.Tensor): (batch_size, seq_len) binary mask where 1 = token, 0 = padding
+
+    Returns:
+        torch.Tensor: (batch_size, seq_len, seq_len) attention mask where entries are 1 if tokens
+                      can attend to each other (within same packed segment), 0 otherwise.
+    """
+    # Step 1: Identify segments within each sample
     cumsum_mask = (attention_mask == 0).cumsum(dim=-1)
-    segment_ids = cumsum_mask * attention_mask  # mask out the 0s themselves
-    # Step 2: Create 2D mask (batch size = 1)
-    seg = segment_ids[0]  # since batch=1
-    attn_matrix = (seg.unsqueeze(0) == seg.unsqueeze(1)).int()
-    # Optional: mask out padding (if needed)
-    attn_matrix = (
-        attn_matrix * attention_mask[0].unsqueeze(0) * attention_mask[0].unsqueeze(1)
-    )
+    segment_ids = cumsum_mask * attention_mask  # zeros remain zero
+
+    # Step 2: Compare segment IDs pairwise per batch element
+    # Shape: (batch_size, seq_len, seq_len)
+    attn_matrix = (segment_ids.unsqueeze(2) == segment_ids.unsqueeze(1)).int()
+
+    # Step 3: Mask out padding tokens
+    mask = attention_mask.unsqueeze(1) * attention_mask.unsqueeze(2)
+    attn_matrix = attn_matrix * mask
+
     return attn_matrix
 
 
 def is_sample_pack(attention_mask: torch.Tensor) -> bool:
-    if attention_mask.shape[0] == 1:
-        nonzero_indices = torch.nonzero(attention_mask)
-        if nonzero_indices.numel() == 0:
-            return False  # or True depending on your logic
-        max_index = nonzero_indices[-1, -1].item()
-        attention_mask_sub = attention_mask[:, : max_index + 1]
-        return attention_mask_sub.sum().item() < attention_mask_sub.shape[-1]
-    return False
+    """
+    Determines whether any sequence in the batch is likely sample-packed.
+
+    A sample-packed sequence is one where there are non-padding (1) tokens
+    after a padding (0) token, indicating multiple sequences packed together
+    with padding as a separator.
+
+    Args:
+        attention_mask (torch.Tensor): A tensor of shape (batch_size, seq_len)
+            where 1 indicates a real token and 0 indicates padding.
+
+    Returns:
+        bool: True if any sample in the batch is sample-packed, False otherwise.
+    """
+    nonzero_counts = attention_mask.sum(dim=1)
+    max_token_positions = torch.argmax(attention_mask.flip(dims=[1]), dim=1)
+    max_indices = attention_mask.shape[1] - 1 - max_token_positions
+    return torch.any(nonzero_counts < (max_indices + 1)).item()
 
 
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data
 def _get_unpad_data(attention_mask):
     # This infers sample packing
     if is_sample_pack(attention_mask):
-        max_index = torch.nonzero(attention_mask)[-1, -1].item()
-        padded_attention_mask = F.pad(attention_mask[:, : max_index + 1], (0, 1))
-        indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
-        cumsum_seqlens_in_batch = torch.cumsum(padded_attention_mask, dim=-1)[
+        # Assume input: attention_mask shape = (1, seq_len)
+        attention_mask = attention_mask.squeeze(0)  # shape: (seq_len,)
+
+        # Compute max_index of the last non-zero element
+        nonzero = torch.nonzero(attention_mask, as_tuple=False).flatten()
+        if nonzero.numel() == 0:
+            return None, None, 0  # handle all-zero case
+        max_index = nonzero[-1].item()
+
+        # Pad the truncated attention mask
+        padded_attention_mask = F.pad(attention_mask[: max_index + 1], (0, 1))
+
+        # Indices of all tokens
+        indices = torch.nonzero(attention_mask, as_tuple=False).flatten()
+
+        # Find where 0s occur (segment boundaries)
+        cumsum_seqlens_in_batch = torch.cumsum(padded_attention_mask, dim=0)[
             padded_attention_mask == 0
         ]
+
+        # Compute seqlens per segment
         seqlens_in_batch = (
             cumsum_seqlens_in_batch - F.pad(cumsum_seqlens_in_batch, (1, 0))[:-1]
         ).to(torch.int)
-        max_seqlen_in_batch = seqlens_in_batch.max().item()
+
+        max_seqlen_in_batch = (
+            seqlens_in_batch.max().item() if seqlens_in_batch.numel() > 0 else 0
+        )
         cu_seqlens = F.pad(cumsum_seqlens_in_batch, (1, 0)).to(torch.int)
     else:
         seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
