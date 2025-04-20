@@ -936,7 +936,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 if is_sample_pack(attention_mask):
                     attention_mask = create_sample_packing_attention_mask(
                         attention_mask
-                    )[None, None, :, :]
+                    )[:, None, :, :]
                 else:
                     # We create a 3D attention mask from a 2D tensor mask.
                     # Sizes are [batch_size, 1, 1, to_seq_length]
