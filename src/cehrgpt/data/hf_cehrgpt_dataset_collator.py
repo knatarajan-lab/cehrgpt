@@ -507,10 +507,10 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         current_values = []
         for idx, example in enumerate(examples):
             input_ids = example["input_ids"]
-            # We add the flattened example to the list either when the example exceeds the total max tokens or
-            # when we reach the last example
-            if (len(current_input_ids) + len(input_ids) + 1 > self.max_tokens) or (
-                idx == len(examples) - 1
+            # We add the flattened example to the list either when the example exceeds the total max tokens
+            if (
+                len(current_input_ids) + len(input_ids) + 1 > self.max_tokens
+                and current_input_ids
             ):
                 packed_example = {
                     "input_ids": current_input_ids,
@@ -540,4 +540,16 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 current_values += examples[idx]["values"] + [
                     self.tokenizer.pad_value_token_id
                 ]
+
+        # The final batch needs to be added
+        if current_input_ids:
+            packed_example = {
+                "input_ids": current_input_ids,
+                "attention_mask": current_attention_mask,
+            }
+            if self.include_values:
+                packed_example.update({"value_indicators": current_value_indicators})
+                packed_example.update({"values": current_values})
+            flattened_examples.append(packed_example)
+
         return super().__call__(flattened_examples)
