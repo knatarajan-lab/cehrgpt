@@ -184,6 +184,11 @@ def load_and_create_model(
 def main():
     cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
 
+    if cehrgpt_args.sample_packing and data_args.streaming:
+        raise RuntimeError(
+            f"sample_packing is not supported when streaming is enabled, please set streaming to False"
+        )
+
     if data_args.streaming:
         # This is for disabling the warning message https://github.com/huggingface/transformers/issues/5486
         # This happens only when streaming is enabled
@@ -428,7 +433,10 @@ def main():
 
     if cehrgpt_args.sample_packing:
         trainer_class = partial(
-            SamplePackingTrainer, max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch
+            SamplePackingTrainer,
+            max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
+            train_lengths=processed_dataset["train"]["num_of_concepts"],
+            validation_lengths=processed_dataset["validation"]["num_of_concepts"],
         )
         training_args.per_device_train_batch_size = 1
         training_args.per_device_eval_batch_size = 1

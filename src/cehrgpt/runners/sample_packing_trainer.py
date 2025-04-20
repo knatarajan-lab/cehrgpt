@@ -24,6 +24,8 @@ class SamplePackingTrainer(Trainer):
                 "max_tokens_per_batch is not provided to SamplePackingTrainer and will default to %s",
                 DEFAULT_MAX_TOKENS_PER_BATCH,
             )
+        self.train_lengths = kwargs.pop("train_lengths", None)
+        self.validation_lengths = kwargs.pop("validation_lengths", None)
         super().__init__(*args, **kwargs)
 
     def num_examples(self, dataloader: DataLoader) -> int:
@@ -35,19 +37,18 @@ class SamplePackingTrainer(Trainer):
         """Returns the training dataloader with our custom batch sampler."""
         train_dataset = self.train_dataset
 
-        LOG.info("Started computing lengths for the train dataset")
-        # Calculate lengths of all sequences in dataset
-        lengths = [
-            (
-                sample["num_of_concepts"]
-                if "num_of_concepts" in sample
-                else len(sample["input_ids"])
-            )
-            for sample in train_dataset
-        ]
-        LOG.info("Finished computing lengths for the train dataset")
+        if self.train_lengths is None:
+            LOG.info("Started computing lengths for the train dataset")
+            # Calculate lengths of all sequences in dataset
+            if "num_of_concepts" in train_dataset.column_names:
+                lengths = train_dataset["num_of_concepts"]
+            else:
+                lengths = [len(sample["input_ids"]) for sample in train_dataset]
 
-        train_dataset = self.train_dataset
+            LOG.info("Finished computing lengths for the train dataset")
+        else:
+            lengths = self.train_lengths
+
         data_collator = self.data_collator
         if import_utils.is_datasets_available() and isinstance(train_dataset, Dataset):
             train_dataset = self._remove_unused_columns(
@@ -104,18 +105,17 @@ class SamplePackingTrainer(Trainer):
             else eval_dataset if eval_dataset is not None else self.eval_dataset
         )
 
-        LOG.info("Started computing lengths for the evaluation dataset")
-        # Calculate lengths of all sequences in dataset
-        lengths = [
-            (
-                sample["num_of_concepts"]
-                if "num_of_concepts" in sample
-                else len(sample["input_ids"])
-            )
-            for sample in eval_dataset
-        ]
+        if self.validation_lengths is None:
+            LOG.info("Started computing lengths for the train dataset")
+            # Calculate lengths of all sequences in dataset
+            if "num_of_concepts" in eval_dataset.column_names:
+                lengths = eval_dataset["num_of_concepts"]
+            else:
+                lengths = [len(sample["input_ids"]) for sample in eval_dataset]
 
-        LOG.info("Finished computing lengths for the evaluation dataset")
+            LOG.info("Finished computing lengths for the train dataset")
+        else:
+            lengths = self.validation_lengths
 
         data_collator = self.data_collator
 
