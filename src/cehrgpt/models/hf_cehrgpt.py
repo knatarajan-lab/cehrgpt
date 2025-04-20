@@ -96,8 +96,8 @@ def is_sample_pack(attention_mask: torch.Tensor) -> bool:
 def _get_unpad_data(attention_mask):
     # This infers sample packing
     if is_sample_pack(attention_mask):
-        # Assume input: attention_mask shape = (1, seq_len)
-        attention_mask = attention_mask.squeeze(0)  # shape: (seq_len,)
+        # Assume input: attention_mask shape = (batch, seq_len)
+        attention_mask = attention_mask.flatten()  # shape: (seq_len,)
 
         # Compute max_index of the last non-zero element
         nonzero = torch.nonzero(attention_mask, as_tuple=False).flatten()
@@ -106,7 +106,7 @@ def _get_unpad_data(attention_mask):
         max_index = nonzero[-1].item()
 
         # Pad the truncated attention mask
-        padded_attention_mask = F.pad(attention_mask[: max_index + 1], (0, 1))
+        padded_attention_mask = F.pad(attention_mask[: max_index + 1], (0, 1), value=0)
 
         # Indices of all tokens
         indices = torch.nonzero(attention_mask, as_tuple=False).flatten()
@@ -118,7 +118,8 @@ def _get_unpad_data(attention_mask):
 
         # Compute seqlens per segment
         seqlens_in_batch = (
-            cumsum_seqlens_in_batch - F.pad(cumsum_seqlens_in_batch, (1, 0))[:-1]
+            cumsum_seqlens_in_batch
+            - F.pad(cumsum_seqlens_in_batch, (1, 0), value=0)[:-1]
         ).to(torch.int)
 
         max_seqlen_in_batch = (
@@ -307,6 +308,12 @@ class GPT2FlashAttention(GPT2Attention):
     ):
         indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(attention_mask)
         batch_size, kv_seq_len, num_key_value_heads, head_dim = key_layer.shape
+
+        assert indices_k.max() < kv_seq_len, (
+            f"Out-of-bounds index into key_layer. "
+            f"indices_k.max(): {indices_k.max()}, kv_seq_len: {kv_seq_len}"
+        )
+        assert indices_k.min() >= 0, "Negative index into key_layer"
 
         key_layer = index_first_axis(
             key_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim),
