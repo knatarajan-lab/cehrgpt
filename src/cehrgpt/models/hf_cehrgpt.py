@@ -80,9 +80,9 @@ def _get_unpad_data(attention_mask):
         ]
         seqlens_in_batch = (
             cumsum_seqlens_in_batch - F.pad(cumsum_seqlens_in_batch, (1, 0))[:-1]
-        )
+        ).to(torch.int)
         max_seqlen_in_batch = seqlens_in_batch.max().item()
-        cu_seqlens = F.pad(cumsum_seqlens_in_batch, (1, 0))
+        cu_seqlens = F.pad(cumsum_seqlens_in_batch, (1, 0)).to(torch.int)
     else:
         seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
         indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
