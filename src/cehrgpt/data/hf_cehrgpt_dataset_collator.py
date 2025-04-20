@@ -290,7 +290,9 @@ class CehrGptDataCollator:
             input_ids = input_ids.detach().tolist()
         concept_ids = self.tokenizer.decode(input_ids, skip_special_tokens=False)
         seq_length = len(record["input_ids"])
-        new_max_length = self.max_length - 1  # Subtract one for the [END] token
+
+        # Subtract one for the [END] token when sample_packing is not enabled
+        new_max_length = self.max_length if sample_packing else self.max_length - 1
 
         if self.include_ttv_prediction:
             record["time_to_visits"] = torch.concat(
@@ -366,6 +368,8 @@ class CehrGptDataCollator:
                     break
 
             record["input_ids"] = record["input_ids"][0:end_index]
+            if sample_packing:
+                record["attention_mask"] = record["attention_mask"][0:end_index]
             if self.include_values:
                 record["value_indicators"] = self._convert_to_tensor(
                     record["value_indicators"][0:end_index]
@@ -438,6 +442,10 @@ class CehrGptDataCollator:
                     current_token = record["input_ids"][i]
                     if current_token == self.vs_token_id:
                         record["input_ids"] = record["input_ids"][i:end_index]
+                        if sample_packing:
+                            record["attention_mask"] = record["attention_mask"][
+                                i:end_index
+                            ]
                         if self.include_values:
                             record["value_indicators"] = record["value_indicators"][
                                 i:end_index
@@ -453,6 +461,10 @@ class CehrGptDataCollator:
             # We simply take the last new_max_length number of tokens from the patient sequence
             if len(record["input_ids"]) > new_max_length:
                 record["input_ids"] = record["input_ids"][-new_max_length:]
+                if sample_packing:
+                    record["attention_mask"] = record["attention_mask"][
+                        -new_max_length:
+                    ]
                 if self.include_values:
                     record["value_indicators"] = record["value_indicators"][
                         -new_max_length:
