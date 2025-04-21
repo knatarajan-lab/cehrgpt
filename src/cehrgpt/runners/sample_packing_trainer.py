@@ -6,7 +6,7 @@ from transformers import Trainer
 from transformers.trainer_utils import has_length
 from transformers.utils import import_utils, logging
 
-from cehrgpt.data.sample_packing_sampler import SamplePackingSampler
+from cehrgpt.data.sample_packing_sampler import SamplePackingBatchSampler
 
 DEFAULT_MAX_TOKENS_PER_BATCH = 16384
 
@@ -59,11 +59,11 @@ class SamplePackingTrainer(Trainer):
                 data_collator, description="training"
             )
         # Create our custom batch sampler
-        batch_sampler = SamplePackingSampler(
+        batch_sampler = SamplePackingBatchSampler(
             lengths=lengths,
             max_tokens=self.max_tokens_per_batch,
-            world_size=self.args.world_size,
             drop_last=self.args.dataloader_drop_last,
+            seed=self.args.seed,
         )
         dataloader_params = {
             "collate_fn": data_collator,
@@ -129,11 +129,11 @@ class SamplePackingTrainer(Trainer):
             )
 
         # Create our custom batch sampler
-        batch_sampler = SamplePackingSampler(
+        batch_sampler = SamplePackingBatchSampler(
             lengths=lengths,
             max_tokens=self.max_tokens_per_batch,
-            world_size=self.args.world_size,
             drop_last=self.args.dataloader_drop_last,
+            seed=self.args.seed,
         )
         dataloader_params = {
             "collate_fn": data_collator,

@@ -1,13 +1,22 @@
-from typing import Iterator, List
+from typing import Iterator, List, Optional
 
 import torch
-from torch.utils.data import RandomSampler, Sampler
+import torch.distributed as dist
+from torch.utils.data import Sampler
 from transformers import logging
 
-logger = logging.get_logger(__name__)
+LOG = logging.get_logger("transformers")
 
 
-class SamplePackingSampler(Sampler):
+class SamplePlacerHolder:
+    def __init__(self):
+        self.epoch = 0
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+
+class SamplePackingBatchSampler(Sampler[List[int]]):
     """
     A batch sampler that creates batches by packing samples together.
 
@@ -19,7 +28,9 @@ class SamplePackingSampler(Sampler):
         self,
         lengths: List[int],
         max_tokens: int,
-        world_size: int,
+        num_replicas: Optional[int] = None,
+        rank: Optional[int] = None,
+        seed: int = 0,
         drop_last: bool = False,
     ):
         """
@@ -30,22 +41,66 @@ class SamplePackingSampler(Sampler):
             drop_last: Whether to drop the last incomplete batch
         """
         super().__init__()
+
+        if num_replicas is None:
+            if dist.is_available() and dist.is_initialized():
+                num_replicas = dist.get_world_size()
+                LOG.info(
+                    "torch.distributed is initialized and there are %s of replicas",
+                    num_replicas,
+                )
+            else:
+                num_replicas = 1
+                LOG.info(
+                    "torch.dist is not initialized and therefore default to 1 for num_replicas"
+                )
+
+        if rank is None:
+            if dist.is_available() and dist.is_initialized():
+                rank = dist.get_rank()
+                LOG.info(
+                    "torch.distributed is initialized and the current rank is %s", rank
+                )
+            else:
+                rank = 0
+                LOG.info(
+                    "torch.distributed is not initialized and therefore default to 0 for rank"
+                )
+
+        if not (0 <= rank < num_replicas):
+            raise ValueError(
+                f"Invalid rank {rank}, rank should be in the interval [0, {num_replicas - 1}]"
+            )
+
         self.lengths = lengths
-        self.world_size = max(1, world_size)
         self.max_tokens = max_tokens
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.seed = seed
         self.drop_last = drop_last
-        self.sampler = RandomSampler(lengths)
+        # Trainer https://github.com/huggingface/transformers/blame/main/src/transformers/trainer.py#L2470
+        # http://github.com/huggingface/accelerate/blob/v0.31.0/src/accelerate/data_loader.py#L482
+        # the huggingface trainer will call the accelerate.data_loader.DataLoaderShard.set_epoch,
+        # which will call batch_sampler.sample.set_epoch
+        self.sampler = SamplePlacerHolder()
 
     def __iter__(self) -> Iterator[List[int]]:
+
+        # deterministically shuffle based on epoch and seed
+        g = torch.Generator()
+        g.manual_seed(self.seed + self.sampler.epoch)
+        indices = torch.randperm(len(self.lengths), generator=g).tolist()
+
+        # Partition indices for this rank
+        indices = indices[self.rank :: self.num_replicas]
+
         batch = []
         current_batch_tokens = 0
-        for idx in self.sampler:
+
+        for idx in indices:
             sample_length = self.lengths[idx]
             # If adding this sample would exceed max_tokens, yield the current batch
-            if (
-                current_batch_tokens + sample_length > self.max_tokens * self.world_size
-                and batch
-            ):
+            if current_batch_tokens + sample_length > self.max_tokens and batch:
                 yield batch
                 batch = []
                 current_batch_tokens = 0
@@ -61,21 +116,25 @@ class SamplePackingSampler(Sampler):
 
     def __len__(self) -> int:
         """
-        Estimates the number of batches that will be generated.
+        Estimates the number of batches that will be generated for this rank.
 
-        This is an approximation since the exact number depends on the specific
-        sequence lengths and their order.
+        This is an approximation since actual batching depends on sequence lengths
+        and sampling order. It accounts for the number of tokens allowed per batch.
+
+        Returns:
+            int: Estimated number of batches.
         """
-        # Calculate average sequence length
-        avg_seq_length = sum(self.lengths) // len(self.lengths)
+        # Estimate based on samples assigned to this rank
+        total_samples = len(self.lengths) // self.num_replicas
 
-        # Estimate average number of sequences per batch
-        seqs_per_batch = self.max_tokens * self.world_size // avg_seq_length
+        # Avoid division by zero
+        avg_seq_length = max(1, sum(self.lengths) // len(self.lengths))
 
-        # Estimate total number of batches
-        if self.drop_last:
-            # If dropping last incomplete batch
-            return len(self.lengths) // seqs_per_batch
-        else:
-            # If keeping last incomplete batch, ensure at least 1 batch
-            return max(1, len(self.lengths) // seqs_per_batch)
+        # Approximate how many sequences can fit in a batch
+        seqs_per_batch = max(1, self.max_tokens // avg_seq_length)
+
+        est_batches = total_samples // seqs_per_batch
+        if not self.drop_last and total_samples % seqs_per_batch != 0:
+            est_batches += 1
+
+        return est_batches
