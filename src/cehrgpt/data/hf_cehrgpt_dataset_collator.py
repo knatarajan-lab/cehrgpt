@@ -377,6 +377,10 @@ class CehrGptDataCollator:
                 record["values"] = self._convert_to_tensor(
                     record["values"][0:end_index]
                 )
+            if self.include_ttv_prediction:
+                record["time_to_visits"] = self._convert_to_tensor(
+                    self._convert_time_to_event(concept_ids[0:end_index])
+                )
             return record
         else:
             if self.include_demographics and not sample_packing:
