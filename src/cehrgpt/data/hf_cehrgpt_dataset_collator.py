@@ -518,9 +518,8 @@ class CehrGptDataCollator:
 
 
 class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
-    def __init__(self, max_tokens, world_size, *args, **kwargs):
+    def __init__(self, max_tokens, *args, **kwargs):
         self.max_tokens = max_tokens
-        self.world_size = world_size
         self.sample_packing = True
         super(SamplePackingCehrGptDataCollator, self).__init__(*args, **kwargs)
 
@@ -554,9 +553,6 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 current_attention_mask = []
                 current_value_indicators = []
                 current_values = []
-
-                if len(flattened_examples) >= self.world_size:
-                    break
 
             current_input_ids.extend(list(input_ids) + [self.tokenizer.pad_token_id])
             current_attention_mask.extend(np.ones_like(input_ids).tolist() + [0])

@@ -469,7 +469,6 @@ def main():
         data_collator_fn = partial(
             SamplePackingCehrGptDataCollator,
             cehrgpt_args.max_tokens_per_batch,
-            training_args.world_size,
         )
     else:
         trainer_class = Trainer
