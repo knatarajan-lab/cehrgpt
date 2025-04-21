@@ -436,7 +436,11 @@ def main():
             SamplePackingTrainer,
             max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
             train_lengths=processed_dataset["train"]["num_of_concepts"],
-            validation_lengths=processed_dataset["validation"]["num_of_concepts"],
+            validation_lengths=(
+                processed_dataset["validation"]
+                if "validation" in processed_dataset
+                else processed_dataset["test"]
+            )["num_of_concepts"],
         )
         training_args.per_device_train_batch_size = 1
         training_args.per_device_eval_batch_size = 1
@@ -464,7 +468,11 @@ def main():
             include_values=model_args.include_values,
         ),
         train_dataset=processed_dataset["train"],
-        eval_dataset=processed_dataset["validation"],
+        eval_dataset=(
+            processed_dataset["validation"]
+            if "validation" in processed_dataset
+            else processed_dataset["test"]
+        ),
         args=training_args,
         callbacks=callbacks,
     )

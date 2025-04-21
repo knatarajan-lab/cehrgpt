@@ -27,6 +27,7 @@ class SamplePackingTrainer(Trainer):
         self.train_lengths = kwargs.pop("train_lengths", None)
         self.validation_lengths = kwargs.pop("validation_lengths", None)
         super().__init__(*args, **kwargs)
+        self.accelerator.even_batches = False
 
     def num_examples(self, dataloader: DataLoader) -> int:
         if has_length(dataloader):
