@@ -116,25 +116,21 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
 
     def __len__(self) -> int:
         """
-        Estimates the number of batches that will be generated for this rank.
+        Estimates the number of batches that will be generated.
 
-        This is an approximation since actual batching depends on sequence lengths
-        and sampling order. It accounts for the number of tokens allowed per batch.
-
-        Returns:
-            int: Estimated number of batches.
+        This is an approximation since the exact number depends on the specific
+        sequence lengths and their order.
         """
-        # Estimate based on samples assigned to this rank
-        total_samples = len(self.lengths) // self.num_replicas
+        # Calculate average sequence length
+        avg_seq_length = sum(self.lengths) // len(self.lengths)
 
-        # Avoid division by zero
-        avg_seq_length = max(1, sum(self.lengths) // len(self.lengths))
+        # Estimate average number of sequences per batch
+        seqs_per_batch = self.max_tokens // avg_seq_length
 
-        # Approximate how many sequences can fit in a batch
-        seqs_per_batch = max(1, self.max_tokens // avg_seq_length)
-
-        est_batches = total_samples // seqs_per_batch
-        if not self.drop_last and total_samples % seqs_per_batch != 0:
-            est_batches += 1
-
-        return est_batches
+        # Estimate total number of batches
+        if self.drop_last:
+            # If dropping last incomplete batch
+            return len(self.lengths) // seqs_per_batch
+        else:
+            # If keeping last incomplete batch, ensure at least 1 batch
+            return max(1, len(self.lengths) // seqs_per_batch)
