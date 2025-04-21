@@ -135,6 +135,11 @@ class CehrGptDataCollator:
             f'batch["attention_mask"].shape[1]: {batch["attention_mask"].shape[1]}, '
             f'batch["input_ids"].shape[1]: {batch["input_ids"].shape[1]}'
         )
+        assert batch["input_ids"].max() <= self.tokenizer.vocab_size, (
+            f"batch['input_ids'].max(): {batch['input_ids'].max()} must be smaller than "
+            f"self.tokenizer.vocab_size: {self.tokenizer.vocab_size}. "
+            f"batch['input_ids']: {batch['input_ids']} "
+        )
 
         if self.pretraining:
             batch["labels"] = self._try_reverse_tensor(

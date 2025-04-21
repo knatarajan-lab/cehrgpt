@@ -979,10 +979,6 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 self.wte(input_ids),
             )
         else:
-            assert input_ids.max().item() < self.config.vocab_size, (
-                f"input_ids.max().item(): {input_ids.max().item()}"
-                f"self.config.vocab_size: {self.config.vocab_size}"
-            )
             input_embeddings = self.wte(input_ids)
 
         if self.config.causal_sfm and input_shape[1] >= self.config.demographics_size:
