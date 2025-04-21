@@ -690,7 +690,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             self.pretrained_wte = None
 
         self.wte = nn.Embedding(config.vocab_size, self.embed_dim)
-        self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
+        if not self.exclude_position_ids:
+            self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         if self.include_values:
             self.vte = nn.Embedding(config.value_vocab_size, self.embed_dim)
             self.concept_value_transformation_layer = ConceptValueTransformationLayer(
@@ -758,7 +759,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.wte = self.wte.to(self.first_device)
         if self.config.use_pretrained_embeddings:
             self.pretrained_wte = self.pretrained_wte.to(self.first_device)
-        self.wpe = self.wpe.to(self.first_device)
+        if not self.exclude_position_ids:
+            self.wpe = self.wpe.to(self.first_device)
         if self.include_values:
             self.vte = self.vte.to(self.first_device)
             self.concept_value_transformation_layer = (
@@ -784,7 +786,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.wte = self.wte.to("cpu")
         if self.config.use_pretrained_embeddings:
             self.pretrained_wte = self.pretrained_wte.to("cpu")
-        self.wpe = self.wpe.to("cpu")
+        if not self.exclude_position_ids:
+            self.wpe = self.wpe.to("cpu")
         self.vte = self.vte.to("cpu")
         self.concept_value_transformation_layer = (
             self.concept_value_transformation_layer.to("cpu")
@@ -809,8 +812,12 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 persistent=False,
             )
 
-    def get_position_embeddings(self) -> Union[nn.Embedding, Tuple[nn.Embedding]]:
-        return self.wpe
+    def get_position_embeddings(
+        self,
+    ) -> Optional[Union[nn.Embedding, Tuple[nn.Embedding]]]:
+        if not self.exclude_position_ids:
+            return self.wpe
+        return None
 
     def set_position_embeddings(self, new_embeddings: nn.Embedding):
         self.wpe = new_embeddings
