@@ -211,10 +211,11 @@ class CehrGptDataCollator:
                     batch["value_indicators"], batch["values"].clone(), -100
                 )
 
+        bz = len(examples)
         if "person_id" in examples[0]:
             batch["person_id"] = torch.cat(
                 [
-                    self._convert_to_tensor(example["person_id"]).reshape(-1, 1)
+                    self._convert_to_tensor(example["person_id"]).reshape(bz, -1)
                     for example in examples
                 ],
                 dim=0,
@@ -224,7 +225,7 @@ class CehrGptDataCollator:
             batch["index_date"] = torch.cat(
                 [
                     torch.tensor(example["index_date"], dtype=torch.float64).reshape(
-                        -1, 1
+                        bz, -1
                     )
                     for example in examples
                 ],
@@ -234,7 +235,7 @@ class CehrGptDataCollator:
         if "age_at_index" in examples[0]:
             batch["age_at_index"] = torch.cat(
                 [
-                    self._convert_to_tensor(example["age_at_index"]).reshape(-1, 1)
+                    self._convert_to_tensor(example["age_at_index"]).reshape(bz, -1)
                     for example in examples
                 ],
                 dim=0,
@@ -243,7 +244,7 @@ class CehrGptDataCollator:
         if "classifier_label" in examples[0]:
             batch["classifier_label"] = torch.cat(
                 [
-                    self._convert_to_tensor(example["classifier_label"]).reshape(-1, 1)
+                    self._convert_to_tensor(example["classifier_label"]).reshape(bz, -1)
                     for example in examples
                 ],
                 dim=0,
@@ -529,6 +530,15 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         current_attention_mask = []
         current_value_indicators = []
         current_values = []
+
+        # Demographics
+        current_person_ids = []
+        current_index_dates = []
+
+        # Binary classification inputs
+        current_ages = []
+        current_labels = []
+
         for idx, example in enumerate(examples):
             input_ids = example["input_ids"]
             # We add the flattened example to the list either when the example exceeds the total max tokens
@@ -546,6 +556,16 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                     )
                     packed_example.update({"values": current_values})
 
+                if current_labels:
+                    packed_example.update(
+                        {
+                            "person_id": current_person_ids,
+                            "index_date": current_index_dates,
+                            "age_at_index": current_ages,
+                            "classifier_label": current_labels,
+                        }
+                    )
+
                 flattened_examples.append(packed_example)
 
                 # reset the inputs
@@ -553,6 +573,13 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 current_attention_mask = []
                 current_value_indicators = []
                 current_values = []
+
+                # Reset demographics
+                current_person_ids = []
+                current_index_dates = []
+                # Reset classification binary inputs
+                current_ages = []
+                current_labels = []
 
             current_input_ids.extend(list(input_ids) + [self.tokenizer.pad_token_id])
             current_attention_mask.extend(np.ones_like(input_ids).tolist() + [0])
@@ -564,6 +591,18 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                     list(example["values"]) + [self.tokenizer.pad_value_token_id]
                 )
 
+            if "person_ids" in example:
+                current_person_ids.append(example["person_ids"])
+
+            if "index_date" in example:
+                current_index_dates.append(example["index_date"])
+
+            if "age_at_index" in example:
+                current_ages.append(example["age_at_index"])
+
+            if "classifier_label" in example:
+                current_labels.append(example["classifier_label"])
+
         # The final batch needs to be added
         if current_input_ids:
             packed_example = {
@@ -573,6 +612,17 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
             if self.include_values:
                 packed_example.update({"value_indicators": current_value_indicators})
                 packed_example.update({"values": current_values})
+
+            if current_labels:
+                packed_example.update(
+                    {
+                        "person_id": current_person_ids,
+                        "index_date": current_index_dates,
+                        "age_at_index": current_ages,
+                        "classifier_label": current_labels,
+                    }
+                )
+
             flattened_examples.append(packed_example)
 
         return super().__call__(flattened_examples)

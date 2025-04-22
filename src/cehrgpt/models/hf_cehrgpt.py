@@ -45,6 +45,16 @@ if is_accelerate_available():
 logger = logging.get_logger(__name__)
 
 
+def extract_features_from_packed_sequence(
+    hidden_state: torch.Tensor,
+    attention_mask: torch.Tensor,
+) -> torch.Tensor:
+    max_index = attention_mask.nonzero(as_tuple=False).flatten()[-1]
+    padded_attention_mask = F.pad(attention_mask[:, : max_index + 1], (0, 1))
+    feature_indices = torch.nonzero(padded_attention_mask == 0)[:, 1] - 1
+    return hidden_state[:, feature_indices]
+
+
 def create_sample_packing_attention_mask(attention_mask: torch.Tensor) -> torch.Tensor:
     """
     Create a block-diagonal attention mask for packed sequences within a batch.
@@ -1878,6 +1888,7 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
         return_dict: Optional[bool] = None,
         **kwargs,
     ) -> CehrGptSequenceClassifierOutput:
+
         cehrgpt_output = self.cehrgpt(
             input_ids=input_ids,
             value_indicators=value_indicators,
@@ -1896,13 +1907,29 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
         with torch.autocast(device_type="cuda", enabled=False):
             normalized_age = self._apply_age_norm(age_at_index)
 
+        if is_sample_pack(attention_mask):
+            features = extract_features_from_packed_sequence(
+                cehrgpt_output.last_hidden_state, attention_mask
+            )
+            assert features.shape[1] == classifier_label.shape[1], (
+                "the length of the features need to be the same as the length of classifier_label. "
+                f"features.shape[1]: {features.shape[1]}, "
+                f"classifier_label.shape[1]: {classifier_label.shape[1]}"
+            )
+            assert features.shape[1] == age_at_index.shape[1], (
+                "the length of the features need to be the same as the length of age_at_index. "
+                f"features.shape[1]: {features.shape[1]}, "
+                f"age_at_index.shape[1]: {age_at_index.shape[1]}"
+            )
+        else:
+            features = cehrgpt_output.last_hidden_state[..., -1, :]
+
         # In case the model is in bfloat16
-        if cehrgpt_output.last_hidden_state.dtype != normalized_age.dtype:
-            normalized_age = normalized_age.to(cehrgpt_output.last_hidden_state.dtype)
+        if features.dtype != normalized_age.dtype:
+            normalized_age = normalized_age.to(features.dtype)
 
         # In fine-tuning, the sequences are left-padded, so we use the last element as the pooler
-        output_pooler = cehrgpt_output.last_hidden_state[..., -1, :]
-        next_input = self.dropout(output_pooler)
+        next_input = self.dropout(features)
         next_input = torch.cat([next_input, normalized_age], dim=1)
         next_input = self.dense_layer(next_input)
         next_input = nn.functional.relu(next_input)
