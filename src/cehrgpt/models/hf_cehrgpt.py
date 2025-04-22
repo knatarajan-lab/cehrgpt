@@ -1917,9 +1917,12 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
                 f"features.shape[1]: {features.shape[1]}, "
                 f"age_at_index.shape[1]: {age_at_index.shape[1]}"
             )
+            num_samples = age_at_index.shape[1]
+            features = features.view((num_samples, -1))
+            classifier_label = classifier_label.view((num_samples, -1))
             with torch.autocast(device_type="cuda", enabled=False):
-                normalized_age = self._apply_age_norm(age_at_index.view((-1, 1))).view(
-                    (1, -1)
+                normalized_age = self._apply_age_norm(
+                    age_at_index.view((num_samples, 1))
                 )
         else:
             features = cehrgpt_output.last_hidden_state[..., -1, :]
