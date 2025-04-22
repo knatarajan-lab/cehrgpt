@@ -100,7 +100,7 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
         for idx in indices:
             sample_length = self.lengths[idx]
             # If adding this sample would exceed max_tokens, yield the current batch
-            if current_batch_tokens + sample_length > self.max_tokens and batch:
+            if current_batch_tokens + sample_length + 1 > self.max_tokens and batch:
                 yield batch
                 batch = []
                 current_batch_tokens = 0
