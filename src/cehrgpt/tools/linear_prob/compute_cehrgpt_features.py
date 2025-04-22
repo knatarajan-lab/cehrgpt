@@ -3,20 +3,31 @@ import os
 import shutil
 import uuid
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
+import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
 from cehrbert.runners.runner_util import generate_prepared_ds_path
 from datasets import concatenate_datasets, load_from_disk
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from transformers.trainer_utils import is_main_process
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
-from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
-from cehrgpt.models.hf_cehrgpt import CEHRGPT2Model
+from cehrgpt.data.hf_cehrgpt_dataset_collator import (
+    CehrGptDataCollator,
+    SamplePackingCehrGptDataCollator,
+)
+from cehrgpt.data.sample_packing_sampler import SamplePackingBatchSampler
+from cehrgpt.models.hf_cehrgpt import (
+    CEHRGPT2Model,
+    extract_features_from_packed_sequence,
+)
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.data_utils import prepare_finetune_dataset
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
@@ -72,43 +83,50 @@ def main():
                 shutil.rmtree(prepared_ds_path)
 
     if processed_dataset is None:
-        # Organize them into a single DatasetDict
-        final_splits = prepare_finetune_dataset(
-            data_args, training_args, cehrgpt_args, cache_file_collector
-        )
-        if cehrgpt_args.expand_tokenizer:
-            new_tokenizer_path = os.path.expanduser(training_args.output_dir)
-            if tokenizer_exists(new_tokenizer_path):
-                cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(new_tokenizer_path)
-            else:
-                cehrgpt_tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
-                    cehrgpt_tokenizer=cehrgpt_tokenizer,
-                    dataset=final_splits["train"],
-                    data_args=data_args,
-                    concept_name_mapping={},
-                )
-                cehrgpt_tokenizer.save_pretrained(
-                    os.path.expanduser(training_args.output_dir)
-                )
+        if is_main_process(training_args.local_rank):
+            # Organize them into a single DatasetDict
+            final_splits = prepare_finetune_dataset(
+                data_args, training_args, cehrgpt_args, cache_file_collector
+            )
+            if cehrgpt_args.expand_tokenizer:
+                new_tokenizer_path = os.path.expanduser(training_args.output_dir)
+                if tokenizer_exists(new_tokenizer_path):
+                    cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
+                        new_tokenizer_path
+                    )
+                else:
+                    cehrgpt_tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
+                        cehrgpt_tokenizer=cehrgpt_tokenizer,
+                        dataset=final_splits["train"],
+                        data_args=data_args,
+                        concept_name_mapping={},
+                    )
+                    cehrgpt_tokenizer.save_pretrained(
+                        os.path.expanduser(training_args.output_dir)
+                    )
 
-            # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
-        if not data_args.streaming:
-            all_columns = final_splits["train"].column_names
-            if "visit_concept_ids" in all_columns:
-                final_splits = final_splits.remove_columns(["visit_concept_ids"])
+                # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
+            if not data_args.streaming:
+                all_columns = final_splits["train"].column_names
+                if "visit_concept_ids" in all_columns:
+                    final_splits = final_splits.remove_columns(["visit_concept_ids"])
 
-        processed_dataset = create_cehrgpt_finetuning_dataset(
-            dataset=final_splits,
-            cehrgpt_tokenizer=cehrgpt_tokenizer,
-            data_args=data_args,
-            cache_file_collector=cache_file_collector,
-        )
-        if not data_args.streaming:
-            processed_dataset.save_to_disk(prepared_ds_path)
-            processed_dataset.cleanup_cache_files()
+            processed_dataset = create_cehrgpt_finetuning_dataset(
+                dataset=final_splits,
+                cehrgpt_tokenizer=cehrgpt_tokenizer,
+                data_args=data_args,
+                cache_file_collector=cache_file_collector,
+            )
+            if not data_args.streaming and not cehrgpt_args.sample_packing:
+                processed_dataset.save_to_disk(prepared_ds_path)
+                processed_dataset.cleanup_cache_files()
 
-        # Remove all the cached files if processed_dataset.cleanup_cache_files() did not remove them already
-        cache_file_collector.remove_cache_files()
+            # Remove all the cached files if processed_dataset.cleanup_cache_files() did not remove them already
+            cache_file_collector.remove_cache_files()
+
+        # After main-process-only operations, synchronize all processes to ensure consistency
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
 
     # Getting the existing features
     feature_folders = glob.glob(
@@ -160,12 +178,30 @@ def main():
         )
         cehrgpt_model.resize_position_embeddings(model_args.max_position_embeddings)
 
-    data_collator = CehrGptDataCollator(
+    if cehrgpt_args.sample_packing:
+        per_device_eval_batch_size = 1
+        data_collator_fn = partial(
+            SamplePackingCehrGptDataCollator,
+            cehrgpt_args.max_tokens_per_batch,
+        )
+        batch_sampler = SamplePackingBatchSampler(
+            lengths=processed_dataset["test"]["num_of_concepts"],
+            max_tokens=cehrgpt_args.max_tokens_per_batch,
+            drop_last=training_args.dataloader_drop_last,
+            seed=training_args.seed,
+        )
+    else:
+        data_collator_fn = CehrGptDataCollator
+        batch_sampler = None
+        per_device_eval_batch_size = training_args.per_device_eval_batch_size
+
+    # We suppress the additional learning objectives in fine-tuning
+    data_collator = data_collator_fn(
         tokenizer=cehrgpt_tokenizer,
         max_length=(
-            cehrgpt_model.config.max_position_embeddings - 1
-            if cehrgpt_model.config.causal_sfm
-            else cehrgpt_model.config.max_position_embeddings
+            cehrgpt_args.max_tokens_per_batch
+            if cehrgpt_args.sample_packing
+            else model_args.max_position_embeddings
         ),
         include_values=model_args.include_values,
         pretraining=False,
@@ -178,18 +214,20 @@ def main():
         dataset=concatenate_datasets(
             [processed_dataset["train"], processed_dataset["validation"]]
         ),
-        batch_size=training_args.per_device_eval_batch_size,
+        batch_size=per_device_eval_batch_size,
         num_workers=training_args.dataloader_num_workers,
         collate_fn=data_collator,
         pin_memory=training_args.dataloader_pin_memory,
+        batch_sampler=batch_sampler,
     )
 
     test_dataloader = DataLoader(
         dataset=processed_dataset["test"],
-        batch_size=training_args.per_device_eval_batch_size,
+        batch_size=per_device_eval_batch_size,
         num_workers=training_args.dataloader_num_workers,
         collate_fn=data_collator,
         pin_memory=training_args.dataloader_pin_memory,
+        batch_sampler=batch_sampler,
     )
 
     # Loading demographics
@@ -232,12 +270,17 @@ def main():
                 tqdm(data_loader, desc="Generating features")
             ):
                 prediction_time_ages = (
-                    batch.pop("age_at_index").numpy().squeeze().astype(float)
+                    batch.pop("age_at_index").numpy().astype(float).squeeze()
                 )
-                person_ids = list(batch.pop("person_id").numpy().squeeze().astype(int))
-                prediction_time_posix = (
-                    batch.pop("index_date").numpy().squeeze(axis=-1).tolist()
-                )
+                if prediction_time_ages.ndim == 0:
+                    prediction_time_ages = np.asarray([prediction_time_ages])
+
+                person_ids = batch.pop("person_id").numpy().astype(int).squeeze()
+                if person_ids.ndim == 0:
+                    person_ids = np.asarray([person_ids])
+                prediction_time_posix = batch.pop("index_date").numpy().squeeze()
+                if prediction_time_posix.ndim == 0:
+                    prediction_time_posix = np.asarray([prediction_time_posix])
                 prediction_time = list(
                     map(datetime.fromtimestamp, prediction_time_posix)
                 )
@@ -246,36 +289,52 @@ def main():
                     .float()
                     .cpu()
                     .numpy()
-                    .squeeze()
                     .astype(bool)
+                    .squeeze()
                 )
+                if labels.ndim == 0:
+                    labels = np.asarray([labels])
+
                 batch = {k: v.to(device) for k, v in batch.items()}
                 # Forward pass
                 cehrgpt_output = cehrgpt_model(
                     **batch, output_attentions=False, output_hidden_states=False
                 )
-                last_end_token = any(
-                    [
-                        cehrgpt_tokenizer.end_token_id == input_id
-                        for input_id in batch.pop("input_ids")
+
+                if cehrgpt_args.sample_packing:
+                    features = (
+                        extract_features_from_packed_sequence(
+                            cehrgpt_output.last_hidden_state,
+                            batch["attention_mask"],
+                        )
                         .cpu()
+                        .detach()
                         .numpy()
-                        .squeeze()
-                        .tolist()
-                    ]
-                )
-                last_token_index = -2 if last_end_token else -1
-                LOG.debug(
-                    "The last token is [END], we need to use the token index before that: %s",
-                    last_token_index,
-                )
-                features = (
-                    cehrgpt_output.last_hidden_state[..., last_token_index, :]
-                    .cpu()
-                    .float()
-                    .detach()
-                    .numpy()
-                )
+                        .squeeze(axis=0)
+                    )
+                else:
+                    last_end_token = any(
+                        [
+                            cehrgpt_tokenizer.end_token_id == input_id
+                            for input_id in batch.pop("input_ids")
+                            .cpu()
+                            .numpy()
+                            .squeeze()
+                            .tolist()
+                        ]
+                    )
+                    last_token_index = -2 if last_end_token else -1
+                    LOG.debug(
+                        "The last token is [END], we need to use the token index before that: %s",
+                        last_token_index,
+                    )
+                    features = (
+                        cehrgpt_output.last_hidden_state[..., last_token_index, :]
+                        .cpu()
+                        .float()
+                        .detach()
+                        .numpy()
+                    )
 
                 # Flatten features or handle them as a list of arrays (one array per row)
                 features_list = [feature for feature in features]
