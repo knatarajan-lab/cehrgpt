@@ -42,6 +42,7 @@ from cehrgpt.data.hf_cehrgpt_dataset_collator import (
     CehrGptDataCollator,
     SamplePackingCehrGptDataCollator,
 )
+from cehrgpt.data.sample_packing_sampler import SamplePackingBatchSampler
 from cehrgpt.models.hf_cehrgpt import (
     CEHRGPTConfig,
     CehrGptForClassification,
@@ -429,8 +430,6 @@ def main():
             trainer.save_state()
 
     if training_args.do_predict:
-        from cehrgpt.data.sample_packing_sampler import SamplePackingBatchSampler
-
         if cehrgpt_args.sample_packing:
             batch_sampler = SamplePackingBatchSampler(
                 lengths=processed_dataset["test"]["num_of_concepts"],
@@ -547,15 +546,15 @@ def do_predict(
     test_losses = []
     with torch.no_grad():
         for index, batch in enumerate(tqdm(test_dataloader, desc="Predicting")):
-            person_ids = batch.pop("person_id").numpy().squeeze().astype(int)
-            index_dates = (
-                map(
-                    datetime.fromtimestamp,
-                    batch.pop("index_date").numpy().squeeze().tolist(),
-                )
-                if "index_date" in batch
-                else None
-            )
+            person_ids = batch.pop("person_id").numpy().astype(int).squeeze()
+            if person_ids.ndim == 0:
+                person_ids = np.asarray([person_ids])
+
+            index_dates = batch.pop("index_date").numpy().squeeze()
+            if index_dates.ndim == 0:
+                index_dates = np.asarray([index_dates])
+            index_dates = list(map(datetime.fromtimestamp, index_dates.tolist()))
+
             batch = {k: v.to(device) for k, v in batch.items()}
             # Forward pass
             output = model(**batch, output_attentions=False, output_hidden_states=False)
@@ -563,10 +562,16 @@ def do_predict(
 
             # Collect logits and labels for prediction
             logits = output.logits.float().cpu().numpy().squeeze()
-            labels = (
-                batch["classifier_label"].float().cpu().numpy().squeeze().astype(bool)
-            )
+            if logits.ndim == 0:
+                logits = np.asarray([logits])
             probabilities = sigmoid(logits)
+
+            labels = (
+                batch["classifier_label"].float().cpu().numpy().astype(bool).squeeze()
+            )
+            if labels.ndim == 0:
+                labels = np.asarray([labels])
+
             # Save predictions to parquet file
             test_prediction_pd = pd.DataFrame(
                 {
