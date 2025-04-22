@@ -178,13 +178,23 @@ def main():
         )
         cehrgpt_model.resize_position_embeddings(model_args.max_position_embeddings)
 
+    train_set = concatenate_datasets(
+        [processed_dataset["train"], processed_dataset["validation"]]
+    )
+
     if cehrgpt_args.sample_packing:
         per_device_eval_batch_size = 1
         data_collator_fn = partial(
             SamplePackingCehrGptDataCollator,
             cehrgpt_args.max_tokens_per_batch,
         )
-        batch_sampler = SamplePackingBatchSampler(
+        train_batch_sampler = SamplePackingBatchSampler(
+            lengths=train_set["num_of_concepts"],
+            max_tokens=cehrgpt_args.max_tokens_per_batch,
+            drop_last=training_args.dataloader_drop_last,
+            seed=training_args.seed,
+        )
+        test_batch_sampler = SamplePackingBatchSampler(
             lengths=processed_dataset["test"]["num_of_concepts"],
             max_tokens=cehrgpt_args.max_tokens_per_batch,
             drop_last=training_args.dataloader_drop_last,
@@ -192,7 +202,8 @@ def main():
         )
     else:
         data_collator_fn = CehrGptDataCollator
-        batch_sampler = None
+        train_batch_sampler = None
+        test_batch_sampler = None
         per_device_eval_batch_size = training_args.per_device_eval_batch_size
 
     # We suppress the additional learning objectives in fine-tuning
@@ -211,14 +222,12 @@ def main():
     )
 
     train_loader = DataLoader(
-        dataset=concatenate_datasets(
-            [processed_dataset["train"], processed_dataset["validation"]]
-        ),
+        dataset=train_set,
         batch_size=per_device_eval_batch_size,
         num_workers=training_args.dataloader_num_workers,
         collate_fn=data_collator,
         pin_memory=training_args.dataloader_pin_memory,
-        batch_sampler=batch_sampler,
+        batch_sampler=train_batch_sampler,
     )
 
     test_dataloader = DataLoader(
@@ -227,7 +236,7 @@ def main():
         num_workers=training_args.dataloader_num_workers,
         collate_fn=data_collator,
         pin_memory=training_args.dataloader_pin_memory,
-        batch_sampler=batch_sampler,
+        batch_sampler=test_batch_sampler,
     )
 
     # Loading demographics
@@ -308,6 +317,7 @@ def main():
                             batch["attention_mask"],
                         )
                         .cpu()
+                        .float()
                         .detach()
                         .numpy()
                         .squeeze(axis=0)
