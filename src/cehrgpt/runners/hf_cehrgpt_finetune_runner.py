@@ -551,7 +551,7 @@ def do_predict(
             index_dates = (
                 map(
                     datetime.fromtimestamp,
-                    batch.pop("index_date").numpy().squeeze(axis=-1).tolist(),
+                    batch.pop("index_date").numpy().squeeze().tolist(),
                 )
                 if "index_date" in batch
                 else None
