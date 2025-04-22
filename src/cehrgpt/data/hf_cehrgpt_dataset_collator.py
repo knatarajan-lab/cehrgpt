@@ -591,8 +591,8 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                     list(example["values"]) + [self.tokenizer.pad_value_token_id]
                 )
 
-            if "person_ids" in example:
-                current_person_ids.append(example["person_ids"])
+            if "person_id" in example:
+                current_person_ids.append(example["person_id"])
 
             if "index_date" in example:
                 current_index_dates.append(example["index_date"])
