@@ -142,12 +142,11 @@ class CehrGptDataCollator:
         )
 
         if self.pretraining:
-            batch["labels"] = self._try_reverse_tensor(
-                pad_sequence(
-                    batch_input_ids,
-                    batch_first=True,
-                    padding_value=-100,
-                ).to(torch.int64)
+            batch["labels"] = torch.where(
+                (batch["input_ids"] != self.tokenizer.pad_token_id)
+                & batch["attention_mask"].to(torch.bool),
+                batch["input_ids"],
+                -100,
             )
 
         if self.use_sub_time_tokenization:
