@@ -27,7 +27,8 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
     def __init__(
         self,
         lengths: List[int],
-        max_tokens: int,
+        max_tokens_per_batch: int,
+        max_position_embeddings: int,
         num_replicas: Optional[int] = None,
         rank: Optional[int] = None,
         seed: int = 0,
@@ -73,7 +74,8 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
             )
 
         self.lengths = lengths
-        self.max_tokens = max_tokens
+        self.max_tokens_per_batch = max_tokens_per_batch
+        self.max_position_embeddings = max_position_embeddings
         self.num_replicas = num_replicas
         self.rank = rank
         self.seed = seed
@@ -98,9 +100,14 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
         current_batch_tokens = 0
 
         for idx in indices:
-            sample_length = self.lengths[idx]
-            # If adding this sample would exceed max_tokens, yield the current batch
-            if current_batch_tokens + sample_length + 1 > self.max_tokens and batch:
+            # We take the minimum of the two because each sequence will be truncated to fit
+            # the context window of the model
+            sample_length = min(self.lengths[idx], self.max_position_embeddings)
+            # If adding this sample would exceed max_tokens_per_batch, yield the current batch
+            if (
+                current_batch_tokens + sample_length + 1 > self.max_tokens_per_batch
+                and batch
+            ):
                 yield batch
                 batch = []
                 current_batch_tokens = 0
@@ -125,7 +132,7 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
         avg_seq_length = sum(self.lengths) // len(self.lengths)
 
         # Estimate average number of sequences per batch
-        seqs_per_batch = self.max_tokens // avg_seq_length
+        seqs_per_batch = self.max_tokens_per_batch // avg_seq_length
 
         # Estimate total number of batches
         if self.drop_last:

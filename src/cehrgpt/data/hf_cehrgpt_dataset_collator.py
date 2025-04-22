@@ -1,5 +1,5 @@
 import random
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -286,9 +286,14 @@ class CehrGptDataCollator:
             record["input_ids"] = self._convert_to_tensor(sorted_input_ids)
         return record
 
-    def generate_start_end_index(self, record: Dict[str, Any]) -> Dict[str, Any]:
+    def generate_start_end_index(
+        self, record: Dict[str, Any], max_length_allowed: Optional[int] = None
+    ) -> Dict[str, Any]:
         """Adding the start and end indices to extract a portion of the patient sequence."""
         # concept_ids will be used to for time to event predictions and identifying the visit starts
+        max_length_allowed = (
+            self.max_length if max_length_allowed is None else max_length_allowed
+        )
         sample_packing = getattr(self, "sample_packing", False)
         input_ids = record["input_ids"]
         if isinstance(input_ids, torch.Tensor):
@@ -297,7 +302,9 @@ class CehrGptDataCollator:
         seq_length = len(record["input_ids"])
 
         # Subtract one for the [END] token when sample_packing is not enabled
-        new_max_length = self.max_length if sample_packing else self.max_length - 1
+        new_max_length = (
+            max_length_allowed if sample_packing else max_length_allowed - 1
+        )
 
         if self.include_ttv_prediction:
             record["time_to_visits"] = torch.concat(
@@ -518,8 +525,9 @@ class CehrGptDataCollator:
 
 
 class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
-    def __init__(self, max_tokens, *args, **kwargs):
-        self.max_tokens = max_tokens
+    def __init__(self, max_tokens, max_position_embeddings, *args, **kwargs):
+        self.max_tokens_per_batch = max_tokens
+        self.max_position_embeddings = max_position_embeddings
         self.sample_packing = True
         super(SamplePackingCehrGptDataCollator, self).__init__(*args, **kwargs)
 
@@ -539,10 +547,17 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         current_labels = []
 
         for idx, example in enumerate(examples):
+
+            # If the sample length exceeds the model's capacity, truncate this example
+            if len(example["input_ids"]) > self.max_position_embeddings:
+                example = self.generate_start_end_index(
+                    example, self.max_position_embeddings
+                )
+
             input_ids = example["input_ids"]
             # We add the flattened example to the list either when the example exceeds the total max tokens
             if (
-                len(current_input_ids) + len(input_ids) + 1 > self.max_tokens
+                len(current_input_ids) + len(input_ids) + 1 > self.max_tokens_per_batch
                 and current_input_ids
             ):
                 packed_example = {

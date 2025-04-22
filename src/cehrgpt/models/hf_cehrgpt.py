@@ -1138,6 +1138,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
     def __init__(self, config: CEHRGPTConfig):
         super().__init__(config)
         self.cehrgpt = CEHRGPT2Model(config)
+        if config.n_positions < config.sample_packing_max_positions:
+            logger.info(
+                "Updated attn_bias to %s according to sample_packing_n_positions",
+                config.sample_packing_max_positions,
+            )
+            self.update_attn_bias(config.sample_packing_max_positions)
         if self.config.include_ttv_prediction:
             self.tte_head = WeibullModel(config.n_embd)
 

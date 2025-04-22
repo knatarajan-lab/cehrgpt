@@ -24,6 +24,17 @@ class SamplePackingTrainer(Trainer):
                 "max_tokens_per_batch is not provided to SamplePackingTrainer and will default to %s",
                 DEFAULT_MAX_TOKENS_PER_BATCH,
             )
+
+        if "max_position_embeddings" in kwargs:
+            self.max_position_embeddings = kwargs.pop("max_position_embeddings")
+            LOG.info("max_position_embeddings: %s", self.max_position_embeddings)
+        else:
+            self.max_position_embeddings = self.max_tokens_per_batch
+            LOG.info(
+                "max_position_embeddings is not provided to SamplePackingTrainer and will default to %s",
+                self.max_tokens_per_batch,
+            )
+
         self.train_lengths = kwargs.pop("train_lengths", None)
         self.validation_lengths = kwargs.pop("validation_lengths", None)
         super().__init__(*args, **kwargs)
@@ -62,7 +73,8 @@ class SamplePackingTrainer(Trainer):
         # Create our custom batch sampler
         batch_sampler = SamplePackingBatchSampler(
             lengths=lengths,
-            max_tokens=self.max_tokens_per_batch,
+            max_tokens_per_batch=self.max_tokens_per_batch,
+            max_position_embeddings=self.max_position_embeddings,
             drop_last=self.args.dataloader_drop_last,
             seed=self.args.seed,
         )
@@ -132,7 +144,8 @@ class SamplePackingTrainer(Trainer):
         # Create our custom batch sampler
         batch_sampler = SamplePackingBatchSampler(
             lengths=lengths,
-            max_tokens=self.max_tokens_per_batch,
+            max_tokens_per_batch=self.max_tokens_per_batch,
+            max_position_embeddings=self.max_position_embeddings,
             drop_last=self.args.dataloader_drop_last,
             seed=self.args.seed,
         )

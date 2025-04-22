@@ -187,16 +187,19 @@ def main():
         data_collator_fn = partial(
             SamplePackingCehrGptDataCollator,
             cehrgpt_args.max_tokens_per_batch,
+            cehrgpt_model.config.max_position_embeddings,
         )
         train_batch_sampler = SamplePackingBatchSampler(
             lengths=train_set["num_of_concepts"],
-            max_tokens=cehrgpt_args.max_tokens_per_batch,
+            max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
+            max_position_embeddings=cehrgpt_model.config.max_position_embeddings,
             drop_last=training_args.dataloader_drop_last,
             seed=training_args.seed,
         )
         test_batch_sampler = SamplePackingBatchSampler(
             lengths=processed_dataset["test"]["num_of_concepts"],
-            max_tokens=cehrgpt_args.max_tokens_per_batch,
+            max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
+            max_position_embeddings=cehrgpt_model.config.max_position_embeddings,
             drop_last=training_args.dataloader_drop_last,
             seed=training_args.seed,
         )

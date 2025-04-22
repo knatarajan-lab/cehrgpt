@@ -147,9 +147,6 @@ def load_and_create_model(
         else:
             pretrained_embedding_dim = model_args.hidden_size
 
-        if cehrgpt_args.sample_packing:
-            model_args.max_position_embeddings = cehrgpt_args.max_tokens_per_batch
-
         model_config = CEHRGPTConfig(
             vocab_size=tokenizer.vocab_size,
             value_vocab_size=tokenizer.value_vocab_size,
@@ -168,8 +165,14 @@ def load_and_create_model(
             n_pretrained_embeddings_layers=cehrgpt_args.n_pretrained_embeddings_layers,
             use_pretrained_embeddings=len(tokenizer.pretrained_token_ids) > 0,
             pretrained_embedding_dim=pretrained_embedding_dim,
+            sample_packing_max_positions=(
+                cehrgpt_args.max_tokens_per_batch
+                if cehrgpt_args.sample_packing
+                else model_args.max_position_embeddings
+            ),
             **model_args.as_dict(),
         )
+
     model = CEHRGPT2LMHeadModel(model_config)
     if tokenizer.pretrained_token_ids:
         model.cehrgpt.update_pretrained_embeddings(
@@ -457,6 +460,7 @@ def main():
         trainer_class = partial(
             SamplePackingTrainer,
             max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
+            max_position_embeddings=model_args.max_position_embeddings,
             train_lengths=processed_dataset["train"]["num_of_concepts"],
             validation_lengths=(
                 processed_dataset["validation"]
@@ -469,6 +473,7 @@ def main():
         data_collator_fn = partial(
             SamplePackingCehrGptDataCollator,
             cehrgpt_args.max_tokens_per_batch,
+            model_args.max_position_embeddings,
         )
     else:
         trainer_class = Trainer
