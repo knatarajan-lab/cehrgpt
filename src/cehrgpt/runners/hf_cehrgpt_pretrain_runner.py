@@ -385,7 +385,8 @@ def main():
         )
         cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_name_or_path)
         # Load the dataset from disk again to in torch distributed training
-        processed_dataset = load_from_disk(str(prepared_ds_path))
+        if not data_args.streaming:
+            processed_dataset = load_from_disk(str(prepared_ds_path))
 
     def filter_func(examples):
         if cehrgpt_args.drop_long_sequences:

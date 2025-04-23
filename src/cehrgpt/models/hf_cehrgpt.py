@@ -1436,13 +1436,18 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     lab_index,
                     token_loss * self.cehrgpt.config.lab_token_loss_weight,
                     token_loss,
-                ).mean()
+                )
+
+                token_loss = (
+                    token_loss.sum() / (shift_labels != loss_fct.ignore_index).sum()
+                )
             else:
                 # Flatten the tokens
                 loss_fct = CrossEntropyLoss()
                 token_loss = loss_fct(
                     shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
                 )
+
             loss = token_loss
 
             if self.cehrgpt.config.entropy_penalty:
@@ -1484,9 +1489,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 ) * shifted_time_token_indicators.view(-1, 1).to(hidden_states.dtype)
                 time_token_loss = time_token_loss.sum(-1)
                 time_token_loss = (
-                    torch.mean(time_token_loss) * self.config.time_token_loss_weight
+                    time_token_loss.sum() / shifted_time_token_indicators.sum()
                 )
-                loss += time_token_loss
+                loss += time_token_loss * self.config.time_token_loss_weight
 
         if time_to_visits is not None:
             # Get lambda and k parameters
@@ -1508,11 +1513,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # Compute log-probs and apply the time_to_visit_indicator
             log_probs = dist.log_prob(torch.clamp(shift_time_to_visits, min=0.0) + 1e-6)
             log_probs *= time_to_visit_indicator
-            time_to_visit_loss = (
-                -log_probs.mean() * self.config.time_to_visit_loss_weight
-            )
+            time_to_visit_loss = -log_probs.sum() / time_to_visit_indicator.sum()
             # Compute the loss
-            loss += time_to_visit_loss
+            loss += time_to_visit_loss * self.config.time_to_visit_loss_weight
 
         if true_values is not None and true_value_indicators is not None:
             true_values = true_values.to(value_logits.device)
@@ -1525,7 +1528,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 shift_next_values.view(-1),
             )
             token_value_loss *= shift_value_indicators.view(-1)
-            loss += token_value_loss.mean()
+            loss += token_value_loss.sum() / shift_value_indicators.sum()
 
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]
