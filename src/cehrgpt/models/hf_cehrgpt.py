@@ -1511,7 +1511,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # Define the Gamma distribution
             dist = Gamma(shifted_k_param.squeeze(-1), shifted_lambda_param.squeeze(-1))
             # Compute log-probs and apply the time_to_visit_indicator
-            log_probs = dist.log_prob(torch.clamp(shift_time_to_visits, min=0.0) + 1e-6)
+            log_probs = dist.log_prob(
+                torch.clamp(torch.clamp(shift_time_to_visits, min=1.0), 1e-3)
+            )
             log_probs *= time_to_visit_indicator
             time_to_visit_loss = -log_probs.sum() / time_to_visit_indicator.sum()
             # Compute the loss
