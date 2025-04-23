@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as f
 from torch import nn
-from torch.distributions import Weibull
+from torch.distributions import Gamma, Weibull
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
 from transformers import PreTrainedModel
@@ -1508,11 +1508,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             time_to_visit_indicator = shift_time_to_visits >= 0
             # Define the Gamma distribution
-            dist = Weibull(
-                shifted_k_param.squeeze(-1), shifted_lambda_param.squeeze(-1)
-            )
+            dist = Gamma(shifted_k_param.squeeze(-1), shifted_lambda_param.squeeze(-1))
             # Compute log-probs and apply the time_to_visit_indicator
-            log_probs = dist.log_prob(torch.clamp(shift_time_to_visits, min=0) + 1)
+            log_probs = dist.log_prob(torch.clamp(shift_time_to_visits, min=1e-3))
             log_probs = torch.where(time_to_visit_indicator, log_probs, 0)
             time_to_visit_loss = -log_probs.sum() / time_to_visit_indicator.sum()
             # Compute the loss
