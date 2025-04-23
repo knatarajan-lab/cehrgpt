@@ -380,8 +380,11 @@ class CehrGptDataCollator:
                     break
 
             record["input_ids"] = record["input_ids"][0:end_index]
-            if sample_packing:
+
+            # We want to make sure we take the subset of attention_mask in sample packing if this field is available
+            if sample_packing and "attention_mask" in record:
                 record["attention_mask"] = record["attention_mask"][0:end_index]
+
             if self.include_values:
                 record["value_indicators"] = self._convert_to_tensor(
                     record["value_indicators"][0:end_index]

@@ -203,6 +203,7 @@ def main():
         training_args.dataloader_num_workers = 0
         training_args.dataloader_prefetch_factor = None
 
+    processed_dataset: Optional[DatasetDict] = None
     cache_file_collector = CacheFileCollector()
     prepared_ds_path = generate_prepared_ds_path(data_args, model_args)
     if os.path.exists(os.path.join(data_args.data_folder, "dataset_dict.json")):
@@ -387,6 +388,9 @@ def main():
         # Load the dataset from disk again to in torch distributed training
         if not data_args.streaming:
             processed_dataset = load_from_disk(str(prepared_ds_path))
+
+    if processed_dataset is None:
+        raise RuntimeError("The processed dataset cannot be None")
 
     def filter_func(examples):
         if cehrgpt_args.drop_long_sequences:
