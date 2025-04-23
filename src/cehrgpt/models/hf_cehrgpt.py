@@ -1523,12 +1523,14 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             shift_value_logits = value_logits[..., :-1, :].contiguous()
             shift_value_indicators = true_value_indicators[..., :-1].contiguous()
             shift_next_values = true_values[..., 1:].contiguous()
-            value_loss_fct = CrossEntropyLoss(reduce=False)
+            value_loss_fct = CrossEntropyLoss(reduction="none")
             token_value_loss = value_loss_fct(
                 shift_value_logits.view(-1, shift_value_logits.size(-1)),
                 shift_next_values.view(-1),
             )
-            token_value_loss *= shift_value_indicators.view(-1)
+            token_value_loss = torch.where(
+                shift_value_indicators.view(-1), token_value_loss, 0
+            )
             loss += token_value_loss.sum() / shift_value_indicators.sum()
 
         if not return_dict:
