@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as f
 from torch import nn
-from torch.distributions import Gamma
+from torch.distributions import Weibull
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
 from transformers import PreTrainedModel
@@ -1483,10 +1483,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     ),
                     shifted_time_token_labels.view(-1),
                 )
-
-                time_token_loss = time_token_loss.view(
-                    -1, 3
-                ) * shifted_time_token_indicators.view(-1, 1).to(hidden_states.dtype)
+                time_token_loss = torch.where(
+                    shifted_time_token_indicators.view(-1, 1).to(torch.bool),
+                    time_token_loss.view(-1, 3),
+                    0,
+                )
                 time_token_loss = time_token_loss.sum(-1)
                 time_token_loss = (
                     time_token_loss.sum() / shifted_time_token_indicators.sum()
@@ -1505,16 +1506,14 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # Move to the same device as lambda_param
             shift_time_to_visits = shift_time_to_visits.to(lambda_param.device)
 
-            time_to_visit_indicator = (shift_time_to_visits >= 0).to(
-                hidden_states.dtype
-            )
+            time_to_visit_indicator = shift_time_to_visits >= 0
             # Define the Gamma distribution
-            dist = Gamma(shifted_k_param.squeeze(-1), shifted_lambda_param.squeeze(-1))
-            # Compute log-probs and apply the time_to_visit_indicator
-            log_probs = dist.log_prob(
-                torch.clamp(torch.clamp(shift_time_to_visits, min=1.0), 1e-3)
+            dist = Weibull(
+                shifted_k_param.squeeze(-1), shifted_lambda_param.squeeze(-1)
             )
-            log_probs *= time_to_visit_indicator
+            # Compute log-probs and apply the time_to_visit_indicator
+            log_probs = dist.log_prob(torch.clamp(shift_time_to_visits, min=0) + 1)
+            log_probs = torch.where(time_to_visit_indicator, log_probs, 0)
             time_to_visit_loss = -log_probs.sum() / time_to_visit_indicator.sum()
             # Compute the loss
             loss += time_to_visit_loss * self.config.time_to_visit_loss_weight
