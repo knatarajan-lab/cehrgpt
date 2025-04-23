@@ -158,6 +158,7 @@ def load_and_create_model(
             attn_implementation=attn_implementation,
             causal_sfm=cehrgpt_args.causal_sfm,
             demographics_size=cehrgpt_args.demographics_size,
+            next_token_prediction_loss_weight=cehrgpt_args.next_token_prediction_loss_weight,
             lab_token_penalty=cehrgpt_args.lab_token_penalty,
             lab_token_loss_weight=cehrgpt_args.lab_token_loss_weight,
             entropy_penalty=cehrgpt_args.entropy_penalty,

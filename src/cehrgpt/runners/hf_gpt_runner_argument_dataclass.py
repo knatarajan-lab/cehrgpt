@@ -115,6 +115,9 @@ class CehrGPTArguments:
             "help": "The lower bound of the learning rate range for hyperparameter tuning."
         },
     )
+    next_token_prediction_loss_weight: float = dataclasses.field(
+        default=1.0, metadata={"help": "The weight of the next token prediction loss"}
+    )
     lab_token_penalty: Optional[bool] = dataclasses.field(
         default=False,
         metadata={

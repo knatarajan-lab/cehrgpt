@@ -1448,7 +1448,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
                 )
 
-            loss = token_loss
+            loss = token_loss * self.cehrgpt.config.next_token_prediction_loss_weight
 
             if self.cehrgpt.config.entropy_penalty:
                 # Compute probabilities using softmax
