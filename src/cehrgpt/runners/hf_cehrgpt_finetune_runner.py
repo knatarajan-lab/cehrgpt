@@ -350,7 +350,7 @@ def main():
         trainer_class = partial(
             SamplePackingTrainer,
             max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
-            max_position_embeddings=model_args.max_position_embeddings,
+            max_position_embeddings=config.max_position_embeddings,
             train_lengths=processed_dataset["train"]["num_of_concepts"],
             validation_lengths=processed_dataset["validation"]["num_of_concepts"],
         )

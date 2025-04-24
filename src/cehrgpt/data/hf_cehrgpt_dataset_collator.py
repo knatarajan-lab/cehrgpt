@@ -461,7 +461,7 @@ class CehrGptDataCollator:
                     current_token = record["input_ids"][i]
                     if current_token == self.vs_token_id:
                         record["input_ids"] = record["input_ids"][i:end_index]
-                        if sample_packing:
+                        if sample_packing and "attention_mask" in record:
                             record["attention_mask"] = record["attention_mask"][
                                 i:end_index
                             ]
@@ -480,7 +480,7 @@ class CehrGptDataCollator:
             # We simply take the last new_max_length number of tokens from the patient sequence
             if len(record["input_ids"]) > new_max_length:
                 record["input_ids"] = record["input_ids"][-new_max_length:]
-                if sample_packing:
+                if sample_packing and "attention_mask" in record:
                     record["attention_mask"] = record["attention_mask"][
                         -new_max_length:
                     ]
