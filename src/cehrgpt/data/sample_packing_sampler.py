@@ -128,6 +128,9 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
         This is an approximation since the exact number depends on the specific
         sequence lengths and their order.
         """
+        if len(self.lengths) == 0:
+            return 0
+
         # Calculate average sequence length
         avg_seq_length = sum(self.lengths) // len(self.lengths)
 
