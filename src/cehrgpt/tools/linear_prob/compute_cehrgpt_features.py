@@ -117,7 +117,7 @@ def main():
                 data_args=data_args,
                 cache_file_collector=cache_file_collector,
             )
-            if not data_args.streaming and not cehrgpt_args.sample_packing:
+            if not data_args.streaming:
                 processed_dataset.save_to_disk(prepared_ds_path)
                 processed_dataset.cleanup_cache_files()
 
@@ -127,6 +127,9 @@ def main():
         # After main-process-only operations, synchronize all processes to ensure consistency
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
+
+        # Load the dataset from disk again to in torch distributed training
+        processed_dataset = load_from_disk(str(prepared_ds_path))
 
     # Getting the existing features
     feature_folders = glob.glob(

@@ -299,7 +299,6 @@ def main():
                     "Clean up the cached files for the  cehrgpt finetuning dataset : %s",
                     stats,
                 )
-                processed_dataset = load_from_disk(str(prepared_ds_path))
 
             # Remove any cached files if there are any
             cache_file_collector.remove_cache_files()
