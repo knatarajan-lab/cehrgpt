@@ -212,42 +212,56 @@ class CehrGptDataCollator:
 
         bz = len(examples)
         if "person_id" in examples[0]:
-            batch["person_id"] = torch.cat(
-                [
-                    self._convert_to_tensor(example["person_id"]).reshape(bz, -1)
-                    for example in examples
-                ],
-                dim=0,
-            ).to(torch.int32)
+            batch["person_id"] = (
+                torch.cat(
+                    [
+                        self._convert_to_tensor(example["person_id"]).reshape(-1, 1)
+                        for example in examples
+                    ],
+                    dim=0,
+                )
+                .to(torch.int32)
+                .reshape(bz, -1)
+            )
 
         if "index_date" in examples[0]:
             batch["index_date"] = torch.cat(
                 [
                     torch.tensor(example["index_date"], dtype=torch.float64).reshape(
-                        bz, -1
+                        -1, 1
                     )
                     for example in examples
                 ],
                 dim=0,
-            )
+            ).reshape(bz, -1)
 
         if "age_at_index" in examples[0]:
-            batch["age_at_index"] = torch.cat(
-                [
-                    self._convert_to_tensor(example["age_at_index"]).reshape(bz, -1)
-                    for example in examples
-                ],
-                dim=0,
-            ).to(torch.float32)
+            batch["age_at_index"] = (
+                torch.cat(
+                    [
+                        self._convert_to_tensor(example["age_at_index"]).reshape(-1, 1)
+                        for example in examples
+                    ],
+                    dim=0,
+                )
+                .to(torch.float32)
+                .reshape(bz, -1)
+            )
 
         if "classifier_label" in examples[0]:
-            batch["classifier_label"] = torch.cat(
-                [
-                    self._convert_to_tensor(example["classifier_label"]).reshape(bz, -1)
-                    for example in examples
-                ],
-                dim=0,
-            ).to(torch.float32)
+            batch["classifier_label"] = (
+                torch.cat(
+                    [
+                        self._convert_to_tensor(example["classifier_label"]).reshape(
+                            -1, 1
+                        )
+                        for example in examples
+                    ],
+                    dim=0,
+                )
+                .to(torch.float32)
+                .reshape(bz, -1)
+            )
 
         return batch
 
