@@ -115,6 +115,9 @@ class CehrGPTArguments:
             "help": "The lower bound of the learning rate range for hyperparameter tuning."
         },
     )
+    next_token_prediction_loss_weight: float = dataclasses.field(
+        default=1.0, metadata={"help": "The weight of the next token prediction loss"}
+    )
     lab_token_penalty: Optional[bool] = dataclasses.field(
         default=False,
         metadata={
@@ -154,4 +157,13 @@ class CehrGPTArguments:
         metadata={
             "help": "A threshold to denote how much the specified metric must improve to satisfy early stopping conditions."
         },
+    )
+    sample_packing: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to use sample packing for efficient training."
+        },
+    )
+    max_tokens_per_batch: int = dataclasses.field(
+        default=16384, metadata={"help": "Maximum number of tokens in each batch"}
     )

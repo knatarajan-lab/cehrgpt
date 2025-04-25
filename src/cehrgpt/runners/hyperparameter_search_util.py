@@ -126,6 +126,7 @@ def sample_dataset(data: Dataset, percentage: float, seed: int) -> Dataset:
 
 
 def perform_hyperparameter_search(
+    trainer_class,
     model_init: Callable,
     dataset: DatasetDict,
     data_collator: CehrGptDataCollator,
@@ -142,6 +143,7 @@ def perform_hyperparameter_search(
     After the search, it updates the provided `TrainingArguments` with the best hyperparameters found.
 
     Args:
+        trainer_class: A Trainer or its subclass
         model_init (Callable): A function to initialize the model, used for each hyperparameter trial.
         dataset (DatasetDict): A Hugging Face DatasetDict containing "train" and "validation" datasets.
         data_collator (CehrGptDataCollator): A data collator for processing batches.
@@ -157,6 +159,7 @@ def perform_hyperparameter_search(
     Example:
         ```
         best_training_args = perform_hyperparameter_search(
+            trainer_class=Trainer,
             model_init=my_model_init,
             dataset=my_dataset_dict,
             data_collator=my_data_collator,
@@ -187,7 +190,7 @@ def perform_hyperparameter_search(
             cehrgpt_args.hyperparameter_tuning_percentage,
             training_args.seed,
         )
-        hyperparam_trainer = Trainer(
+        hyperparam_trainer = trainer_class(
             model_init=model_init,
             data_collator=data_collator,
             train_dataset=sampled_train,

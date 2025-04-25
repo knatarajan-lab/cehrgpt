@@ -32,7 +32,7 @@ dependencies = [
     "cehrbert_data==0.0.7",
     "openai==1.54.3",
     "optuna==4.0.0",
-    "transformers==4.40.0",
+    "transformers==4.44.0",
     "tokenizers==0.19.0",
     "peft==0.10.0",
     "lightgbm",

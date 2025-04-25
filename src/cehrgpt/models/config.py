@@ -133,6 +133,7 @@ class CEHRGPTConfig(PretrainedConfig):
         n_pretrained_embeddings_layers=2,
         pretrained_embedding_dim=768,
         pretrained_token_ids: List[int] = None,
+        next_token_prediction_loss_weight=1.0,
         time_token_loss_weight=1.0,
         time_to_visit_loss_weight=1.0,
         causal_sfm=False,
@@ -141,6 +142,7 @@ class CEHRGPTConfig(PretrainedConfig):
         lab_token_loss_weight=0.9,
         entropy_penalty=False,
         entropy_penalty_alpha=0.01,
+        sample_packing_max_positions=None,
         **kwargs,
     ):
         if token_to_time_token_mapping is None:
@@ -150,6 +152,11 @@ class CEHRGPTConfig(PretrainedConfig):
         self.vocab_size = vocab_size
         self.time_token_vocab_size = time_token_vocab_size
         self.n_positions = n_positions
+        self.sample_packing_max_positions = (
+            sample_packing_max_positions
+            if sample_packing_max_positions
+            else n_positions
+        )
         self.n_embd = n_embd
         self.n_layer = n_layer
         self.n_head = n_head
@@ -178,6 +185,7 @@ class CEHRGPTConfig(PretrainedConfig):
         self.include_values = include_values
         self.value_vocab_size = value_vocab_size
 
+        self.next_token_prediction_loss_weight = next_token_prediction_loss_weight
         self.include_ttv_prediction = include_ttv_prediction
         self.use_sub_time_tokenization = use_sub_time_tokenization
         self._token_to_time_token_mapping = token_to_time_token_mapping

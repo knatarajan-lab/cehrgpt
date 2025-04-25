@@ -18,7 +18,7 @@ def prepare_dataset(
     age_scaler = feature_processor["age_scaler"]
     gender_encoder = feature_processor["gender_encoder"]
     race_encoder = feature_processor["race_encoder"]
-    scaled_age = age_scaler.transform(df[["age_at_index"]].to_numpy())
+    age_scaler.transform(df[["age_at_index"]].to_numpy())
 
     one_hot_gender = gender_encoder.transform(
         np.expand_dims(df.gender_concept_id.to_numpy(), axis=1)
@@ -28,13 +28,13 @@ def prepare_dataset(
     )
 
     features = np.stack(df["features"].apply(lambda x: np.array(x).flatten()))
-    concatenated_features = np.hstack(
-        [scaled_age, one_hot_gender.toarray(), one_hot_race.toarray(), features]
-    )
+    # features = np.hstack(
+    #     [scaled_age, one_hot_gender.toarray(), one_hot_race.toarray(), features]
+    # )
     return {
         "subject_id": df["subject_id"].to_numpy(),
         "prediction_time": df["prediction_time"].tolist(),
-        "features": concatenated_features,
+        "features": features,
         "boolean_value": df["boolean_value"].to_numpy(),
     }
 

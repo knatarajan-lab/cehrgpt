@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as f
 from torch import nn
-from torch.distributions import Gamma
+from torch.distributions import Gamma, Weibull
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
 from transformers import PreTrainedModel
@@ -45,12 +45,103 @@ if is_accelerate_available():
 logger = logging.get_logger(__name__)
 
 
+def extract_features_from_packed_sequence(
+    hidden_state: torch.Tensor,
+    attention_mask: torch.Tensor,
+) -> torch.Tensor:
+    max_index = attention_mask.nonzero(as_tuple=False).flatten()[-1]
+    padded_attention_mask = F.pad(attention_mask[:, : max_index + 1], (0, 1))
+    feature_indices = torch.nonzero(padded_attention_mask == 0)[:, 1] - 1
+    return hidden_state[:, feature_indices]
+
+
+def create_sample_packing_attention_mask(attention_mask: torch.Tensor) -> torch.Tensor:
+    """
+    Create a block-diagonal attention mask for packed sequences within a batch.
+
+    Args:
+        attention_mask (torch.Tensor): (batch_size, seq_len) binary mask where 1 = token, 0 = padding
+
+    Returns:
+        torch.Tensor: (batch_size, seq_len, seq_len) attention mask where entries are 1 if tokens
+                      can attend to each other (within same packed segment), 0 otherwise.
+    """
+    # Step 1: Identify segments within each sample
+    cumsum_mask = (attention_mask == 0).cumsum(dim=-1)
+    segment_ids = cumsum_mask * attention_mask  # zeros remain zero
+
+    # Step 2: Compare segment IDs pairwise per batch element
+    # Shape: (batch_size, seq_len, seq_len)
+    attn_matrix = (segment_ids.unsqueeze(2) == segment_ids.unsqueeze(1)).int()
+
+    # Step 3: Mask out padding tokens
+    mask = attention_mask.unsqueeze(1) * attention_mask.unsqueeze(2)
+    attn_matrix = attn_matrix * mask
+
+    return attn_matrix
+
+
+def is_sample_pack(attention_mask: torch.Tensor) -> bool:
+    """
+    Determines whether any sequence in the batch is likely sample-packed.
+
+    A sample-packed sequence is one where there are non-padding (1) tokens
+    after a padding (0) token, indicating multiple sequences packed together
+    with padding as a separator.
+
+    Args:
+        attention_mask (torch.Tensor): A tensor of shape (batch_size, seq_len)
+            where 1 indicates a real token and 0 indicates padding.
+
+    Returns:
+        bool: True if any sample in the batch is sample-packed, False otherwise.
+    """
+    nonzero_counts = attention_mask.sum(dim=1)
+    max_token_positions = torch.argmax(attention_mask.flip(dims=[1]), dim=1)
+    max_indices = attention_mask.shape[1] - 1 - max_token_positions
+    return torch.any(nonzero_counts < (max_indices + 1)).item()
+
+
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data
 def _get_unpad_data(attention_mask):
-    seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
-    indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
-    max_seqlen_in_batch = seqlens_in_batch.max().item()
-    cu_seqlens = F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
+    # This infers sample packing
+    if is_sample_pack(attention_mask):
+        # Assume input: attention_mask shape = (batch, seq_len)
+        attention_mask = attention_mask.flatten()  # shape: (seq_len,)
+
+        # Compute max_index of the last non-zero element
+        nonzero = torch.nonzero(attention_mask, as_tuple=False).flatten()
+        max_index = nonzero[-1].item()
+
+        # Pad the truncated attention mask
+        padded_attention_mask = F.pad(attention_mask[: max_index + 1], (0, 1), value=0)
+
+        # Indices of all tokens
+        indices = torch.nonzero(attention_mask, as_tuple=False).flatten()
+
+        # Find where 0s occur (segment boundaries)
+        cumsum_seqlens_in_batch = torch.cumsum(padded_attention_mask, dim=0)[
+            padded_attention_mask == 0
+        ]
+
+        # Compute seqlens per segment
+        seqlens_in_batch = (
+            cumsum_seqlens_in_batch
+            - F.pad(cumsum_seqlens_in_batch, (1, 0), value=0)[:-1]
+        ).to(torch.int)
+
+        max_seqlen_in_batch = (
+            seqlens_in_batch.max().item() if seqlens_in_batch.numel() > 0 else 0
+        )
+        cu_seqlens = F.pad(cumsum_seqlens_in_batch, (1, 0)).to(torch.int)
+    else:
+        seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
+        indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
+        max_seqlen_in_batch = seqlens_in_batch.max().item()
+        cu_seqlens = F.pad(
+            torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0)
+        )
+
     return (
         indices,
         cu_seqlens,
@@ -609,7 +700,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             self.pretrained_wte = None
 
         self.wte = nn.Embedding(config.vocab_size, self.embed_dim)
-        self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
+        if not self.exclude_position_ids:
+            self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         if self.include_values:
             self.vte = nn.Embedding(config.value_vocab_size, self.embed_dim)
             self.concept_value_transformation_layer = ConceptValueTransformationLayer(
@@ -677,7 +769,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.wte = self.wte.to(self.first_device)
         if self.config.use_pretrained_embeddings:
             self.pretrained_wte = self.pretrained_wte.to(self.first_device)
-        self.wpe = self.wpe.to(self.first_device)
+        if not self.exclude_position_ids:
+            self.wpe = self.wpe.to(self.first_device)
         if self.include_values:
             self.vte = self.vte.to(self.first_device)
             self.concept_value_transformation_layer = (
@@ -703,7 +796,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.wte = self.wte.to("cpu")
         if self.config.use_pretrained_embeddings:
             self.pretrained_wte = self.pretrained_wte.to("cpu")
-        self.wpe = self.wpe.to("cpu")
+        if not self.exclude_position_ids:
+            self.wpe = self.wpe.to("cpu")
         self.vte = self.vte.to("cpu")
         self.concept_value_transformation_layer = (
             self.concept_value_transformation_layer.to("cpu")
@@ -728,8 +822,12 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 persistent=False,
             )
 
-    def get_position_embeddings(self) -> Union[nn.Embedding, Tuple[nn.Embedding]]:
-        return self.wpe
+    def get_position_embeddings(
+        self,
+    ) -> Optional[Union[nn.Embedding, Tuple[nn.Embedding]]]:
+        if not self.exclude_position_ids:
+            return self.wpe
+        return None
 
     def set_position_embeddings(self, new_embeddings: nn.Embedding):
         self.wpe = new_embeddings
@@ -850,12 +948,19 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 == "flash_attention_2"
             ):
                 attention_mask = attention_mask.view(batch_size, -1)
-                # We create a 3D attention mask from a 2D tensor mask.
-                # Sizes are [batch_size, 1, 1, to_seq_length]
-                # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
-                # this attention mask is more simple than the triangular masking of causal attention
-                # used in OpenAI GPT, we just need to prepare the broadcast dimension here.
-                attention_mask = attention_mask[:, None, None, :]
+
+                # If this is sample packing, we need to great the
+                if is_sample_pack(attention_mask):
+                    attention_mask = create_sample_packing_attention_mask(
+                        attention_mask
+                    )[:, None, :, :]
+                else:
+                    # We create a 3D attention mask from a 2D tensor mask.
+                    # Sizes are [batch_size, 1, 1, to_seq_length]
+                    # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
+                    # this attention mask is more simple than the triangular masking of causal attention
+                    # used in OpenAI GPT, we just need to prepare the broadcast dimension here.
+                    attention_mask = attention_mask[:, None, None, :]
 
                 # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
                 # masked positions, this operation will create a tensor which is 0.0 for
@@ -1033,6 +1138,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
     def __init__(self, config: CEHRGPTConfig):
         super().__init__(config)
         self.cehrgpt = CEHRGPT2Model(config)
+        if config.n_positions < config.sample_packing_max_positions:
+            logger.info(
+                "Updated attn_bias to %s according to sample_packing_n_positions",
+                config.sample_packing_max_positions,
+            )
+            self.update_attn_bias(config.sample_packing_max_positions)
         if self.config.include_ttv_prediction:
             self.tte_head = WeibullModel(config.n_embd)
 
@@ -1325,14 +1436,19 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     lab_index,
                     token_loss * self.cehrgpt.config.lab_token_loss_weight,
                     token_loss,
-                ).mean()
+                )
+
+                token_loss = (
+                    token_loss.sum() / (shift_labels != loss_fct.ignore_index).sum()
+                )
             else:
                 # Flatten the tokens
                 loss_fct = CrossEntropyLoss()
                 token_loss = loss_fct(
                     shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
                 )
-            loss = token_loss
+
+            loss = token_loss * self.cehrgpt.config.next_token_prediction_loss_weight
 
             if self.cehrgpt.config.entropy_penalty:
                 # Compute probabilities using softmax
@@ -1367,15 +1483,16 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     ),
                     shifted_time_token_labels.view(-1),
                 )
-
-                time_token_loss = time_token_loss.view(
-                    -1, 3
-                ) * shifted_time_token_indicators.view(-1, 1).to(hidden_states.dtype)
+                time_token_loss = torch.where(
+                    shifted_time_token_indicators.view(-1, 1).to(torch.bool),
+                    time_token_loss.view(-1, 3),
+                    0,
+                )
                 time_token_loss = time_token_loss.sum(-1)
                 time_token_loss = (
-                    torch.mean(time_token_loss) * self.config.time_token_loss_weight
+                    time_token_loss.sum() / shifted_time_token_indicators.sum()
                 )
-                loss += time_token_loss
+                loss += time_token_loss * self.config.time_token_loss_weight
 
         if time_to_visits is not None:
             # Get lambda and k parameters
@@ -1389,32 +1506,30 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # Move to the same device as lambda_param
             shift_time_to_visits = shift_time_to_visits.to(lambda_param.device)
 
-            time_to_visit_indicator = (shift_time_to_visits >= 0).to(
-                hidden_states.dtype
-            )
+            time_to_visit_indicator = shift_time_to_visits >= 0
             # Define the Gamma distribution
             dist = Gamma(shifted_k_param.squeeze(-1), shifted_lambda_param.squeeze(-1))
             # Compute log-probs and apply the time_to_visit_indicator
-            log_probs = dist.log_prob(torch.clamp(shift_time_to_visits, min=0.0) + 1e-6)
-            log_probs *= time_to_visit_indicator
-            time_to_visit_loss = (
-                -log_probs.mean() * self.config.time_to_visit_loss_weight
-            )
+            log_probs = dist.log_prob(torch.clamp(shift_time_to_visits, min=1e-3))
+            log_probs = torch.where(time_to_visit_indicator, log_probs, 0)
+            time_to_visit_loss = -log_probs.sum() / time_to_visit_indicator.sum()
             # Compute the loss
-            loss += time_to_visit_loss
+            loss += time_to_visit_loss * self.config.time_to_visit_loss_weight
 
         if true_values is not None and true_value_indicators is not None:
             true_values = true_values.to(value_logits.device)
             shift_value_logits = value_logits[..., :-1, :].contiguous()
             shift_value_indicators = true_value_indicators[..., :-1].contiguous()
             shift_next_values = true_values[..., 1:].contiguous()
-            value_loss_fct = CrossEntropyLoss(reduce=False)
+            value_loss_fct = CrossEntropyLoss(reduction="none")
             token_value_loss = value_loss_fct(
                 shift_value_logits.view(-1, shift_value_logits.size(-1)),
                 shift_next_values.view(-1),
             )
-            token_value_loss *= shift_value_indicators.view(-1)
-            loss += token_value_loss.mean()
+            token_value_loss = torch.where(
+                shift_value_indicators.view(-1), token_value_loss, 0
+            )
+            loss += token_value_loss.sum() / shift_value_indicators.sum()
 
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]
@@ -1783,6 +1898,7 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
         return_dict: Optional[bool] = None,
         **kwargs,
     ) -> CehrGptSequenceClassifierOutput:
+
         cehrgpt_output = self.cehrgpt(
             input_ids=input_ids,
             value_indicators=value_indicators,
@@ -1797,17 +1913,39 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
             return_dict=return_dict,
         )
 
-        # Disable autocasting for precision-sensitive operations
-        with torch.autocast(device_type="cuda", enabled=False):
-            normalized_age = self._apply_age_norm(age_at_index)
+        if is_sample_pack(attention_mask):
+            features = extract_features_from_packed_sequence(
+                cehrgpt_output.last_hidden_state, attention_mask
+            )
+            assert features.shape[1] == classifier_label.shape[1], (
+                "the length of the features need to be the same as the length of classifier_label. "
+                f"features.shape[1]: {features.shape[1]}, "
+                f"classifier_label.shape[1]: {classifier_label.shape[1]}"
+            )
+            assert features.shape[1] == age_at_index.shape[1], (
+                "the length of the features need to be the same as the length of age_at_index. "
+                f"features.shape[1]: {features.shape[1]}, "
+                f"age_at_index.shape[1]: {age_at_index.shape[1]}"
+            )
+            num_samples = age_at_index.shape[1]
+            features = features.view((num_samples, -1))
+            classifier_label = classifier_label.view((num_samples, -1))
+            with torch.autocast(device_type="cuda", enabled=False):
+                normalized_age = self._apply_age_norm(
+                    age_at_index.view((num_samples, 1))
+                )
+        else:
+            features = cehrgpt_output.last_hidden_state[..., -1, :]
+            # Disable autocasting for precision-sensitive operations
+            with torch.autocast(device_type="cuda", enabled=False):
+                normalized_age = self._apply_age_norm(age_at_index)
 
         # In case the model is in bfloat16
-        if cehrgpt_output.last_hidden_state.dtype != normalized_age.dtype:
-            normalized_age = normalized_age.to(cehrgpt_output.last_hidden_state.dtype)
+        if features.dtype != normalized_age.dtype:
+            normalized_age = normalized_age.to(features.dtype)
 
         # In fine-tuning, the sequences are left-padded, so we use the last element as the pooler
-        output_pooler = cehrgpt_output.last_hidden_state[..., -1, :]
-        next_input = self.dropout(output_pooler)
+        next_input = self.dropout(features)
         next_input = torch.cat([next_input, normalized_age], dim=1)
         next_input = self.dense_layer(next_input)
         next_input = nn.functional.relu(next_input)

@@ -92,6 +92,8 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "true",
             "--use_early_stopping",
             "false",
+            "--report_to",
+            "none",
         ]
         train_main()
         # Teacher force the prompt to consist of [year][age][gender][race][VS] then inject the random vector before [VS]

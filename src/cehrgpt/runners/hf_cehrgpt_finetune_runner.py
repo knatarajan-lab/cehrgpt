@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
 from cehrbert.runners.hf_cehrbert_finetune_runner import compute_metrics
 from cehrbert.runners.hf_runner_argument_dataclass import (
@@ -19,13 +20,7 @@ from cehrbert.runners.runner_util import (
     generate_prepared_ds_path,
     get_last_hf_checkpoint,
 )
-from datasets import (
-    Dataset,
-    DatasetDict,
-    IterableDataset,
-    concatenate_datasets,
-    load_from_disk,
-)
+from datasets import DatasetDict, concatenate_datasets, load_from_disk
 from peft import LoraConfig, PeftModel, get_peft_model
 from scipy.special import expit as sigmoid
 from torch.utils.data import DataLoader
@@ -39,11 +34,15 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
-from transformers.tokenization_utils_base import LARGE_INTEGER
+from transformers.trainer_utils import is_main_process
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
-from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
+from cehrgpt.data.hf_cehrgpt_dataset_collator import (
+    CehrGptDataCollator,
+    SamplePackingCehrGptDataCollator,
+)
+from cehrgpt.data.sample_packing_sampler import SamplePackingBatchSampler
 from cehrgpt.models.hf_cehrgpt import (
     CEHRGPTConfig,
     CehrGptForClassification,
@@ -56,6 +55,7 @@ from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.runners.hyperparameter_search_util import perform_hyperparameter_search
+from cehrgpt.runners.sample_packing_trainer import SamplePackingTrainer
 
 LOG = logging.get_logger("transformers")
 
@@ -251,59 +251,76 @@ def main():
                 shutil.rmtree(prepared_ds_path)
 
     if processed_dataset is None:
-        final_splits = prepare_finetune_dataset(
-            data_args, training_args, cehrgpt_args, cache_file_collector
-        )
-        if cehrgpt_args.expand_tokenizer:
-            new_tokenizer_path = os.path.expanduser(training_args.output_dir)
-            if tokenizer_exists(new_tokenizer_path):
-                tokenizer = CehrGptTokenizer.from_pretrained(new_tokenizer_path)
-            else:
-                # Try to use the defined pretrained embeddings if exists, Otherwise we default to the pretrained model
-                # embedded in the pretrained model
-                pretrained_concept_embedding_model = PretrainedEmbeddings(
-                    cehrgpt_args.pretrained_embedding_path
-                )
-                if not pretrained_concept_embedding_model.exists:
-                    pretrained_concept_embedding_model = (
-                        tokenizer.pretrained_concept_embedding_model
-                    )
-                tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
-                    cehrgpt_tokenizer=tokenizer,
-                    dataset=final_splits["train"],
-                    data_args=data_args,
-                    concept_name_mapping={},
-                    pretrained_concept_embedding_model=pretrained_concept_embedding_model,
-                )
-                tokenizer.save_pretrained(os.path.expanduser(training_args.output_dir))
-
-        # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
-        if not data_args.streaming:
-            all_columns = final_splits["train"].column_names
-            if "visit_concept_ids" in all_columns:
-                final_splits = final_splits.remove_columns(["visit_concept_ids"])
-
-        processed_dataset = create_cehrgpt_finetuning_dataset(
-            dataset=final_splits,
-            cehrgpt_tokenizer=tokenizer,
-            data_args=data_args,
-            cache_file_collector=cache_file_collector,
-        )
-        if not data_args.streaming:
-            processed_dataset.save_to_disk(str(prepared_ds_path))
-            stats = processed_dataset.cleanup_cache_files()
-            LOG.info(
-                "Clean up the cached files for the  cehrgpt finetuning dataset : %s",
-                stats,
+        if is_main_process(training_args.local_rank):
+            final_splits = prepare_finetune_dataset(
+                data_args, training_args, cehrgpt_args, cache_file_collector
             )
-            processed_dataset = load_from_disk(str(prepared_ds_path))
+            if cehrgpt_args.expand_tokenizer:
+                new_tokenizer_path = os.path.expanduser(training_args.output_dir)
+                if tokenizer_exists(new_tokenizer_path):
+                    tokenizer = CehrGptTokenizer.from_pretrained(new_tokenizer_path)
+                else:
+                    # Try to use the defined pretrained embeddings if exists, Otherwise we default to the pretrained model
+                    # embedded in the pretrained model
+                    pretrained_concept_embedding_model = PretrainedEmbeddings(
+                        cehrgpt_args.pretrained_embedding_path
+                    )
+                    if not pretrained_concept_embedding_model.exists:
+                        pretrained_concept_embedding_model = (
+                            tokenizer.pretrained_concept_embedding_model
+                        )
+                    tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
+                        cehrgpt_tokenizer=tokenizer,
+                        dataset=final_splits["train"],
+                        data_args=data_args,
+                        concept_name_mapping={},
+                        pretrained_concept_embedding_model=pretrained_concept_embedding_model,
+                    )
+                    tokenizer.save_pretrained(
+                        os.path.expanduser(training_args.output_dir)
+                    )
 
-    # Remove any cached files if there are any
-    cache_file_collector.remove_cache_files()
+            # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
+            if not data_args.streaming:
+                all_columns = final_splits["train"].column_names
+                if "visit_concept_ids" in all_columns:
+                    final_splits = final_splits.remove_columns(["visit_concept_ids"])
+
+            processed_dataset = create_cehrgpt_finetuning_dataset(
+                dataset=final_splits,
+                cehrgpt_tokenizer=tokenizer,
+                data_args=data_args,
+                cache_file_collector=cache_file_collector,
+            )
+            if not data_args.streaming:
+                processed_dataset.save_to_disk(str(prepared_ds_path))
+                stats = processed_dataset.cleanup_cache_files()
+                LOG.info(
+                    "Clean up the cached files for the  cehrgpt finetuning dataset : %s",
+                    stats,
+                )
+
+            # Remove any cached files if there are any
+            cache_file_collector.remove_cache_files()
+
+        # After main-process-only operations, synchronize all processes to ensure consistency
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+
+        # Loading tokenizer in all processes in torch distributed training
+        tokenizer_name_or_path = os.path.expanduser(
+            training_args.output_dir
+            if cehrgpt_args.expand_tokenizer
+            else model_args.tokenizer_name_or_path
+        )
+        tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_name_or_path)
+        # Load the dataset from disk again to in torch distributed training
+        processed_dataset = load_from_disk(str(prepared_ds_path))
+
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
-    if not data_args.streaming:
+    if not data_args.streaming and not cehrgpt_args.sample_packing:
         processed_dataset.set_format("pt")
 
     if cehrgpt_args.few_shot_predict:
@@ -324,13 +341,40 @@ def main():
     config = CEHRGPTConfig.from_pretrained(model_args.model_name_or_path)
     if config.max_position_embeddings < model_args.max_position_embeddings:
         config.max_position_embeddings = model_args.max_position_embeddings
+
+    # persist this parameter in case this is overwritten by sample packing
+    per_device_eval_batch_size = training_args.per_device_eval_batch_size
+
+    if cehrgpt_args.sample_packing:
+        trainer_class = partial(
+            SamplePackingTrainer,
+            max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
+            max_position_embeddings=config.max_position_embeddings,
+            train_lengths=processed_dataset["train"]["num_of_concepts"],
+            validation_lengths=processed_dataset["validation"]["num_of_concepts"],
+        )
+        training_args.per_device_train_batch_size = 1
+        training_args.per_device_eval_batch_size = 1
+        data_collator_fn = partial(
+            SamplePackingCehrGptDataCollator,
+            cehrgpt_args.max_tokens_per_batch,
+            config.max_position_embeddings,
+        )
+    else:
+        trainer_class = Trainer
+        data_collator_fn = CehrGptDataCollator
+
     # We suppress the additional learning objectives in fine-tuning
-    data_collator = CehrGptDataCollator(
+    data_collator = data_collator_fn(
         tokenizer=tokenizer,
         max_length=(
-            config.max_position_embeddings - 1
-            if config.causal_sfm
-            else config.max_position_embeddings
+            cehrgpt_args.max_tokens_per_batch
+            if cehrgpt_args.sample_packing
+            else (
+                config.max_position_embeddings - 1
+                if config.causal_sfm
+                else config.max_position_embeddings
+            )
         ),
         include_values=model_args.include_values,
         pretraining=False,
@@ -342,6 +386,7 @@ def main():
     if training_args.do_train:
         if cehrgpt_args.hyperparameter_tuning:
             training_args = perform_hyperparameter_search(
+                trainer_class,
                 partial(model_init, model_args, training_args, tokenizer),
                 processed_dataset,
                 data_collator,
@@ -353,11 +398,16 @@ def main():
         if cehrgpt_args.retrain_with_full:
             # Always retrain with the full set when hyperparameter tuning is set to true
             retrain_with_full_set(
-                model_args, training_args, tokenizer, processed_dataset, data_collator
+                trainer_class,
+                model_args,
+                training_args,
+                tokenizer,
+                processed_dataset,
+                data_collator,
             )
         else:
             # Initialize Trainer for final training on the combined train+val set
-            trainer = Trainer(
+            trainer = trainer_class(
                 model=model_init(model_args, training_args, tokenizer),
                 data_collator=data_collator,
                 args=training_args,
@@ -381,17 +431,30 @@ def main():
             trainer.save_state()
 
     if training_args.do_predict:
+        if cehrgpt_args.sample_packing:
+            batch_sampler = SamplePackingBatchSampler(
+                lengths=processed_dataset["test"]["num_of_concepts"],
+                max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
+                max_position_embeddings=config.max_position_embeddings,
+                drop_last=training_args.dataloader_drop_last,
+                seed=training_args.seed,
+            )
+            per_device_eval_batch_size = 1
+        else:
+            batch_sampler = None
         test_dataloader = DataLoader(
             dataset=processed_dataset["test"],
-            batch_size=training_args.per_device_eval_batch_size,
+            batch_size=per_device_eval_batch_size,
             num_workers=training_args.dataloader_num_workers,
             collate_fn=data_collator,
             pin_memory=training_args.dataloader_pin_memory,
+            batch_sampler=batch_sampler,
         )
         do_predict(test_dataloader, model_args, training_args, cehrgpt_args)
 
 
 def retrain_with_full_set(
+    trainer_class,
     model_args: ModelArguments,
     training_args: TrainingArguments,
     tokenizer: CehrGptTokenizer,
@@ -408,6 +471,7 @@ def retrain_with_full_set(
     and state information.
 
     Args:
+        trainer_class: Trainer or its subclass
         model_args (ModelArguments): Model configuration and hyperparameters.
         training_args (TrainingArguments): Training configuration, including output directory,
                                            evaluation strategy, and other training parameters.
@@ -429,7 +493,7 @@ def retrain_with_full_set(
     # Disable evaluation
     training_args.evaluation_strategy = "no"
     checkpoint = get_last_hf_checkpoint(training_args)
-    final_trainer = Trainer(
+    final_trainer = trainer_class(
         model=model_init(model_args, training_args, tokenizer),
         data_collator=data_collator,
         args=training_args,
@@ -484,15 +548,15 @@ def do_predict(
     test_losses = []
     with torch.no_grad():
         for index, batch in enumerate(tqdm(test_dataloader, desc="Predicting")):
-            person_ids = batch.pop("person_id").numpy().squeeze().astype(int)
-            index_dates = (
-                map(
-                    datetime.fromtimestamp,
-                    batch.pop("index_date").numpy().squeeze(axis=-1).tolist(),
-                )
-                if "index_date" in batch
-                else None
-            )
+            person_ids = batch.pop("person_id").numpy().astype(int).squeeze()
+            if person_ids.ndim == 0:
+                person_ids = np.asarray([person_ids])
+
+            index_dates = batch.pop("index_date").numpy().squeeze()
+            if index_dates.ndim == 0:
+                index_dates = np.asarray([index_dates])
+            index_dates = list(map(datetime.fromtimestamp, index_dates.tolist()))
+
             batch = {k: v.to(device) for k, v in batch.items()}
             # Forward pass
             output = model(**batch, output_attentions=False, output_hidden_states=False)
@@ -500,10 +564,16 @@ def do_predict(
 
             # Collect logits and labels for prediction
             logits = output.logits.float().cpu().numpy().squeeze()
-            labels = (
-                batch["classifier_label"].float().cpu().numpy().squeeze().astype(bool)
-            )
+            if logits.ndim == 0:
+                logits = np.asarray([logits])
             probabilities = sigmoid(logits)
+
+            labels = (
+                batch["classifier_label"].float().cpu().numpy().astype(bool).squeeze()
+            )
+            if labels.ndim == 0:
+                labels = np.asarray([labels])
+
             # Save predictions to parquet file
             test_prediction_pd = pd.DataFrame(
                 {

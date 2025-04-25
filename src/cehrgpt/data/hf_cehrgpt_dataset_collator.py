@@ -1,5 +1,5 @@
 import random
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -105,9 +105,12 @@ class CehrGptDataCollator:
             self._try_reverse_tensor(self._convert_to_tensor(example["input_ids"]))
             for example in examples
         ]
+
         batch_attention_mask = [
             self._try_reverse_tensor(
-                torch.ones_like(
+                self._convert_to_tensor(example["attention_mask"]).to(torch.float)
+                if "attention_mask" in example
+                else torch.ones_like(
                     self._convert_to_tensor(example["input_ids"]), dtype=torch.float
                 )
             )
@@ -128,14 +131,22 @@ class CehrGptDataCollator:
         )
         assert batch["input_ids"].shape[1] <= self.max_length
         assert batch["attention_mask"].shape[1] <= self.max_length
+        assert batch["attention_mask"].shape[1] == batch["input_ids"].shape[1], (
+            f'batch["attention_mask"].shape[1]: {batch["attention_mask"].shape[1]}, '
+            f'batch["input_ids"].shape[1]: {batch["input_ids"].shape[1]}'
+        )
+        assert batch["input_ids"].max() < self.tokenizer.vocab_size, (
+            f"batch['input_ids'].max(): {batch['input_ids'].max()} must be smaller than "
+            f"self.tokenizer.vocab_size: {self.tokenizer.vocab_size}. "
+            f"batch['input_ids']: {batch['input_ids']} "
+        )
 
         if self.pretraining:
-            batch["labels"] = self._try_reverse_tensor(
-                pad_sequence(
-                    batch_input_ids,
-                    batch_first=True,
-                    padding_value=-100,
-                ).to(torch.int64)
+            batch["labels"] = torch.where(
+                (batch["input_ids"] != self.tokenizer.pad_token_id)
+                & batch["attention_mask"].to(torch.bool),
+                batch["input_ids"],
+                -100,
             )
 
         if self.use_sub_time_tokenization:
@@ -170,7 +181,7 @@ class CehrGptDataCollator:
         if self.include_values:
             batch_value_indicators = [
                 self._try_reverse_tensor(
-                    self._convert_to_tensor(example["value_indicators"])
+                    self._convert_to_tensor(example["value_indicators"]).to(torch.bool)
                 )
                 for example in examples
             ]
@@ -178,7 +189,6 @@ class CehrGptDataCollator:
                 self._try_reverse_tensor(self._convert_to_tensor(example["values"]))
                 for example in examples
             ]
-
             batch["value_indicators"] = self._try_reverse_tensor(
                 pad_sequence(
                     batch_value_indicators, batch_first=True, padding_value=False
@@ -200,14 +210,19 @@ class CehrGptDataCollator:
                     batch["value_indicators"], batch["values"].clone(), -100
                 )
 
+        bz = len(examples)
         if "person_id" in examples[0]:
-            batch["person_id"] = torch.cat(
-                [
-                    self._convert_to_tensor(example["person_id"]).reshape(-1, 1)
-                    for example in examples
-                ],
-                dim=0,
-            ).to(torch.int32)
+            batch["person_id"] = (
+                torch.cat(
+                    [
+                        self._convert_to_tensor(example["person_id"]).reshape(-1, 1)
+                        for example in examples
+                    ],
+                    dim=0,
+                )
+                .to(torch.int32)
+                .reshape(bz, -1)
+            )
 
         if "index_date" in examples[0]:
             batch["index_date"] = torch.cat(
@@ -218,25 +233,35 @@ class CehrGptDataCollator:
                     for example in examples
                 ],
                 dim=0,
-            )
+            ).reshape(bz, -1)
 
         if "age_at_index" in examples[0]:
-            batch["age_at_index"] = torch.cat(
-                [
-                    self._convert_to_tensor(example["age_at_index"]).reshape(-1, 1)
-                    for example in examples
-                ],
-                dim=0,
-            ).to(torch.float32)
+            batch["age_at_index"] = (
+                torch.cat(
+                    [
+                        self._convert_to_tensor(example["age_at_index"]).reshape(-1, 1)
+                        for example in examples
+                    ],
+                    dim=0,
+                )
+                .to(torch.float32)
+                .reshape(bz, -1)
+            )
 
         if "classifier_label" in examples[0]:
-            batch["classifier_label"] = torch.cat(
-                [
-                    self._convert_to_tensor(example["classifier_label"]).reshape(-1, 1)
-                    for example in examples
-                ],
-                dim=0,
-            ).to(torch.float32)
+            batch["classifier_label"] = (
+                torch.cat(
+                    [
+                        self._convert_to_tensor(example["classifier_label"]).reshape(
+                            -1, 1
+                        )
+                        for example in examples
+                    ],
+                    dim=0,
+                )
+                .to(torch.float32)
+                .reshape(bz, -1)
+            )
 
         return batch
 
@@ -275,53 +300,69 @@ class CehrGptDataCollator:
             record["input_ids"] = self._convert_to_tensor(sorted_input_ids)
         return record
 
-    def generate_start_end_index(self, record: Dict[str, Any]) -> Dict[str, Any]:
+    def generate_start_end_index(
+        self, record: Dict[str, Any], max_length_allowed: Optional[int] = None
+    ) -> Dict[str, Any]:
         """Adding the start and end indices to extract a portion of the patient sequence."""
         # concept_ids will be used to for time to event predictions and identifying the visit starts
+        max_length_allowed = (
+            self.max_length if max_length_allowed is None else max_length_allowed
+        )
+        sample_packing = getattr(self, "sample_packing", False)
         input_ids = record["input_ids"]
         if isinstance(input_ids, torch.Tensor):
             input_ids = input_ids.detach().tolist()
         concept_ids = self.tokenizer.decode(input_ids, skip_special_tokens=False)
         seq_length = len(record["input_ids"])
-        new_max_length = self.max_length - 1  # Subtract one for the [END] token
+
+        # Subtract one for the [END] token when sample_packing is not enabled
+        new_max_length = (
+            max_length_allowed if sample_packing else max_length_allowed - 1
+        )
+
+        if self.include_ttv_prediction:
+            record["time_to_visits"] = torch.concat(
+                [self._convert_to_tensor(self._convert_time_to_event(concept_ids))]
+            )
 
         # Return the record directly if the actual sequence length is less than the max sequence
         if seq_length <= new_max_length:
-            record["input_ids"] = torch.concat(
-                [
-                    self._convert_to_tensor(record["input_ids"]),
-                    self._convert_to_tensor([self.tokenizer.end_token_id]),
-                ]
-            )
-            if self.include_values:
-                record["value_indicators"] = torch.concat(
+            if not sample_packing:
+                record["input_ids"] = torch.concat(
                     [
-                        self._convert_to_tensor(record["value_indicators"]),
-                        self._convert_to_tensor([False]),
-                    ]
-                ).to(torch.bool)
-                record["values"] = torch.concat(
-                    [
-                        self._convert_to_tensor(record["values"]),
-                        self._convert_to_tensor([self.tokenizer.pad_value_token_id]),
+                        self._convert_to_tensor(record["input_ids"]),
+                        self._convert_to_tensor([self.tokenizer.end_token_id]),
                     ]
                 )
-            if self.include_ttv_prediction:
-                record["time_to_visits"] = torch.concat(
-                    [
-                        self._convert_to_tensor(
-                            self._convert_time_to_event(concept_ids)
-                        ),
-                        self._convert_to_tensor([-100.0]),
-                    ]
-                )
+                if self.include_values:
+                    record["value_indicators"] = torch.concat(
+                        [
+                            self._convert_to_tensor(record["value_indicators"]),
+                            self._convert_to_tensor([False]),
+                        ]
+                    ).to(torch.bool)
+                    record["values"] = torch.concat(
+                        [
+                            self._convert_to_tensor(record["values"]),
+                            self._convert_to_tensor(
+                                [self.tokenizer.pad_value_token_id]
+                            ),
+                        ]
+                    )
+                if self.include_ttv_prediction:
+                    record["time_to_visits"] = torch.concat(
+                        [
+                            record["time_to_visits"],
+                            self._convert_to_tensor([-100.0]),
+                        ]
+                    )
 
             return record
 
         if self.pretraining:
             # There is a 50% chance we randomly slice out a portion of the patient history and update the demographic
             # prompt depending on the new starting point
-            if random.random() < 0.5:
+            if random.random() < 0.5 and not sample_packing:
                 start_index, end_index, demographic_tokens = random_slice_gpt_sequence(
                     concept_ids, new_max_length
                 )
@@ -353,6 +394,11 @@ class CehrGptDataCollator:
                     break
 
             record["input_ids"] = record["input_ids"][0:end_index]
+
+            # We want to make sure we take the subset of attention_mask in sample packing if this field is available
+            if sample_packing and "attention_mask" in record:
+                record["attention_mask"] = record["attention_mask"][0:end_index]
+
             if self.include_values:
                 record["value_indicators"] = self._convert_to_tensor(
                     record["value_indicators"][0:end_index]
@@ -366,7 +412,7 @@ class CehrGptDataCollator:
                 )
             return record
         else:
-            if self.include_demographics:
+            if self.include_demographics and not sample_packing:
                 # We employ a left truncation strategy, where the most recent patient history is reserved for fine-tuning
                 demographic_prompts_at_visits = collect_demographic_prompts_at_visits(
                     concept_ids
@@ -429,6 +475,10 @@ class CehrGptDataCollator:
                     current_token = record["input_ids"][i]
                     if current_token == self.vs_token_id:
                         record["input_ids"] = record["input_ids"][i:end_index]
+                        if sample_packing and "attention_mask" in record:
+                            record["attention_mask"] = record["attention_mask"][
+                                i:end_index
+                            ]
                         if self.include_values:
                             record["value_indicators"] = record["value_indicators"][
                                 i:end_index
@@ -444,6 +494,10 @@ class CehrGptDataCollator:
             # We simply take the last new_max_length number of tokens from the patient sequence
             if len(record["input_ids"]) > new_max_length:
                 record["input_ids"] = record["input_ids"][-new_max_length:]
+                if sample_packing and "attention_mask" in record:
+                    record["attention_mask"] = record["attention_mask"][
+                        -new_max_length:
+                    ]
                 if self.include_values:
                     record["value_indicators"] = record["value_indicators"][
                         -new_max_length:
@@ -454,31 +508,152 @@ class CehrGptDataCollator:
                         -new_max_length:
                     ]
 
-            # Finally we add the end token to the end of the sequence
-            record["input_ids"] = torch.concat(
-                [
-                    self._convert_to_tensor(record["input_ids"]),
-                    self._convert_to_tensor([self.tokenizer.end_token_id]),
-                ]
-            )
-            if self.include_values:
-                record["value_indicators"] = torch.concat(
+            if not sample_packing:
+                # Finally we add the end token to the end of the sequence
+                record["input_ids"] = torch.concat(
                     [
-                        self._convert_to_tensor(record["value_indicators"]),
-                        self._convert_to_tensor([False]),
-                    ]
-                ).to(torch.bool)
-                record["values"] = torch.concat(
-                    [
-                        self._convert_to_tensor(record["values"]),
-                        self._convert_to_tensor([self.tokenizer.pad_value_token_id]),
+                        self._convert_to_tensor(record["input_ids"]),
+                        self._convert_to_tensor([self.tokenizer.end_token_id]),
                     ]
                 )
-            if self.include_ttv_prediction:
-                record["time_to_visits"] = torch.concat(
-                    [
-                        record["time_to_visits"],
-                        self._convert_to_tensor([-100.0]),
-                    ]
-                )
+                if self.include_values:
+                    record["value_indicators"] = torch.concat(
+                        [
+                            self._convert_to_tensor(record["value_indicators"]),
+                            self._convert_to_tensor([False]),
+                        ]
+                    ).to(torch.bool)
+                    record["values"] = torch.concat(
+                        [
+                            self._convert_to_tensor(record["values"]),
+                            self._convert_to_tensor(
+                                [self.tokenizer.pad_value_token_id]
+                            ),
+                        ]
+                    )
+                if self.include_ttv_prediction:
+                    record["time_to_visits"] = torch.concat(
+                        [
+                            record["time_to_visits"],
+                            self._convert_to_tensor([-100.0]),
+                        ]
+                    )
             return record
+
+
+class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
+    def __init__(self, max_tokens, max_position_embeddings, *args, **kwargs):
+        self.max_tokens_per_batch = max_tokens
+        self.max_position_embeddings = max_position_embeddings
+        self.sample_packing = True
+        super(SamplePackingCehrGptDataCollator, self).__init__(*args, **kwargs)
+
+    def __call__(self, examples):
+        flattened_examples = []
+        current_input_ids = []
+        current_attention_mask = []
+        current_value_indicators = []
+        current_values = []
+
+        # Demographics
+        current_person_ids = []
+        current_index_dates = []
+
+        # Binary classification inputs
+        current_ages = []
+        current_labels = []
+
+        for idx, example in enumerate(examples):
+
+            # If the sample length exceeds the model's capacity, truncate this example
+            if len(example["input_ids"]) > self.max_position_embeddings:
+                example = self.generate_start_end_index(
+                    example, self.max_position_embeddings
+                )
+
+            input_ids = example["input_ids"]
+            # We add the flattened example to the list either when the example exceeds the total max tokens
+            if (
+                len(current_input_ids) + len(input_ids) + 1 > self.max_tokens_per_batch
+                and current_input_ids
+            ):
+                packed_example = {
+                    "input_ids": current_input_ids,
+                    "attention_mask": current_attention_mask,
+                }
+                if self.include_values:
+                    packed_example.update(
+                        {"value_indicators": current_value_indicators}
+                    )
+                    packed_example.update({"values": current_values})
+
+                if current_labels:
+                    packed_example.update(
+                        {
+                            "person_id": current_person_ids,
+                            "index_date": current_index_dates,
+                            "age_at_index": current_ages,
+                            "classifier_label": current_labels,
+                        }
+                    )
+
+                flattened_examples.append(packed_example)
+
+                # reset the inputs
+                current_input_ids = []
+                current_attention_mask = []
+                current_value_indicators = []
+                current_values = []
+
+                # Reset demographics
+                current_person_ids = []
+                current_index_dates = []
+                # Reset classification binary inputs
+                current_ages = []
+                current_labels = []
+
+            current_input_ids.extend(list(input_ids) + [self.tokenizer.pad_token_id])
+            current_attention_mask.extend(np.ones_like(input_ids).tolist() + [0])
+            if self.include_values:
+                current_value_indicators.extend(
+                    list(example["value_indicators"]) + [False]
+                )
+                current_values.extend(
+                    list(example["values"]) + [self.tokenizer.pad_value_token_id]
+                )
+
+            if "person_id" in example:
+                current_person_ids.append(example["person_id"])
+
+            if "index_date" in example:
+                current_index_dates.append(example["index_date"])
+
+            if "age_at_index" in example:
+                current_ages.append(example["age_at_index"])
+
+            if "classifier_label" in example:
+                current_labels.append(example["classifier_label"])
+
+        # The final batch needs to be added
+        if current_input_ids:
+            packed_example = {
+                "input_ids": current_input_ids,
+                "attention_mask": current_attention_mask,
+            }
+            if self.include_values:
+                packed_example.update({"value_indicators": current_value_indicators})
+                packed_example.update({"values": current_values})
+
+            if current_labels:
+                packed_example.update(
+                    {
+                        "person_id": current_person_ids,
+                        "index_date": current_index_dates,
+                        "age_at_index": current_ages,
+                        "classifier_label": current_labels,
+                    }
+                )
+
+            flattened_examples.append(packed_example)
+
+        return super().__call__(flattened_examples)
