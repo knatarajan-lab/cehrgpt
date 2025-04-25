@@ -1,4 +1,3 @@
-import functools
 import os
 from functools import partial
 from typing import Optional, Union
@@ -35,7 +34,6 @@ from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
-from cehrgpt.runners.data_utils import data_collate_fn, get_torch_dtype
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.runners.sample_packing_trainer import SamplePackingTrainer
@@ -536,10 +534,16 @@ def main():
             shuffle_records=data_args.shuffle_records,
             include_ttv_prediction=model_args.include_ttv_prediction,
             use_sub_time_tokenization=model_args.use_sub_time_tokenization,
-            include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
-            motor_tte_vocab_size=cehrgpt_tokenizer.motor_tte_vocab_size,
             include_values=model_args.include_values,
         ),
+        train_dataset=processed_dataset["train"],
+        eval_dataset=(
+            processed_dataset["validation"]
+            if "validation" in processed_dataset
+            else processed_dataset["test"]
+        ),
+        args=training_args,
+        callbacks=callbacks,
     )
 
     checkpoint = None
