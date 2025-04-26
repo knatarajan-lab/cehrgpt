@@ -727,6 +727,14 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+        # We do need to update the pre-computed attention bias matrix if sample packing requires a larger context window
+        if self.config.sample_packing_max_positions > self.config.n_positions:
+            logger.info(
+                "Updated attn_bias to %s according to sample_packing_max_positions",
+                config.sample_packing_max_positions,
+            )
+            self.update_attn_bias(self.config.sample_packing_max_positions)
+
     def initialize_pretrained_embeddings(self):
         layers = [
             nn.Embedding(self.config.vocab_size, self.config.pretrained_embedding_dim),
@@ -1138,12 +1146,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
     def __init__(self, config: CEHRGPTConfig):
         super().__init__(config)
         self.cehrgpt = CEHRGPT2Model(config)
-        if config.n_positions < config.sample_packing_max_positions:
-            logger.info(
-                "Updated attn_bias to %s according to sample_packing_n_positions",
-                config.sample_packing_max_positions,
-            )
-            self.update_attn_bias(config.sample_packing_max_positions)
         if self.config.include_ttv_prediction:
             self.tte_head = WeibullModel(config.n_embd)
 
