@@ -141,6 +141,22 @@ class CehrGptDataCollator:
             f"batch['input_ids']: {batch['input_ids']} "
         )
 
+        if "position_ids" in examples[0]:
+            batch_position_ids = [
+                self._try_reverse_tensor(
+                    self._convert_to_tensor(example["position_ids"])
+                )
+                for example in examples
+            ]
+            # Pad sequences to the max length in the batch
+            batch["position_ids"] = self._try_reverse_tensor(
+                pad_sequence(
+                    batch_position_ids,
+                    batch_first=True,
+                    padding_value=self.max_length,
+                ).to(torch.int64)
+            )
+
         if self.pretraining:
             batch["labels"] = torch.where(
                 (batch["input_ids"] != self.tokenizer.pad_token_id)
@@ -552,6 +568,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         flattened_examples = []
         current_input_ids = []
         current_attention_mask = []
+        current_position_ids = []
         current_value_indicators = []
         current_values = []
 
@@ -580,6 +597,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 packed_example = {
                     "input_ids": current_input_ids,
                     "attention_mask": current_attention_mask,
+                    "position_ids": current_position_ids,
                 }
                 if self.include_values:
                     packed_example.update(
@@ -602,6 +620,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 # reset the inputs
                 current_input_ids = []
                 current_attention_mask = []
+                current_position_ids = []
                 current_value_indicators = []
                 current_values = []
 
@@ -614,6 +633,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
 
             current_input_ids.extend(list(input_ids) + [self.tokenizer.pad_token_id])
             current_attention_mask.extend(np.ones_like(input_ids).tolist() + [0])
+            current_position_ids.extend(list(range(len(input_ids) + 1)))
             if self.include_values:
                 current_value_indicators.extend(
                     list(example["value_indicators"]) + [False]
@@ -639,6 +659,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
             packed_example = {
                 "input_ids": current_input_ids,
                 "attention_mask": current_attention_mask,
+                "position_ids": current_position_ids,
             }
             if self.include_values:
                 packed_example.update({"value_indicators": current_value_indicators})
