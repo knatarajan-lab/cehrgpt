@@ -535,6 +535,8 @@ def main():
             include_ttv_prediction=model_args.include_ttv_prediction,
             use_sub_time_tokenization=model_args.use_sub_time_tokenization,
             include_values=model_args.include_values,
+            include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
+            motor_tte_vocab_size=model.config.motor_tte_vocab_size,
         ),
         train_dataset=processed_dataset["train"],
         eval_dataset=(

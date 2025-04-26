@@ -435,116 +435,163 @@ class CehrGptDataCollator:
                 - "event_indicators": np.ndarray of shape [num_visits, motor_vocab_size], where 0 = event occurred, 1 = censored
         """
         input_ids = record["input_ids"]
+        sample_packing = getattr(self, "sample_packing", False)
+
         if isinstance(input_ids, torch.Tensor):
             input_ids = input_ids.detach().tolist()
 
-        concept_ids = self.tokenizer.decode(input_ids, skip_special_tokens=False)
-        time_to_event_vectors = []
-        global_event_indicators = []
+        # This potentially contains packed samples, we need to handle that
+        packed_concept_ids = self.tokenizer.decode(input_ids, skip_special_tokens=False)
+        pad_indices = []
+        if sample_packing:
+            # We start from the first index
+            for i in range(len(packed_concept_ids)):
+                if packed_concept_ids[i] == self.tokenizer.pad_token:
+                    # If we encounter consecutive pads, we should break out of the loop
+                    if pad_indices and pad_indices[-1] == self.tokenizer.pad_token:
+                        break
+                    pad_indices.append(i)
 
-        # First collect TTE data in reverse chronological order
-        censor_times = []
-        time_to_event_data: List[Dict[str, int]] = []
-        time_to_event_dict: Dict[str, int] = {}
-        time_to_event_to_include: List[bool] = []
-        next_future_visit_concepts = set()
-        time_interval = 0
+        # If we did not find a pad, that means the whole sequence belongs to one sample
+        if len(pad_indices) == 0:
+            pad_indices.append(len(packed_concept_ids))
 
-        # Reverse walk through concept_ids to calculate TTE from each [VE] point
-        for concept_id in reversed(concept_ids):
-            if is_visit_end(concept_id):
-                # Update TTE for existing concepts, or add new ones seen in this visit
-                for existing_concept_id in list(time_to_event_dict.keys()):
-                    if existing_concept_id in next_future_visit_concepts:
-                        time_to_event_dict[existing_concept_id] = time_interval
+        timepiece_time_to_event_vectors = []
+        timepiece_event_indicators = []
+        timepiece_indicators = []
+        time_to_event_to_includes = []
+
+        for start_index, end_index in zip([0] + pad_indices[:-1], pad_indices):
+            concept_ids = packed_concept_ids[start_index:end_index]
+            time_to_event_vectors = []
+            global_event_indicators = []
+
+            # First collect TTE data in reverse chronological order
+            censor_times = []
+            time_to_event_data: List[Dict[str, int]] = []
+            time_to_event_dict: Dict[str, int] = {}
+            time_to_event_to_include: List[bool] = []
+            next_future_visit_concepts = set()
+            time_interval = 0
+
+            # Reverse walk through concept_ids to calculate TTE from each [VE] point
+            for concept_id in reversed(concept_ids):
+                if is_visit_end(concept_id):
+                    # Update TTE for existing concepts, or add new ones seen in this visit
+                    for existing_concept_id in list(time_to_event_dict.keys()):
+                        if existing_concept_id in next_future_visit_concepts:
+                            time_to_event_dict[existing_concept_id] = time_interval
+                        else:
+                            time_to_event_dict[existing_concept_id] += time_interval
+
+                    for next_concept_id in next_future_visit_concepts:
+                        if next_concept_id not in time_to_event_dict:
+                            time_to_event_dict[next_concept_id] = time_interval
+
+                    # If the next visit occurs on the same day as the previous one, we don't want to do TTE for the
+                    # previous visit
+                    time_to_event_to_include.append(time_interval > 0)
+                    time_to_event_data.append(copy.deepcopy(time_to_event_dict))
+                    # Record the censor time at the end of the visit
+                    if censor_times:
+                        censor_times.append(censor_times[-1] + time_interval)
                     else:
-                        time_to_event_dict[existing_concept_id] += time_interval
+                        censor_times.append(time_interval)
+                    time_interval = 0
+                    next_future_visit_concepts.clear()
 
-                for next_concept_id in next_future_visit_concepts:
-                    if next_concept_id not in time_to_event_dict:
-                        time_to_event_dict[next_concept_id] = time_interval
+                elif is_att_token(concept_id):
+                    time_interval += extract_time_interval_in_days(concept_id)
 
-                # If the next visit occurs on the same day as the previous one, we don't want to do TTE for the
-                # previous visit
-                time_to_event_to_include.append(time_interval > 0)
-                time_to_event_data.append(copy.deepcopy(time_to_event_dict))
-                # Record the censor time at the end of the visit
-                if censor_times:
-                    censor_times.append(censor_times[-1] + time_interval)
-                else:
-                    censor_times.append(time_interval)
-                time_interval = 0
-                next_future_visit_concepts.clear()
+                elif self.tokenizer.is_motor_time_to_event_code(concept_id):
+                    next_future_visit_concepts.add(concept_id)
 
-            elif is_att_token(concept_id):
-                time_interval += extract_time_interval_in_days(concept_id)
+            # Reverse back to chronological order for final labels
+            time_to_event_data.reverse()
+            censor_times.reverse()
+            time_to_event_to_include.reverse()
 
-            elif self.tokenizer.is_motor_time_to_event_code(concept_id):
-                next_future_visit_concepts.add(concept_id)
+            for censor_time, visit_tte_data in zip(censor_times, time_to_event_data):
+                time_to_event_vector = np.full(
+                    self.tokenizer.motor_tte_vocab_size,
+                    fill_value=censor_time,
+                    dtype=np.int32,
+                )
+                event_indicator = np.zeros(
+                    self.tokenizer.motor_tte_vocab_size,
+                    dtype=np.int32,
+                )
+                visit_token_ids = [
+                    self.tokenizer.get_motor_token_id(concept_id)
+                    for concept_id in visit_tte_data.keys()
+                ]
+                visit_tte_values = list(visit_tte_data.values())
 
-        # Reverse back to chronological order for final labels
-        time_to_event_data.reverse()
-        censor_times.reverse()
-        time_to_event_to_include.reverse()
+                time_to_event_vector[visit_token_ids] = visit_tte_values
+                event_indicator[visit_token_ids] = 1  # not censored (event occurred)
 
-        for censor_time, visit_tte_data in zip(censor_times, time_to_event_data):
-            time_to_event_vector = np.full(
-                self.tokenizer.motor_tte_vocab_size,
-                fill_value=censor_time,
+                time_to_event_vectors.append(time_to_event_vector)
+                global_event_indicators.append(event_indicator)
+
+            time_to_event_vectors = np.asarray(time_to_event_vectors)
+            global_event_indicators = np.asarray(global_event_indicators).astype(bool)
+            n_visits = len(time_to_event_vectors)
+
+            timepiece_time_to_event_vector = np.full(
+                (
+                    self.motor_num_time_pieces,
+                    n_visits,
+                    self.tokenizer.motor_tte_vocab_size,
+                ),
+                fill_value=0,
                 dtype=np.int32,
             )
-            event_indicator = np.zeros(
-                self.tokenizer.motor_tte_vocab_size,
-                dtype=np.int32,
+            timepiece_event_indicator = np.zeros(
+                (
+                    self.motor_num_time_pieces,
+                    n_visits,
+                    self.tokenizer.motor_tte_vocab_size,
+                ),
+                dtype=bool,
             )
-            visit_token_ids = [
-                self.tokenizer.get_motor_token_id(concept_id)
-                for concept_id in visit_tte_data.keys()
-            ]
-            visit_tte_values = list(visit_tte_data.values())
-
-            time_to_event_vector[visit_token_ids] = visit_tte_values
-            event_indicator[visit_token_ids] = 1  # not censored (event occurred)
-
-            time_to_event_vectors.append(time_to_event_vector)
-            global_event_indicators.append(event_indicator)
-
-        time_to_event_vectors = np.asarray(time_to_event_vectors)
-        global_event_indicators = np.asarray(global_event_indicators).astype(bool)
-        n_visits = len(time_to_event_vectors)
-
-        timepiece_time_to_event_vector = np.full(
-            (self.motor_num_time_pieces, n_visits, self.tokenizer.motor_tte_vocab_size),
-            fill_value=0,
-            dtype=np.int32,
-        )
-        timepiece_event_indicator = np.zeros(
-            (self.motor_num_time_pieces, n_visits, self.tokenizer.motor_tte_vocab_size),
-            dtype=bool,
-        )
-        timepiece_indicator = np.zeros(
-            (self.motor_num_time_pieces, n_visits, self.tokenizer.motor_tte_vocab_size),
-            dtype=bool,
-        )
-
-        # Putting the event time and censor time into the corresponding time bins
-        for bin_num in range(self.motor_num_time_pieces):
-            start = self.motor_time_interval * bin_num
-            end = self.motor_time_interval * (bin_num + 1)
-            time_in_bin = np.clip(time_to_event_vectors - start, 0, end - start)
-            timepiece_time_to_event_vector[bin_num] = time_in_bin
-            event_indicator = (
-                global_event_indicators
-                & (start <= time_to_event_vectors)
-                & (time_to_event_vectors < end)
+            timepiece_indicator = np.zeros(
+                (
+                    self.motor_num_time_pieces,
+                    n_visits,
+                    self.tokenizer.motor_tte_vocab_size,
+                ),
+                dtype=bool,
             )
-            timepiece_event_indicator[bin_num] = event_indicator
-            timepiece_indicator[bin_num] = time_in_bin > 0 | event_indicator
 
-        record["time_to_event_vectors"] = timepiece_time_to_event_vector.swapaxes(0, 1)
-        record["event_indicators"] = timepiece_event_indicator.swapaxes(0, 1)
-        record["time_indicators"] = timepiece_indicator.swapaxes(0, 1)
-        record["time_to_event_to_include"] = np.asarray(time_to_event_to_include)
+            # Putting the event time and censor time into the corresponding time bins
+            for bin_num in range(self.motor_num_time_pieces):
+                start = self.motor_time_interval * bin_num
+                end = self.motor_time_interval * (bin_num + 1)
+                time_in_bin = np.clip(time_to_event_vectors - start, 0, end - start)
+                timepiece_time_to_event_vector[bin_num] = time_in_bin
+                event_indicator = (
+                    global_event_indicators
+                    & (start <= time_to_event_vectors)
+                    & (time_to_event_vectors < end)
+                )
+                timepiece_event_indicator[bin_num] = event_indicator
+                timepiece_indicator[bin_num] = time_in_bin > 0 | event_indicator
+
+            timepiece_time_to_event_vectors.append(
+                timepiece_time_to_event_vector.swapaxes(0, 1)
+            )
+            timepiece_event_indicators.append(timepiece_event_indicator.swapaxes(0, 1))
+            timepiece_indicators.append(timepiece_indicator.swapaxes(0, 1))
+            time_to_event_to_includes.append(np.asarray(time_to_event_to_include))
+
+        record["time_to_event_vectors"] = np.concatenate(
+            timepiece_time_to_event_vectors, axis=0
+        )
+        record["event_indicators"] = np.concatenate(timepiece_event_indicators, axis=0)
+        record["time_indicators"] = np.concatenate(timepiece_indicators, axis=0)
+        record["time_to_event_to_include"] = np.concatenate(
+            time_to_event_to_includes, axis=0
+        )
         return record
 
     def random_sort(self, record: Dict[str, Any]) -> Dict[str, Any]:
