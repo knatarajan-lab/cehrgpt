@@ -131,8 +131,13 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
         if len(self.lengths) == 0:
             return 0
 
+        # We need to truncate the lengths due to the context window limit imposed by the model
+        truncated_lengths = [
+            min(self.max_position_embeddings, length) for length in self.lengths
+        ]
+
         # Calculate average sequence length
-        avg_seq_length = sum(self.lengths) // len(self.lengths)
+        avg_seq_length = sum(truncated_lengths) // len(truncated_lengths)
 
         # Estimate average number of sequences per batch
         seqs_per_batch = self.max_tokens_per_batch // avg_seq_length
@@ -140,7 +145,7 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
         # Estimate total number of batches
         if self.drop_last:
             # If dropping last incomplete batch
-            return len(self.lengths) // seqs_per_batch * self.num_replicas
+            return len(truncated_lengths) // seqs_per_batch * self.num_replicas
         else:
             # If keeping last incomplete batch, ensure at least 1 batch
-            return max(1, len(self.lengths) // seqs_per_batch) * self.num_replicas
+            return max(1, len(truncated_lengths) // seqs_per_batch) * self.num_replicas
