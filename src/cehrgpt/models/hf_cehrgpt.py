@@ -1419,6 +1419,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # Shift so that tokens < n predict n
             shift_logits = lm_logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
+            valid_tokens: torch.BoolTensor = shift_labels != 100
+            total_num_tokens = valid_tokens.sum()
             if (
                 self.cehrgpt.config.lab_token_penalty
                 and self.cehrgpt.config.lab_token_exists
@@ -1440,27 +1442,28 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     token_loss,
                 )
 
-                token_loss = (
-                    token_loss.sum() / (shift_labels != loss_fct.ignore_index).sum()
-                )
+                token_loss = token_loss.sum() / total_num_tokens
             else:
                 # Flatten the tokens
-                loss_fct = CrossEntropyLoss()
+                loss_fct = CrossEntropyLoss(reduction="none")
                 token_loss = loss_fct(
                     shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
                 )
+                token_loss = token_loss.sum() / total_num_tokens
 
             loss = token_loss * self.cehrgpt.config.next_token_prediction_loss_weight
 
             if self.cehrgpt.config.entropy_penalty:
                 # Compute probabilities using softmax
-                probs = torch.softmax(lm_logits, dim=-1)
+                probs = torch.softmax(shift_logits, dim=-1)
                 # Compute negative entropy: sum(p * log(p))
                 entropy = torch.sum(
                     probs * torch.log(probs + 1e-9), dim=-1
                 )  # Add epsilon for numerical stability
+                entropy = torch.where(valid_tokens, entropy, 0)
                 # Regularization term: mean entropy scaled by alpha
-                loss += self.cehrgpt.config.entropy_penalty_alpha * entropy.mean()
+                entropy_penalty = entropy.sum() / total_num_tokens
+                loss += entropy_penalty * self.cehrgpt.config.entropy_penalty_alpha
 
             # We add another loss term when use_sub_time_tokenization is enabled, we need to recover the sub time token
             # predictions for year/month/token
@@ -1490,48 +1493,47 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     time_token_loss.view(-1, 3),
                     0,
                 )
-                time_token_loss = time_token_loss.sum(-1)
-                time_token_loss = (
-                    time_token_loss.sum() / shifted_time_token_indicators.sum()
-                )
+                time_token_loss = time_token_loss.sum() / total_num_tokens
                 loss += time_token_loss * self.config.time_token_loss_weight
 
-        if time_to_visits is not None:
-            # Get lambda and k parameters
-            lambda_param, k_param = self.tte_head(hidden_states)
+            if time_to_visits is not None:
+                # Get lambda and k parameters
+                lambda_param, k_param = self.tte_head(hidden_states)
 
-            # Perform slicing before tensors are split across GPUs
-            shifted_lambda_param = lambda_param[..., :-1, :].contiguous()
-            shifted_k_param = k_param[..., :-1, :].contiguous()
-            shift_time_to_visits = time_to_visits[..., 1:].contiguous()
+                # Perform slicing before tensors are split across GPUs
+                shifted_lambda_param = lambda_param[..., :-1, :].contiguous()
+                shifted_k_param = k_param[..., :-1, :].contiguous()
+                shift_time_to_visits = time_to_visits[..., 1:].contiguous()
 
-            # Move to the same device as lambda_param
-            shift_time_to_visits = shift_time_to_visits.to(lambda_param.device)
+                # Move to the same device as lambda_param
+                shift_time_to_visits = shift_time_to_visits.to(lambda_param.device)
 
-            time_to_visit_indicator = shift_time_to_visits >= 0
-            # Define the Gamma distribution
-            dist = Gamma(shifted_k_param.squeeze(-1), shifted_lambda_param.squeeze(-1))
-            # Compute log-probs and apply the time_to_visit_indicator
-            log_probs = dist.log_prob(torch.clamp(shift_time_to_visits, min=1e-3))
-            log_probs = torch.where(time_to_visit_indicator, log_probs, 0)
-            time_to_visit_loss = -log_probs.sum() / time_to_visit_indicator.sum()
-            # Compute the loss
-            loss += time_to_visit_loss * self.config.time_to_visit_loss_weight
+                time_to_visit_indicator = shift_time_to_visits >= 0
+                # Define the Gamma distribution
+                dist = Gamma(
+                    shifted_k_param.squeeze(-1), shifted_lambda_param.squeeze(-1)
+                )
+                # Compute log-probs and apply the time_to_visit_indicator
+                log_probs = dist.log_prob(torch.clamp(shift_time_to_visits, min=1e-3))
+                log_probs = torch.where(time_to_visit_indicator, log_probs, 0)
+                time_to_visit_loss = -log_probs.sum() / total_num_tokens
+                # Compute the loss
+                loss += time_to_visit_loss * self.config.time_to_visit_loss_weight
 
-        if true_values is not None and true_value_indicators is not None:
-            true_values = true_values.to(value_logits.device)
-            shift_value_logits = value_logits[..., :-1, :].contiguous()
-            shift_value_indicators = true_value_indicators[..., :-1].contiguous()
-            shift_next_values = true_values[..., 1:].contiguous()
-            value_loss_fct = CrossEntropyLoss(reduction="none")
-            token_value_loss = value_loss_fct(
-                shift_value_logits.view(-1, shift_value_logits.size(-1)),
-                shift_next_values.view(-1),
-            )
-            token_value_loss = torch.where(
-                shift_value_indicators.view(-1), token_value_loss, 0
-            )
-            loss += token_value_loss.sum() / shift_value_indicators.sum()
+            if true_values is not None and true_value_indicators is not None:
+                true_values = true_values.to(value_logits.device)
+                shift_value_logits = value_logits[..., :-1, :].contiguous()
+                shift_value_indicators = true_value_indicators[..., :-1].contiguous()
+                shift_next_values = true_values[..., 1:].contiguous()
+                value_loss_fct = CrossEntropyLoss(reduction="none")
+                token_value_loss = value_loss_fct(
+                    shift_value_logits.view(-1, shift_value_logits.size(-1)),
+                    shift_next_values.view(-1),
+                )
+                token_value_loss = torch.where(
+                    shift_value_indicators.view(-1), token_value_loss, 0
+                )
+                loss += token_value_loss.sum() / total_num_tokens
 
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]
