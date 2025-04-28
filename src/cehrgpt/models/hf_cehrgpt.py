@@ -1538,7 +1538,15 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 token_value_loss = torch.where(
                     shift_value_indicators.view(-1), token_value_loss, 0
                 )
-                loss += token_value_loss.sum() / total_num_tokens
+                token_value_loss = token_value_loss.sum() / total_num_tokens
+                if (
+                    self.cehrgpt.config.lab_token_penalty
+                    and self.cehrgpt.config.lab_token_exists
+                ):
+                    token_value_loss = (
+                        token_value_loss * self.config.lab_token_loss_weight
+                    )
+                loss += token_value_loss
 
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]
