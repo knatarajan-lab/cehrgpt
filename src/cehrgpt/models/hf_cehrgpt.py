@@ -96,6 +96,11 @@ def is_sample_pack(attention_mask: torch.Tensor) -> bool:
     Returns:
         bool: True if any sample in the batch is sample-packed, False otherwise.
     """
+
+    # If the attention_maks is left padded, we will flip it so we can use the same logic below
+    if (attention_mask[:, 0] == 0).any():
+        attention_mask = attention_mask.flip(dims=[1])
+
     nonzero_counts = attention_mask.sum(dim=1)
     max_token_positions = torch.argmax(attention_mask.flip(dims=[1]), dim=1)
     max_indices = attention_mask.shape[1] - 1 - max_token_positions
