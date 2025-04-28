@@ -37,40 +37,47 @@ LOG = logging.get_logger("transformers")
 
 
 def extract_averaged_embeddings_from_packed_sequence(
-    hidden_states: torch.Tensor, attention_mask: torch.Tensor
+    hidden_states: torch.Tensor,
+    attention_mask: torch.Tensor,
+    ve_token_indicators: torch.BoolTensor,
 ) -> torch.Tensor:
+    """
+    Args:
+
+        hidden_states: (batch_size=1, seq_len, hidden_dim) tensor
+        attention_mask: (batch_size=1, seq_len) tensor, where 0 indicates padding
+        ve_token_indicators: (batch_size=1, seq_len) bool tensor, True if token is VE token
+    Returns:
+        (num_samples, hidden_dim) tensor: averaged embeddings over VE tokens for each sample
+    """
     # Step 1: Create segment IDs
     mask = attention_mask[0]  # (seq_len,)
-    segment_ids = (mask == 0).cumsum(dim=0) + 1
-    segment_ids = segment_ids * mask  # set PAD positions back to 0
+    segment_ids = (mask == 0).cumsum(dim=0) + 1  # start segment IDs from 1
+    segment_ids = (segment_ids * mask).to(torch.int32)  # set PAD positions back to 0
 
-    # Now segment_ids looks like:
-    # tensor([1, 1, 0, 2, 2, 2, 2, 0, 3, 3, 0])
-
-    # Step 2: Only keep valid tokens (nonzero segment ids)
-    valid = segment_ids > 0
-    valid_embeddings = hidden_states[0, valid]  # (num_valid_tokens, hidden_dim)
-    valid_segments = segment_ids[valid]  # (num_valid_tokens,)
+    # Step 2: Only keep tokens that are both valid and VE tokens
+    valid = (segment_ids > 0) & (ve_token_indicators[0])
+    valid_embeddings = hidden_states[0, valid].to(torch.float32)  # (num_valid_ve_tokens, hidden_dim)
+    valid_segments = segment_ids[valid]  # (num_valid_ve_tokens,)
 
     # Step 3: Group by segment id and average
-    num_segments = segment_ids.max().item()
+    num_segments = int(segment_ids.max().item())
 
-    # Initialize
     sample_embeddings = torch.zeros(
         num_segments, hidden_states.size(-1), device=hidden_states.device
     )
     counts = torch.zeros(num_segments, device=hidden_states.device)
 
-    # Scatter add embeddings and counts
-    sample_embeddings.index_add_(
-        0, valid_segments - 1, valid_embeddings
-    )  # segment id starts from 1
+    sample_embeddings.index_add_(0, valid_segments - 1, valid_embeddings)
     counts.index_add_(
         0, valid_segments - 1, torch.ones_like(valid_segments, dtype=counts.dtype)
     )
 
-    # Final averaging
+    # Avoid divide-by-zero (if some segments have no VE tokens, set their embeddings to zero)
+    counts = counts.masked_fill(counts == 0, 1.0)
+
     sample_embeddings = sample_embeddings / counts.unsqueeze(-1)
+
     return sample_embeddings
 
 
@@ -310,6 +317,8 @@ def main():
 
     data_loaders = [("train", train_loader), ("test", test_dataloader)]
 
+    ve_token_id = cehrgpt_tokenizer._convert_token_to_id("[VE]")
+
     for split, data_loader in data_loaders:
 
         # Ensure prediction folder exists
@@ -356,10 +365,14 @@ def main():
 
                 if cehrgpt_args.sample_packing:
                     if cehrgpt_args.average_over_sequence:
+                        ve_token_indicators: torch.BoolTensor = (
+                            batch["input_ids"] == ve_token_id
+                        )
                         features = (
                             extract_averaged_embeddings_from_packed_sequence(
                                 cehrgpt_output.last_hidden_state,
                                 batch["attention_mask"],
+                                ve_token_indicators,
                             )
                             .cpu()
                             .float()
