@@ -20,7 +20,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
 from tokenizers.trainers import WordLevelTrainer
 from tqdm import tqdm
-from transformers import EarlyStoppingCallback, PreTrainedTokenizer
+from transformers import PreTrainedTokenizer
 from transformers.utils import logging
 
 from cehrgpt.gpt_utils import (
