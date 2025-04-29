@@ -508,11 +508,13 @@ class CehrGptDataCollator:
                 elif self.tokenizer.is_motor_time_to_event_code(concept_id):
                     next_future_visit_concepts.add(concept_id)
 
-            assert len(time_to_event_data) > 0, (
-                "len(time_to_event_data) must be greater than 0. "
-                f"concept_ids: {concept_ids}. "
-                f"packed_concept_ids[start_index:]: {packed_concept_ids[start_index:]}"
-            )
+            if len(time_to_event_data) == 0:
+                LOG.info(
+                    "Vist end event is not detected for this sample, and is skipped for MOTOR tasks."
+                    "It's likely this sample contains a long admission. length: %s, concept_ids[-10:] %s",
+                    len(concept_ids), concept_ids[-10:],
+                )
+                continue
 
             # Reverse back to chronological order for final labels
             time_to_event_data.reverse()
