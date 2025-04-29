@@ -537,6 +537,7 @@ def main():
             include_values=model_args.include_values,
             include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
             motor_tte_vocab_size=model.config.motor_tte_vocab_size,
+            motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
         ),
         train_dataset=processed_dataset["train"],
         eval_dataset=(
