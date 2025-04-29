@@ -506,6 +506,11 @@ class CehrGptDataCollator:
                 elif self.tokenizer.is_motor_time_to_event_code(concept_id):
                     next_future_visit_concepts.add(concept_id)
 
+            assert len(time_to_event_data) > 0, (
+                "len(time_to_event_data) must be greater than 0. "
+                f"concept_ids: {concept_ids}"
+            )
+
             # Reverse back to chronological order for final labels
             time_to_event_data.reverse()
             censor_times.reverse()
