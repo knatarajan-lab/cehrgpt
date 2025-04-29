@@ -12,7 +12,7 @@ import scipy.stats as stats
 import transformers
 from cehrbert.models.hf_models.tokenization_utils import agg_helper, load_json_file
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
-from datasets import Dataset, DatasetDict
+from datasets import Dataset, DatasetDict, IterableDataset
 from femr.stat_utils import OnlineStatistics, ReservoirSampler
 from scipy.interpolate import UnivariateSpline
 from tokenizers import AddedToken, Tokenizer
@@ -20,7 +20,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
 from tokenizers.trainers import WordLevelTrainer
 from tqdm import tqdm
-from transformers import PreTrainedTokenizer
+from transformers import EarlyStoppingCallback, PreTrainedTokenizer
 from transformers.utils import logging
 
 from cehrgpt.gpt_utils import (
@@ -55,21 +55,6 @@ CONCEPT_MAPPING_FILE_NAME = "concept_name_mapping.json"
 MOTOR_TIME_TO_EVENT_CODES_FILE_NAME = "motor_time_to_event_codes.json"
 
 LOG = logging.get_logger("transformers")
-
-
-def agg_statistics(stats1, stats2):
-    if stats1.get("numeric_stats_by_lab"):
-        for k, v in stats2["numeric_stats_by_lab"].items():
-            stats1["numeric_stats_by_lab"][k].combine(v)
-    if stats1.get("categorical_stats_by_lab"):
-        for (concept_id, concept_as_value), count in stats2[
-            "categorical_stats_by_lab"
-        ].items():
-            stats1["numeric_stats_by_lab"][(concept_id, concept_as_value)] += count
-    if stats1.get("concept_code_stats"):
-        for concept_id, count in stats2["concept_code_stats"].items():
-            stats1["concept_code_stats"][concept_id] += count
-    return stats1
 
 
 def truncated_sample(sample, standard_deviation):
@@ -203,7 +188,22 @@ def create_bins_with_spline(samples, num_bins, d_freedom=3) -> List[Dict[str, An
     return bins
 
 
-def map_statistics(batch: Dict[str, Any], size=10_000) -> Dict[str, Any]:
+def agg_statistics(stats1, stats2):
+    if stats1.get("numeric_stats_by_lab"):
+        for k, v in stats2["numeric_stats_by_lab"].items():
+            stats1["numeric_stats_by_lab"][k].combine(v)
+    if stats1.get("categorical_stats_by_lab"):
+        for (concept_id, concept_as_value), count in stats2[
+            "categorical_stats_by_lab"
+        ].items():
+            stats1["numeric_stats_by_lab"][(concept_id, concept_as_value)] += count
+    if stats1.get("concept_code_stats"):
+        for concept_id, weight in stats2["concept_code_stats"].items():
+            stats1["concept_code_stats"][concept_id] += weight
+    return stats1
+
+
+def map_statistics(batch: Dict[str, Any], total_size, size=10_000) -> Dict[str, Any]:
     if "units" in batch:
         batch_value_units = batch["units"]
     else:
@@ -241,6 +241,7 @@ def map_statistics(batch: Dict[str, Any], size=10_000) -> Dict[str, Any]:
         batch["concept_value_masks"],
         batch_value_units,
     ):
+        unique_codes = set()
         for (
             concept_id,
             number_as_value,
@@ -259,8 +260,10 @@ def map_statistics(batch: Dict[str, Any], size=10_000) -> Dict[str, Any]:
                     numeric_stats_by_lab[(concept_id, unit)].add(number_as_value, 1)
                 if concept_as_value:
                     categorical_stats_by_lab[(concept_id, concept_as_value)] += 1
-            else:
-                concept_code_stats[concept_id] += 1
+            unique_codes.add(concept_id)
+
+        for code in unique_codes:
+            concept_code_stats[code] += 1 / total_size
 
     return {
         "numeric_stats_by_lab": numeric_stats_by_lab,
@@ -854,7 +857,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         concept_name_mapping: Dict[str, str],
         data_args: DataTrainingArguments,
         pretrained_concept_embedding_model: PretrainedEmbeddings = None,
-        motor_time_to_event_codes: Optional[List[int]] = None,
+        num_motor_tasks: Optional[int] = None,
     ):
         if not isinstance(cehrgpt_tokenizer, CehrGptTokenizer):
             raise ValueError(
@@ -867,7 +870,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             dataset=dataset,
             concept_name_mapping=concept_name_mapping,
             data_args=data_args,
-            motor_time_to_event_codes=motor_time_to_event_codes,
+            num_motor_tasks=num_motor_tasks,
         )
 
         new_tokens = set(new_tokenizer.get_vocab().keys()) - set(
@@ -1021,13 +1024,24 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         return categorical_lab_stats_existing
 
     @classmethod
+    def get_dataset_len(cls, dataset: Union[Dataset, IterableDataset]) -> int:
+        if isinstance(dataset, Dataset):
+            return len(dataset)
+        elif isinstance(dataset, IterableDataset):
+            return sum([1 for _ in dataset])
+        raise RuntimeError(
+            "The dataset must be one of the two types (Dataset, IterableDataset)"
+        )
+
+    @classmethod
     def train_tokenizer(
         cls,
         dataset: Union[Dataset, DatasetDict],
         concept_name_mapping: Dict[str, str],
         data_args: DataTrainingArguments,
         pretrained_concept_embedding_model: PretrainedEmbeddings = None,
-        motor_time_to_event_codes: Optional[List[str]] = None,
+        allowed_motor_codes: Optional[List[int]] = None,
+        num_motor_tasks: Optional[int] = None,
     ):
         """
         Train a huggingface word level tokenizer.
@@ -1074,7 +1088,9 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             ]
         )
 
-        map_statistics_partial = partial(map_statistics, size=SAMPLE_SIZE)
+        map_statistics_partial = partial(
+            map_statistics, total_size=cls.get_dataset_len(dataset), size=SAMPLE_SIZE
+        )
 
         if data_args.streaming:
             first_example = next(iter(dataset))
@@ -1165,13 +1181,31 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             if concept_id in concept_name_mapping
         }
 
-        if motor_time_to_event_codes:
-            # Prune motor_time_to_event_codes
-            motor_time_to_event_codes = [
-                concept_id
-                for concept_id in motor_time_to_event_codes
-                if concept_id in vocab
-            ]
+        delta = 1e-3
+        code_weights = np.asarray(list(concept_code_stats.values()))
+        # Clip the values so we don't get errors when applying np.log
+        code_weights = code_weights.clip(delta, 1 - delta)
+        code_entropies = np.log(code_weights) * code_weights + (
+            1 - code_weights
+        ) * np.log(1 - code_weights)
+        concept_code_entropies = {
+            k: v for k, v in zip(concept_code_stats.keys(), code_entropies)
+        }
+        motor_time_to_event_codes = None
+        if num_motor_tasks and allowed_motor_codes:
+            motor_time_to_event_codes = []
+            for concept_id, _ in sorted(
+                concept_code_entropies.items(), key=lambda t: t[1]
+            ):
+                if concept_id not in allowed_motor_codes:
+                    continue
+                if len(motor_time_to_event_codes) < num_motor_tasks:
+                    motor_time_to_event_codes.append(concept_id)
+                else:
+                    break
+            LOG.info(
+                f"{len(motor_time_to_event_codes)} number of tasks have been added as MOTOR tasks"
+            )
 
         return CehrGptTokenizer(
             concept_tokenizer,
