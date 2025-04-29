@@ -187,6 +187,12 @@ class CehrGPTArguments:
         default=1.0,
         metadata={"help": "The MOTOR time to event loss weight"},
     )
+    motor_num_time_pieces: Optional[int] = dataclasses.field(
+        default=8,
+        metadata={
+            "help": "The number of times each motor_num_time_pieces piece has to be"
+        },
+    )
     concept_dir: Optional[str] = dataclasses.field(
         default=None,
         metadata={"help": "The directory where the concept data is stored."},
