@@ -1546,7 +1546,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     token_value_loss = (
                         token_value_loss * self.config.lab_token_loss_weight
                     )
-                loss += token_value_loss
+                loss += token_value_loss * self.config.value_prediction_loss_weight
 
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]

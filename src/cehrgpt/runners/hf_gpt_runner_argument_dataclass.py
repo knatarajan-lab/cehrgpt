@@ -128,6 +128,10 @@ class CehrGPTArguments:
         default=1.0,
         metadata={"help": "lab_token_loss_weight penalty co-efficient"},
     )
+    value_prediction_loss_weight: Optional[float] = dataclasses.field(
+        default=1.0,
+        metadata={"help": "The weight of the value prediction loss"},
+    )
     entropy_penalty: Optional[bool] = dataclasses.field(
         default=False,
         metadata={"help": "A flag to indicate whether we want to use entropy penalty."},
