@@ -10,11 +10,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import scipy.stats as stats
 import transformers
-from cehrbert.models.hf_models.tokenization_utils import (
-    agg_helper,
-    agg_statistics,
-    load_json_file,
-)
+from cehrbert.models.hf_models.tokenization_utils import agg_helper, load_json_file
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import Dataset, DatasetDict
 from femr.stat_utils import OnlineStatistics, ReservoirSampler
@@ -54,10 +50,26 @@ TIME_TOKENIZER_FILE_NAME = "cehrgpt_time_tokenizer.json"
 TOKEN_TO_SUB_TIME_TOKEN_MAPPING_FILE_NAME = "token_to_sub_time_token_mapping.json"
 LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.pickle"
 LEGACY_LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.json"
+CONCEPT_STATS_FILE_NAME = "cehrgpt_concept_stats.json"
 CONCEPT_MAPPING_FILE_NAME = "concept_name_mapping.json"
 MOTOR_TIME_TO_EVENT_CODES_FILE_NAME = "motor_time_to_event_codes.json"
 
 LOG = logging.get_logger("transformers")
+
+
+def agg_statistics(stats1, stats2):
+    if stats1.get("numeric_stats_by_lab"):
+        for k, v in stats2["numeric_stats_by_lab"].items():
+            stats1["numeric_stats_by_lab"][k].combine(v)
+    if stats1.get("categorical_stats_by_lab"):
+        for (concept_id, concept_as_value), count in stats2[
+            "categorical_stats_by_lab"
+        ].items():
+            stats1["numeric_stats_by_lab"][(concept_id, concept_as_value)] += count
+    if stats1.get("concept_code_stats"):
+        for concept_id, count in stats2["concept_code_stats"].items():
+            stats1["concept_code_stats"][concept_id] += count
+    return stats1
 
 
 def truncated_sample(sample, standard_deviation):
@@ -215,6 +227,7 @@ def map_statistics(batch: Dict[str, Any], size=10_000) -> Dict[str, Any]:
 
     numeric_stats_by_lab = collections.defaultdict(partial(ReservoirSampler, size=size))
     categorical_stats_by_lab = collections.defaultdict(int)
+    concept_code_stats = collections.defaultdict(int)
     for (
         concept_ids,
         number_as_values,
@@ -246,10 +259,13 @@ def map_statistics(batch: Dict[str, Any], size=10_000) -> Dict[str, Any]:
                     numeric_stats_by_lab[(concept_id, unit)].add(number_as_value, 1)
                 if concept_as_value:
                     categorical_stats_by_lab[(concept_id, concept_as_value)] += 1
+            else:
+                concept_code_stats[concept_id] += 1
 
     return {
         "numeric_stats_by_lab": numeric_stats_by_lab,
         "categorical_stats_by_lab": categorical_stats_by_lab,
+        "concept_code_stats": concept_code_stats,
     }
 
 
@@ -351,6 +367,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         value_tokenizer: Tokenizer,
         att_tokenizer: Tokenizer,
         token_to_sub_time_token_mapping: Dict[str, List[str]],
+        concept_code_stats: Dict[str, Any],
         numeric_lab_stats: List[Dict[str, Any]],
         categorical_lab_stats: Dict[Tuple[str, str], int],
         concept_name_mapping: Dict[str, str],
@@ -361,6 +378,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         self._value_tokenizer = value_tokenizer
         self._att_tokenizer = att_tokenizer
         self._token_to_sub_time_token_mapping = token_to_sub_time_token_mapping
+        self._concept_code_stats = concept_code_stats
         self._numeric_lab_stats = numeric_lab_stats
         self._numeric_event_statistics = NumericEventStatistics(numeric_lab_stats)
         self._categorical_lab_stats = categorical_lab_stats
@@ -658,6 +676,9 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         ) as f:
             json.dump(self._token_to_sub_time_token_mapping, f)
 
+        with open(os.path.join(save_directory, CONCEPT_STATS_FILE_NAME), "w") as f:
+            json.dump(self._concept_code_stats, f)
+
         with open(os.path.join(save_directory, LAB_STATS_FILE_NAME), "wb") as f:
             lab_stats = {
                 "numeric_lab_stats": self._numeric_lab_stats,
@@ -782,6 +803,14 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             return None
         concept_name_mapping = load_json_file(concept_name_mapping_file)
 
+        # Load the concept_code_stats json file
+        concept_code_stats_mapping_file = transformers.utils.hub.cached_file(
+            pretrained_model_name_or_path, CONCEPT_STATS_FILE_NAME, **kwargs
+        )
+        if not concept_code_stats_mapping_file:
+            return None
+        concept_code_stats = load_json_file(concept_code_stats_mapping_file)
+
         # Load the MOTOR time to event codes file
         motor_time_to_event_codes_file = transformers.utils.hub.cached_file(
             pretrained_model_name_or_path, MOTOR_TIME_TO_EVENT_CODES_FILE_NAME, **kwargs
@@ -797,6 +826,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             value_tokenizer,
             att_tokenizer,
             token_to_sub_time_token_mapping,
+            concept_code_stats,
             lab_stats["numeric_lab_stats"],
             lab_stats["categorical_lab_stats"],
             concept_name_mapping,
@@ -1099,6 +1129,10 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         ].items():
             categorical_lab_stats[(concept_id, value_as_concept)] += count
 
+        concept_code_stats = collections.defaultdict(int)
+        for concept_id, count in current["concept_code_stats"].items():
+            concept_code_stats[concept_id] += count
+
         # We will train a tokenizer specifically for time intervals
         sub_time_token_data = []
         token_to_sub_time_token_mapping = collections.defaultdict(list)
@@ -1144,6 +1178,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             value_tokenizer,
             att_tokenizer,
             token_to_sub_time_token_mapping,
+            concept_code_stats,
             numeric_lab_stats,
             categorical_lab_stats,
             concept_name_mapping,
