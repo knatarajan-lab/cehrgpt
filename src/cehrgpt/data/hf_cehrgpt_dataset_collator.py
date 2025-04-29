@@ -34,7 +34,7 @@ class CehrGptDataCollator:
         use_sub_time_tokenization: bool = False,
         include_motor_time_to_event: bool = False,
         motor_tte_vocab_size: int = 0,
-        motor_num_time_pieces: int = 16,
+        motor_num_time_pieces: int = 8,
         pretraining: bool = True,
         include_demographics: bool = False,
         add_linear_prob_token: bool = False,
