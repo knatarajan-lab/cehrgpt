@@ -53,6 +53,8 @@ def main(args):
     feature_train = pd.read_parquet(features_data_dir / "train" / "features")
     feature_test = pd.read_parquet(features_data_dir / "test" / "features")
 
+    feature_train = feature_train.sort_values(["subject_id", "prediction_time"])
+
     if feature_processor_path.exists():
         with open(feature_processor_path, "rb") as f:
             feature_processor = pickle.load(f)
