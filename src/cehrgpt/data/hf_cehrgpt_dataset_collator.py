@@ -739,7 +739,8 @@ class CehrGptDataCollator:
             for i in reversed(list(range(0, end_index))):
                 current_token = record["input_ids"][i]
                 if current_token == self.ve_token_id:
-                    end_index = i
+                    # Plus one because slicing is right exclusive
+                    end_index = i + 1
                     break
 
             record["input_ids"] = record["input_ids"][0:end_index]
