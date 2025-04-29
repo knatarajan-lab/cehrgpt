@@ -463,6 +463,8 @@ class CehrGptDataCollator:
 
         for start_index, end_index in zip([0] + pad_indices[:-1], pad_indices):
             concept_ids = packed_concept_ids[start_index:end_index]
+            if concept_ids[0] == self.tokenizer.pad_token:
+                concept_ids.pop(0)
             time_to_event_vectors = []
             global_event_indicators = []
 
@@ -508,7 +510,8 @@ class CehrGptDataCollator:
 
             assert len(time_to_event_data) > 0, (
                 "len(time_to_event_data) must be greater than 0. "
-                f"concept_ids: {concept_ids}"
+                f"concept_ids: {concept_ids}. "
+                f"packed_concept_ids[start_index:]: {packed_concept_ids[start_index:]}"
             )
 
             # Reverse back to chronological order for final labels
