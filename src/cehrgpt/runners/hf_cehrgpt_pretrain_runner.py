@@ -73,7 +73,7 @@ def load_and_create_tokenizer(
 ) -> CehrGptTokenizer:
 
     concept_name_mapping = {}
-    motor_time_to_event_codes = list()
+    allowed_motor_codes = list()
     if cehrgpt_args.concept_dir:
         import pandas as pd
         from cehrbert_data.const.artificial_tokens import DEATH_TOKEN
@@ -90,15 +90,16 @@ def load_and_create_tokenizer(
                 row, "concept_name"
             )
             if (
-                getattr(row, "domain_id") in ["Condition", "Procedure", "Drug"]
+                cehrgpt_args.include_motor_time_to_event
+                and getattr(row, "domain_id") in ["Condition", "Procedure", "Drug"]
                 and getattr(row, "standard_concept") == "S"
             ):
-                motor_time_to_event_codes.append(str(getattr(row, "concept_id")))
+                allowed_motor_codes.append(str(getattr(row, "concept_id")))
         LOG.info(
             "Adding death codes for MOTOR TTE predictions: %s",
             [DEATH_TOKEN, death_code],
         )
-        motor_time_to_event_codes.extend([DEATH_TOKEN, death_code])
+        allowed_motor_codes.extend([DEATH_TOKEN, death_code])
     # Try to load the pretrained tokenizer
     tokenizer_abspath = os.path.expanduser(model_args.tokenizer_name_or_path)
     try:
@@ -116,7 +117,12 @@ def load_and_create_tokenizer(
             concept_name_mapping,
             data_args,
             PretrainedEmbeddings(cehrgpt_args.pretrained_embedding_path),
-            motor_time_to_event_codes,
+            allowed_motor_codes if cehrgpt_args.include_motor_time_to_event else None,
+            (
+                cehrgpt_args.num_motor_tasks
+                if cehrgpt_args.include_motor_time_to_event
+                else None
+            ),
         )
         LOG.info("Finished training the tokenizer ...")
         tokenizer.save_pretrained(tokenizer_abspath)

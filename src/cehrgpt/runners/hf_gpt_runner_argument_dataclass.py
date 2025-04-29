@@ -183,6 +183,10 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether we want to include the motor time to events"
         },
     )
+    num_motor_tasks: Optional[int] = dataclasses.field(
+        default=10000,
+        metadata={"help": "The number of max MOTOR tasks"},
+    )
     motor_time_to_event_weight: Optional[float] = dataclasses.field(
         default=1.0,
         metadata={"help": "The MOTOR time to event loss weight"},
