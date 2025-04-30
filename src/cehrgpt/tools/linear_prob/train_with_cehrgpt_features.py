@@ -57,7 +57,7 @@ def main(args):
         features_data_dir / "features_with_label" / "test_features"
     )
 
-    feature_train = feature_train.sort_values(["subject_id", "prediction_time"])
+    feature_train = feature_train.sample(n=len(feature_train), random_state=42)
 
     if feature_processor_path.exists():
         with open(feature_processor_path, "rb") as f:
