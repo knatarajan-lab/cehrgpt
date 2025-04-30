@@ -57,7 +57,9 @@ def extract_averaged_embeddings_from_packed_sequence(
 
     # Step 2: Only keep tokens that are both valid and VE tokens
     valid = (segment_ids > 0) & (ve_token_indicators[0])
-    valid_embeddings = hidden_states[0, valid].to(torch.float32)  # (num_valid_ve_tokens, hidden_dim)
+    valid_embeddings = hidden_states[0, valid].to(
+        torch.float32
+    )  # (num_valid_ve_tokens, hidden_dim)
     valid_segments = segment_ids[valid]  # (num_valid_ve_tokens,)
 
     # Step 3: Group by segment id and average
@@ -322,7 +324,9 @@ def main():
     for split, data_loader in data_loaders:
 
         # Ensure prediction folder exists
-        feature_output_folder = Path(training_args.output_dir) / split / "features"
+        feature_output_folder = (
+            Path(training_args.output_dir) / "features_with_label" / f"{split}_features"
+        )
         feature_output_folder.mkdir(parents=True, exist_ok=True)
 
         LOG.info("Generating features for %s set at %s", split, feature_output_folder)

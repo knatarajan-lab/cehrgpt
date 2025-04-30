@@ -50,8 +50,12 @@ def main(args):
         print("The models have been trained, and skip ...")
         exit(0)
 
-    feature_train = pd.read_parquet(features_data_dir / "train" / "features")
-    feature_test = pd.read_parquet(features_data_dir / "test" / "features")
+    feature_train = pd.read_parquet(
+        features_data_dir / "features_with_label" / "train_features"
+    )
+    feature_test = pd.read_parquet(
+        features_data_dir / "features_with_label" / "test_features"
+    )
 
     feature_train = feature_train.sort_values(["subject_id", "prediction_time"])
 
