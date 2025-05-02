@@ -91,7 +91,8 @@ def load_and_create_tokenizer(
             )
             if (
                 cehrgpt_args.include_motor_time_to_event
-                and getattr(row, "domain_id") in ["Condition", "Procedure", "Drug"]
+                and getattr(row, "domain_id")
+                in ["Condition", "Procedure", "Drug", "Visit"]
                 and getattr(row, "standard_concept") == "S"
             ):
                 allowed_motor_codes.append(str(getattr(row, "concept_id")))
