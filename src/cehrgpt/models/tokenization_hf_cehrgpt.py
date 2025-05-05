@@ -196,7 +196,7 @@ def agg_statistics(stats1, stats2):
         for (concept_id, concept_as_value), count in stats2[
             "categorical_stats_by_lab"
         ].items():
-            stats1["numeric_stats_by_lab"][(concept_id, concept_as_value)] += count
+            stats1["categorical_stats_by_lab"][(concept_id, concept_as_value)] += count
     if stats1.get("concept_code_stats"):
         for concept_id, weight in stats2["concept_code_stats"].items():
             stats1["concept_code_stats"][concept_id] += weight
