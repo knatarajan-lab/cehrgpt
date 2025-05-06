@@ -343,10 +343,8 @@ def compute_statistics(
     for concept_id, count in current["concept_code_stats"].items():
         concept_code_stats[concept_id] += count
 
-    delta = 1e-3
     code_weights = np.asarray(list(concept_code_stats.values()))
     # Clip the values so we don't get errors when applying np.log
-    code_weights = code_weights.clip(delta, 1 - delta)
     code_entropies = np.log(code_weights) * code_weights + (1 - code_weights) * np.log(
         1 - code_weights
     )
