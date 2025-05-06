@@ -102,6 +102,9 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "none",
             "--include_motor_time_to_event",
             "true",
+            "--apply_entropy_filter",
+            "--min_prevalence",
+            "0.3",
         ]
         train_main()
         # Teacher force the prompt to consist of [year][age][gender][race][VS] then inject the random vector before [VS]

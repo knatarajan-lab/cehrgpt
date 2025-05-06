@@ -27,6 +27,16 @@ from cehrgpt.models.tokenization_hf_cehrgpt import (
     CehrGptTokenizer,
 )
 
+CEHRGPT_COLUMNS = [
+    "concept_ids",
+    "concept_value_masks",
+    "number_as_values",
+    "concept_as_values",
+    "is_numeric_types",
+    "concept_values",
+    "units",
+]
+
 
 def convert_date_to_posix_time(index_date: datetime.date) -> float:
     return datetime.datetime.combine(
@@ -339,7 +349,29 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
             "is_numeric_types",
         ]
 
+    def filter_out_invalid_tokens(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        column_names = []
+        seq_length = len(record["concept_ids"])
+        for k, v in record.items():
+            if k not in CEHRGPT_COLUMNS:
+                continue
+            if isinstance(v, (list, np.ndarray)) and len(v) == seq_length:
+                column_names.append(k)
+        valid_concept_ids = self._concept_tokenizer.get_vocab().keys()
+        valid_indices = [
+            idx
+            for idx, concept_id in enumerate(record["concept_ids"])
+            if concept_id in valid_concept_ids
+        ]
+        for column in column_names:
+            record[column] = [
+                v for idx, v in enumerate(record[column]) if idx in valid_indices
+            ]
+        return record
+
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        # Remove the tokens from patient sequences that do not exist in the tokenizer
+        record = self.filter_out_invalid_tokens(record)
         # If any concept has a value associated with it, we normalize the value
         record["input_ids"] = self._concept_tokenizer.encode(record["concept_ids"])
         record["value_indicators"] = record["concept_value_masks"]
