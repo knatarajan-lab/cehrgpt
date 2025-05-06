@@ -205,3 +205,11 @@ class CehrGPTArguments:
         default=False,
         metadata={"help": "Whether or not to average tokens per sequence"},
     )
+    apply_entropy_filter: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={"help": "A flag to indicate whether we want to use entropy filter."},
+    )
+    min_prevalence: Optional[float] = dataclasses.field(
+        default=1 / 1000,
+        metadata={"help": "The min_prevalence to keep the concepts in the tokenizer"},
+    )

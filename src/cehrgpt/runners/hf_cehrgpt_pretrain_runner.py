@@ -124,6 +124,8 @@ def load_and_create_tokenizer(
                 if cehrgpt_args.include_motor_time_to_event
                 else None
             ),
+            apply_entropy_filter=cehrgpt_args.apply_entropy_filter,
+            min_prevalence=cehrgpt_args.min_prevalence,
         )
         LOG.info("Finished training the tokenizer ...")
         tokenizer.save_pretrained(tokenizer_abspath)
@@ -386,6 +388,8 @@ def main():
                         pretrained_concept_embedding_model=PretrainedEmbeddings(
                             cehrgpt_args.pretrained_embedding_path
                         ),
+                        apply_entropy_filter=cehrgpt_args.apply_entropy_filter,
+                        min_prevalence=cehrgpt_args.min_prevalence,
                     )
                     cehrgpt_tokenizer.save_pretrained(
                         os.path.expanduser(training_args.output_dir)
