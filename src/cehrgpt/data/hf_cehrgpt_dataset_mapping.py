@@ -332,9 +332,10 @@ class HFCehrGptTokenizationMapping(DatasetMapping):
             for idx, concept_id in enumerate(record["concept_ids"])
             if concept_id in valid_concept_ids
         ]
-        for column in column_names:
-            values = record[column]
-            record[column] = [values[idx] for idx in valid_indices]
+        if len(valid_indices) != len(record["concept_ids"]):
+            for column in column_names:
+                values = record[column]
+                record[column] = [values[idx] for idx in valid_indices]
         return record
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
