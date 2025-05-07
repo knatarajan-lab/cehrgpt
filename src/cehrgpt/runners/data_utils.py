@@ -11,7 +11,13 @@ from cehrbert.runners.runner_util import (
     get_meds_extension_path,
     load_parquet_as_dataset,
 )
-from datasets import DatasetDict, concatenate_datasets, load_from_disk
+from datasets import (
+    Dataset,
+    DatasetDict,
+    IterableDataset,
+    concatenate_datasets,
+    load_from_disk,
+)
 from transformers import TrainingArguments
 from transformers.utils import logging
 

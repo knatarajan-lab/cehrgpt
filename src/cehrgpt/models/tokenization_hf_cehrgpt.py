@@ -629,13 +629,16 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             OUT_OF_VOCABULARY_TOKEN,
             LINEAR_PROB_TOKEN,
         ]
-        return self.encode(
+        lab_token_ids = self.encode(
             [
                 concept_id
                 for concept_id in self._numeric_concept_ids
                 + self._categorical_concept_ids
                 if concept_id not in reserved_tokens
             ]
+        )
+        return list(
+            filter(lambda token_id: token_id != self._oov_token_id, lab_token_ids)
         )
 
     @property
@@ -1148,6 +1151,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         concept_code_entropies = cehrgpt_data_statistics["concept_code_entropies"]
 
         if apply_entropy_filter:
+            min_prevalence = max(1e-8, min_prevalence)
             min_entropy = (
                 np.log(1 - min_prevalence) * (1 - min_prevalence)
                 + np.log(min_prevalence) * min_prevalence
