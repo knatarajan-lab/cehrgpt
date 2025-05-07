@@ -364,9 +364,8 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
             if concept_id in valid_concept_ids
         ]
         for column in column_names:
-            record[column] = [
-                v for idx, v in enumerate(record[column]) if idx in valid_indices
-            ]
+            values = record[column]
+            record[column] = [values[idx] for idx in valid_indices]
         return record
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
