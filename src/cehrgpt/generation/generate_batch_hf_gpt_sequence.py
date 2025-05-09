@@ -159,7 +159,9 @@ def main(args):
     if args.end_on_pad_token_id:
         cehrgpt_model.generation_config.eos_token_id = cehrgpt_tokenizer.pad_token_id
         cehrgpt_model.generation_config.bos_token_id = cehrgpt_tokenizer.pad_token_id
+        cehrgpt_model.generation_config.pad_token_id = cehrgpt_tokenizer.end_token_id
     else:
+        cehrgpt_model.generation_config.pad_token_id = cehrgpt_tokenizer.pad_token_id
         cehrgpt_model.generation_config.eos_token_id = cehrgpt_tokenizer.end_token_id
         cehrgpt_model.generation_config.bos_token_id = cehrgpt_tokenizer.end_token_id
 
