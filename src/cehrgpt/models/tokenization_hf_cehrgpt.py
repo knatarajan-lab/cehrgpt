@@ -1144,7 +1144,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
 
         LOG.info("Calculating data statistics")
         cehrgpt_data_statistics = compute_statistics(dataset, data_args)
-        dataset_size = cehrgpt_data_statistics["total"]
+        cehrgpt_data_statistics["total"]
         numeric_lab_stats = cehrgpt_data_statistics["numeric_lab_stats"]
         categorical_lab_stats = cehrgpt_data_statistics["categorical_lab_stats"]
         concept_code_stats = cehrgpt_data_statistics["concept_code_stats"]
@@ -1162,11 +1162,10 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                 if v <= min_entropy or not is_clinical_event(k)
             ]
         else:
-            min_patients = int(min_prevalence * dataset_size)
             qualified_codes = [
                 k
                 for k, v in concept_code_stats.items()
-                if min_patients <= v or not is_clinical_event(k)
+                if min_prevalence <= v or not is_clinical_event(k)
             ]
 
         # Create the tokenizer now
