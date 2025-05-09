@@ -34,6 +34,7 @@ from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.runners.data_utils import get_torch_dtype
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.runners.sample_packing_trainer import SamplePackingTrainer
@@ -137,13 +138,12 @@ def load_and_create_tokenizer(
 def load_and_create_model(
     model_args: ModelArguments,
     cehrgpt_args: CehrGPTArguments,
-    training_args: TrainingArguments,
     tokenizer: CehrGptTokenizer,
 ) -> CEHRGPT2LMHeadModel:
     attn_implementation = (
         "flash_attention_2" if is_flash_attn_2_available() else "eager"
     )
-    torch_dtype = torch.bfloat16 if training_args.bf16 else torch.float32
+    torch_dtype = get_torch_dtype(model_args.torch_dtype)
     model_abspath = os.path.expanduser(model_args.model_name_or_path)
     if cehrgpt_args.continue_pretrain:
         try:
@@ -463,9 +463,7 @@ def main():
     else:
         processed_dataset = processed_dataset.filter(filter_func, **filter_args)
 
-    model = load_and_create_model(
-        model_args, cehrgpt_args, training_args, cehrgpt_tokenizer
-    )
+    model = load_and_create_model(model_args, cehrgpt_args, cehrgpt_tokenizer)
 
     # Try to update motor tte vocab size if the new configuration is different from the existing one
     if cehrgpt_args.include_motor_time_to_event:
