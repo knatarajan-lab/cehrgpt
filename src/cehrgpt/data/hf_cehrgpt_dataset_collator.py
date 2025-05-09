@@ -631,7 +631,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 current_ages = []
                 current_labels = []
 
-            current_input_ids.extend(list(input_ids) + [self.tokenizer.pad_token_id])
+            current_input_ids.extend(list(input_ids) + [self.tokenizer.end_token_id])
             current_attention_mask.extend(np.ones_like(input_ids).tolist() + [0])
             current_position_ids.extend(list(range(len(input_ids) + 1)))
             if self.include_values:
