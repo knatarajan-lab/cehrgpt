@@ -105,7 +105,7 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
             sample_length = min(self.lengths[idx], self.max_position_embeddings)
             # If adding this sample would exceed max_tokens_per_batch, yield the current batch
             if (
-                current_batch_tokens + sample_length + 1 > self.max_tokens_per_batch
+                current_batch_tokens + sample_length + 2 > self.max_tokens_per_batch
                 and batch
             ):
                 yield batch
@@ -114,8 +114,8 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
 
             # Add the sample to the current batch
             batch.append(idx)
-            # plus extract one for the PAD token to separate samples
-            current_batch_tokens += sample_length + 1
+            # plus extract one for the [END] and [PAD] tokens to separate samples
+            current_batch_tokens += sample_length + 2
 
         # Yield the last batch if it's not empty and we're not dropping it
         if batch and not self.drop_last:
@@ -133,7 +133,7 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
 
         # We need to truncate the lengths due to the context window limit imposed by the model
         truncated_lengths = [
-            min(self.max_position_embeddings, length) for length in self.lengths
+            min(self.max_position_embeddings, length + 2) for length in self.lengths
         ]
 
         # Calculate average sequence length

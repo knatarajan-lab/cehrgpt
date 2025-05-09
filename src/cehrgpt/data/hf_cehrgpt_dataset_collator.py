@@ -565,7 +565,6 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         super(SamplePackingCehrGptDataCollator, self).__init__(*args, **kwargs)
 
     def __call__(self, examples):
-        flattened_examples = []
         current_input_ids = []
         current_attention_mask = []
         current_position_ids = []
@@ -583,63 +582,37 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         for idx, example in enumerate(examples):
 
             # If the sample length exceeds the model's capacity, truncate this example
+            add_end_token = len(example["input_ids"]) <= self.max_position_embeddings
             if len(example["input_ids"]) > self.max_position_embeddings:
                 example = self.generate_start_end_index(
                     example, self.max_position_embeddings
                 )
 
             input_ids = example["input_ids"]
-            # We add the flattened example to the list either when the example exceeds the total max tokens
-            if (
-                len(current_input_ids) + len(input_ids) + 1 > self.max_tokens_per_batch
-                and current_input_ids
-            ):
-                packed_example = {
-                    "input_ids": current_input_ids,
-                    "attention_mask": current_attention_mask,
-                    "position_ids": current_position_ids,
-                }
-                if self.include_values:
-                    packed_example.update(
-                        {"value_indicators": current_value_indicators}
-                    )
-                    packed_example.update({"values": current_values})
 
-                if current_labels:
-                    packed_example.update(
-                        {
-                            "person_id": current_person_ids,
-                            "index_date": current_index_dates,
-                            "age_at_index": current_ages,
-                            "classifier_label": current_labels,
-                        }
-                    )
-
-                flattened_examples.append(packed_example)
-
-                # reset the inputs
-                current_input_ids = []
-                current_attention_mask = []
-                current_position_ids = []
-                current_value_indicators = []
-                current_values = []
-
-                # Reset demographics
-                current_person_ids = []
-                current_index_dates = []
-                # Reset classification binary inputs
-                current_ages = []
-                current_labels = []
-
-            current_input_ids.extend(list(input_ids) + [self.tokenizer.end_token_id])
-            current_attention_mask.extend(np.ones_like(input_ids).tolist() + [0])
-            current_position_ids.extend(list(range(len(input_ids) + 1)))
+            # We add [END] [PAD], we want to attend to [END], adding [END] is important for sequence generation.
+            # If the sequence length of the sequence is less than the context window, we add both [END][PAD], otherwise
+            # we only add [PAD] token to the end of the sequence because it's not finished
+            current_input_ids.extend(
+                list(input_ids)
+                + (
+                    [self.tokenizer.end_token_id, self.tokenizer.pad_token_id]
+                    if add_end_token
+                    else [self.tokenizer.pad_token_id]
+                )
+            )
+            current_attention_mask.extend(
+                np.ones_like(input_ids).tolist() + ([1, 0] if add_end_token else [0])
+            )
+            num_tokens_to_pad = 1 + int(add_end_token)
+            current_position_ids.extend(list(range(len(input_ids) + num_tokens_to_pad)))
             if self.include_values:
                 current_value_indicators.extend(
-                    list(example["value_indicators"]) + [False]
+                    list(example["value_indicators"]) + [False] * num_tokens_to_pad
                 )
                 current_values.extend(
-                    list(example["values"]) + [self.tokenizer.pad_value_token_id]
+                    list(example["values"])
+                    + [self.tokenizer.pad_value_token_id] * num_tokens_to_pad
                 )
 
             if "person_id" in example:
@@ -654,27 +627,26 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
             if "classifier_label" in example:
                 current_labels.append(example["classifier_label"])
 
-        # The final batch needs to be added
-        if current_input_ids:
-            packed_example = {
-                "input_ids": current_input_ids,
-                "attention_mask": current_attention_mask,
-                "position_ids": current_position_ids,
-            }
-            if self.include_values:
-                packed_example.update({"value_indicators": current_value_indicators})
-                packed_example.update({"values": current_values})
+        assert (
+            len(current_input_ids) <= self.max_tokens_per_batch
+        ), f"the total number of tokens in the packed sequence should be less than { self.max_tokens_per_batch}"
+        packed_example = {
+            "input_ids": current_input_ids,
+            "attention_mask": current_attention_mask,
+            "position_ids": current_position_ids,
+        }
+        if self.include_values:
+            packed_example.update({"value_indicators": current_value_indicators})
+            packed_example.update({"values": current_values})
 
-            if current_labels:
-                packed_example.update(
-                    {
-                        "person_id": current_person_ids,
-                        "index_date": current_index_dates,
-                        "age_at_index": current_ages,
-                        "classifier_label": current_labels,
-                    }
-                )
+        if current_labels:
+            packed_example.update(
+                {
+                    "person_id": current_person_ids,
+                    "index_date": current_index_dates,
+                    "age_at_index": current_ages,
+                    "classifier_label": current_labels,
+                }
+            )
 
-            flattened_examples.append(packed_example)
-
-        return super().__call__(flattened_examples)
+        return super().__call__([packed_example])

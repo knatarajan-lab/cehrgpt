@@ -154,14 +154,10 @@ def main(args):
         .eval()
         .to(device)
     )
-    if args.end_on_pad_token_id:
-        cehrgpt_model.generation_config.eos_token_id = cehrgpt_tokenizer.pad_token_id
-        cehrgpt_model.generation_config.bos_token_id = cehrgpt_tokenizer.pad_token_id
-        cehrgpt_model.generation_config.pad_token_id = cehrgpt_tokenizer.end_token_id
-    else:
-        cehrgpt_model.generation_config.pad_token_id = cehrgpt_tokenizer.pad_token_id
-        cehrgpt_model.generation_config.eos_token_id = cehrgpt_tokenizer.end_token_id
-        cehrgpt_model.generation_config.bos_token_id = cehrgpt_tokenizer.end_token_id
+
+    cehrgpt_model.generation_config.pad_token_id = cehrgpt_tokenizer.pad_token_id
+    cehrgpt_model.generation_config.eos_token_id = cehrgpt_tokenizer.end_token_id
+    cehrgpt_model.generation_config.bos_token_id = cehrgpt_tokenizer.end_token_id
 
     folder_name = get_cehrgpt_output_folder(args, cehrgpt_tokenizer)
     output_folder_name = os.path.join(
@@ -331,11 +327,6 @@ def create_arg_parser():
     base_arg_parser.add_argument(
         "--meds_format",
         dest="meds_format",
-        action="store_true",
-    )
-    base_arg_parser.add_argument(
-        "--end_on_pad_token_id",
-        dest="end_on_pad_token_id",
         action="store_true",
     )
     return base_arg_parser
