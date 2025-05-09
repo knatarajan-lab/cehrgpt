@@ -335,11 +335,6 @@ def create_arg_parser():
         dest="meds_format",
         action="store_true",
     )
-    base_arg_parser.add_argument(
-        "--end_on_pad_token_id",
-        dest="end_on_pad_token_id",
-        action="store_true",
-    )
     return base_arg_parser
 
 
