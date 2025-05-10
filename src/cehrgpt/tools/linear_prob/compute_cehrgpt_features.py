@@ -273,7 +273,7 @@ def main():
             if cehrgpt_args.sample_packing
             else model_args.max_position_embeddings
         ),
-        include_values=model_args.include_values,
+        include_values=cehrgpt_model.config.include_values,
         pretraining=False,
         include_ttv_prediction=False,
         use_sub_time_tokenization=False,
