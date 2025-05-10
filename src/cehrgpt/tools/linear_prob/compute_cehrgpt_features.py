@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime
 from functools import partial
 from pathlib import Path
+from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -34,6 +35,12 @@ from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
 
 LOG = logging.get_logger("transformers")
+
+
+def get_torch_dtype(torch_dtype: Optional[str] = None) -> Union[torch.dtype, str]:
+    if torch_dtype and hasattr(torch, torch_dtype):
+        return getattr(torch, torch_dtype)
+    return torch.float32
 
 
 def extract_averaged_embeddings_from_packed_sequence(
@@ -93,15 +100,14 @@ def main():
     cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
         model_args.tokenizer_name_or_path
     )
+    torch_dtype = get_torch_dtype(model_args.torch_dtype)
     cehrgpt_model = (
         CEHRGPT2Model.from_pretrained(
             model_args.model_name_or_path,
             attn_implementation=(
                 "flash_attention_2" if is_flash_attn_2_available() else "eager"
             ),
-            torch_dtype=(
-                torch.bfloat16 if is_flash_attn_2_available() else torch.float32
-            ),
+            torch_dtype=torch_dtype,
         )
         .eval()
         .to(device)
