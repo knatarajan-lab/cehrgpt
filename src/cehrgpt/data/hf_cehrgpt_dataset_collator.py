@@ -582,14 +582,16 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         for idx, example in enumerate(examples):
 
             # If the sample length exceeds the model's capacity, truncate this example
-            add_end_token = len(example["input_ids"]) <= self.max_position_embeddings
+            add_end_token = (
+                len(example["input_ids"]) <= self.max_position_embeddings
+                and self.pretraining
+            )
             if len(example["input_ids"]) > self.max_position_embeddings:
                 example = self.generate_start_end_index(
                     example, self.max_position_embeddings
                 )
 
             input_ids = example["input_ids"]
-
             # We add [END] [PAD], we want to attend to [END], adding [END] is important for sequence generation.
             # If the sequence length of the sequence is less than the context window, we add both [END][PAD], otherwise
             # we only add [PAD] token to the end of the sequence because it's not finished
