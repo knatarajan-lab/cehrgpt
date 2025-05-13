@@ -481,6 +481,7 @@ def main():
             SamplePackingCehrGptDataCollator,
             cehrgpt_args.max_tokens_per_batch,
             model_args.max_position_embeddings,
+            add_end_token_in_sample_packing=cehrgpt_args.add_end_token_in_sample_packing,
         )
     else:
         trainer_class = Trainer

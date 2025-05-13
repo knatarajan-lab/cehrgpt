@@ -171,6 +171,12 @@ class CehrGPTArguments:
     max_tokens_per_batch: int = dataclasses.field(
         default=16384, metadata={"help": "Maximum number of tokens in each batch"}
     )
+    add_end_token_in_sample_packing: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to add end token in sample packing"
+        },
+    )
     average_over_sequence: bool = dataclasses.field(
         default=False,
         metadata={"help": "Whether or not to average tokens per sequence"},

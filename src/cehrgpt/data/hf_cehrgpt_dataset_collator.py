@@ -562,6 +562,9 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         self.max_tokens_per_batch = max_tokens
         self.max_position_embeddings = max_position_embeddings
         self.sample_packing = True
+        self.add_end_token_in_sample_packing = kwargs.pop(
+            "add_end_token_in_sample_packing", False
+        )
         super(SamplePackingCehrGptDataCollator, self).__init__(*args, **kwargs)
 
     def __call__(self, examples):
@@ -584,8 +587,9 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
             # If the sample length exceeds the model's capacity, truncate this example
             add_end_token = (
                 len(example["input_ids"]) <= self.max_position_embeddings
-                and self.pretraining
+                and self.add_end_token_in_sample_packing
             )
+
             if len(example["input_ids"]) > self.max_position_embeddings:
                 example = self.generate_start_end_index(
                     example, self.max_position_embeddings
