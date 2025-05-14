@@ -1,5 +1,4 @@
 import glob
-import json
 import os
 import shutil
 import uuid
@@ -15,7 +14,6 @@ import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
 from cehrbert.runners.runner_util import generate_prepared_ds_path
 from datasets import concatenate_datasets, load_from_disk
-from torch.profiler import ProfilerActivity, profile
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers.trainer_utils import is_main_process
@@ -471,14 +469,6 @@ def main():
                 features_pd.to_parquet(
                     feature_output_folder / f"{uuid.uuid4()}.parquet"
                 )
-
-    # Save the training metrics to the output file
-    with open(training_metrics_file, "w") as output_file:
-        training_metrics = {
-            "duration_in_seconds": (datetime.now() - start_time).total_seconds(),
-            "total_flops": total_gflops,
-        }
-        json.dump(training_metrics, output_file)
 
 
 if __name__ == "__main__":
