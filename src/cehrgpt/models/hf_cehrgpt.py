@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as f
 from torch import nn
-from torch.distributions import Gamma, Weibull
+from torch.distributions import Gamma
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
 from transformers import PreTrainedModel
@@ -1498,7 +1498,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     time_token_loss.view(-1, 3),
                     0,
                 )
-                time_token_loss = time_token_loss.sum() / total_num_tokens
+                time_token_loss = (
+                    time_token_loss.sum() / shifted_time_token_indicators.sum()
+                )
                 loss += time_token_loss * self.config.time_token_loss_weight
 
             if time_to_visits is not None:
@@ -1521,7 +1523,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 # Compute log-probs and apply the time_to_visit_indicator
                 log_probs = dist.log_prob(torch.clamp(shift_time_to_visits, min=1e-3))
                 log_probs = torch.where(time_to_visit_indicator, log_probs, 0)
-                time_to_visit_loss = -log_probs.sum() / total_num_tokens
+                time_to_visit_loss = -log_probs.sum() / time_to_visit_indicator.sum()
                 # Compute the loss
                 loss += time_to_visit_loss * self.config.time_to_visit_loss_weight
 
@@ -1538,7 +1540,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 token_value_loss = torch.where(
                     shift_value_indicators.view(-1), token_value_loss, 0
                 )
-                token_value_loss = token_value_loss.sum() / total_num_tokens
+                token_value_loss = token_value_loss.sum() / shift_value_indicators.sum()
                 if (
                     self.cehrgpt.config.lab_token_penalty
                     and self.cehrgpt.config.lab_token_exists
