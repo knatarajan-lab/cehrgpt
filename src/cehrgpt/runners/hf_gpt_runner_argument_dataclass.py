@@ -128,6 +128,10 @@ class CehrGPTArguments:
         default=1.0,
         metadata={"help": "lab_token_loss_weight penalty co-efficient"},
     )
+    value_prediction_loss_weight: Optional[float] = dataclasses.field(
+        default=1.0,
+        metadata={"help": "The weight of the value prediction loss"},
+    )
     entropy_penalty: Optional[bool] = dataclasses.field(
         default=False,
         metadata={"help": "A flag to indicate whether we want to use entropy penalty."},
@@ -166,4 +170,14 @@ class CehrGPTArguments:
     )
     max_tokens_per_batch: int = dataclasses.field(
         default=16384, metadata={"help": "Maximum number of tokens in each batch"}
+    )
+    add_end_token_in_sample_packing: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to add end token in sample packing"
+        },
+    )
+    average_over_sequence: bool = dataclasses.field(
+        default=False,
+        metadata={"help": "Whether or not to average tokens per sequence"},
     )

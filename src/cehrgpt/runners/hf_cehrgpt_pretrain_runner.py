@@ -161,6 +161,7 @@ def load_and_create_model(
             next_token_prediction_loss_weight=cehrgpt_args.next_token_prediction_loss_weight,
             lab_token_penalty=cehrgpt_args.lab_token_penalty,
             lab_token_loss_weight=cehrgpt_args.lab_token_loss_weight,
+            value_prediction_loss_weight=cehrgpt_args.value_prediction_loss_weight,
             entropy_penalty=cehrgpt_args.entropy_penalty,
             entropy_penalty_alpha=cehrgpt_args.entropy_penalty_alpha,
             n_pretrained_embeddings_layers=cehrgpt_args.n_pretrained_embeddings_layers,
@@ -480,6 +481,7 @@ def main():
             SamplePackingCehrGptDataCollator,
             cehrgpt_args.max_tokens_per_batch,
             model_args.max_position_embeddings,
+            add_end_token_in_sample_packing=cehrgpt_args.add_end_token_in_sample_packing,
         )
     else:
         trainer_class = Trainer

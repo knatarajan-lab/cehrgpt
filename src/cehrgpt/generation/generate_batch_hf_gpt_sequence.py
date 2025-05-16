@@ -93,9 +93,9 @@ def generate_single_batch(
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
-            bos_token_id=tokenizer.end_token_id,
-            eos_token_id=tokenizer.end_token_id,
-            pad_token_id=tokenizer.pad_token_id,
+            bos_token_id=model.generation_config.bos_token_id,
+            eos_token_id=model.generation_config.eos_token_id,
+            pad_token_id=model.generation_config.pad_token_id,
             do_sample=True,
             use_cache=True,
             return_dict_in_generate=True,
@@ -150,15 +150,11 @@ def main(args):
             attn_implementation=(
                 "flash_attention_2" if is_flash_attn_2_available() else "eager"
             ),
-            torch_dtype=(
-                torch.bfloat16
-                if is_flash_attn_2_available() and args.use_bfloat16
-                else torch.float32
-            ),
         )
         .eval()
         .to(device)
     )
+
     cehrgpt_model.generation_config.pad_token_id = cehrgpt_tokenizer.pad_token_id
     cehrgpt_model.generation_config.eos_token_id = cehrgpt_tokenizer.end_token_id
     cehrgpt_model.generation_config.bos_token_id = cehrgpt_tokenizer.end_token_id

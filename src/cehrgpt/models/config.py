@@ -140,6 +140,7 @@ class CEHRGPTConfig(PretrainedConfig):
         demographics_size=4,
         lab_token_penalty=False,
         lab_token_loss_weight=0.9,
+        value_prediction_loss_weight=1.0,
         entropy_penalty=False,
         entropy_penalty_alpha=0.01,
         sample_packing_max_positions=None,
@@ -203,6 +204,7 @@ class CEHRGPTConfig(PretrainedConfig):
         self.lab_token_loss_weight = lab_token_loss_weight
         self.entropy_penalty = entropy_penalty
         self.entropy_penalty_alpha = entropy_penalty_alpha
+        self.value_prediction_loss_weight = value_prediction_loss_weight
 
         kwargs["tie_word_embeddings"] = not use_pretrained_embeddings
 
