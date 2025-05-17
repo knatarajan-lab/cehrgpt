@@ -28,11 +28,11 @@ classifiers = [
 ]
 
 dependencies = [
-    "cehrbert==1.4.1",
+    "cehrbert==1.4.4",
     "cehrbert_data==0.0.7",
     "openai==1.54.3",
     "optuna==4.0.0",
-    "transformers==4.44.0",
+    "transformers==4.44.1",
     "tokenizers==0.19.0",
     "peft==0.10.0",
     "lightgbm",

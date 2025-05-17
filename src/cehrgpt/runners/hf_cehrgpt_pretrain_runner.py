@@ -147,6 +147,8 @@ def load_and_create_model(
         else:
             pretrained_embedding_dim = model_args.hidden_size
 
+        model_args_cehrgpt = model_args.as_dict()
+        model_args_cehrgpt.pop("attn_implementation")
         model_config = CEHRGPTConfig(
             vocab_size=tokenizer.vocab_size,
             value_vocab_size=tokenizer.value_vocab_size,
@@ -172,7 +174,7 @@ def load_and_create_model(
                 if cehrgpt_args.sample_packing
                 else model_args.max_position_embeddings
             ),
-            **model_args.as_dict(),
+            **model_args_cehrgpt,
         )
 
     model = CEHRGPT2LMHeadModel(model_config)
