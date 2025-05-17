@@ -212,6 +212,11 @@ def load_and_create_model(
                 if cehrgpt_args.sample_packing
                 else model_args.max_position_embeddings
             ),
+            include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
+            motor_tte_vocab_size=tokenizer.motor_tte_vocab_size,
+            motor_time_to_event_weight=cehrgpt_args.motor_time_to_event_weight,
+            motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
+            ve_token_id=tokenizer.ve_token_id,
             **model_args_cehrgpt,
         )
 
