@@ -19,6 +19,7 @@ from cehrbert_data.const.common import NA
 from cehrbert_data.decorators.patient_event_decorator_base import get_att_function
 from datasets.formatting.formatting import LazyBatch
 from dateutil.relativedelta import relativedelta
+from pandas import Series
 
 from cehrgpt.models.tokenization_hf_cehrgpt import (
     NONE_BIN,
@@ -33,7 +34,36 @@ def convert_date_to_posix_time(index_date: datetime.date) -> float:
     ).timestamp()
 
 
-class MedToCehrGPTDatasetMapping(DatasetMapping):
+class DatasetMappingDecorator(DatasetMapping):
+
+    def batch_transform(
+        self, records: Union[LazyBatch, Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Drop index_date if it contains None.
+
+        :param records:
+        :return:
+        """
+        if isinstance(records, LazyBatch):
+            table = records.pa_table
+
+            if "index_date" in table.column_names:
+                index_col = table.column("index_date")
+                if index_col.null_count > 0:
+                    table = table.drop(["index_date"])
+            records = LazyBatch(pa_table=table, formatter=records.formatter)
+        else:
+            if "index_date" in records:
+                if pd.isna(records["index_date"][0]):
+                    del records["index_date"]
+        return super().batch_transform(records=records)
+
+    def transform(self, record: Dict[str, Any]) -> Union[Dict[str, Any], Series]:
+        raise NotImplemented("Must be implemented")
+
+
+class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
     def __init__(
         self,
         data_args: DataTrainingArguments,
@@ -58,29 +88,6 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
             contain the standard OMOP concept id for discharge facilities (e.g 8536)
         - in case of inpatient visits, datetime_value of the last measurement stores visit_end_datetime
     """
-
-    def batch_transform(
-        self, records: Union[LazyBatch, Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """
-        Drop index_date if it contains None.
-
-        :param records:
-        :return:
-        """
-        if isinstance(records, LazyBatch):
-            table = records.pa_table
-
-            if "index_date" in table.column_names:
-                index_col = table.column("index_date")
-                if index_col.null_count > 0:
-                    table = table.drop(["index_date"])
-            records = LazyBatch(pa_table=table, formatter=records.formatter)
-        else:
-            if "index_date" in records:
-                if pd.isna(records["index_date"][0]):
-                    del records["index_date"]
-        return super().batch_transform(records=records)
 
     def remove_columns(self):
         return ["patient_id", "visits", "birth_datetime"]
@@ -318,7 +325,7 @@ class MedToCehrGPTDatasetMapping(DatasetMapping):
         return cehrgpt_record
 
 
-class HFCehrGptTokenizationMapping(DatasetMapping):
+class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
     def __init__(
         self,
         concept_tokenizer: CehrGptTokenizer,
