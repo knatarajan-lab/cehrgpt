@@ -156,14 +156,8 @@ def main(args):
     )
 
     cehrgpt_model.generation_config.pad_token_id = cehrgpt_tokenizer.pad_token_id
-    if args.end_on_pad_token_id:
-        cehrgpt_model.generation_config.eos_token_id = cehrgpt_tokenizer.pad_token_id
-        cehrgpt_model.generation_config.bos_token_id = cehrgpt_tokenizer.pad_token_id
-        cehrgpt_model.generation_config.pad_token_id = cehrgpt_tokenizer.end_token_id
-    else:
-        cehrgpt_model.generation_config.pad_token_id = cehrgpt_tokenizer.pad_token_id
-        cehrgpt_model.generation_config.eos_token_id = cehrgpt_tokenizer.end_token_id
-        cehrgpt_model.generation_config.bos_token_id = cehrgpt_tokenizer.end_token_id
+    cehrgpt_model.generation_config.eos_token_id = cehrgpt_tokenizer.end_token_id
+    cehrgpt_model.generation_config.bos_token_id = cehrgpt_tokenizer.end_token_id
 
     folder_name = get_cehrgpt_output_folder(args, cehrgpt_tokenizer)
     output_folder_name = os.path.join(

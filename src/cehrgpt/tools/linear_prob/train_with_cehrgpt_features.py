@@ -63,8 +63,6 @@ def main(args):
         replace=False,
     )
 
-    feature_train = feature_train.sort_values(["subject_id", "prediction_time"])
-
     if feature_processor_path.exists():
         with open(feature_processor_path, "rb") as f:
             feature_processor = pickle.load(f)
