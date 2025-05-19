@@ -1159,13 +1159,15 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             qualified_codes = [
                 k
                 for k, v in concept_code_entropies.items()
-                if v <= min_entropy or not is_clinical_event(k)
+                if v <= min_entropy
+                or not is_clinical_event(k, data_args.is_data_in_meds)
             ]
         else:
             qualified_codes = [
                 k
                 for k, v in concept_code_stats.items()
-                if min_prevalence <= v or not is_clinical_event(k)
+                if min_prevalence <= v
+                or not is_clinical_event(k, data_args.is_data_in_meds)
             ]
 
         # Create the tokenizer now

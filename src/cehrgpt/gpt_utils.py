@@ -11,6 +11,7 @@ from cehrgpt.models.special_tokens import (
 )
 
 # Regular expression pattern to match inpatient attendance tokens
+MEDS_CODE_PATTERN = re.compile(r".*/.*")
 INPATIENT_ATT_PATTERN = re.compile(r"(?:VS-|i-)D(\d+)(?:-VE)?")
 DEMOGRAPHIC_PROMPT_SIZE = 4
 
@@ -194,8 +195,12 @@ def get_cehrgpt_output_folder(args, cehrgpt_tokenizer) -> str:
     return folder_name
 
 
-def is_clinical_event(token: str) -> bool:
-    return token.isnumeric()
+def is_clinical_event(token: str, meds: bool = False) -> bool:
+    if token.isnumeric():
+        return True
+    if meds:
+        return bool(MEDS_CODE_PATTERN.match(token))
+    return False
 
 
 def is_visit_start(token: str):
