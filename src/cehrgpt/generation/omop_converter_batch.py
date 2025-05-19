@@ -60,6 +60,24 @@ OOV_CONCEPT_MAP = {
 }
 
 
+def extract_gender_concept_id(gender_token: str) -> int:
+    if gender_token.startswith("Gender/"):
+        return int(gender_token[len("Gender/") :])
+    elif gender_token.isnumeric():
+        return int(gender_token)
+    else:
+        return 0
+
+
+def extract_race_concept_id(race_token: str) -> int:
+    if race_token.startswith("Race/"):
+        return int(race_token[len("Race/") :])
+    elif race_token.isnumeric():
+        return int(race_token)
+    else:
+        return 0
+
+
 def create_folder_if_not_exists(output_folder, table_name):
     if not os.path.isdir(Path(output_folder) / table_name):
         os.mkdir(Path(output_folder) / table_name)
@@ -288,7 +306,13 @@ def gpt_to_omop_converter_batch(
         if int(birth_year) < 1900 or int(birth_year) > datetime.date.today().year:
             continue
 
-        p = Person(person_id, start_gender, birth_year, start_race)
+        p = Person(
+            person_id=person_id,
+            gender_concept_id=extract_gender_concept_id(start_gender),
+            year_of_birth=birth_year,
+            race_concept_id=extract_race_concept_id(start_race),
+        )
+
         append_to_dict(omop_export_dict, p, person_id)
         id_mappings_dict["person"][person_id] = person_id
         pt_seq_dict[person_id] = " ".join(concept_ids)
@@ -316,7 +340,12 @@ def gpt_to_omop_converter_batch(
                     id_mappings_dict["death"][person_id] = person_id
                 else:
                     try:
-                        visit_concept_id = int(clinical_events[event_idx + 1])
+                        if clinical_events[event_idx + 1].startswith("Visit/"):
+                            visit_concept_id = int(
+                                clinical_events[event_idx + 1][len("Visit/") :]
+                            )
+                        else:
+                            visit_concept_id = int(clinical_events[event_idx + 1])
                         inpatient_visit_indicator = visit_concept_id in [
                             9201,
                             262,
@@ -349,6 +378,7 @@ def gpt_to_omop_converter_batch(
                         visit_occurrence_id
                     ] = person_id
                     visit_occurrence_id += 1
+
             elif event in ATT_TIME_TOKENS:
                 if event[0] == "D":
                     att_date_delta = int(event[1:])
