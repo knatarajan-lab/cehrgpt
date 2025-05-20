@@ -244,6 +244,7 @@ def main():
             SamplePackingCehrGptDataCollator,
             cehrgpt_args.max_tokens_per_batch,
             cehrgpt_model.config.max_position_embeddings,
+            add_end_token_in_sample_packing=cehrgpt_args.add_end_token_in_sample_packing,
         )
         train_batch_sampler = SamplePackingBatchSampler(
             lengths=train_set["num_of_concepts"],
