@@ -450,6 +450,10 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         return self._padding_token_id
 
     @property
+    def oov_token_id(self):
+        return self._oov_token_id
+
+    @property
     def pad_token(self):
         return PAD_TOKEN
 

@@ -38,10 +38,10 @@ class CehrGptDataCollator:
         # We used VS for the historical data, currently, we use the new [VS] for the newer data
         # so we need to check both cases.
         self.vs_token_id = tokenizer._convert_token_to_id("VS")
-        if self.vs_token_id == tokenizer._oov_token_id:
+        if self.vs_token_id == tokenizer.oov_token_id:
             self.vs_token_id = tokenizer._convert_token_to_id("[VS]")
         self.ve_token_id = tokenizer._convert_token_to_id("VE")
-        if self.ve_token_id == tokenizer._oov_token_id:
+        if self.ve_token_id == tokenizer.oov_token_id:
             self.ve_token_id = tokenizer._convert_token_to_id("[VE]")
 
         self.shuffle_records = shuffle_records
@@ -348,7 +348,7 @@ class CehrGptDataCollator:
         linear_token_id = (
             self.tokenizer.linear_token_id
             if self.tokenizer.linear_token_id
-            else self.tokenizer._oov_token_id
+            else self.tokenizer.oov_token_id
         )
         eos_token = (
             linear_token_id
@@ -619,7 +619,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 linear_prob_token_id = (
                     self.tokenizer.linear_token_id
                     if self.tokenizer.linear_token_id is not None
-                    else self.tokenizer._oov_token_id
+                    else self.tokenizer.oov_token_id
                 )
                 additional_tokens.append(linear_prob_token_id)
             additional_tokens.append(self.tokenizer.pad_token_id)
