@@ -4,6 +4,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
+from trl.commands.scripts.ppo_multi_adapter import tokenizer
 
 from cehrgpt.gpt_utils import (
     DEMOGRAPHIC_PROMPT_SIZE,
@@ -343,8 +344,14 @@ class CehrGptDataCollator:
                 [self._convert_to_tensor(self._convert_time_to_event(concept_ids))]
             )
 
-        eos_token = (
+        # If linear token exists, we will use it, otherwise we default to the OOV token
+        linear_token_id = (
             self.tokenizer.linear_token_id
+            if self.tokenizer.linear_token_id
+            else self.tokenizer._oov_token_id
+        )
+        eos_token = (
+            linear_token_id
             if self.add_linear_prob_token
             else self.tokenizer.end_token_id
         )
