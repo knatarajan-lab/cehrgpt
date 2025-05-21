@@ -661,32 +661,33 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
                 hasattr(self, "hf_quantizer") and self.hf_quantizer is not None
             )
             wpe = self.get_position_embeddings()
-            max_position, embed_dim = wpe.weight.shape
-            if new_num_position_embeddings > max_position:
-                new_embeddings = nn.Embedding(
-                    new_num_position_embeddings,
-                    embed_dim,
-                    device=wpe.weight.device,
-                    dtype=wpe.weight.dtype,
-                )
+            if wpe is not None:
+                max_position, embed_dim = wpe.weight.shape
+                if new_num_position_embeddings > max_position:
+                    new_embeddings = nn.Embedding(
+                        new_num_position_embeddings,
+                        embed_dim,
+                        device=wpe.weight.device,
+                        dtype=wpe.weight.dtype,
+                    )
 
-                # initialize all new embeddings (in particular added tokens)
-                self._init_weights(new_embeddings)
-                if is_deepspeed_zero3_enabled() and not is_quantized:
-                    import deepspeed
+                    # initialize all new embeddings (in particular added tokens)
+                    self._init_weights(new_embeddings)
+                    if is_deepspeed_zero3_enabled() and not is_quantized:
+                        import deepspeed
 
-                    params = [wpe.weight, new_embeddings.weight]
-                    with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
+                        params = [wpe.weight, new_embeddings.weight]
+                        with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
+                            new_embeddings.weight.data[:max_position, :] = (
+                                wpe.weight.data[:max_position, :]
+                            )
+                    else:
                         new_embeddings.weight.data[:max_position, :] = wpe.weight.data[
                             :max_position, :
                         ]
-                else:
-                    new_embeddings.weight.data[:max_position, :] = wpe.weight.data[
-                        :max_position, :
-                    ]
-                self.set_position_embeddings(new_embeddings)
-                self.config.max_position_embeddings = new_num_position_embeddings
-                self.update_attn_bias(new_num_position_embeddings)
+                    self.set_position_embeddings(new_embeddings)
+                    self.config.max_position_embeddings = new_num_position_embeddings
+                    self.update_attn_bias(new_num_position_embeddings)
 
 
 class CEHRGPT2Model(CEHRGPTPreTrainedModel):
