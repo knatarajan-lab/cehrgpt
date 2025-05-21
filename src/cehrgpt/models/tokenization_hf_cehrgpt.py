@@ -36,6 +36,7 @@ from cehrgpt.gpt_utils import (
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.special_tokens import (
     END_TOKEN,
+    LINEAR_PROB_TOKEN,
     OUT_OF_VOCABULARY_TOKEN,
     PAD_TOKEN,
     START_TOKEN,
@@ -365,6 +366,12 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         self._padding_token_id = self._tokenizer.token_to_id(PAD_TOKEN)
         self._start_token_id = self._tokenizer.token_to_id(START_TOKEN)
         self._end_token_id = self._tokenizer.token_to_id(END_TOKEN)
+
+        # Backward compatible with the old tokenizer
+        self._linear_token_id = None
+        if LINEAR_PROB_TOKEN in self._tokenizer.get_vocab():
+            self._linear_token_id = self._tokenizer.token_to_id(LINEAR_PROB_TOKEN)
+
         self._numeric_concept_ids = (
             self._numeric_event_statistics.get_numeric_concept_ids()
         )
@@ -447,6 +454,16 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         return PAD_TOKEN
 
     @property
+    def linear_token_id(self) -> Optional[int]:
+        return self._linear_token_id
+
+    @property
+    def linear_token(self) -> Optional[str]:
+        if LINEAR_PROB_TOKEN in self._tokenizer.get_vocab():
+            return LINEAR_PROB_TOKEN
+        return None
+
+    @property
     def numeric_concept_ids(self):
         return self._numeric_concept_ids
 
@@ -456,7 +473,13 @@ class CehrGptTokenizer(PreTrainedTokenizer):
 
     @property
     def lab_token_ids(self):
-        reserved_tokens = [START_TOKEN, PAD_TOKEN, END_TOKEN, OUT_OF_VOCABULARY_TOKEN]
+        reserved_tokens = [
+            START_TOKEN,
+            PAD_TOKEN,
+            END_TOKEN,
+            OUT_OF_VOCABULARY_TOKEN,
+            LINEAR_PROB_TOKEN,
+        ]
         return self.encode(
             [
                 concept_id
@@ -510,6 +533,18 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         return self._value_tokenizer.decode(
             concept_value_token_ids, skip_special_tokens=skip_special_tokens
         ).split(" ")
+
+    def add_token(self, tokens: Union[str, List[str]]) -> None:
+        if isinstance(tokens, str):
+            tokens = [tokens]
+        vocab = self.get_vocab()
+        self._tokenizer.add_tokens(
+            [
+                AddedToken(token, single_word=True, normalized=False)
+                for token in tokens
+                if token not in vocab
+            ]
+        )
 
     def _convert_token_to_id(self, token):
         """Converts a token (str) in an id using the vocab."""
@@ -894,7 +929,13 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         concept_tokenizer = cls.train_concept_tokenizer(
             dataset,
             feature_name="concept_ids",
-            special_tokens=[PAD_TOKEN, OUT_OF_VOCABULARY_TOKEN, START_TOKEN, END_TOKEN],
+            special_tokens=[
+                PAD_TOKEN,
+                OUT_OF_VOCABULARY_TOKEN,
+                START_TOKEN,
+                END_TOKEN,
+                LINEAR_PROB_TOKEN,
+            ],
             unk_token=OUT_OF_VOCABULARY_TOKEN,
             data_args=data_args,
         )

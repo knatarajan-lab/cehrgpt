@@ -29,6 +29,7 @@ from cehrgpt.models.hf_cehrgpt import (
     CEHRGPT2Model,
     extract_features_from_packed_sequence,
 )
+from cehrgpt.models.special_tokens import LINEAR_PROB_TOKEN
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.data_utils import prepare_finetune_dataset
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
@@ -112,6 +113,11 @@ def main():
         .eval()
         .to(device)
     )
+
+    if LINEAR_PROB_TOKEN not in cehrgpt_tokenizer.get_vocab():
+        cehrgpt_tokenizer.add_tokens(LINEAR_PROB_TOKEN)
+        cehrgpt_model.resize_token_embeddings(cehrgpt_tokenizer.get_vocab_size())
+
     prepared_ds_path = generate_prepared_ds_path(
         data_args, model_args, data_folder=data_args.cohort_folder
     )
@@ -244,6 +250,7 @@ def main():
             SamplePackingCehrGptDataCollator,
             cehrgpt_args.max_tokens_per_batch,
             cehrgpt_model.config.max_position_embeddings,
+            add_end_token_in_sample_packing=cehrgpt_args.add_end_token_in_sample_packing,
         )
         train_batch_sampler = SamplePackingBatchSampler(
             lengths=train_set["num_of_concepts"],
@@ -278,6 +285,7 @@ def main():
         include_ttv_prediction=False,
         use_sub_time_tokenization=False,
         include_demographics=cehrgpt_args.include_demographics,
+        add_linear_prob_token=True,
     )
 
     train_loader = DataLoader(
