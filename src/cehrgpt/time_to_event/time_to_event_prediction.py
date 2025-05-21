@@ -118,9 +118,9 @@ def main(args):
     LOG.info(f"Top P {args.top_p}")
     LOG.info(f"Top K {args.top_k}")
 
-    cehrgpt_model.resize_position_embeddings(
-        cehrgpt_model.config.max_position_embeddings + task_config.max_new_tokens
-    )
+    # cehrgpt_model.resize_position_embeddings(
+    #     cehrgpt_model.config.max_position_embeddings + task_config.max_new_tokens
+    # )
 
     generation_config = TimeToEventModel.get_generation_config(
         tokenizer=cehrgpt_tokenizer,
