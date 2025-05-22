@@ -4,7 +4,6 @@ from typing import Any, Dict, Optional
 import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
-from trl.commands.scripts.ppo_multi_adapter import tokenizer
 
 from cehrgpt.gpt_utils import (
     DEMOGRAPHIC_PROMPT_SIZE,
