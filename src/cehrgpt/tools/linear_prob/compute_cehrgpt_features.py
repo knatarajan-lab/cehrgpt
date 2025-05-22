@@ -116,7 +116,7 @@ def main():
 
     if LINEAR_PROB_TOKEN not in cehrgpt_tokenizer.get_vocab():
         cehrgpt_tokenizer.add_tokens(LINEAR_PROB_TOKEN)
-        cehrgpt_model.resize_token_embeddings(cehrgpt_tokenizer.get_vocab_size())
+        cehrgpt_model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)
 
     prepared_ds_path = generate_prepared_ds_path(
         data_args, model_args, data_folder=data_args.cohort_folder
