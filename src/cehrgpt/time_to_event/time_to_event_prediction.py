@@ -271,9 +271,13 @@ def filter_out_existing_results(
     parquet_files = glob.glob(os.path.join(prediction_output_folder_name, "*parquet"))
     if parquet_files:
         cohort_members = set()
-        results_dataframe = pd.read_parquet(parquet_files)[["person_id", "index_date"]]
+        results_dataframe = pd.read_parquet(parquet_files)[
+            ["subject_id", "prediction_time"]
+        ]
         for row in results_dataframe.itertuples():
-            cohort_members.add((row.person_id, row.index_date.strftime("%Y-%m-%d")))
+            cohort_members.add(
+                (row.subject_id, row.prediction_time.strftime("%Y-%m-%d"))
+            )
 
         def filter_func(batched):
             return [
