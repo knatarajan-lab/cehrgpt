@@ -190,14 +190,22 @@ def main(args):
             args.max_n_trial,
         )
         visit_counter = sum([int(is_visit_end(_)) for _ in partial_history])
+        predicted_boolean_probability = (
+            sum([event != "0" for event in concept_time_to_event.outcome_events])
+            / len(concept_time_to_event.outcome_events)
+            if concept_time_to_event
+            else 0.0
+        )
         tte_outputs.append(
             {
-                "person_id": record["person_id"],
-                "index_date": record["index_date"],
+                "subject_id": record["person_id"],
+                "prediction_time": record["index_date"],
                 "visit_counter": visit_counter,
-                "label": label,
+                "boolean_value": label,
+                "predicted_boolean_probability": predicted_boolean_probability,
+                "predicted_boolean_value": None,
                 "time_to_event": time_to_event,
-                "prediction": (
+                "trials": (
                     asdict(concept_time_to_event) if concept_time_to_event else None
                 ),
             }
@@ -292,12 +300,14 @@ def flush_to_disk_if_full(
         pd.DataFrame(
             tte_outputs,
             columns=[
-                "person_id",
-                "index_date",
+                "subject_id",
+                "prediction_time",
                 "visit_counter",
-                "label",
+                "boolean_value",
+                "predicted_boolean_probability",
+                "predicted_boolean_value",
                 "time_to_event",
-                "prediction",
+                "trials",
             ],
         ).to_parquet(output_parquet_file)
         tte_outputs.clear()
