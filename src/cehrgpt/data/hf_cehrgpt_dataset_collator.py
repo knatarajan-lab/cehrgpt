@@ -29,6 +29,7 @@ class CehrGptDataCollator:
         use_sub_time_tokenization: bool = False,
         pretraining: bool = True,
         include_demographics: bool = False,
+        add_linear_prob_token: bool = False,
     ):
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -36,10 +37,10 @@ class CehrGptDataCollator:
         # We used VS for the historical data, currently, we use the new [VS] for the newer data
         # so we need to check both cases.
         self.vs_token_id = tokenizer._convert_token_to_id("VS")
-        if self.vs_token_id == tokenizer._oov_token_id:
+        if self.vs_token_id == tokenizer.oov_token_id:
             self.vs_token_id = tokenizer._convert_token_to_id("[VS]")
         self.ve_token_id = tokenizer._convert_token_to_id("VE")
-        if self.ve_token_id == tokenizer._oov_token_id:
+        if self.ve_token_id == tokenizer.oov_token_id:
             self.ve_token_id = tokenizer._convert_token_to_id("[VE]")
 
         self.shuffle_records = shuffle_records
@@ -48,6 +49,7 @@ class CehrGptDataCollator:
         self.use_sub_time_tokenization = use_sub_time_tokenization
         self.pretraining = pretraining
         self.include_demographics = include_demographics
+        self.add_linear_prob_token = add_linear_prob_token
 
         if self.use_sub_time_tokenization:
             token_to_time_token_mapping = tokenizer.token_to_time_token_mapping
@@ -341,13 +343,25 @@ class CehrGptDataCollator:
                 [self._convert_to_tensor(self._convert_time_to_event(concept_ids))]
             )
 
+        # If linear token exists, we will use it, otherwise we default to the OOV token
+        linear_token_id = (
+            self.tokenizer.linear_token_id
+            if self.tokenizer.linear_token_id
+            else self.tokenizer.oov_token_id
+        )
+        eos_token = (
+            linear_token_id
+            if self.add_linear_prob_token
+            else self.tokenizer.end_token_id
+        )
+
         # Return the record directly if the actual sequence length is less than the max sequence
         if seq_length <= new_max_length:
             if not sample_packing:
                 record["input_ids"] = torch.concat(
                     [
                         self._convert_to_tensor(record["input_ids"]),
-                        self._convert_to_tensor([self.tokenizer.end_token_id]),
+                        self._convert_to_tensor([eos_token]),
                     ]
                 )
                 if self.include_values:
@@ -529,7 +543,7 @@ class CehrGptDataCollator:
                 record["input_ids"] = torch.concat(
                     [
                         self._convert_to_tensor(record["input_ids"]),
-                        self._convert_to_tensor([self.tokenizer.end_token_id]),
+                        self._convert_to_tensor([eos_token]),
                     ]
                 )
                 if self.include_values:
@@ -584,33 +598,39 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
 
         for idx, example in enumerate(examples):
 
-            # If the sample length exceeds the model's capacity, truncate this example
+            # We only add an end token if the patient sequence could fit in the entire context window
             add_end_token = (
                 len(example["input_ids"]) <= self.max_position_embeddings
                 and self.add_end_token_in_sample_packing
             )
-
+            # If the sample length exceeds the model's capacity, truncate this example
             if len(example["input_ids"]) > self.max_position_embeddings:
                 example = self.generate_start_end_index(
                     example, self.max_position_embeddings
                 )
 
+            add_eos_token = add_end_token | self.add_linear_prob_token
+            additional_tokens = []
+            if add_end_token:
+                additional_tokens.append(self.tokenizer.end_token_id)
+            elif self.add_linear_prob_token:
+                # Backward compatible
+                linear_prob_token_id = (
+                    self.tokenizer.linear_token_id
+                    if self.tokenizer.linear_token_id is not None
+                    else self.tokenizer.oov_token_id
+                )
+                additional_tokens.append(linear_prob_token_id)
+            additional_tokens.append(self.tokenizer.pad_token_id)
             input_ids = example["input_ids"]
             # We add [END] [PAD], we want to attend to [END], adding [END] is important for sequence generation.
             # If the sequence length of the sequence is less than the context window, we add both [END][PAD], otherwise
             # we only add [PAD] token to the end of the sequence because it's not finished
-            current_input_ids.extend(
-                list(input_ids)
-                + (
-                    [self.tokenizer.end_token_id, self.tokenizer.pad_token_id]
-                    if add_end_token
-                    else [self.tokenizer.pad_token_id]
-                )
-            )
+            current_input_ids.extend(list(input_ids) + additional_tokens)
             current_attention_mask.extend(
-                np.ones_like(input_ids).tolist() + ([1, 0] if add_end_token else [0])
+                np.ones_like(input_ids).tolist() + ([1, 0] if add_eos_token else [0])
             )
-            num_tokens_to_pad = 1 + int(add_end_token)
+            num_tokens_to_pad = 1 + int(add_eos_token)
             current_position_ids.extend(list(range(len(input_ids) + num_tokens_to_pad)))
             if self.include_values:
                 current_value_indicators.extend(

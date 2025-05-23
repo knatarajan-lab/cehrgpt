@@ -80,20 +80,9 @@ class TimeToEventModel:
         return token in self.outcome_events
 
     def simulate(
-        self, partial_history: Union[np.ndarray, List[str]]
+        self,
+        partial_history: Union[np.ndarray, List[str]],
     ) -> List[List[str]]:
-
-        sequence_is_demographics = len(partial_history) == 4 and partial_history[
-            0
-        ].startswith("year")
-        sequence_ends_ve = is_visit_end(partial_history[-1])
-
-        if not (sequence_is_demographics | sequence_ends_ve):
-            raise ValueError(
-                "There are only two types of sequences allowed. 1) the sequence only contains "
-                "demographics; 2) the sequence ends on VE;"
-            )
-
         token_ids = self.tokenizer.encode(partial_history)
         prompt = torch.tensor(token_ids).unsqueeze(0).to(self.device)
 
