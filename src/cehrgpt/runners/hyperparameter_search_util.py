@@ -85,7 +85,9 @@ def hp_space(
             "per_device_train_batch_size", batch_sizes
         ),
         "weight_decay": trial.suggest_float("weight_decay", *weight_decays, log=True),
-        "num_train_epochs": trial.suggest_int("num_train_epochs", *num_train_epochs),
+        "num_train_epochs": trial.suggest_categorical(
+            "num_train_epochs", num_train_epochs
+        ),
     }
 
 

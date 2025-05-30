@@ -1,0 +1,23 @@
+task_name: "cabg_prediction"
+outcome_events: [
+    "43528001",
+    "43528003",
+    "43528004",
+    "43528002",
+    "4305852",
+    "4168831",
+    "2107250",
+    "2107216",
+    "2107222",
+    "2107231",
+    "4336464",
+    "4231998",
+    "4284104",
+    "2100873",
+]
+future_visit_start: 0
+future_visit_end: -1
+prediction_window_start: 0
+prediction_window_end: 365
+max_new_tokens: 1024
+include_descendants: true
