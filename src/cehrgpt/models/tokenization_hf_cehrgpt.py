@@ -1053,6 +1053,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             value_tokenizer=cehrgpt_tokenizer_copy._value_tokenizer,
             att_tokenizer=cehrgpt_tokenizer_copy._att_tokenizer,
             token_to_sub_time_token_mapping=cehrgpt_tokenizer_copy._token_to_sub_time_token_mapping,
+            concept_code_stats=cehrgpt_tokenizer_copy._concept_code_stats,
             numeric_lab_stats=cehrgpt_tokenizer_copy._numeric_lab_stats,
             categorical_lab_stats=cehrgpt_tokenizer_copy._categorical_lab_stats,
             concept_name_mapping=cehrgpt_tokenizer_copy._concept_name_mapping,
