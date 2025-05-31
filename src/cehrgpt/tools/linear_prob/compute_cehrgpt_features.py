@@ -306,30 +306,36 @@ def main():
         batch_sampler=test_batch_sampler,
     )
 
-    # Loading demographics
-    print("Loading demographics as a dictionary")
-    demographics_df = pd.concat(
-        [
-            pd.read_parquet(
-                data_dir,
-                columns=[
-                    "person_id",
-                    "index_date",
-                    "gender_concept_id",
-                    "race_concept_id",
-                ],
-            )
-            for data_dir in [data_args.data_folder, data_args.test_data_folder]
-        ]
-    )
-    demographics_df["index_date"] = demographics_df.index_date.dt.date
-    demographics_dict = {
-        (row["person_id"], row["index_date"]): {
-            "gender_concept_id": row["gender_concept_id"],
-            "race_concept_id": row["race_concept_id"],
+    if data_args.is_data_in_meds:
+        demographics_dict = dict()
+    else:
+        # Loading demographics
+        print("Loading demographics as a dictionary")
+        demographics_df = pd.concat(
+            [
+                pd.read_parquet(
+                    data_dir,
+                    columns=[
+                        "person_id",
+                        "index_date",
+                        "gender_concept_id",
+                        "race_concept_id",
+                    ],
+                )
+                for data_dir in [data_args.data_folder, data_args.test_data_folder]
+            ]
+        )
+        # This is a pre-caution in case the index_date is not a datetime type
+        demographics_df["index_date"] = pd.to_datetime(
+            demographics_df["index_date"]
+        ).dt.date
+        demographics_dict = {
+            (row["person_id"], row["index_date"]): {
+                "gender_concept_id": row["gender_concept_id"],
+                "race_concept_id": row["race_concept_id"],
+            }
+            for _, row in demographics_df.iterrows()
         }
-        for _, row in demographics_df.iterrows()
-    }
 
     data_loaders = [("train", train_loader), ("test", test_dataloader)]
 

@@ -6,7 +6,11 @@ import unittest
 from pathlib import Path
 
 import pandas as pd
-from datasets import disable_caching
+
+# Set environment variables early!
+os.environ["WANDB_MODE"] = "disabled"
+os.environ["TRANSFORMERS_VERBOSITY"] = "info"
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 from cehrgpt.generation.generate_batch_hf_gpt_sequence import create_arg_parser
 from cehrgpt.generation.generate_batch_hf_gpt_sequence import main as generate_main
@@ -15,11 +19,6 @@ from cehrgpt.models.pretrained_embeddings import (
     PRETRAINED_EMBEDDING_VECTOR_FILE_NAME,
 )
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import main as train_main
-
-disable_caching()
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-os.environ["WANDB_MODE"] = "disabled"
-os.environ["TRANSFORMERS_VERBOSITY"] = "info"
 
 
 class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
@@ -30,6 +29,9 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
         cls.data_folder = os.path.join(root_folder, "sample_data", "pretrain")
         cls.pretrained_embedding_folder = os.path.join(
             root_folder, "sample_data", "pretrained_embeddings"
+        )
+        cls.concept_dir = os.path.join(
+            root_folder, "sample_data", "omop_vocab", "concept"
         )
         # Create a temporary directory to store model and tokenizer
         cls.temp_dir = tempfile.mkdtemp()
@@ -68,6 +70,8 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             self.dataset_prepared_path,
             "--pretrained_embedding_path",
             self.model_folder_path,
+            "--concept_dir",
+            self.concept_dir,
             "--max_steps",
             "10",
             "--save_steps",
@@ -96,6 +100,11 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "false",
             "--report_to",
             "none",
+            "--include_motor_time_to_event",
+            "true",
+            "--apply_entropy_filter",
+            "--min_prevalence",
+            "0.01",
         ]
         train_main()
         # Teacher force the prompt to consist of [year][age][gender][race][VS] then inject the random vector before [VS]

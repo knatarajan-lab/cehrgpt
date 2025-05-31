@@ -177,7 +177,39 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether we want to add end token in sample packing"
         },
     )
+    include_motor_time_to_event: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to include the motor time to events"
+        },
+    )
+    num_motor_tasks: Optional[int] = dataclasses.field(
+        default=10000,
+        metadata={"help": "The number of max MOTOR tasks"},
+    )
+    motor_time_to_event_weight: Optional[float] = dataclasses.field(
+        default=1.0,
+        metadata={"help": "The MOTOR time to event loss weight"},
+    )
+    motor_num_time_pieces: Optional[int] = dataclasses.field(
+        default=8,
+        metadata={
+            "help": "The number of times each motor_num_time_pieces piece has to be"
+        },
+    )
+    concept_dir: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={"help": "The directory where the concept data is stored."},
+    )
     average_over_sequence: bool = dataclasses.field(
         default=False,
         metadata={"help": "Whether or not to average tokens per sequence"},
+    )
+    apply_entropy_filter: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={"help": "A flag to indicate whether we want to use entropy filter."},
+    )
+    min_prevalence: Optional[float] = dataclasses.field(
+        default=1 / 1000,
+        metadata={"help": "The min_prevalence to keep the concepts in the tokenizer"},
     )
