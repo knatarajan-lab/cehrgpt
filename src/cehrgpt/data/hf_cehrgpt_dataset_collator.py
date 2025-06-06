@@ -112,8 +112,8 @@ class CehrGptDataCollator:
         return [float(default_value(_)) for _ in concept_ids]
 
     def __call__(self, examples):
-
-        examples = [self.generate_start_end_index(_) for _ in examples]
+        sample_packing = getattr(self, "sample_packing", False)
+        examples = [self.generate_start_end_index(_, sample_packing) for _ in examples]
         examples = [self.random_sort(_) for _ in examples]
         batch = {}
 
@@ -512,7 +512,8 @@ class CehrGptDataCollator:
                 LOG.info(
                     "Vist end event is not detected for this sample, and is skipped for MOTOR tasks."
                     "It's likely this sample contains a long admission. length: %s, concept_ids[-10:] %s",
-                    len(concept_ids), concept_ids[-10:],
+                    len(concept_ids),
+                    concept_ids[-10:],
                 )
                 continue
 
@@ -640,14 +641,16 @@ class CehrGptDataCollator:
         return record
 
     def generate_start_end_index(
-        self, record: Dict[str, Any], max_length_allowed: Optional[int] = None
+        self,
+        record: Dict[str, Any],
+        sample_packing: bool,
+        max_length_allowed: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Adding the start and end indices to extract a portion of the patient sequence."""
         # concept_ids will be used to for time to event predictions and identifying the visit starts
         max_length_allowed = (
             self.max_length if max_length_allowed is None else max_length_allowed
         )
-        sample_packing = getattr(self, "sample_packing", False)
         input_ids = record["input_ids"]
         if isinstance(input_ids, torch.Tensor):
             input_ids = input_ids.detach().tolist()
@@ -928,7 +931,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
             # If the sample length exceeds the model's capacity, truncate this example
             if len(example["input_ids"]) > self.max_position_embeddings:
                 example = self.generate_start_end_index(
-                    example, self.max_position_embeddings
+                    example, False, self.max_position_embeddings
                 )
 
             add_eos_token = add_end_token | self.add_linear_prob_token
