@@ -352,6 +352,17 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
     def filter_out_invalid_tokens(self, record: Dict[str, Any]) -> Dict[str, Any]:
         column_names = []
         seq_length = len(record["concept_ids"])
+
+        # We can't have "0" as a token in the tokenizer because it would break tokenization for "Race/0", "Visit/0"
+        # This is a pre-caution
+        if "0" in record["concept_ids"]:
+            if isinstance(record["concept_ids"], np.ndarray):
+                record["concept_ids"][record["concept_ids"] == "0"] = "Unknown"
+            else:
+                record["concept_ids"] = [
+                    "Unknown" if x == "0" else x for x in record["concept_ids"]
+                ]
+
         for k, v in record.items():
             if k not in CEHRGPT_COLUMNS:
                 continue
@@ -376,7 +387,7 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         record["input_ids"] = self._concept_tokenizer.encode(record["concept_ids"])
         assert len(record["input_ids"]) == len(record["concept_ids"]), (
             "The number of tokens must equal to the number of concepts\n"
-            f"decoded concept_ids: {self._concept_tokenizer.decode(record['concept_ids'], skip_special_tokens=False)}"
+            f"decoded concept_ids: {self._concept_tokenizer.decode(record['input_ids'], skip_special_tokens=False)}"
         )
         record["value_indicators"] = record["concept_value_masks"]
         if "number_as_values" not in record or "concept_as_values" not in record:
