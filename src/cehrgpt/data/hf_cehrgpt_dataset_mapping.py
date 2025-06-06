@@ -374,6 +374,10 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         record = self.filter_out_invalid_tokens(record)
         # If any concept has a value associated with it, we normalize the value
         record["input_ids"] = self._concept_tokenizer.encode(record["concept_ids"])
+        assert len(record["input_ids"]) == len(record["concept_ids"]), (
+            "The number of tokens must equal to the number of concepts\n"
+            f"decoded concept_ids: {self._concept_tokenizer.decode(record['concept_ids'], skip_special_tokens=False)}"
+        )
         record["value_indicators"] = record["concept_value_masks"]
         if "number_as_values" not in record or "concept_as_values" not in record:
             record["number_as_values"] = [
