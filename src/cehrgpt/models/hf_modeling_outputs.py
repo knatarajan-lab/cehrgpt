@@ -85,6 +85,7 @@ class CehrGptCausalLMOutput(ModelOutput):
     time_token_loss: Optional[torch.FloatTensor] = None
     time_to_visit_loss: Optional[torch.FloatTensor] = None
     token_value_loss: Optional[torch.FloatTensor] = None
+    motor_tte_loss: Optional[torch.FloatTensor] = None
 
 
 @dataclass

@@ -121,6 +121,7 @@ class CEHRGPTConfig(PretrainedConfig):
         bos_token_id=50256,
         eos_token_id=50256,
         lab_token_ids=None,
+        ve_token_id=None,
         scale_attn_by_inverse_layer_idx=False,
         reorder_and_upcast_attn=False,
         exclude_position_ids=False,
@@ -128,6 +129,10 @@ class CEHRGPTConfig(PretrainedConfig):
         value_vocab_size=None,
         include_ttv_prediction=False,
         use_sub_time_tokenization=True,
+        include_motor_time_to_event=True,
+        motor_tte_vocab_size=None,
+        motor_time_to_event_weight=1.0,
+        motor_num_time_pieces=16,
         token_to_time_token_mapping: Dict[int, List] = None,
         use_pretrained_embeddings=False,
         n_pretrained_embeddings_layers=2,
@@ -192,6 +197,22 @@ class CEHRGPTConfig(PretrainedConfig):
         self._token_to_time_token_mapping = token_to_time_token_mapping
         self.time_token_loss_weight = time_token_loss_weight
         self.time_to_visit_loss_weight = time_to_visit_loss_weight
+
+        # MOTOR TTE configuration
+        self.motor_tte_vocab_size = motor_tte_vocab_size
+        self.include_motor_time_to_event = (
+            include_motor_time_to_event
+            and self.motor_tte_vocab_size
+            and self.motor_tte_vocab_size > 0
+        )
+        if self.include_motor_time_to_event and not ve_token_id:
+            raise RuntimeError(
+                f"ve_token_id must be provided when include_motor_time_to_event is True"
+            )
+        self.ve_token_id = ve_token_id
+        self.motor_time_to_event_weight = motor_time_to_event_weight
+        self.motor_num_time_pieces = motor_num_time_pieces
+
         self.causal_sfm = causal_sfm
         self.demographics_size = demographics_size
         self.use_pretrained_embeddings = use_pretrained_embeddings

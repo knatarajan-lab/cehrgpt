@@ -1,4 +1,7 @@
+from typing import Optional, Union
+
 import numpy as np
+import torch
 from cehrbert.data_generators.hf_data_generator.cache_util import CacheFileCollector
 from cehrbert.data_generators.hf_data_generator.meds_utils import (
     create_dataset_from_meds_reader,
@@ -8,7 +11,13 @@ from cehrbert.runners.runner_util import (
     get_meds_extension_path,
     load_parquet_as_dataset,
 )
-from datasets import DatasetDict, concatenate_datasets, load_from_disk
+from datasets import (
+    Dataset,
+    DatasetDict,
+    IterableDataset,
+    concatenate_datasets,
+    load_from_disk,
+)
 from transformers import TrainingArguments
 from transformers.utils import logging
 
@@ -16,6 +25,22 @@ from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 
 LOG = logging.get_logger("transformers")
+
+
+def get_torch_dtype(torch_dtype: Optional[str] = None) -> Union[torch.dtype, str]:
+    if torch_dtype and hasattr(torch, torch_dtype):
+        return getattr(torch, torch_dtype)
+    return torch.float
+
+
+def data_collate_fn(features, model_type: torch.dtype, collator):
+    batch = collator(features)
+    if model_type != torch.float32:
+        for key, value in batch.items():
+            # Only convert float32 tensors to bfloat16
+            if isinstance(value, torch.Tensor) and value.dtype == torch.float32:
+                batch[key] = value.to(model_type)
+    return batch
 
 
 def prepare_finetune_dataset(

@@ -145,7 +145,7 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
         # Estimate total number of batches
         if self.drop_last:
             # If dropping last incomplete batch
-            return len(truncated_lengths) // seqs_per_batch * self.num_replicas
+            return len(truncated_lengths) // seqs_per_batch
         else:
             # If keeping last incomplete batch, ensure at least 1 batch
-            return max(1, len(truncated_lengths) // seqs_per_batch) * self.num_replicas
+            return max(1, len(truncated_lengths) // seqs_per_batch)

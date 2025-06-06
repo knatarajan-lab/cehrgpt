@@ -31,6 +31,9 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
         cls.pretrained_embedding_folder = os.path.join(
             root_folder, "sample_data", "pretrained_embeddings"
         )
+        cls.concept_dir = os.path.join(
+            root_folder, "sample_data", "omop_vocab", "concept"
+        )
         # Create a temporary directory to store model and tokenizer
         cls.temp_dir = tempfile.mkdtemp()
         cls.model_folder_path = os.path.join(cls.temp_dir, "model")
@@ -62,6 +65,8 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             self.model_folder_path,
             "--output_dir",
             self.model_folder_path,
+            "--concept_dir",
+            self.concept_dir,
             "--data_folder",
             self.data_folder,
             "--dataset_prepared_path",
@@ -106,6 +111,8 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "512",
             "--report_to",
             "none",
+            "--include_motor_time_to_event",
+            "true",
         ]
         train_main()
         # Teacher force the prompt to consist of [year][age][gender][race][VS] then inject the random vector before [VS]
