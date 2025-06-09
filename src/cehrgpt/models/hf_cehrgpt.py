@@ -769,6 +769,10 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             )
             self.update_attn_bias(self.config.sample_packing_max_positions)
 
+    def enable_position_embeddings(self):
+        self.wpe = nn.Embedding(self.config.max_position_embeddings, self.embed_dim)
+        self.config.exclude_position_ids = False
+
     def initialize_pretrained_embeddings(self):
         layers = [
             nn.Embedding(self.config.vocab_size, self.config.pretrained_embedding_dim),
@@ -1072,7 +1076,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             )
 
         if not self.exclude_position_ids:
-            position_embeds = self.wpe(position_ids)
+            position_embeds = self.wpe(position_ids).to(input_embeddings.dtype)
             hidden_states = input_embeddings + position_embeds
         else:
             hidden_states = input_embeddings
@@ -1630,16 +1634,18 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # We add another loss term when use_sub_time_tokenization is enabled, we need to recover the sub time token
             # predictions for year/month/token
             if (
-                    self.config.use_sub_time_tokenization
-                    and sub_time_tokens is not None
-                    and time_token_indicators is not None
+                self.config.use_sub_time_tokenization
+                and sub_time_tokens is not None
+                and time_token_indicators is not None
             ):
                 # Split the last dimensions into three parts
                 time_loss_fct = CrossEntropyLoss(reduction="none")
                 time_token_logits = self.time_token_lm_head(
                     torch.unflatten(hidden_states, 2, (3, -1))
                 )
-                shifted_time_token_logits = time_token_logits[..., :-1, :, :].contiguous()
+                shifted_time_token_logits = time_token_logits[
+                    ..., :-1, :, :
+                ].contiguous()
                 shifted_time_token_indicators = (
                     time_token_indicators[..., 1:].contiguous().to(lm_logits.device)
                 )
@@ -1707,7 +1713,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                         token_value_loss * self.config.lab_token_loss_weight
                     )
                 loss += token_value_loss * self.config.value_prediction_loss_weight
-
 
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]

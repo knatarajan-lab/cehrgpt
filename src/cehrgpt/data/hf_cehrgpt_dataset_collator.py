@@ -170,7 +170,7 @@ class CehrGptDataCollator:
                 pad_sequence(
                     batch_position_ids,
                     batch_first=True,
-                    padding_value=self.max_length,
+                    padding_value=0,
                 ).to(torch.int64)
             )
 
@@ -710,7 +710,6 @@ class CehrGptDataCollator:
                             self._convert_to_tensor([-100.0]),
                         ]
                     )
-
             return record
 
         if self.pretraining:
@@ -753,6 +752,9 @@ class CehrGptDataCollator:
             # We want to make sure we take the subset of attention_mask in sample packing if this field is available
             if sample_packing and "attention_mask" in record:
                 record["attention_mask"] = record["attention_mask"][0:end_index]
+
+            if sample_packing and "position_ids" in record:
+                record["position_ids"] = record["position_ids"][0:end_index]
 
             if self.include_values:
                 record["value_indicators"] = self._convert_to_tensor(
@@ -834,6 +836,8 @@ class CehrGptDataCollator:
                             record["attention_mask"] = record["attention_mask"][
                                 i:end_index
                             ]
+                        if sample_packing and "position_ids" in record:
+                            record["position_ids"] = record["position_ids"][i:end_index]
                         if self.include_values:
                             record["value_indicators"] = record["value_indicators"][
                                 i:end_index
@@ -853,6 +857,8 @@ class CehrGptDataCollator:
                     record["attention_mask"] = record["attention_mask"][
                         -new_max_length:
                     ]
+                if sample_packing and "position_ids" in record:
+                    record["position_ids"] = record["position_ids"][-new_max_length:]
                 if self.include_values:
                     record["value_indicators"] = record["value_indicators"][
                         -new_max_length:
@@ -956,7 +962,13 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 np.ones_like(input_ids).tolist() + ([1, 0] if add_eos_token else [0])
             )
             num_tokens_to_pad = 1 + int(add_eos_token)
-            current_position_ids.extend(list(range(len(input_ids) + num_tokens_to_pad)))
+            current_position_ids.extend(
+                np.clip(
+                    list(range(len(input_ids) + num_tokens_to_pad)),
+                    0,
+                    self.max_position_embeddings - 1,
+                )
+            )
             if self.include_values:
                 current_value_indicators.extend(
                     list(example["value_indicators"]) + [False] * num_tokens_to_pad
