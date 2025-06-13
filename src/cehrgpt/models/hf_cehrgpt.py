@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as f
 from torch import nn
-from torch.distributions import Gamma, Weibull
+from torch.distributions import Exponential, Gamma
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
 from transformers import PreTrainedModel
@@ -362,9 +362,37 @@ class GPT2FlashAttention(GPT2Attention):
         )
 
 
-class WeibullModel(nn.Module):
+class MotorTaskHead(nn.Module):
+    def __init__(self, input_dim, motor_tte_vocab_size, motor_num_time_pieces):
+        super(MotorTaskHead, self).__init__()
+        self.input_dim = input_dim
+        self.motor_tte_vocab_size = motor_tte_vocab_size
+        self.motor_num_time_pieces = motor_num_time_pieces
+        self.linear = nn.Sequential(
+            nn.Linear(input_dim, input_dim // 2),
+            gelu_new,
+            nn.Linear(
+                input_dim // 2, motor_tte_vocab_size * self.motor_num_time_pieces
+            ),
+        )
+
+    def forward(self, x):
+        # Ensure scale is positive
+        length = x.shape[0]
+        # (num_visits_in_batch, motor_tte_vocab_size * motor_num_time_pieces)
+        lambda_p = f.softplus(self.linear(x))
+        # Check for NaN values
+        if torch.isnan(lambda_p).any():
+            logger.warning(f"NaN values found in scale_param. x: {x}")
+        # (num_visits_in_batch,  motor_num_time_pieces, motor_tte_vocab_size,)
+        return lambda_p.view(
+            length, self.motor_num_time_pieces, self.motor_tte_vocab_size
+        )
+
+
+class VisitTimeToEventHead(nn.Module):
     def __init__(self, input_dim):
-        super(WeibullModel, self).__init__()
+        super(VisitTimeToEventHead, self).__init__()
         self.linear1 = nn.Sequential(
             nn.Linear(input_dim, input_dim // 2), gelu_new, nn.Linear(input_dim // 2, 1)
         )
@@ -741,6 +769,10 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             )
             self.update_attn_bias(self.config.sample_packing_max_positions)
 
+    def enable_position_embeddings(self):
+        self.wpe = nn.Embedding(self.config.max_position_embeddings, self.embed_dim)
+        self.config.exclude_position_ids = False
+
     def initialize_pretrained_embeddings(self):
         layers = [
             nn.Embedding(self.config.vocab_size, self.config.pretrained_embedding_dim),
@@ -1044,7 +1076,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             )
 
         if not self.exclude_position_ids:
-            position_embeds = self.wpe(position_ids)
+            position_embeds = self.wpe(position_ids).to(input_embeddings.dtype)
             hidden_states = input_embeddings + position_embeds
         else:
             hidden_states = input_embeddings
@@ -1153,7 +1185,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         super().__init__(config)
         self.cehrgpt = CEHRGPT2Model(config)
         if self.config.include_ttv_prediction:
-            self.tte_head = WeibullModel(config.n_embd)
+            self.tte_head = VisitTimeToEventHead(config.n_embd)
 
         if self.config.use_sub_time_tokenization:
             self.time_token_lm_head = nn.Linear(
@@ -1164,6 +1196,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         if self.config.include_values:
             self.value_head = nn.Linear(
                 config.n_embd, config.value_vocab_size, bias=False
+            )
+
+        if self.config.include_motor_time_to_event:
+            self.motor_tte = MotorTaskHead(
+                config.n_embd, config.motor_tte_vocab_size, config.motor_num_time_pieces
             )
 
         # Model parallel
@@ -1193,6 +1230,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             self.value_head = self.value_head.to(self.cehrgpt.first_device)
         if self.config.include_ttv_prediction:
             self.tte_head = self.tte_head.to(self.cehrgpt.first_device)
+        if self.config.include_motor_time_to_event:
+            self.motor_tte = self.motor_tte.to(self.cehrgpt.first_device)
         self.model_parallel = True
 
     def deparallelize(self):
@@ -1207,6 +1246,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             self.value_head = self.value_head.to("cpu")
         if self.config.include_ttv_prediction:
             self.tte_head = self.tte_head.to("cpu")
+        if self.config.include_motor_time_to_event:
+            self.motor_tte = self.motor_tte.to("cpu")
         self.model_parallel = False
         torch.cuda.empty_cache()
 
@@ -1233,6 +1274,28 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
     def update_attn_bias(self, max_position_embeddings: int):
         self.cehrgpt.update_attn_bias(max_position_embeddings)
+
+    def update_motor_tte_vocab_size(
+        self, motor_tte_vocab_size: Optional[int] = None
+    ) -> None:
+        update_motor_tte_layer = False
+        if motor_tte_vocab_size and motor_tte_vocab_size > 0:
+            if self.config.include_motor_time_to_event:
+                if self.config.motor_tte_vocab_size != motor_tte_vocab_size:
+                    self.config.include_motor_time_to_event = True
+                    self.config.motor_tte_vocab_size = motor_tte_vocab_size
+                    update_motor_tte_layer = True
+            else:
+                self.config.include_motor_time_to_event = True
+                self.config.motor_tte_vocab_size = motor_tte_vocab_size
+                update_motor_tte_layer = True
+
+        if update_motor_tte_layer:
+            self.motor_tte = MotorTaskHead(
+                self.config.n_embd,
+                self.config.motor_tte_vocab_size,
+                self.config.motor_num_time_pieces,
+            )
 
     def prepare_inputs_for_generation(
         self,
@@ -1329,6 +1392,74 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         return model_inputs
 
+    def motor_nll_loss(
+        self,
+        ve_token_features,
+        motor_time_to_event_vectors,
+        motor_event_indicators,
+        motor_time_to_event_to_include,
+        motor_time_indicators,
+        batch_motor_end_index,
+    ):
+        """
+        Computes the negative log-likelihood (NLL) loss using the LogNormal distribution.
+
+        for modeling time-to-event data at each visit.
+
+        Args:
+            ve_token_features (Tensor): Hidden representations for the [VE] tokens [num_visits, hidden_dim].
+            motor_time_to_event_vectors (Tensor): Raw time-to-event durations [B, T, motor_vocab_size] (flattened).
+            motor_time_to_event_to_include: (Tensor): Bool indicators (True if included, False if not included).
+            motor_event_indicators (Tensor): Binary indicators (1 if censored, 0 if event occurred).
+            motor_time_indicators (Tensor): Binary indicators whether the time occurs in the current
+                time bucket (1 if censored, 0 if event occurred).
+            batch_motor_end_index (Tensor): Tensor indicating the number of valid [VE] tokens in the batch.
+
+        Returns:
+            Tensor: Scalar loss value (mean negative log-likelihood).
+        """
+        batch_motor_end_index = batch_motor_end_index.sum().item()
+        motor_time_to_event_vectors = motor_time_to_event_vectors.view(
+            (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
+        )[:batch_motor_end_index].clamp(min=1e-3)
+        motor_event_indicators = motor_event_indicators.reshape(
+            (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
+        )[:batch_motor_end_index]
+        motor_time_to_event_to_include = motor_time_to_event_to_include.flatten()[
+            :batch_motor_end_index
+        ]
+        motor_time_indicators = motor_time_indicators.view(
+            (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
+        )[:batch_motor_end_index]
+        assert ve_token_features.shape[0] == motor_time_to_event_vectors.shape[0], (
+            "The number of VE tokens in the labels needs to match up "
+            "with the first dimension of motor_time_to_event_vectors. "
+            f"Received ve_token_features.shape[0]: {ve_token_features.shape[0]}, "
+            f"motor_time_to_event_vectors.shape[0]: {motor_time_to_event_vectors.shape[0]}"
+        )
+        motor_time_to_event_vectors = motor_time_to_event_vectors[
+            motor_time_to_event_to_include
+        ]
+        motor_event_indicators = motor_event_indicators[motor_time_to_event_to_include]
+        motor_time_indicators = motor_time_indicators[motor_time_to_event_to_include]
+        ve_token_features = ve_token_features[motor_time_to_event_to_include]
+
+        # Get Exponential parameters from model
+        lambda_p = self.motor_tte(ve_token_features)
+        # (num_visits_in_batch, num_of_pieces, motor_vocab_size)
+        dist = Exponential(lambda_p.clamp(min=1e-3))
+
+        # Compute event loss
+        tte_loss = torch.where(
+            motor_event_indicators,
+            -dist.log_prob(motor_time_to_event_vectors),
+            -torch.log(
+                1 - dist.cdf(motor_time_to_event_vectors).clamp(max=1 - 1e-6) + 1e-6
+            ),
+        )
+        tte_loss = torch.where(motor_time_indicators, tte_loss, 0.0)
+        return torch.mean(tte_loss)
+
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -1345,6 +1476,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         time_to_visits: Optional[torch.FloatTensor] = None,
         time_token_indicators: Optional[torch.BoolTensor] = None,
         sub_time_tokens: Optional[torch.LongTensor] = None,
+        motor_time_to_event_vectors: Optional[torch.FloatTensor] = None,
+        motor_event_indicators: Optional[torch.BoolTensor] = None,
+        motor_time_to_event_to_include: Optional[torch.BoolTensor] = None,
+        motor_time_indicators: Optional[torch.BoolTensor] = None,
+        motor_end_index: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -1404,6 +1540,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         time_token_loss = None
         time_to_visit_loss = None
         token_value_loss = None
+        motor_tte_loss = None
+
         if labels is not None:
             # move labels to correct device to enable model parallelism
             labels = labels.to(lm_logits.device)
@@ -1471,9 +1609,35 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 entropy_penalty = entropy.sum() / total_num_tokens
                 loss += entropy_penalty * self.cehrgpt.config.entropy_penalty_alpha
 
+            if (
+                self.config.include_motor_time_to_event
+                and motor_time_to_event_vectors is not None
+                and motor_event_indicators is not None
+                and motor_time_to_event_to_include is not None
+                and motor_time_indicators is not None
+                and motor_end_index is not None
+            ):
+                ve_token_id_indices = labels == self.config.ve_token_id
+                ve_token_features = hidden_states[ve_token_id_indices]
+                # Get rid of the last VE features because it's already reached the end of the patient sequence and
+                # there is nothing to predict.
+                motor_tte_loss = self.motor_nll_loss(
+                    ve_token_features=ve_token_features,
+                    motor_time_to_event_vectors=motor_time_to_event_vectors,
+                    motor_event_indicators=motor_event_indicators,
+                    motor_time_to_event_to_include=motor_time_to_event_to_include,
+                    motor_time_indicators=motor_time_indicators,
+                    batch_motor_end_index=motor_end_index,
+                )
+                loss += motor_tte_loss * self.config.motor_time_to_event_weight
+
             # We add another loss term when use_sub_time_tokenization is enabled, we need to recover the sub time token
             # predictions for year/month/token
-            if self.config.use_sub_time_tokenization:
+            if (
+                self.config.use_sub_time_tokenization
+                and sub_time_tokens is not None
+                and time_token_indicators is not None
+            ):
                 # Split the last dimensions into three parts
                 time_loss_fct = CrossEntropyLoss(reduction="none")
                 time_token_logits = self.time_token_lm_head(
@@ -1502,7 +1666,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 time_token_loss = time_token_loss.sum() / total_num_tokens
                 loss += time_token_loss * self.config.time_token_loss_weight
 
-            if time_to_visits is not None:
+            if time_to_visits is not None and time_to_visits is not None:
                 # Get lambda and k parameters
                 lambda_param, k_param = self.tte_head(hidden_states)
 
@@ -1513,7 +1677,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
                 # Move to the same device as lambda_param
                 shift_time_to_visits = shift_time_to_visits.to(lambda_param.device)
-
                 time_to_visit_indicator = shift_time_to_visits >= 0
                 # Define the Gamma distribution
                 dist = Gamma(
@@ -1567,6 +1730,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             time_token_loss=time_token_loss,
             time_to_visit_loss=time_to_visit_loss,
             token_value_loss=token_value_loss,
+            motor_tte_loss=motor_tte_loss,
         )
 
     @staticmethod

@@ -50,7 +50,7 @@ from cehrgpt.models.hf_cehrgpt import (
 )
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
-from cehrgpt.runners.data_utils import prepare_finetune_dataset
+from cehrgpt.runners.data_utils import get_torch_dtype, prepare_finetune_dataset
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
@@ -142,11 +142,10 @@ def load_finetuned_model(
         raise ValueError(
             f"finetune_model_type can be one of the following types {FineTuneModelType.POOLING.value}"
         )
-
     attn_implementation = (
         "flash_attention_2" if is_flash_attn_2_available() else "eager"
     )
-    torch_dtype = torch.bfloat16 if training_args.bf16 else torch.float32
+    torch_dtype = get_torch_dtype(model_args.torch_dtype)
     # Try to create a new model based on the base model
     try:
         return finetune_model_cls.from_pretrained(
@@ -166,6 +165,10 @@ def model_init(
     model = load_finetuned_model(
         model_args, training_args, model_args.model_name_or_path
     )
+    # Enable position embeddings when position embeddings are disabled in pre-training
+    if not model_args.exclude_position_ids and model.cehrgpt.exclude_position_ids:
+        LOG.info(f"Enable the position_embeddings")
+        model.cehrgpt.enable_position_embeddings()
     if model.config.max_position_embeddings < model_args.max_position_embeddings:
         LOG.info(
             f"Increase model.config.max_position_embeddings to {model_args.max_position_embeddings}"
@@ -175,9 +178,6 @@ def model_init(
     # Enable include_values when include_values is set to be False during pre-training
     if model_args.include_values and not model.cehrgpt.include_values:
         model.cehrgpt.include_values = True
-    # Enable position embeddings when position embeddings are disabled in pre-training
-    if not model_args.exclude_position_ids and model.cehrgpt.exclude_position_ids:
-        model.cehrgpt.exclude_position_ids = False
     # Expand tokenizer to adapt to the finetuning dataset
     if model.config.vocab_size < tokenizer.vocab_size:
         model.resize_token_embeddings(tokenizer.vocab_size)
@@ -350,8 +350,6 @@ def main():
             SamplePackingTrainer,
             max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
             max_position_embeddings=config.max_position_embeddings,
-            train_lengths=processed_dataset["train"]["num_of_concepts"],
-            validation_lengths=processed_dataset["validation"]["num_of_concepts"],
         )
         training_args.per_device_train_batch_size = 1
         training_args.per_device_eval_batch_size = 1

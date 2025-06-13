@@ -28,7 +28,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "cehrbert==1.4.4",
+    "cehrbert @ git+https://github.com/cumc-dbmi/cehrbert@main",
     "cehrbert_data==0.0.7",
     "openai==1.54.3",
     "optuna==4.0.0",

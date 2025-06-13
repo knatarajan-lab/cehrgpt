@@ -4,12 +4,7 @@ from typing import Callable, Tuple
 import optuna
 from cehrbert.runners.hf_runner_argument_dataclass import ModelArguments
 from datasets import Dataset, DatasetDict
-from transformers import (
-    EarlyStoppingCallback,
-    Trainer,
-    TrainerCallback,
-    TrainingArguments,
-)
+from transformers import EarlyStoppingCallback, TrainerCallback, TrainingArguments
 from transformers.utils import logging
 
 from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
@@ -219,6 +214,8 @@ def perform_hyperparameter_search(
             backend="optuna",
             n_trials=cehrgpt_args.n_trials,
             compute_objective=lambda m: m["optuna_best_metric"],
+            # Ensure reproducibility
+            sampler=optuna.samplers.TPESampler(seed=training_args.seed),
         )
         LOG.info("Best hyperparameters: %s", best_trial.hyperparameters)
         # Update training arguments with best hyperparameters and set epochs based on adjusted effective epochs

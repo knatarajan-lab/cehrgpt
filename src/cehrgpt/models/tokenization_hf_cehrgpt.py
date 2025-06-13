@@ -10,13 +10,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import scipy.stats as stats
 import transformers
-from cehrbert.models.hf_models.tokenization_utils import (
-    agg_helper,
-    agg_statistics,
-    load_json_file,
-)
+from cehrbert.models.hf_models.tokenization_utils import agg_helper, load_json_file
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
-from datasets import Dataset, DatasetDict
+from datasets import Dataset, DatasetDict, IterableDataset
 from femr.stat_utils import OnlineStatistics, ReservoirSampler
 from scipy.interpolate import UnivariateSpline
 from tokenizers import AddedToken, Tokenizer
@@ -31,6 +27,7 @@ from cehrgpt.gpt_utils import (
     convert_time_interval_to_time_tuple,
     extract_time_interval_in_days,
     is_att_token,
+    is_clinical_event,
     is_inpatient_att_token,
 )
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
@@ -54,7 +51,10 @@ TIME_TOKENIZER_FILE_NAME = "cehrgpt_time_tokenizer.json"
 TOKEN_TO_SUB_TIME_TOKEN_MAPPING_FILE_NAME = "token_to_sub_time_token_mapping.json"
 LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.pickle"
 LEGACY_LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.json"
+CONCEPT_STATS_FILE_NAME = "cehrgpt_concept_stats.json"
 CONCEPT_MAPPING_FILE_NAME = "concept_name_mapping.json"
+MOTOR_TIME_TO_EVENT_CODES_FILE_NAME = "motor_time_to_event_codes.json"
+
 LOG = logging.get_logger("transformers")
 
 
@@ -72,6 +72,16 @@ def is_valid_valid_bin(token: str) -> bool:
 
 def create_value_bin(bin_index: int) -> str:
     return "BIN:" + str(bin_index)
+
+
+def get_dataset_len(dataset: Union[Dataset, IterableDataset]) -> int:
+    if isinstance(dataset, Dataset):
+        return len(dataset)
+    elif isinstance(dataset, IterableDataset):
+        return sum([1 for _ in dataset])
+    raise RuntimeError(
+        "The dataset must be one of the two types (Dataset, IterableDataset)"
+    )
 
 
 def create_sample_from_bins(bins, sample_size: int = 10_000) -> List[float]:
@@ -189,7 +199,22 @@ def create_bins_with_spline(samples, num_bins, d_freedom=3) -> List[Dict[str, An
     return bins
 
 
-def map_statistics(batch: Dict[str, Any], size=10_000) -> Dict[str, Any]:
+def agg_statistics(stats1, stats2):
+    if stats1.get("numeric_stats_by_lab"):
+        for k, v in stats2["numeric_stats_by_lab"].items():
+            stats1["numeric_stats_by_lab"][k].combine(v)
+    if stats1.get("categorical_stats_by_lab"):
+        for (concept_id, concept_as_value), count in stats2[
+            "categorical_stats_by_lab"
+        ].items():
+            stats1["categorical_stats_by_lab"][(concept_id, concept_as_value)] += count
+    if stats1.get("concept_code_stats"):
+        for concept_id, weight in stats2["concept_code_stats"].items():
+            stats1["concept_code_stats"][concept_id] += weight
+    return stats1
+
+
+def map_statistics(batch: Dict[str, Any], total_size, size=10_000) -> Dict[str, Any]:
     if "units" in batch:
         batch_value_units = batch["units"]
     else:
@@ -213,6 +238,7 @@ def map_statistics(batch: Dict[str, Any], size=10_000) -> Dict[str, Any]:
 
     numeric_stats_by_lab = collections.defaultdict(partial(ReservoirSampler, size=size))
     categorical_stats_by_lab = collections.defaultdict(int)
+    concept_code_stats = collections.defaultdict(int)
     for (
         concept_ids,
         number_as_values,
@@ -226,6 +252,7 @@ def map_statistics(batch: Dict[str, Any], size=10_000) -> Dict[str, Any]:
         batch["concept_value_masks"],
         batch_value_units,
     ):
+        unique_codes = set()
         for (
             concept_id,
             number_as_value,
@@ -244,10 +271,94 @@ def map_statistics(batch: Dict[str, Any], size=10_000) -> Dict[str, Any]:
                     numeric_stats_by_lab[(concept_id, unit)].add(number_as_value, 1)
                 if concept_as_value:
                     categorical_stats_by_lab[(concept_id, concept_as_value)] += 1
+            unique_codes.add(concept_id)
+
+        for code in unique_codes:
+            concept_code_stats[code] += 1 / total_size
 
     return {
         "numeric_stats_by_lab": numeric_stats_by_lab,
         "categorical_stats_by_lab": categorical_stats_by_lab,
+        "concept_code_stats": concept_code_stats,
+    }
+
+
+def compute_statistics(
+    dataset: Dataset, data_args: DataTrainingArguments
+) -> Dict[str, Any]:
+    total = get_dataset_len(dataset)
+    map_statistics_partial = partial(map_statistics, total_size=total, size=SAMPLE_SIZE)
+    if data_args.streaming:
+        first_example = next(iter(dataset))
+        parts = dataset.map(
+            partial(agg_helper, map_func=map_statistics_partial),
+            batched=True,
+            batch_size=data_args.preprocessing_batch_size,
+            remove_columns=first_example.keys(),
+        )
+    else:
+        parts = dataset.map(
+            partial(agg_helper, map_func=map_statistics_partial),
+            batched=True,
+            batch_size=data_args.preprocessing_batch_size,
+            remove_columns=dataset.column_names,
+            num_proc=data_args.preprocessing_num_workers,
+            keep_in_memory=True,
+            new_fingerprint="invalid",
+        )
+    current = None
+    for stat in tqdm(parts, desc="Aggregating the lab statistics"):
+        fixed_stat = pickle.loads(stat["data"])
+        if current is None:
+            current = fixed_stat
+        else:
+            current = agg_statistics(current, fixed_stat)
+
+    numeric_lab_stats = []
+    for (concept_id, unit), online_stats in current["numeric_stats_by_lab"].items():
+        if len(online_stats.samples) == 0:
+            continue
+        samples = truncated_sample(online_stats.samples, data_args.value_outlier_std)
+        bins = create_bins_with_spline(samples, NUM_OF_BINS, DEGREE_OF_FREEDOM)
+        if len(bins) > 0:
+            numeric_lab_stats.append(
+                {
+                    "concept_id": concept_id,
+                    "unit": unit,
+                    "mean": np.mean(samples),
+                    "std": np.std(samples),
+                    "count": len(online_stats.samples),
+                    "value_outlier_std": data_args.value_outlier_std,
+                    "bins": bins,
+                }
+            )
+
+    categorical_lab_stats = collections.defaultdict(int)
+    for (concept_id, value_as_concept), count in current[
+        "categorical_stats_by_lab"
+    ].items():
+        categorical_lab_stats[(concept_id, value_as_concept)] += count
+
+    concept_code_stats = collections.defaultdict(int)
+    for concept_id, count in current["concept_code_stats"].items():
+        concept_code_stats[concept_id] += count
+
+    code_weights = np.asarray(list(concept_code_stats.values())).clip(1e-8, 1 - 1e-8)
+    # Clip the values so we don't get errors when applying np.log
+    code_entropies = np.log(code_weights) * code_weights + (1 - code_weights) * np.log(
+        1 - code_weights
+    )
+
+    concept_code_entropies = {
+        k: v for k, v in zip(concept_code_stats.keys(), code_entropies)
+    }
+
+    return {
+        "numeric_lab_stats": numeric_lab_stats,
+        "categorical_lab_stats": categorical_lab_stats,
+        "concept_code_stats": concept_code_stats,
+        "concept_code_entropies": concept_code_entropies,
+        "total": total,
     }
 
 
@@ -349,15 +460,18 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         value_tokenizer: Tokenizer,
         att_tokenizer: Tokenizer,
         token_to_sub_time_token_mapping: Dict[str, List[str]],
+        concept_code_stats: Dict[str, Any],
         numeric_lab_stats: List[Dict[str, Any]],
         categorical_lab_stats: Dict[Tuple[str, str], int],
         concept_name_mapping: Dict[str, str],
         pretrained_concept_embedding_model: PretrainedEmbeddings = None,
+        motor_time_to_event_codes: Optional[List[str]] = None,
     ):
         self._tokenizer = tokenizer
         self._value_tokenizer = value_tokenizer
         self._att_tokenizer = att_tokenizer
         self._token_to_sub_time_token_mapping = token_to_sub_time_token_mapping
+        self._concept_code_stats = concept_code_stats
         self._numeric_lab_stats = numeric_lab_stats
         self._numeric_event_statistics = NumericEventStatistics(numeric_lab_stats)
         self._categorical_lab_stats = categorical_lab_stats
@@ -389,6 +503,12 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             for _ in self.get_vocab().keys()
             if self._pretrained_concept_embedding_model.is_concept_available(_)
         ]
+        self._motor_time_to_event_codes = (
+            motor_time_to_event_codes if motor_time_to_event_codes else []
+        )
+        self._motor_code_to_id_mapping = {
+            code: i for i, code in enumerate(sorted(self._motor_time_to_event_codes))
+        }
 
         super().__init__()
 
@@ -408,6 +528,10 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                 for _ in self._pretrained_concept_ids
             ]
         )
+
+    @property
+    def motor_tte_vocab_size(self) -> int:
+        return len(self._motor_code_to_id_mapping)
 
     @property
     def vocab_size(self) -> int:
@@ -467,6 +591,27 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             return LINEAR_PROB_TOKEN
         return None
 
+    def vs_token_id(self):
+        # We used VS for the historical data, currently, we use the new [VS] for the newer data
+        # so we need to check both cases.
+        if "VS" in self._tokenizer.get_vocab():
+            return self._convert_token_to_id("VS")
+        elif "[VS]" in self._tokenizer.get_vocab():
+            return self._convert_token_to_id("[VS]")
+        else:
+            raise RuntimeError("The tokenizer does not contain either VS or [VS]")
+
+    @property
+    def ve_token_id(self):
+        # We used VE for the historical data, currently, we use the new [VE] for the newer data
+        # so we need to check both cases.
+        if "VE" in self._tokenizer.get_vocab():
+            return self._convert_token_to_id("VE")
+        elif "[VE]" in self._tokenizer.get_vocab():
+            return self._convert_token_to_id("[VE]")
+        else:
+            raise RuntimeError("The tokenizer does not contain either VE or [VE]")
+
     @property
     def numeric_concept_ids(self):
         return self._numeric_concept_ids
@@ -484,13 +629,16 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             OUT_OF_VOCABULARY_TOKEN,
             LINEAR_PROB_TOKEN,
         ]
-        return self.encode(
+        lab_token_ids = self.encode(
             [
                 concept_id
                 for concept_id in self._numeric_concept_ids
                 + self._categorical_concept_ids
                 if concept_id not in reserved_tokens
             ]
+        )
+        return list(
+            filter(lambda token_id: token_id != self._oov_token_id, lab_token_ids)
         )
 
     @property
@@ -509,6 +657,19 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     @property
     def pretrained_concept_embedding_model(self):
         return self._pretrained_concept_embedding_model
+
+    def get_motor_token_id(self, concept_id: str) -> int:
+        if concept_id not in concept_id:
+            raise RuntimeError(f"Invalid motor concept id: {concept_id}")
+        return self._motor_code_to_id_mapping[concept_id]
+
+    def is_motor_time_to_event_code(self, future_concept_id: str) -> bool:
+        if (
+            self._motor_time_to_event_codes
+            and future_concept_id in self._motor_time_to_event_codes
+        ):
+            return True
+        return False
 
     def get_vocab(self) -> Dict[str, int]:
         return self._tokenizer.get_vocab()
@@ -611,6 +772,9 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         ) as f:
             json.dump(self._token_to_sub_time_token_mapping, f)
 
+        with open(os.path.join(save_directory, CONCEPT_STATS_FILE_NAME), "w") as f:
+            json.dump(self._concept_code_stats, f)
+
         with open(os.path.join(save_directory, LAB_STATS_FILE_NAME), "wb") as f:
             lab_stats = {
                 "numeric_lab_stats": self._numeric_lab_stats,
@@ -620,6 +784,11 @@ class CehrGptTokenizer(PreTrainedTokenizer):
 
         with open(os.path.join(save_directory, CONCEPT_MAPPING_FILE_NAME), "w") as f:
             json.dump(self._concept_name_mapping, f)
+
+        with open(
+            os.path.join(save_directory, MOTOR_TIME_TO_EVENT_CODES_FILE_NAME), "w"
+        ) as f:
+            json.dump(self._motor_time_to_event_codes, f)
 
         self._pretrained_concept_embedding_model.save(save_directory)
 
@@ -730,6 +899,22 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             return None
         concept_name_mapping = load_json_file(concept_name_mapping_file)
 
+        # Load the concept_code_stats json file
+        concept_code_stats_mapping_file = transformers.utils.hub.cached_file(
+            pretrained_model_name_or_path, CONCEPT_STATS_FILE_NAME, **kwargs
+        )
+        if not concept_code_stats_mapping_file:
+            return None
+        concept_code_stats = load_json_file(concept_code_stats_mapping_file)
+
+        # Load the MOTOR time to event codes file
+        motor_time_to_event_codes_file = transformers.utils.hub.cached_file(
+            pretrained_model_name_or_path, MOTOR_TIME_TO_EVENT_CODES_FILE_NAME, **kwargs
+        )
+        if not motor_time_to_event_codes_file:
+            return None
+        motor_time_to_event_codes = load_json_file(motor_time_to_event_codes_file)
+
         pretrained_embedding_model = PretrainedEmbeddings(pretrained_model_name_or_path)
 
         return CehrGptTokenizer(
@@ -737,10 +922,12 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             value_tokenizer,
             att_tokenizer,
             token_to_sub_time_token_mapping,
+            concept_code_stats,
             lab_stats["numeric_lab_stats"],
             lab_stats["categorical_lab_stats"],
             concept_name_mapping,
             pretrained_embedding_model,
+            motor_time_to_event_codes,
         )
 
     @classmethod
@@ -763,6 +950,9 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         concept_name_mapping: Dict[str, str],
         data_args: DataTrainingArguments,
         pretrained_concept_embedding_model: PretrainedEmbeddings = None,
+        num_motor_tasks: Optional[int] = None,
+        apply_entropy_filter: bool = False,
+        min_prevalence: float = 1 / 1000,
     ):
         if not isinstance(cehrgpt_tokenizer, CehrGptTokenizer):
             raise ValueError(
@@ -775,6 +965,9 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             dataset=dataset,
             concept_name_mapping=concept_name_mapping,
             data_args=data_args,
+            num_motor_tasks=num_motor_tasks,
+            apply_entropy_filter=apply_entropy_filter,
+            min_prevalence=min_prevalence,
         )
 
         new_tokens = set(new_tokenizer.get_vocab().keys()) - set(
@@ -792,6 +985,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         new_numeric_lab_stats = new_tokenizer._numeric_lab_stats
         new_categorical_lab_stats = new_tokenizer._categorical_lab_stats
         new_concept_name_mapping = new_tokenizer._concept_name_mapping
+        new_motor_time_to_event_codes = new_tokenizer._motor_time_to_event_codes
 
         # Add new tokens to the existing tokenizer
         cehrgpt_tokenizer_copy._tokenizer.add_tokens(
@@ -840,15 +1034,31 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             if token not in cehrgpt_tokenizer_copy._concept_name_mapping:
                 cehrgpt_tokenizer_copy._concept_name_mapping[token] = concept_name
 
+        # Merge motor_time_to_event_codes
+        if (
+            new_motor_time_to_event_codes
+            and cehrgpt_tokenizer_copy._motor_time_to_event_codes
+        ):
+            for motor_time_to_event_code in new_motor_time_to_event_codes:
+                if (
+                    motor_time_to_event_code
+                    not in cehrgpt_tokenizer_copy._motor_time_to_event_codes
+                ):
+                    cehrgpt_tokenizer_copy._motor_time_to_event_codes.append(
+                        motor_time_to_event_code
+                    )
+
         return CehrGptTokenizer(
             tokenizer=cehrgpt_tokenizer_copy._tokenizer,
             value_tokenizer=cehrgpt_tokenizer_copy._value_tokenizer,
             att_tokenizer=cehrgpt_tokenizer_copy._att_tokenizer,
             token_to_sub_time_token_mapping=cehrgpt_tokenizer_copy._token_to_sub_time_token_mapping,
+            concept_code_stats=cehrgpt_tokenizer_copy._concept_code_stats,
             numeric_lab_stats=cehrgpt_tokenizer_copy._numeric_lab_stats,
             categorical_lab_stats=cehrgpt_tokenizer_copy._categorical_lab_stats,
             concept_name_mapping=cehrgpt_tokenizer_copy._concept_name_mapping,
             pretrained_concept_embedding_model=pretrained_concept_embedding_model,
+            motor_time_to_event_codes=cehrgpt_tokenizer_copy._motor_time_to_event_codes,
         )
 
     @classmethod
@@ -918,6 +1128,10 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         concept_name_mapping: Dict[str, str],
         data_args: DataTrainingArguments,
         pretrained_concept_embedding_model: PretrainedEmbeddings = None,
+        allowed_motor_codes: Optional[List[int]] = None,
+        num_motor_tasks: Optional[int] = None,
+        apply_entropy_filter: bool = False,
+        min_prevalence: float = 1 / 1000,
     ):
         """
         Train a huggingface word level tokenizer.
@@ -929,6 +1143,35 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         if isinstance(dataset, DatasetDict):
             dataset = dataset["train"]
 
+        LOG.info("Calculating data statistics")
+        cehrgpt_data_statistics = compute_statistics(dataset, data_args)
+        cehrgpt_data_statistics["total"]
+        numeric_lab_stats = cehrgpt_data_statistics["numeric_lab_stats"]
+        categorical_lab_stats = cehrgpt_data_statistics["categorical_lab_stats"]
+        concept_code_stats = cehrgpt_data_statistics["concept_code_stats"]
+        concept_code_entropies = cehrgpt_data_statistics["concept_code_entropies"]
+
+        if apply_entropy_filter:
+            min_prevalence = max(1e-8, min_prevalence)
+            min_entropy = (
+                np.log(1 - min_prevalence) * (1 - min_prevalence)
+                + np.log(min_prevalence) * min_prevalence
+            )
+            qualified_codes = [
+                k
+                for k, v in concept_code_entropies.items()
+                if v <= min_entropy
+                or not is_clinical_event(k, data_args.is_data_in_meds)
+            ]
+        else:
+            qualified_codes = [
+                k
+                for k, v in concept_code_stats.items()
+                if min_prevalence <= v
+                or not is_clinical_event(k, data_args.is_data_in_meds)
+            ]
+
+        # Create the tokenizer now
         LOG.info("Training the tokenizer for concepts")
         concept_tokenizer = cls.train_concept_tokenizer(
             dataset,
@@ -942,6 +1185,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             ],
             unk_token=OUT_OF_VOCABULARY_TOKEN,
             data_args=data_args,
+            qualified_codes=qualified_codes,
         )
         concept_value_column = "concept_as_values"
         for row in dataset:
@@ -964,65 +1208,11 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             ]
         )
 
-        map_statistics_partial = partial(map_statistics, size=SAMPLE_SIZE)
-
-        if data_args.streaming:
-            first_example = next(iter(dataset))
-            parts = dataset.map(
-                partial(agg_helper, map_func=map_statistics_partial),
-                batched=True,
-                batch_size=data_args.preprocessing_batch_size,
-                remove_columns=first_example.keys(),
-            )
-        else:
-            parts = dataset.map(
-                partial(agg_helper, map_func=map_statistics_partial),
-                batched=True,
-                batch_size=data_args.preprocessing_batch_size,
-                remove_columns=dataset.column_names,
-                num_proc=data_args.preprocessing_num_workers,
-                keep_in_memory=True,
-                new_fingerprint="invalid",
-            )
-        current = None
-        for stat in tqdm(parts, desc="Aggregating the lab statistics"):
-            fixed_stat = pickle.loads(stat["data"])
-            if current is None:
-                current = fixed_stat
-            else:
-                current = agg_statistics(current, fixed_stat)
-
-        numeric_lab_stats = []
-        for (concept_id, unit), online_stats in current["numeric_stats_by_lab"].items():
-            if len(online_stats.samples) == 0:
-                continue
-            samples = truncated_sample(
-                online_stats.samples, data_args.value_outlier_std
-            )
-            bins = create_bins_with_spline(samples, NUM_OF_BINS, DEGREE_OF_FREEDOM)
-            if len(bins) > 0:
-                numeric_lab_stats.append(
-                    {
-                        "concept_id": concept_id,
-                        "unit": unit,
-                        "mean": np.mean(samples),
-                        "std": np.std(samples),
-                        "count": len(online_stats.samples),
-                        "value_outlier_std": data_args.value_outlier_std,
-                        "bins": bins,
-                    }
-                )
-
-        categorical_lab_stats = collections.defaultdict(int)
-        for (concept_id, value_as_concept), count in current[
-            "categorical_stats_by_lab"
-        ].items():
-            categorical_lab_stats[(concept_id, value_as_concept)] += count
-
         # We will train a tokenizer specifically for time intervals
         sub_time_token_data = []
         token_to_sub_time_token_mapping = collections.defaultdict(list)
-        for token, token_id in concept_tokenizer.get_vocab().items():
+        vocab = concept_tokenizer.get_vocab()
+        for token, token_id in vocab.items():
             if is_att_token(token):
                 time_interval = extract_time_interval_in_days(token)
                 time_tuple = convert_time_interval_to_time_tuple(
@@ -1043,15 +1233,43 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         )
         att_tokenizer.train_from_iterator(sub_time_token_data, trainer=att_trainer)
 
+        # Prune concept_name_mapping
+        concept_name_mapping = {
+            concept_id: concept_name_mapping[concept_id]
+            for concept_id in vocab.keys()
+            if concept_id in concept_name_mapping
+        }
+
+        motor_time_to_event_codes = None
+        if num_motor_tasks and allowed_motor_codes:
+            motor_time_to_event_codes = []
+            for concept_id, _ in sorted(
+                concept_code_entropies.items(), key=lambda t: t[1]
+            ):
+                if (
+                    concept_id not in allowed_motor_codes
+                    or concept_id not in qualified_codes
+                ):
+                    continue
+                if len(motor_time_to_event_codes) < num_motor_tasks:
+                    motor_time_to_event_codes.append(concept_id)
+                else:
+                    break
+            LOG.info(
+                f"{len(motor_time_to_event_codes)} number of tasks have been added as MOTOR tasks"
+            )
+
         return CehrGptTokenizer(
             concept_tokenizer,
             value_tokenizer,
             att_tokenizer,
             token_to_sub_time_token_mapping,
+            concept_code_stats,
             numeric_lab_stats,
             categorical_lab_stats,
             concept_name_mapping,
             pretrained_concept_embedding_model,
+            motor_time_to_event_codes,
         )
 
     @classmethod
@@ -1062,6 +1280,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         special_tokens: List[str],
         unk_token,
         data_args,
+        qualified_codes: Optional[List[str]] = None,
     ):
         # Use the Fast Tokenizer from the Huggingface tokenizers Rust implementation.
         # https://github.com/huggingface/tokenizers
@@ -1074,7 +1293,9 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             show_progress=True,
         )
         batch_concat_concepts_partial_func = partial(
-            cls.batch_concat_concepts, feature_name=feature_name
+            cls.batch_concat_concepts,
+            feature_name=feature_name,
+            qualified_codes=qualified_codes,
         )
         if data_args.streaming:
             concatenated_features = dataset.map(
@@ -1114,13 +1335,30 @@ class CehrGptTokenizer(PreTrainedTokenizer):
 
     @classmethod
     def batch_concat_concepts(
-        cls, records: Dict[str, List], feature_name
+        cls,
+        records: Dict[str, List],
+        feature_name: str,
+        qualified_codes: Optional[List[str]] = None,
     ) -> Dict[str, List]:
+        def filter_token(t: str) -> bool:
+            """
+            If the token is None or not string, return False.
+
+            When qualified_codes is provided, t must be in
+            qualified_codes to be valid, otherwise the tokens are always valid
+
+            :param t:
+            :return:
+            """
+            if t is None or not isinstance(t, str):
+                return False
+            if qualified_codes:
+                return t in qualified_codes
+            return True
+
         return {
             feature_name: [
-                " ".join(
-                    [token for token in tokens if token and isinstance(token, str)]
-                )
+                " ".join(filter(filter_token, tokens))
                 for tokens in records[feature_name]
             ]
         }
