@@ -1394,7 +1394,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
     def motor_nll_loss(
         self,
-        ve_token_features,
+        hidden_states,
         motor_time_to_event_vectors,
         motor_event_indicators,
         motor_time_to_event_to_include,
@@ -1407,7 +1407,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         for modeling time-to-event data at each visit.
 
         Args:
-            ve_token_features (Tensor): Hidden representations for the [VE] tokens [num_visits, hidden_dim].
+            hidden_states (Tensor): Hidden representations for sequence tokens [num_of_concepts, hidden_dim].
             motor_time_to_event_vectors (Tensor): Raw time-to-event durations [B, T, motor_vocab_size] (flattened).
             motor_time_to_event_to_include: (Tensor): Bool indicators (True if included, False if not included).
             motor_event_indicators (Tensor): Binary indicators (1 if censored, 0 if event occurred).
@@ -1425,27 +1425,23 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         motor_event_indicators = motor_event_indicators.reshape(
             (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
         )[:batch_motor_end_index]
-        motor_time_to_event_to_include = motor_time_to_event_to_include.flatten()[
-            :batch_motor_end_index
-        ]
         motor_time_indicators = motor_time_indicators.view(
             (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
         )[:batch_motor_end_index]
-        assert ve_token_features.shape[0] == motor_time_to_event_vectors.shape[0], (
+
+        tte_features = hidden_states[motor_time_to_event_to_include].view(
+            (-1, self.config.n_embd)
+        )
+
+        assert tte_features.shape[0] == motor_time_to_event_vectors.shape[0], (
             "The number of VE tokens in the labels needs to match up "
             "with the first dimension of motor_time_to_event_vectors. "
-            f"Received ve_token_features.shape[0]: {ve_token_features.shape[0]}, "
+            f"Received ve_token_features.shape[0]: {tte_features.shape[0]}, "
             f"motor_time_to_event_vectors.shape[0]: {motor_time_to_event_vectors.shape[0]}"
         )
-        motor_time_to_event_vectors = motor_time_to_event_vectors[
-            motor_time_to_event_to_include
-        ]
-        motor_event_indicators = motor_event_indicators[motor_time_to_event_to_include]
-        motor_time_indicators = motor_time_indicators[motor_time_to_event_to_include]
-        ve_token_features = ve_token_features[motor_time_to_event_to_include]
 
         # Get Exponential parameters from model
-        lambda_p = self.motor_tte(ve_token_features)
+        lambda_p = self.motor_tte(tte_features)
         # (num_visits_in_batch, num_of_pieces, motor_vocab_size)
         dist = Exponential(lambda_p.clamp(min=1e-3))
 
@@ -1617,12 +1613,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 and motor_time_indicators is not None
                 and motor_end_index is not None
             ):
-                ve_token_id_indices = labels == self.config.ve_token_id
-                ve_token_features = hidden_states[ve_token_id_indices]
-                # Get rid of the last VE features because it's already reached the end of the patient sequence and
-                # there is nothing to predict.
                 motor_tte_loss = self.motor_nll_loss(
-                    ve_token_features=ve_token_features,
+                    hidden_states=hidden_states,
                     motor_time_to_event_vectors=motor_time_to_event_vectors,
                     motor_event_indicators=motor_event_indicators,
                     motor_time_to_event_to_include=motor_time_to_event_to_include,

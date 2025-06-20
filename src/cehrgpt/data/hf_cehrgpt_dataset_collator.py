@@ -296,18 +296,11 @@ class CehrGptDataCollator:
                 )
 
                 # Input to indicate whether the visit should be included for TTE predictions
-                batch_motor_time_to_event_to_include = torch.concat(
-                    batch_motor_time_to_event_to_include, dim=0
-                ).to(torch.bool)
                 batch["motor_time_to_event_to_include"] = (
-                    torch.concat(
-                        [
-                            batch_motor_time_to_event_to_include,
-                            torch.full((padded_length,), False),
-                        ],
-                        dim=0,
-                    ).to(torch.bool)
-                ).reshape((batch_size, -1))
+                    torch.concat(batch_motor_time_to_event_to_include, dim=0)
+                    .to(torch.bool)
+                    .reshape((batch_size, -1))
+                )
 
                 # Motor time indicators that indicate whether there are neither clinical events nor censor events
                 batch_motor_time_indicators = torch.concat(
@@ -478,39 +471,37 @@ class CehrGptDataCollator:
             time_to_event_dict: Dict[str, int] = {}
             time_to_event_to_include: List[bool] = []
             next_future_visit_concepts = set()
-            time_interval = 0
 
             # Reverse walk through concept_ids to calculate TTE from each [VE] point
             for concept_id in reversed(concept_ids):
-                if is_visit_end(concept_id):
-                    # Update TTE for existing concepts, or add new ones seen in this visit
-                    for existing_concept_id in list(time_to_event_dict.keys()):
-                        if existing_concept_id in next_future_visit_concepts:
-                            time_to_event_dict[existing_concept_id] = time_interval
+                is_included = False
+                if is_att_token(concept_id):
+                    time_interval = extract_time_interval_in_days(concept_id)
+                    if time_interval > 0:
+                        # Update TTE for existing concepts, or add new ones seen in this visit
+                        for existing_concept_id in list(time_to_event_dict.keys()):
+                            if existing_concept_id in next_future_visit_concepts:
+                                time_to_event_dict[existing_concept_id] = time_interval
+                            else:
+                                time_to_event_dict[existing_concept_id] += time_interval
+
+                        for next_concept_id in next_future_visit_concepts:
+                            if next_concept_id not in time_to_event_dict:
+                                time_to_event_dict[next_concept_id] = time_interval
+
+                        is_included = True
+                        time_to_event_data.append(copy.deepcopy(time_to_event_dict))
+                        # Record the censor time at the end of the visit
+                        if censor_times:
+                            censor_times.append(censor_times[-1] + time_interval)
                         else:
-                            time_to_event_dict[existing_concept_id] += time_interval
-
-                    for next_concept_id in next_future_visit_concepts:
-                        if next_concept_id not in time_to_event_dict:
-                            time_to_event_dict[next_concept_id] = time_interval
-
-                    # If the next visit occurs on the same day as the previous one, we don't want to do TTE for the
-                    # previous visit
-                    time_to_event_to_include.append(time_interval > 0)
-                    time_to_event_data.append(copy.deepcopy(time_to_event_dict))
-                    # Record the censor time at the end of the visit
-                    if censor_times:
-                        censor_times.append(censor_times[-1] + time_interval)
-                    else:
-                        censor_times.append(time_interval)
-                    time_interval = 0
-                    next_future_visit_concepts.clear()
-
-                elif is_att_token(concept_id):
-                    time_interval += extract_time_interval_in_days(concept_id)
+                            censor_times.append(time_interval)
+                        next_future_visit_concepts.clear()
 
                 elif self.tokenizer.is_motor_time_to_event_code(concept_id):
                     next_future_visit_concepts.add(concept_id)
+
+                time_to_event_to_include.append(is_included)
 
             if len(time_to_event_data) == 0:
                 LOG.info(
@@ -525,6 +516,13 @@ class CehrGptDataCollator:
             time_to_event_data.reverse()
             censor_times.reverse()
             time_to_event_to_include.reverse()
+
+            # Shift time_to_event_to_include to left by one because we should make predictions right before
+            # we see the ATT token
+            time_to_event_to_include = time_to_event_to_include[1:] + [False]
+            # We need to add False for the PAD in sample_packing
+            if sample_packing:
+                time_to_event_to_include.append(False)
 
             for censor_time, visit_tte_data in zip(censor_times, time_to_event_data):
                 time_to_event_vector = np.full(
