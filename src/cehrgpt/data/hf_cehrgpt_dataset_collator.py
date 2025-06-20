@@ -605,6 +605,10 @@ class CehrGptDataCollator:
         record["time_to_event_to_include"] = np.concatenate(
             time_to_event_to_includes, axis=0
         )
+
+        assert len(record["time_to_event_to_include"]) == len(
+            packed_concept_ids
+        ), f'len(record["time_to_event_to_include"]) == len(packed_concept_ids) must be true'
         return record
 
     def random_sort(self, record: Dict[str, Any]) -> Dict[str, Any]:
