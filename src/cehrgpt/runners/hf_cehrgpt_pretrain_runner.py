@@ -75,6 +75,12 @@ def load_and_create_tokenizer(
 
     concept_name_mapping = {}
     allowed_motor_codes = list()
+
+    if cehrgpt_args.include_motor_time_to_event and not cehrgpt_args.concept_dir:
+        raise RuntimeError(
+            "concept_dir must be specified if include_motor_time_to_event is True"
+        )
+
     if cehrgpt_args.concept_dir:
         import pandas as pd
         from cehrbert_data.const.artificial_tokens import DEATH_TOKEN
