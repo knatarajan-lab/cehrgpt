@@ -500,13 +500,13 @@ class CehrGptDataCollator:
                 time_to_event_to_include.append(is_included)
 
             if len(time_to_event_data) == 0:
-                LOG.info(
-                    "Vist end event is not detected for this sample, and is skipped for MOTOR tasks."
-                    "It's likely this sample contains a long admission. length: %s, concept_ids[-10:] %s",
+                LOG.debug(
+                    "There are no MOTOR tasks detected for this sample."
+                    "It's likely this sample either contains a long admission or does not "
+                    "have any time intervals greater than 0. length: %s, concept_ids[-10:] %s",
                     len(concept_ids),
                     concept_ids[-10:],
                 )
-                continue
 
             # Reverse back to chronological order for final labels
             time_to_event_data.reverse()
@@ -544,12 +544,12 @@ class CehrGptDataCollator:
 
             time_to_event_vectors = np.asarray(time_to_event_vectors)
             global_event_indicators = np.asarray(global_event_indicators).astype(bool)
-            n_visits = len(time_to_event_vectors)
+            n_tte_predictions = len(time_to_event_vectors)
 
             timepiece_time_to_event_vector = np.full(
                 (
                     self.motor_num_time_pieces,
-                    n_visits,
+                    n_tte_predictions,
                     self.tokenizer.motor_tte_vocab_size,
                 ),
                 fill_value=0,
@@ -558,7 +558,7 @@ class CehrGptDataCollator:
             timepiece_event_indicator = np.zeros(
                 (
                     self.motor_num_time_pieces,
-                    n_visits,
+                    n_tte_predictions,
                     self.tokenizer.motor_tte_vocab_size,
                 ),
                 dtype=bool,
@@ -566,25 +566,26 @@ class CehrGptDataCollator:
             timepiece_indicator = np.zeros(
                 (
                     self.motor_num_time_pieces,
-                    n_visits,
+                    n_tte_predictions,
                     self.tokenizer.motor_tte_vocab_size,
                 ),
                 dtype=bool,
             )
 
-            # Putting the event time and censor time into the corresponding time bins
-            for bin_num in range(self.motor_num_time_pieces):
-                start = self.motor_time_interval * bin_num
-                end = self.motor_time_interval * (bin_num + 1)
-                time_in_bin = np.clip(time_to_event_vectors - start, 0, end - start)
-                timepiece_time_to_event_vector[bin_num] = time_in_bin
-                event_indicator = (
-                    global_event_indicators
-                    & (start <= time_to_event_vectors)
-                    & (time_to_event_vectors < end)
-                )
-                timepiece_event_indicator[bin_num] = event_indicator
-                timepiece_indicator[bin_num] = time_in_bin > 0 | event_indicator
+            if n_tte_predictions > 0:
+                # Putting the event time and censor time into the corresponding time bins
+                for bin_num in range(self.motor_num_time_pieces):
+                    start = self.motor_time_interval * bin_num
+                    end = self.motor_time_interval * (bin_num + 1)
+                    time_in_bin = np.clip(time_to_event_vectors - start, 0, end - start)
+                    timepiece_time_to_event_vector[bin_num] = time_in_bin
+                    event_indicator = (
+                        global_event_indicators
+                        & (start <= time_to_event_vectors)
+                        & (time_to_event_vectors < end)
+                    )
+                    timepiece_event_indicator[bin_num] = event_indicator
+                    timepiece_indicator[bin_num] = time_in_bin > 0 | event_indicator
 
             timepiece_time_to_event_vectors.append(
                 timepiece_time_to_event_vector.swapaxes(0, 1)
