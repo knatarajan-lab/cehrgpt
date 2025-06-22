@@ -1454,7 +1454,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             ),
         )
         tte_loss = torch.where(motor_time_indicators, tte_loss, 0.0)
-        return torch.mean(tte_loss)
+        return torch.sum(tte_loss) / torch.sum(motor_time_indicators)
 
     def forward(
         self,
