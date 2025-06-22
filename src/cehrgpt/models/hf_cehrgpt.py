@@ -34,6 +34,7 @@ from cehrgpt.models.hf_modeling_outputs import (
     CehrGptOutputWithPast,
     CehrGptSequenceClassifierOutput,
 )
+from cehrgpt.models.rmsnorm import RMSNorm
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -370,7 +371,7 @@ class MotorTaskHead(nn.Module):
         self.motor_num_time_pieces = motor_num_time_pieces
         self.linear = nn.Sequential(
             nn.Linear(input_dim, input_dim // 2),
-            gelu_new,
+            RMSNorm(input_dim // 2),
             nn.Linear(
                 input_dim // 2, motor_tte_vocab_size * self.motor_num_time_pieces
             ),
