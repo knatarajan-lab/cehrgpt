@@ -215,52 +215,49 @@ class CehrGptDataCollator:
             examples_with_motor_tte = [
                 self.create_time_to_event_labels(_) for _ in examples
             ]
-            batch_motor_time_to_event_vectors = [
+
+            motor_tte_times = [
                 self._try_reverse_tensor(
-                    self._convert_to_tensor(example["time_to_event_vectors"])
+                    self._convert_to_tensor(example["motor_tte_times"])
                 )
                 for example in examples_with_motor_tte
             ]
-            batch_motor_event_indicators = [
+            motor_tte_event_indicators = [
                 self._try_reverse_tensor(
-                    self._convert_to_tensor(example["event_indicators"])
+                    self._convert_to_tensor(example["motor_tte_event_indicators"])
                 )
                 for example in examples_with_motor_tte
             ]
-            batch_motor_time_to_event_to_include = [
+            motor_tte_label_indicators = [
                 self._try_reverse_tensor(
-                    self._convert_to_tensor(example["time_to_event_to_include"])
+                    self._convert_to_tensor(example["motor_tte_label_indicators"])
                 )
                 for example in examples_with_motor_tte
             ]
-            batch_motor_time_indicators = [
+            motor_tte_masks = [
                 self._try_reverse_tensor(
-                    self._convert_to_tensor(example["time_indicators"])
+                    self._convert_to_tensor(example["motor_tte_masks"])
                 )
                 for example in examples_with_motor_tte
             ]
 
-            batch_motor_time_to_event_vectors = torch.concat(
-                batch_motor_time_to_event_vectors, dim=0
-            ).to(torch.float32)
+            motor_tte_times = torch.concat(motor_tte_times, dim=0).to(torch.float32)
 
             # If every example in the batch only contains one visit, there would be no labels generated for MOTOR TTE
             # we only create the labels when any example has more than one visit
-            if batch_motor_time_to_event_vectors.dim() <= 1:
+            if motor_tte_times.dim() <= 1:
                 LOG.warning(
                     "There are no MOTOR TTE labels generated for this batch "
                     "because every example in this batch only contains one visit."
                 )
             else:
                 batch_size = len(examples)
-                length, num_time_pieces, motor_tte_vocab_size = (
-                    batch_motor_time_to_event_vectors.shape
-                )
+                length, num_time_pieces, motor_tte_vocab_size = motor_tte_times.shape
                 padded_length = batch_size - length % batch_size
-                batch["motor_time_to_event_vectors"] = (
+                batch["motor_tte_times"] = (
                     torch.concat(
                         [
-                            batch_motor_time_to_event_vectors,
+                            motor_tte_times,
                             torch.full(
                                 (padded_length, num_time_pieces, motor_tte_vocab_size),
                                 0.0,
@@ -273,13 +270,12 @@ class CehrGptDataCollator:
                 )
 
                 # Motor event indicators that indicate there is an event occurred in this time interval
-                batch_motor_event_indicators = torch.concat(
-                    batch_motor_event_indicators, dim=0
-                ).to(torch.bool)
-                batch["motor_event_indicators"] = (
+                batch["motor_tte_event_indicators"] = (
                     torch.concat(
                         [
-                            batch_motor_event_indicators,
+                            torch.concat(motor_tte_event_indicators, dim=0).to(
+                                torch.bool
+                            ),
                             torch.full(
                                 (padded_length, num_time_pieces, motor_tte_vocab_size),
                                 False,
@@ -292,20 +288,17 @@ class CehrGptDataCollator:
                 )
 
                 # Input to indicate whether the visit should be included for TTE predictions
-                batch["motor_time_to_event_to_include"] = (
-                    torch.concat(batch_motor_time_to_event_to_include, dim=0)
+                batch["motor_tte_label_indicators"] = (
+                    torch.concat(motor_tte_label_indicators, dim=0)
                     .to(torch.bool)
                     .reshape((batch_size, -1))
                 )
 
                 # Motor time indicators that indicate whether there are neither clinical events nor censor events
-                batch_motor_time_indicators = torch.concat(
-                    batch_motor_time_indicators, dim=0
-                ).to(torch.bool)
-                batch["motor_time_indicators"] = (
+                batch["motor_tte_masks"] = (
                     torch.concat(
                         [
-                            batch_motor_time_indicators,
+                            torch.concat(motor_tte_masks, dim=0).to(torch.bool),
                             torch.full(
                                 (padded_length, num_time_pieces, motor_tte_vocab_size),
                                 False,
@@ -316,7 +309,6 @@ class CehrGptDataCollator:
                     .reshape((batch_size, -1, num_time_pieces, motor_tte_vocab_size))
                     .to(torch.bool)
                 )
-
                 batch["motor_end_index"] = torch.concat(
                     [
                         torch.full((length, 1), 1, dtype=torch.int32),
@@ -449,23 +441,23 @@ class CehrGptDataCollator:
         if len(pad_indices) == 0:
             pad_indices.append(len(packed_concept_ids))
 
-        timepiece_time_to_event_vectors = []
-        timepiece_event_indicators = []
-        timepiece_indicators = []
-        time_to_event_to_includes = []
+        motor_tte_times = []
+        motor_tte_event_indicators = []
+        motor_tte_masks = []
+        motor_tte_label_indicators = []
 
         for start_index, end_index in zip([0] + pad_indices[:-1], pad_indices):
             concept_ids = packed_concept_ids[start_index:end_index]
             if concept_ids[0] == self.tokenizer.pad_token:
                 concept_ids.pop(0)
-            time_to_event_vectors = []
+            time_vectors = []
             global_event_indicators = []
 
             # First collect TTE data in reverse chronological order
             censor_times = []
             time_to_event_data: List[Dict[str, int]] = []
             time_to_event_dict: Dict[str, int] = {}
-            time_to_event_to_include: List[bool] = []
+            motor_tte_label_indicator: List[bool] = []
             next_future_visit_concepts = set()
 
             # Reverse walk through concept_ids to calculate TTE from each [VE] point
@@ -497,7 +489,7 @@ class CehrGptDataCollator:
                 elif self.tokenizer.is_motor_time_to_event_code(concept_id):
                     next_future_visit_concepts.add(concept_id)
 
-                time_to_event_to_include.append(is_included)
+                motor_tte_label_indicator.append(is_included)
 
             if len(time_to_event_data) == 0:
                 LOG.debug(
@@ -511,17 +503,17 @@ class CehrGptDataCollator:
             # Reverse back to chronological order for final labels
             time_to_event_data.reverse()
             censor_times.reverse()
-            time_to_event_to_include.reverse()
+            motor_tte_label_indicator.reverse()
 
             # Shift time_to_event_to_include to left by one because we should make predictions right before
             # we see the ATT token
-            time_to_event_to_include = time_to_event_to_include[1:] + [False]
+            motor_tte_label_indicator = motor_tte_label_indicator[1:] + [False]
             # We need to add False for the PAD in sample_packing
             if sample_packing:
-                time_to_event_to_include.append(False)
+                motor_tte_label_indicator.append(False)
 
             for censor_time, visit_tte_data in zip(censor_times, time_to_event_data):
-                time_to_event_vector = np.full(
+                time_vector = np.full(
                     self.tokenizer.motor_tte_vocab_size,
                     fill_value=censor_time,
                     dtype=np.int32,
@@ -536,17 +528,17 @@ class CehrGptDataCollator:
                 ]
                 visit_tte_values = list(visit_tte_data.values())
 
-                time_to_event_vector[visit_token_ids] = visit_tte_values
+                time_vector[visit_token_ids] = visit_tte_values
                 event_indicator[visit_token_ids] = 1  # not censored (event occurred)
 
-                time_to_event_vectors.append(time_to_event_vector)
+                time_vectors.append(time_vector)
                 global_event_indicators.append(event_indicator)
 
-            time_to_event_vectors = np.asarray(time_to_event_vectors)
+            time_vectors = np.asarray(time_vectors)
             global_event_indicators = np.asarray(global_event_indicators).astype(bool)
-            n_tte_predictions = len(time_to_event_vectors)
+            n_tte_predictions = len(time_vectors)
 
-            timepiece_time_to_event_vector = np.full(
+            motor_tte_time = np.full(
                 (
                     self.motor_num_time_pieces,
                     n_tte_predictions,
@@ -555,7 +547,7 @@ class CehrGptDataCollator:
                 fill_value=0,
                 dtype=np.int32,
             )
-            timepiece_event_indicator = np.zeros(
+            motor_tte_event_indicator = np.zeros(
                 (
                     self.motor_num_time_pieces,
                     n_tte_predictions,
@@ -563,7 +555,7 @@ class CehrGptDataCollator:
                 ),
                 dtype=bool,
             )
-            timepiece_indicator = np.zeros(
+            motor_tte_mask = np.zeros(
                 (
                     self.motor_num_time_pieces,
                     n_tte_predictions,
@@ -577,35 +569,33 @@ class CehrGptDataCollator:
                 for bin_num in range(self.motor_num_time_pieces):
                     start = self.motor_time_interval * bin_num
                     end = self.motor_time_interval * (bin_num + 1)
-                    time_in_bin = np.clip(time_to_event_vectors - start, 0, end - start)
-                    timepiece_time_to_event_vector[bin_num] = time_in_bin
+                    time_in_bin = np.clip(time_vectors - start, 0, end - start)
+                    motor_tte_time[bin_num] = time_in_bin
                     event_indicator = (
                         global_event_indicators
-                        & (start <= time_to_event_vectors)
-                        & (time_to_event_vectors < end)
+                        & (start <= time_vectors)
+                        & (time_vectors < end)
                     )
-                    timepiece_event_indicator[bin_num] = event_indicator
-                    timepiece_indicator[bin_num] = time_in_bin > 0 | event_indicator
+                    motor_tte_event_indicator[bin_num] = event_indicator
+                    motor_tte_mask[bin_num] = time_in_bin > 0 | event_indicator
 
-            timepiece_time_to_event_vectors.append(
-                timepiece_time_to_event_vector.swapaxes(0, 1)
-            )
-            timepiece_event_indicators.append(timepiece_event_indicator.swapaxes(0, 1))
-            timepiece_indicators.append(timepiece_indicator.swapaxes(0, 1))
-            time_to_event_to_includes.append(np.asarray(time_to_event_to_include))
+            motor_tte_times.append(motor_tte_time.swapaxes(0, 1))
+            motor_tte_event_indicators.append(motor_tte_event_indicator.swapaxes(0, 1))
+            motor_tte_masks.append(motor_tte_mask.swapaxes(0, 1))
+            motor_tte_label_indicators.append(np.asarray(motor_tte_label_indicator))
 
-        record["time_to_event_vectors"] = np.concatenate(
-            timepiece_time_to_event_vectors, axis=0
+        record["motor_tte_times"] = np.concatenate(motor_tte_times, axis=0)
+        record["motor_tte_event_indicators"] = np.concatenate(
+            motor_tte_event_indicators, axis=0
         )
-        record["event_indicators"] = np.concatenate(timepiece_event_indicators, axis=0)
-        record["time_indicators"] = np.concatenate(timepiece_indicators, axis=0)
-        record["time_to_event_to_include"] = np.concatenate(
-            time_to_event_to_includes, axis=0
+        record["motor_tte_label_indicators"] = np.concatenate(
+            motor_tte_label_indicators, axis=0
         )
+        record["motor_tte_masks"] = np.concatenate(motor_tte_masks, axis=0)
 
-        assert len(record["time_to_event_to_include"]) == len(
+        assert len(record["motor_tte_label_indicators"]) == len(
             packed_concept_ids
-        ), f'len(record["time_to_event_to_include"]) == len(packed_concept_ids) must be true'
+        ), f'len(record["motor_tte_label_indicators"]) == len(packed_concept_ids) must be true'
         return record
 
     def random_sort(self, record: Dict[str, Any]) -> Dict[str, Any]:
