@@ -1445,9 +1445,13 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         lambda_p = self.motor_tte(tte_features)
 
         # Compute event loss
-        survival_loss = torch.where(
-            motor_tte_masks, lambda_p * motor_tte_times, 0
-        ).mean()
+        # Calculate the accumulative hazard
+        # exp(-sum_{j} lambda_j)
+        survival_loss = (
+            torch.where(motor_tte_masks, lambda_p * motor_tte_times, 0)
+            .sum(dim=1)
+            .mean()
+        )
         event_loss = -torch.where(
             motor_tte_event_indicators, torch.log(lambda_p), 0
         ).mean()
