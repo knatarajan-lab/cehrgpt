@@ -659,7 +659,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         return self._pretrained_concept_embedding_model
 
     def get_motor_token_id(self, concept_id: str) -> int:
-        if concept_id not in concept_id:
+        if not self.is_motor_time_to_event_code(concept_id):
             raise RuntimeError(f"Invalid motor concept id: {concept_id}")
         return self._motor_code_to_id_mapping[concept_id]
 
