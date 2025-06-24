@@ -1452,9 +1452,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             .sum(dim=1)
             .mean()
         )
-        event_loss = -torch.where(
-            motor_tte_event_indicators, torch.log(lambda_p), 0
-        ).mean()
+        event_loss = (
+            -torch.where(motor_tte_event_indicators, torch.log(lambda_p), 0)
+            .sum(dim=1)
+            .mean()
+        )
         return survival_loss + event_loss
 
     def forward(
