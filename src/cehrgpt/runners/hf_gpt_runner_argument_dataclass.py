@@ -162,6 +162,12 @@ class CehrGPTArguments:
             "help": "A threshold to denote how much the specified metric must improve to satisfy early stopping conditions."
         },
     )
+    apply_rotary: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to use rotary encoder layers"
+        },
+    )
     sample_packing: Optional[bool] = dataclasses.field(
         default=False,
         metadata={
