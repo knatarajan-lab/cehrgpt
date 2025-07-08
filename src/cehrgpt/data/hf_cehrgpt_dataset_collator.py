@@ -926,6 +926,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         current_input_ids = []
         current_attention_mask = []
         current_position_ids = []
+        current_ages = []
         current_value_indicators = []
         current_values = []
 
@@ -980,7 +981,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 )
             )
 
-            current_prediction_ages.extend(
+            current_ages.extend(
                 list(example["ages"]) + ([0, 0] if add_eos_token else [0])
             )
 
@@ -1013,7 +1014,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
             "input_ids": current_input_ids,
             "attention_mask": current_attention_mask,
             "position_ids": current_position_ids,
-            "ages": current_prediction_ages,
+            "ages": current_ages,
         }
         if self.include_values:
             packed_example.update({"value_indicators": current_value_indicators})
