@@ -44,6 +44,7 @@ CEHRGPT_COLUMNS = [
     "concept_values",
     "units",
     "epoch_times",
+    "ages",
 ]
 
 
