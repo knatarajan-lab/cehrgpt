@@ -35,6 +35,7 @@ CEHRGPT_COLUMNS = [
     "is_numeric_types",
     "concept_values",
     "units",
+    "ages",
 ]
 
 

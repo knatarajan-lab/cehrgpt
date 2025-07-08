@@ -161,6 +161,23 @@ class CehrGptDataCollator:
             f"batch['input_ids']: {batch['input_ids']} "
         )
 
+        if "ages" in examples[0]:
+            batch_ages = [
+                self._try_reverse_tensor(self._convert_to_tensor(example["ages"]))
+                for example in examples
+            ]
+            # Pad sequences to the max length in the batch
+            batch["ages"] = torch.clip(
+                self._try_reverse_tensor(
+                    pad_sequence(
+                        batch_ages,
+                        batch_first=True,
+                        padding_value=0,
+                    ).to(torch.int64)
+                ),
+                min=0,
+            )
+
         if "position_ids" in examples[0]:
             batch_position_ids = [
                 self._try_reverse_tensor(
@@ -963,7 +980,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         current_index_dates = []
 
         # Binary classification inputs
-        current_ages = []
+        current_prediction_ages = []
         current_labels = []
 
         for idx, example in enumerate(examples):
@@ -1008,6 +1025,11 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                     self.max_position_embeddings - 1,
                 )
             )
+
+            current_prediction_ages.extend(
+                list(example["ages"]) + ([0, 0] if add_eos_token else [0])
+            )
+
             if self.include_values:
                 current_value_indicators.extend(
                     list(example["value_indicators"]) + [False] * num_tokens_to_pad
@@ -1024,7 +1046,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 current_index_dates.append(example["index_date"])
 
             if "age_at_index" in example:
-                current_ages.append(example["age_at_index"])
+                current_prediction_ages.append(example["age_at_index"])
 
             if "classifier_label" in example:
                 current_labels.append(example["classifier_label"])
@@ -1037,6 +1059,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
             "input_ids": current_input_ids,
             "attention_mask": current_attention_mask,
             "position_ids": current_position_ids,
+            "ages": current_prediction_ages,
         }
         if self.include_values:
             packed_example.update({"value_indicators": current_value_indicators})
@@ -1047,7 +1070,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 {
                     "person_id": current_person_ids,
                     "index_date": current_index_dates,
-                    "age_at_index": current_ages,
+                    "age_at_index": current_prediction_ages,
                     "classifier_label": current_labels,
                 }
             )
