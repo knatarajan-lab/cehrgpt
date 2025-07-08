@@ -213,6 +213,7 @@ def load_and_create_model(
             n_pretrained_embeddings_layers=cehrgpt_args.n_pretrained_embeddings_layers,
             use_pretrained_embeddings=len(tokenizer.pretrained_token_ids) > 0,
             pretrained_embedding_dim=pretrained_embedding_dim,
+            apply_rotary=cehrgpt_args.apply_rotary,
             sample_packing_max_positions=(
                 cehrgpt_args.max_tokens_per_batch
                 if cehrgpt_args.sample_packing
