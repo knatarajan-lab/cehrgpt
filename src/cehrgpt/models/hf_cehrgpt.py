@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as f
 from torch import nn
-from torch.distributions import Exponential, Gamma
+from torch.distributions import Gamma
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
 from transformers import PreTrainedModel
@@ -153,6 +153,27 @@ def _get_unpad_data(attention_mask):
         cu_seqlens,
         max_seqlen_in_batch,
     )
+
+
+class RotaryPositionEmbedding(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.dim = dim
+        self.inv_freq = 1.0 / (10000 ** (torch.linspace(0, 2, steps=dim // 2))).reshape(
+            1, 1, dim // 2
+        )
+
+    def forward(self, x: torch.Tensor, time: torch.Tensor) -> torch.Tensor:
+        if time.ndim == 2:
+            time = time[..., None]
+        t = self.inv_freq * time
+        sin, cos = torch.sin(t), torch.cos(t)
+        sin = torch.stack((sin, sin), dim=-1).reshape(x.shape)
+        cos = torch.stack((cos, cos), dim=-1).reshape(x.shape)
+        flat_x = x.reshape(-1, x.shape[-1])
+        x1 = flat_x[:, ::2]
+        x2 = flat_x[:, 1::2]
+        return (x * cos) + (torch.stack((-x2, x1), dim=-1).reshape(x.shape) * sin)
 
 
 class GPT2FlashAttention(GPT2Attention):
@@ -1927,6 +1948,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # sample
             probs = nn.functional.softmax(next_token_scores, dim=-1)
             next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+
+            # TODO: decode to get time tokens and recalculate the age at this time step
 
             # finished sentences should have their next token be a padding token
             if eos_token_id is not None:
