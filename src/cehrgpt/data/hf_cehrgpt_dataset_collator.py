@@ -315,11 +315,11 @@ class CehrGptDataCollator:
                 )
 
                 # Input to indicate whether the visit should be included for TTE predictions
-                batch["motor_tte_label_indicators"] = (
-                    torch.concat(motor_tte_label_indicators, dim=0)
-                    .to(torch.bool)
-                    .reshape((batch_size, -1))
-                )
+                batch["motor_tte_label_indicators"] = pad_sequence(
+                    motor_tte_label_indicators,
+                    batch_first=True,
+                    padding_value=False,
+                ).to(torch.bool)
 
                 # Motor time indicators that indicate whether there are neither clinical events nor censor events
                 batch["motor_tte_masks"] = (
