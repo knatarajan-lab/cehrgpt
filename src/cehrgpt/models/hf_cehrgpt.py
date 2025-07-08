@@ -184,9 +184,18 @@ class GPT2FlashAttention(GPT2Attention):
     calls the public API of flash attention and handles padding tokens.
     """
 
+    def __init__(
+        self, config, is_cross_attention=False, layer_idx=None, apply_rotary=False
+    ):
+        super().__init__(config, is_cross_attention, layer_idx)
+        self.apply_rotary = apply_rotary
+        if self.apply_rotary:
+            self.rope = RotaryPositionEmbedding(config.hidden_size)
+
     def forward(
         self,
         hidden_states: Optional[Tuple[torch.FloatTensor]],
+        position_ids: Optional[Tuple[torch.FloatTensor]] = None,
         layer_past: Optional[Tuple[torch.Tensor]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
@@ -214,6 +223,10 @@ class GPT2FlashAttention(GPT2Attention):
         query = self._split_heads(query, self.num_heads, self.head_dim)
         key = self._split_heads(key, self.num_heads, self.head_dim)
         value = self._split_heads(value, self.num_heads, self.head_dim)
+
+        if self.apply_rotary and position_ids is not None:
+            query = self.rope(query, position_ids)
+            key = self.rope(key, position_ids)
 
         if layer_past is not None:
             past_key, past_value = layer_past
@@ -764,12 +777,23 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 self.embed_dim
             )
 
+        if (
+            self.config.apply_rotary
+            and not getattr(config, "_attn_implementation", "eager")
+            == "flash_attention_2"
+        ):
+            raise RuntimeError(
+                "Rotary embeddings are only supported for flash attention, please set apply_rotary=False"
+            )
+
         self.drop = nn.Dropout(config.embd_pdrop)
         gpt_blocks = []
         for i in range(config.num_hidden_layers):
             gpt_block = GPT2Block(config, layer_idx=i)
             if getattr(config, "_attn_implementation", "eager") == "flash_attention_2":
-                gpt_block.attn = GPT2FlashAttention(config, layer_idx=i)
+                gpt_block.attn = GPT2FlashAttention(
+                    config, layer_idx=i, apply_rotary=self.config.apply_rotary
+                )
                 gpt_block.is_causal = True
             gpt_blocks.append(gpt_block)
         self.h = nn.ModuleList(gpt_blocks)
@@ -929,6 +953,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
+        ages: Optional[torch.LongTensor] = None,
         random_vectors: Optional[torch.FloatTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
@@ -1131,12 +1156,12 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                     attention_mask = attention_mask.to(hidden_states.device)
                 if isinstance(head_mask, torch.Tensor):
                     head_mask = head_mask.to(hidden_states.device)
+
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
             if self.gradient_checkpointing and self.training:
-                outputs = self._gradient_checkpointing_func(
-                    block.__call__,
+                block_inputs = (
                     hidden_states,
                     None,
                     attention_mask,
@@ -1146,7 +1171,15 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                     use_cache,
                     output_attentions,
                 )
+                if isinstance(block, GPT2FlashAttention):
+                    block_inputs = block_inputs[:1] + (ages,) + block_inputs[1:]
+                outputs = self._gradient_checkpointing_func(
+                    block.__call__, *block_inputs
+                )
             else:
+                additional_keyword_args = {}
+                if isinstance(block, GPT2FlashAttention):
+                    additional_keyword_args["position_ids"] = ages
                 outputs = block(
                     hidden_states,
                     layer_past=layer_past,
@@ -1156,6 +1189,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                     encoder_attention_mask=None,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
+                    **additional_keyword_args,
                 )
 
             hidden_states = outputs[0]
