@@ -121,7 +121,6 @@ class GPT2AttentionRoPE(GPT2Attention):
         super().__init__(config, is_cross_attention, layer_idx)
         self.apply_rotary = apply_rotary
         if self.apply_rotary:
-            logger.info("Initialize Rotary Position Embedding")
             self.rope = RotaryPositionEmbedding(config.hidden_size)
 
     def forward(
@@ -205,7 +204,6 @@ class GPT2FlashAttention(GPT2Attention):
         super().__init__(config, is_cross_attention, layer_idx)
         self.apply_rotary = apply_rotary
         if self.apply_rotary:
-            logger.info("Initialize Rotary Position Embedding")
             self.rope = RotaryPositionEmbedding(config.hidden_size)
 
     def forward(
