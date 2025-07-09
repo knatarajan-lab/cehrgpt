@@ -1092,8 +1092,19 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             ]
             if random_vectors is None:
                 random_vectors = torch.rand_like(input_embeddings[:, :1])
+
             input_embeddings = torch.concat(
                 [demographic_embeddings, random_vectors, medical_event_embeddings],
+                dim=1,
+            )
+            position_ids = torch.concat(
+                [
+                    position_ids[:, : self.config.demographics_size],
+                    torch.zeros_like(position_ids[:, :1], dtype=position_ids.dtype).to(
+                        position_ids.device
+                    ),
+                    position_ids[:, self.config.demographics_size :],
+                ],
                 dim=1,
             )
 

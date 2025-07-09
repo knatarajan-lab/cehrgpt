@@ -29,7 +29,7 @@ from datasets.formatting.formatting import LazyBatch
 from dateutil.relativedelta import relativedelta
 from pandas import Series
 
-from cehrgpt.gpt_utils import encode_demographics
+from cehrgpt.gpt_utils import encode_demographics, multiple_of_10
 from cehrgpt.models.tokenization_hf_cehrgpt import (
     NONE_BIN,
     UNKNOWN_BIN,
@@ -47,6 +47,9 @@ CEHRGPT_COLUMNS = [
     "epoch_times",
     "ages",
     "position_ids",
+    "ages",
+    "genders",
+    "races",
 ]
 
 
@@ -434,13 +437,22 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         race_id = self._concept_tokenizer.encode_race(race)
         record["races"] = np.full(len(record["concept_ids"]), race_id)
         record["position_ids"] = [
-            encode_demographics(age=age, race=race_id, gender=gender_id)
+            encode_demographics(
+                age=age,
+                race=race_id,
+                gender=gender_id,
+                max_race=multiple_of_10(self._concept_tokenizer.race_size),
+                max_gender=multiple_of_10(self._concept_tokenizer.gender_size),
+            )
             for age in np.clip(record["ages"], a_min=0, a_max=200)
         ]
         assert len(record["input_ids"]) == len(record["concept_ids"]), (
             "The number of tokens must equal to the number of concepts\n"
             f"decoded concept_ids: {self._concept_tokenizer.decode(record['input_ids'], skip_special_tokens=False)}"
         )
+        assert len(record["input_ids"]) == len(
+            record["position_ids"]
+        ), "The number of tokens must equal to the number of positions\n"
         record["value_indicators"] = record["concept_value_masks"]
         if "number_as_values" not in record or "concept_as_values" not in record:
             record["number_as_values"] = [
