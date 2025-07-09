@@ -113,6 +113,8 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "none",
             "--include_motor_time_to_event",
             "true",
+            "--exclude_position_ids",
+            "true",
         ]
         train_main()
         # Teacher force the prompt to consist of [year][age][gender][race][VS] then inject the random vector before [VS]
