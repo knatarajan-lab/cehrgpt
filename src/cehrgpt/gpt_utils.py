@@ -147,6 +147,10 @@ class RandomSampleCache:
         return self._cache.pop()
 
 
+def multiple_of_10(n: int) -> int:
+    return ((n // 10) + 1) * 10
+
+
 def encode_demographics(
     age: int, gender: int, race: int, max_age=200, max_gender=10, max_race=10
 ) -> int:
