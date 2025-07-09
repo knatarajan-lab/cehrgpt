@@ -227,6 +227,7 @@ class GPT2FlashAttention(GPT2Attention):
         if self.apply_rotary and position_ids is not None:
             query = self.rope(query, position_ids)
             key = self.rope(key, position_ids)
+            value = self.rope(value, position_ids)
 
         if layer_past is not None:
             past_key, past_value = layer_past
