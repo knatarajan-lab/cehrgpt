@@ -21,6 +21,7 @@ from datasets.formatting.formatting import LazyBatch
 from dateutil.relativedelta import relativedelta
 from pandas import Series
 
+from cehrgpt.gpt_utils import encode_demographics
 from cehrgpt.models.tokenization_hf_cehrgpt import (
     NONE_BIN,
     UNKNOWN_BIN,
@@ -382,10 +383,21 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         return record
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
+
+        # Getting gender and race to the record
+        gender, race = record["concept_ids"][2:4]
         # Remove the tokens from patient sequences that do not exist in the tokenizer
         record = self.filter_out_invalid_tokens(record)
         # If any concept has a value associated with it, we normalize the value
         record["input_ids"] = self._concept_tokenizer.encode(record["concept_ids"])
+        gender_id = self._concept_tokenizer.encode_gender(gender)
+        record["genders"] = np.full(len(record["concept_ids"]), gender_id)
+        race_id = self._concept_tokenizer.encode_race(race)
+        record["races"] = np.full(len(record["concept_ids"]), race_id)
+        record["position_ids"] = [
+            encode_demographics(age=age, race=race_id, gender=gender_id)
+            for age in np.clip(record["ages"], a_min=0, a_max=200)
+        ]
         assert len(record["input_ids"]) == len(record["concept_ids"]), (
             "The number of tokens must equal to the number of concepts\n"
             f"decoded concept_ids: {self._concept_tokenizer.decode(record['input_ids'], skip_special_tokens=False)}"
