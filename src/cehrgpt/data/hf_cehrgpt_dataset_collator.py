@@ -13,7 +13,6 @@ from cehrgpt.gpt_utils import (
     extract_time_interval_in_days,
     is_att_token,
     is_inpatient_att_token,
-    is_visit_end,
     random_slice_gpt_sequence,
 )
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
@@ -161,38 +160,18 @@ class CehrGptDataCollator:
             f"batch['input_ids']: {batch['input_ids']} "
         )
 
-        if "ages" in examples[0]:
-            batch_ages = [
-                self._try_reverse_tensor(self._convert_to_tensor(example["ages"]))
-                for example in examples
-            ]
-            # Pad sequences to the max length in the batch
-            batch["ages"] = torch.clip(
-                self._try_reverse_tensor(
-                    pad_sequence(
-                        batch_ages,
-                        batch_first=True,
-                        padding_value=0,
-                    ).to(torch.int64)
-                ),
-                min=0,
-            )
-
-        if "position_ids" in examples[0]:
-            batch_position_ids = [
-                self._try_reverse_tensor(
-                    self._convert_to_tensor(example["position_ids"])
-                )
-                for example in examples
-            ]
-            # Pad sequences to the max length in the batch
-            batch["position_ids"] = self._try_reverse_tensor(
-                pad_sequence(
-                    batch_position_ids,
-                    batch_first=True,
-                    padding_value=0,
-                ).to(torch.int64)
-            )
+        batch_position_ids = [
+            self._try_reverse_tensor(self._convert_to_tensor(example["position_ids"]))
+            for example in examples
+        ]
+        # Pad sequences to the max length in the batch
+        batch["position_ids"] = self._try_reverse_tensor(
+            pad_sequence(
+                batch_position_ids,
+                batch_first=True,
+                padding_value=0,
+            ).to(torch.int64)
+        )
 
         if self.pretraining:
             batch["labels"] = torch.where(
@@ -745,6 +724,12 @@ class CehrGptDataCollator:
                         self._convert_to_tensor([eos_token]),
                     ]
                 )
+                record["position_ids"] = torch.concat(
+                    [
+                        self._convert_to_tensor(record["position_ids"]),
+                        self._convert_to_tensor([0]),
+                    ]
+                )
                 if self.include_values:
                     record["value_indicators"] = torch.concat(
                         [
@@ -779,6 +764,9 @@ class CehrGptDataCollator:
                 record["input_ids"] = self._convert_to_tensor(
                     record["input_ids"][start_index : end_index + 1]
                 )
+                record["position_ids"] = self._convert_to_tensor(
+                    record["position_ids"][start_index : end_index + 1]
+                )
                 if self.include_values:
                     record["value_indicators"] = self._convert_to_tensor(
                         record["value_indicators"][start_index : end_index + 1]
@@ -790,8 +778,6 @@ class CehrGptDataCollator:
                     record["time_to_visits"] = self._convert_to_tensor(
                         self._convert_time_to_event(
                             concept_ids[start_index : end_index + 1]
-                        )
-                    )
                 return record
 
             # The default employs a right truncation strategy, where the demographic prompt is reserved
@@ -804,13 +790,12 @@ class CehrGptDataCollator:
                     break
 
             record["input_ids"] = record["input_ids"][0:end_index]
-
+            record["position_ids"] = self._convert_to_tensor(
+                record["position_ids"][0:end_index]
+            )
             # We want to make sure we take the subset of attention_mask in sample packing if this field is available
             if sample_packing and "attention_mask" in record:
                 record["attention_mask"] = record["attention_mask"][0:end_index]
-
-            if sample_packing and "position_ids" in record:
-                record["position_ids"] = record["position_ids"][0:end_index]
 
             if self.include_values:
                 record["value_indicators"] = self._convert_to_tensor(
@@ -844,6 +829,17 @@ class CehrGptDataCollator:
                                 ),
                             ]
                         )
+                        record["position_ids"] = torch.concat(
+                            [
+                                torch.zeros(
+                                    [DEMOGRAPHIC_PROMPT_SIZE], dtype=torch.float32
+                                ),
+                                self._convert_to_tensor(
+                                    record["position_ids"][token_index:seq_length]
+                                ),
+                            ]
+                        )
+
                         if self.include_values:
                             record["value_indicators"] = torch.concat(
                                 [
@@ -888,12 +884,12 @@ class CehrGptDataCollator:
                     current_token = record["input_ids"][i]
                     if current_token == self.vs_token_id:
                         record["input_ids"] = record["input_ids"][i:end_index]
+                        record["position_ids"] = record["position_ids"][i:end_index]
                         if sample_packing and "attention_mask" in record:
                             record["attention_mask"] = record["attention_mask"][
                                 i:end_index
                             ]
-                        if sample_packing and "position_ids" in record:
-                            record["position_ids"] = record["position_ids"][i:end_index]
+
                         if self.include_values:
                             record["value_indicators"] = record["value_indicators"][
                                 i:end_index
@@ -909,12 +905,13 @@ class CehrGptDataCollator:
             # We simply take the last new_max_length number of tokens from the patient sequence
             if len(record["input_ids"]) > new_max_length:
                 record["input_ids"] = record["input_ids"][-new_max_length:]
+                record["position_ids"] = self._convert_to_tensor(
+                    record["position_ids"][-new_max_length:]
+                )
                 if sample_packing and "attention_mask" in record:
                     record["attention_mask"] = record["attention_mask"][
                         -new_max_length:
                     ]
-                if sample_packing and "position_ids" in record:
-                    record["position_ids"] = record["position_ids"][-new_max_length:]
                 if self.include_values:
                     record["value_indicators"] = record["value_indicators"][
                         -new_max_length:
@@ -931,6 +928,12 @@ class CehrGptDataCollator:
                     [
                         self._convert_to_tensor(record["input_ids"]),
                         self._convert_to_tensor([eos_token]),
+                    ]
+                )
+                record["position_ids"] = torch.concat(
+                    [
+                        self._convert_to_tensor(record["position_ids"]),
+                        self._convert_to_tensor([0]),
                     ]
                 )
                 if self.include_values:
@@ -972,7 +975,6 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         current_input_ids = []
         current_attention_mask = []
         current_position_ids = []
-        current_ages = []
         current_value_indicators = []
         current_values = []
 
@@ -1027,10 +1029,6 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 )
             )
 
-            current_ages.extend(
-                list(example["ages"]) + ([0, 0] if add_eos_token else [0])
-            )
-
             if self.include_values:
                 current_value_indicators.extend(
                     list(example["value_indicators"]) + [False] * num_tokens_to_pad
@@ -1060,7 +1058,6 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
             "input_ids": current_input_ids,
             "attention_mask": current_attention_mask,
             "position_ids": current_position_ids,
-            "ages": current_ages,
         }
         if self.include_values:
             packed_example.update({"value_indicators": current_value_indicators})

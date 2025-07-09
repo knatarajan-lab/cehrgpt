@@ -147,6 +147,15 @@ class RandomSampleCache:
         return self._cache.pop()
 
 
+def encode_demographics(
+    age: int, gender: int, race: int, max_age=200, max_gender=10, max_race=10
+) -> int:
+    assert 0 <= age < max_age
+    assert 0 <= gender < max_gender
+    assert 0 <= race < max_race
+    return age + max_age * gender + max_age * max_gender * race
+
+
 def collect_demographic_prompts_at_visits(patient_history: List[str]):
     demographic_prompts_at_visits = []
     start_year, start_age, start_gender, start_race = patient_history[

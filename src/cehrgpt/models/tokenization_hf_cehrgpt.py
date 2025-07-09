@@ -19,6 +19,7 @@ from tokenizers import AddedToken, Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
 from tokenizers.trainers import WordLevelTrainer
+from torch.fx.experimental.migrate_gradual_types.operation import op_eq
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer
 from transformers.utils import logging
@@ -52,6 +53,7 @@ TOKEN_TO_SUB_TIME_TOKEN_MAPPING_FILE_NAME = "token_to_sub_time_token_mapping.jso
 LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.pickle"
 LEGACY_LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.json"
 CONCEPT_STATS_FILE_NAME = "cehrgpt_concept_stats.json"
+DEMOGRAPHICS_STATS_FILE_NAME = "demographics_stats.json"
 CONCEPT_MAPPING_FILE_NAME = "concept_name_mapping.json"
 MOTOR_TIME_TO_EVENT_CODES_FILE_NAME = "motor_time_to_event_codes.json"
 
@@ -211,6 +213,10 @@ def agg_statistics(stats1, stats2):
     if stats1.get("concept_code_stats"):
         for concept_id, weight in stats2["concept_code_stats"].items():
             stats1["concept_code_stats"][concept_id] += weight
+    if stats1.get("gender_list"):
+        stats1.get("gender_list").update(stats2.get("gender_list"))
+    if stats1.get("race_list"):
+        stats1.get("race_list").update(stats2.get("race_list"))
     return stats1
 
 
@@ -239,6 +245,8 @@ def map_statistics(batch: Dict[str, Any], total_size, size=10_000) -> Dict[str, 
     numeric_stats_by_lab = collections.defaultdict(partial(ReservoirSampler, size=size))
     categorical_stats_by_lab = collections.defaultdict(int)
     concept_code_stats = collections.defaultdict(int)
+    gender_list = set()
+    race_list = set()
     for (
         concept_ids,
         number_as_values,
@@ -252,6 +260,11 @@ def map_statistics(batch: Dict[str, Any], total_size, size=10_000) -> Dict[str, 
         batch["concept_value_masks"],
         batch_value_units,
     ):
+        # Collecting demographics
+        gender, race = concept_ids[2:4]
+        gender_list.add(gender)
+        race_list.add(race)
+
         unique_codes = set()
         for (
             concept_id,
@@ -280,6 +293,8 @@ def map_statistics(batch: Dict[str, Any], total_size, size=10_000) -> Dict[str, 
         "numeric_stats_by_lab": numeric_stats_by_lab,
         "categorical_stats_by_lab": categorical_stats_by_lab,
         "concept_code_stats": concept_code_stats,
+        "gender_list": gender_list,
+        "race_list": race_list,
     }
 
 
@@ -358,6 +373,8 @@ def compute_statistics(
         "categorical_lab_stats": categorical_lab_stats,
         "concept_code_stats": concept_code_stats,
         "concept_code_entropies": concept_code_entropies,
+        "gender_list": current["gender_list"],
+        "race_list": current["race_list"],
         "total": total,
     }
 
@@ -466,6 +483,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         concept_name_mapping: Dict[str, str],
         pretrained_concept_embedding_model: PretrainedEmbeddings = None,
         motor_time_to_event_codes: Optional[List[str]] = None,
+        gender_map: Optional[Dict[str, int]] = None,
+        race_map: Optional[Dict[str, int]] = None,
     ):
         self._tokenizer = tokenizer
         self._value_tokenizer = value_tokenizer
@@ -509,7 +528,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         self._motor_code_to_id_mapping = {
             code: i for i, code in enumerate(sorted(self._motor_time_to_event_codes))
         }
-
+        self._gender_map = gender_map if gender_map else {}
+        self._race_map = race_map if race_map else {}
         super().__init__()
 
     @property
@@ -709,6 +729,12 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             concept_value_token_ids, skip_special_tokens=skip_special_tokens
         ).split(" ")
 
+    def encode_gender(self, gender: str) -> int:
+        return self._gender_map.get(gender, 0)
+
+    def encode_race(self, race: str) -> int:
+        return self._race_map.get(race, 0)
+
     def add_token(self, tokens: Union[str, List[str]]) -> None:
         if isinstance(tokens, str):
             tokens = [tokens]
@@ -791,6 +817,17 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                 "categorical_lab_stats": self._categorical_lab_stats,
             }
             pickle.dump(lab_stats, f)
+
+        with open(
+            os.path.join(save_directory, DEMOGRAPHICS_STATS_FILE_NAME), "wb"
+        ) as f:
+            pickle.dump(
+                {
+                    "gender_map": self._gender_map,
+                    "race_map": self._race_map,
+                },
+                f,
+            )
 
         with open(os.path.join(save_directory, CONCEPT_MAPPING_FILE_NAME), "w") as f:
             json.dump(self._concept_name_mapping, f)
@@ -901,6 +938,17 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             with open(lab_stats_file, "rb") as file:
                 lab_stats = pickle.load(file)
 
+        # Load the demographics stats json file
+        demographics_stats_file = transformers.utils.hub.cached_file(
+            pretrained_model_name_or_path, DEMOGRAPHICS_STATS_FILE_NAME, **kwargs
+        )
+
+        if not demographics_stats_file:
+            return None
+
+        with open(demographics_stats_file, "rb") as file:
+            demographics_stats = pickle.load(file)
+
         # Load the concept_name json file
         concept_name_mapping_file = transformers.utils.hub.cached_file(
             pretrained_model_name_or_path, CONCEPT_MAPPING_FILE_NAME, **kwargs
@@ -938,6 +986,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             concept_name_mapping,
             pretrained_embedding_model,
             motor_time_to_event_codes,
+            demographics_stats["gender_map"],
+            demographics_stats["race_map"],
         )
 
     @classmethod
@@ -1058,6 +1108,18 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                         motor_time_to_event_code
                     )
 
+        for gender in new_tokenizer._gender_map.keys():
+            if gender not in cehrgpt_tokenizer_copy._gender_map:
+                cehrgpt_tokenizer_copy._gender_map[gender] = len(
+                    cehrgpt_tokenizer_copy._gender_map
+                )
+
+        for race in new_tokenizer._race_map.keys():
+            if race not in cehrgpt_tokenizer_copy._race_map:
+                cehrgpt_tokenizer_copy._race_map[race] = len(
+                    cehrgpt_tokenizer_copy._race_map
+                )
+
         return CehrGptTokenizer(
             tokenizer=cehrgpt_tokenizer_copy._tokenizer,
             value_tokenizer=cehrgpt_tokenizer_copy._value_tokenizer,
@@ -1069,6 +1131,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             concept_name_mapping=cehrgpt_tokenizer_copy._concept_name_mapping,
             pretrained_concept_embedding_model=pretrained_concept_embedding_model,
             motor_time_to_event_codes=cehrgpt_tokenizer_copy._motor_time_to_event_codes,
+            gender_map=cehrgpt_tokenizer_copy._gender_map,
+            race_map=cehrgpt_tokenizer_copy._race_map,
         )
 
     @classmethod
@@ -1155,7 +1219,6 @@ class CehrGptTokenizer(PreTrainedTokenizer):
 
         LOG.info("Calculating data statistics")
         cehrgpt_data_statistics = compute_statistics(dataset, data_args)
-        cehrgpt_data_statistics["total"]
         numeric_lab_stats = cehrgpt_data_statistics["numeric_lab_stats"]
         categorical_lab_stats = cehrgpt_data_statistics["categorical_lab_stats"]
         concept_code_stats = cehrgpt_data_statistics["concept_code_stats"]
@@ -1269,6 +1332,15 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                 f"{len(motor_time_to_event_codes)} number of tasks have been added as MOTOR tasks"
             )
 
+        gender_map = {
+            gender: i + 1
+            for i, gender in enumerate(sorted(cehrgpt_data_statistics["gender_list"]))
+        }
+        race_map = {
+            race: i + 1
+            for i, race in enumerate(sorted(cehrgpt_data_statistics["race_list"]))
+        }
+
         return CehrGptTokenizer(
             concept_tokenizer,
             value_tokenizer,
@@ -1280,6 +1352,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             concept_name_mapping,
             pretrained_concept_embedding_model,
             motor_time_to_event_codes,
+            gender_map,
+            race_map,
         )
 
     @classmethod
