@@ -43,6 +43,7 @@ CEHRGPT_COLUMNS = [
     "position_ids",
     "genders",
     "races",
+    "ages",
 ]
 
 
@@ -392,6 +393,8 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
 
         # Getting gender and race to the record
         gender, race = record["concept_ids"][2:4]
+        # Reconstruct the ages input before the filter is applied
+        record["ages"] = construct_age_sequence(record["concept_ids"])
         # Remove the tokens from patient sequences that do not exist in the tokenizer
         record = self.filter_out_invalid_tokens(record)
 
@@ -401,7 +404,6 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         record["genders"] = np.full(len(record["concept_ids"]), gender_id)
         race_id = self._concept_tokenizer.encode_race(race)
         record["races"] = np.full(len(record["concept_ids"]), race_id)
-        record["ages"] = construct_age_sequence(record["concept_ids"])
         record["position_ids"] = [
             encode_demographics(
                 age=age,
