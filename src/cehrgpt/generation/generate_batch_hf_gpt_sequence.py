@@ -116,7 +116,7 @@ def extract_output_from_model_response(
 
 def generate_single_batch(
     model: CEHRGPT2LMHeadModel,
-    tokenizer: CehrGptTokenizer,
+    cehrgpt_tokenizer: CehrGptTokenizer,
     prompts: List[List[int]],
     max_new_tokens=512,
     mini_num_of_concepts=1,
@@ -155,11 +155,11 @@ def generate_single_batch(
         results = model.generate(
             inputs=batched_prompts,
             generation_config=generation_config,
-            lab_token_ids=tokenizer.lab_token_ids,
+            cehrgpt_tokenizer=cehrgpt_tokenizer,
         )
 
     return extract_output_from_model_response(
-        results, tokenizer, skip_special_tokens=False
+        results, cehrgpt_tokenizer, skip_special_tokens=False
     )
 
 

@@ -3,6 +3,8 @@ import re
 from collections.abc import Iterable
 from datetime import date, timedelta
 from typing import Dict, Generic, List, Optional, Sequence, Tuple, TypeVar, Union
+import numpy as np
+from transformers.utils import logging
 
 from cehrgpt.cehrgpt_args import SamplingStrategy
 from cehrgpt.models.special_tokens import (
@@ -19,6 +21,7 @@ from cehrgpt.models.special_tokens import (
 MEDS_CODE_PATTERN = re.compile(r".*/.*")
 INPATIENT_ATT_PATTERN = re.compile(r"(?:VS-|i-)D(\d+)(?:-VE)?")
 DEMOGRAPHIC_PROMPT_SIZE = 4
+logger = logging.get_logger("transformers")
 
 # Define type variables at the module level
 K = TypeVar("K")
@@ -147,20 +150,31 @@ class RandomSampleCache:
         return self._cache.pop()
 
 
-def construct_age_sequence(concept_ids: List[str]) -> List[int]:
+def construct_age_sequence(
+    concept_ids: List[str], ages: Optional[List[int]] = None
+) -> List[int]:
     age_token = concept_ids[1]
-    assert age_token.lower().startswith(
-        "age"
-    ), f"The second token is not a valid age token. The first 4 tokens are: {concept_ids[:4]}"
-    age_str = age_token.split(":")[1]
-    assert age_str.isnumeric(), f"age_str: {age_str}"
-    ages = []
-    time_delta = 0
-    for concept_id in concept_ids:
-        if is_att_token(concept_id):
-            time_delta += extract_time_interval_in_days(concept_id)
-        ages.append(int(age_str) + time_delta // 365)
-    return ages
+    if age_token.lower().startswith("age"):
+        age_str = age_token.split(":")[1]
+        assert age_str.isnumeric(), f"age_str: {age_str}"
+        ages = []
+        time_delta = 0
+        for concept_id in concept_ids:
+            if is_att_token(concept_id):
+                time_delta += extract_time_interval_in_days(concept_id)
+            ages.append(int(age_str) + time_delta // 365)
+        return ages
+    elif ages is not None:
+        return ages
+    else:
+        logger.warning(
+            "The second token is not a valid age token. The first 4 tokens are: %s. "
+            "Trying to fall back to ages, but it is not valid either %s. "
+            "Fall back to a zero vector [0, 0, 0, ...., 0]",
+            concept_ids[:4],
+            ages,
+        )
+        return np.zeros_like(concept_ids, dtype=int).tolist()
 
 
 def multiple_of_10(n: int) -> int:

@@ -394,7 +394,9 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         # Getting gender and race to the record
         gender, race = record["concept_ids"][2:4]
         # Reconstruct the ages input before the filter is applied
-        record["ages"] = construct_age_sequence(record["concept_ids"])
+        record["ages"] = construct_age_sequence(
+            record["concept_ids"], record.get("ages", None)
+        )
         # Remove the tokens from patient sequences that do not exist in the tokenizer
         record = self.filter_out_invalid_tokens(record)
 
