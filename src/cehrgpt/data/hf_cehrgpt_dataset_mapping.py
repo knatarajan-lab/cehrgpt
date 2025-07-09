@@ -431,29 +431,19 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
 
         # Getting gender and race to the record
-        gender, race = record["concept_ids"][2:4]
-        # Reconstruct the ages input before the filter is applied
+        # gender, race = record["concept_ids"][2:4]
+        # # Reconstruct the ages input before the filter is applied
         record["ages"] = construct_age_sequence(record["concept_ids"])
         # Remove the tokens from patient sequences that do not exist in the tokenizer
         record = self.filter_out_invalid_tokens(record)
 
         # If any concept has a value associated with it, we normalize the value
         record["input_ids"] = self._concept_tokenizer.encode(record["concept_ids"])
-        gender_id = self._concept_tokenizer.encode_gender(gender)
-        record["genders"] = np.full(len(record["concept_ids"]), gender_id)
-        race_id = self._concept_tokenizer.encode_race(race)
-        record["races"] = np.full(len(record["concept_ids"]), race_id)
-        record["position_ids"] = [
-            encode_demographics(
-                age=age,
-                race=race_id,
-                gender=gender_id,
-                max_age=200,
-                max_race=multiple_of_10(self._concept_tokenizer.race_size),
-                max_gender=multiple_of_10(self._concept_tokenizer.gender_size),
-            )
-            for age in np.clip(record["ages"], a_min=0, a_max=120)
-        ]
+        # gender_id = self._concept_tokenizer.encode_gender(gender)
+        # record["genders"] = np.full(len(record["concept_ids"]), gender_id)
+        # race_id = self._concept_tokenizer.encode_race(race)
+        # record["races"] = np.full(len(record["concept_ids"]), race_id)
+        record["position_ids"] = np.clip(record["ages"], a_min=0, a_max=120)
         assert len(record["input_ids"]) == len(record["concept_ids"]), (
             "The number of tokens must equal to the number of concepts\n"
             f"decoded concept_ids: {self._concept_tokenizer.decode(record['input_ids'], skip_special_tokens=False)}"
