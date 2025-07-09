@@ -953,7 +953,6 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        ages: Optional[torch.LongTensor] = None,
         random_vectors: Optional[torch.FloatTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
@@ -1172,14 +1171,14 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                     output_attentions,
                 )
                 if isinstance(block, GPT2FlashAttention):
-                    block_inputs = block_inputs[:1] + (ages,) + block_inputs[1:]
+                    block_inputs = block_inputs[:1] + (position_ids,) + block_inputs[1:]
                 outputs = self._gradient_checkpointing_func(
                     block.__call__, *block_inputs
                 )
             else:
                 additional_keyword_args = {}
                 if isinstance(block, GPT2FlashAttention):
-                    additional_keyword_args["position_ids"] = ages
+                    additional_keyword_args["position_ids"] = position_ids
                 outputs = block(
                     hidden_states,
                     layer_past=layer_past,
@@ -1522,7 +1521,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        ages: Optional[torch.LongTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
         random_vectors: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
@@ -1558,7 +1556,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             past_key_values=past_key_values,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            ages=ages,
             random_vectors=random_vectors,
             head_mask=head_mask,
             use_cache=use_cache,
