@@ -249,9 +249,9 @@ class CehrGptDataCollator:
                 )
                 for example in examples_with_motor_tte
             ]
-            motor_tte_label_indicators = [
+            motor_tte_task_indicators = [
                 self._try_reverse_tensor(
-                    self._convert_to_tensor(example["motor_tte_label_indicators"])
+                    self._convert_to_tensor(example["motor_tte_task_indicators"])
                 )
                 for example in examples_with_motor_tte
             ]
@@ -309,8 +309,8 @@ class CehrGptDataCollator:
                 )
 
                 # Input to indicate whether the visit should be included for TTE predictions
-                batch["motor_tte_label_indicators"] = pad_sequence(
-                    motor_tte_label_indicators,
+                batch["motor_tte_task_indicators"] = pad_sequence(
+                    motor_tte_task_indicators,
                     batch_first=True,
                     padding_value=False,
                 ).to(torch.bool)
@@ -465,7 +465,7 @@ class CehrGptDataCollator:
         motor_tte_times = []
         motor_tte_event_indicators = []
         motor_tte_masks = []
-        motor_tte_label_indicators = []
+        motor_tte_task_indicators = []
 
         for start_index, end_index in zip([0] + pad_indices[:-1], pad_indices):
             concept_ids = packed_concept_ids[start_index:end_index]
@@ -603,20 +603,20 @@ class CehrGptDataCollator:
             motor_tte_times.append(motor_tte_time.swapaxes(0, 1))
             motor_tte_event_indicators.append(motor_tte_event_indicator.swapaxes(0, 1))
             motor_tte_masks.append(motor_tte_mask.swapaxes(0, 1))
-            motor_tte_label_indicators.append(np.asarray(motor_tte_label_indicator))
+            motor_tte_task_indicators.append(np.asarray(motor_tte_label_indicator))
 
         record["motor_tte_times"] = np.concatenate(motor_tte_times, axis=0)
         record["motor_tte_event_indicators"] = np.concatenate(
             motor_tte_event_indicators, axis=0
         )
-        record["motor_tte_label_indicators"] = np.concatenate(
-            motor_tte_label_indicators, axis=0
+        record["motor_tte_task_indicators"] = np.concatenate(
+            motor_tte_task_indicators, axis=0
         )
         record["motor_tte_masks"] = np.concatenate(motor_tte_masks, axis=0)
 
-        assert len(record["motor_tte_label_indicators"]) == len(
+        assert len(record["motor_tte_task_indicators"]) == len(
             packed_concept_ids
-        ), f'len(record["motor_tte_label_indicators"]) == len(packed_concept_ids) must be true'
+        ), f'len(record["motor_tte_task_indicators"]) == len(packed_concept_ids) must be true'
         return record
 
     def random_sort(self, record: Dict[str, Any]) -> Dict[str, Any]:
