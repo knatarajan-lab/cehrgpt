@@ -1510,7 +1510,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         hidden_states,
         motor_tte_times,
         motor_tte_event_indicators,
-        motor_tte_label_indicators,
+        motor_tte_task_indicators,
         motor_tte_masks,
         motor_end_index,
     ):
@@ -1522,7 +1522,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         Args:
             hidden_states (Tensor): Hidden representations for sequence tokens [num_of_concepts, hidden_dim].
             motor_tte_times (Tensor): Raw time-to-event durations [B, T, motor_vocab_size] (flattened).
-            motor_tte_label_indicators: (Tensor): Bool indicators (True if included, False if not included).
+            motor_tte_task_indicators: (Tensor): Bool indicators (True if included, False if not included).
             motor_tte_event_indicators (Tensor): Binary indicators (1 if censored, 0 if event occurred).
             motor_tte_masks (Tensor): Binary indicators whether the prediction should be masked
             (1 if not masked, 0 if masked).
@@ -1542,7 +1542,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
         )[:motor_end_index]
 
-        tte_features = hidden_states[motor_tte_label_indicators].view(
+        tte_features = hidden_states[motor_tte_task_indicators].view(
             (-1, self.config.n_embd)
         )
 
@@ -1592,7 +1592,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         sub_time_tokens: Optional[torch.LongTensor] = None,
         motor_tte_times: Optional[torch.FloatTensor] = None,
         motor_tte_event_indicators: Optional[torch.BoolTensor] = None,
-        motor_tte_label_indicators: Optional[torch.BoolTensor] = None,
+        motor_tte_task_indicators: Optional[torch.BoolTensor] = None,
         motor_tte_masks: Optional[torch.BoolTensor] = None,
         motor_end_index: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
@@ -1730,7 +1730,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 self.config.include_motor_time_to_event
                 and motor_tte_times is not None
                 and motor_tte_event_indicators is not None
-                and motor_tte_label_indicators is not None
+                and motor_tte_task_indicators is not None
                 and motor_tte_masks is not None
                 and motor_end_index is not None
             ):
@@ -1738,7 +1738,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     hidden_states=hidden_states,
                     motor_tte_times=motor_tte_times,
                     motor_tte_event_indicators=motor_tte_event_indicators,
-                    motor_tte_label_indicators=motor_tte_label_indicators,
+                    motor_tte_task_indicators=motor_tte_task_indicators,
                     motor_tte_masks=motor_tte_masks,
                     motor_end_index=motor_end_index,
                 )
