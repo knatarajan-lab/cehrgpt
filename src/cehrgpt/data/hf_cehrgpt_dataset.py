@@ -24,6 +24,9 @@ CEHRGPT_COLUMNS = [
     "values",
     "value_indicators",
     "position_ids",
+    "ages",
+    "genders",
+    "races",
 ]
 
 TRANSFORMER_COLUMNS = ["input_ids"]
