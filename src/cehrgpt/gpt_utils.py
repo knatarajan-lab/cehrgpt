@@ -147,6 +147,18 @@ class RandomSampleCache:
         return self._cache.pop()
 
 
+def construct_age_sequence(concept_ids: List[str]) -> List[int]:
+    age_str = concept_ids[1].split(":")[1]
+    assert age_str.isnumeric(), f"age_str: {age_str}"
+    ages = []
+    time_delta = 0
+    for concept_id in concept_ids:
+        if is_att_token(concept_id):
+            time_delta += extract_time_interval_in_days(concept_id)
+        ages.append(int(age_str) + time_delta // 365)
+    return ages
+
+
 def multiple_of_10(n: int) -> int:
     return ((n // 10) + 1) * 10
 
