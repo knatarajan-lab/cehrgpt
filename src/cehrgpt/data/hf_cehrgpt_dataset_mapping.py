@@ -29,7 +29,11 @@ from datasets.formatting.formatting import LazyBatch
 from dateutil.relativedelta import relativedelta
 from pandas import Series
 
-from cehrgpt.gpt_utils import encode_demographics, multiple_of_10
+from cehrgpt.gpt_utils import (
+    construct_age_sequence,
+    encode_demographics,
+    multiple_of_10,
+)
 from cehrgpt.models.tokenization_hf_cehrgpt import (
     NONE_BIN,
     UNKNOWN_BIN,
@@ -47,7 +51,6 @@ CEHRGPT_COLUMNS = [
     "epoch_times",
     "ages",
     "position_ids",
-    "ages",
     "genders",
     "races",
 ]
@@ -430,13 +433,14 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         gender, race = record["concept_ids"][2:4]
         # Remove the tokens from patient sequences that do not exist in the tokenizer
         record = self.filter_out_invalid_tokens(record)
+
         # If any concept has a value associated with it, we normalize the value
         record["input_ids"] = self._concept_tokenizer.encode(record["concept_ids"])
         gender_id = self._concept_tokenizer.encode_gender(gender)
         record["genders"] = np.full(len(record["concept_ids"]), gender_id)
         race_id = self._concept_tokenizer.encode_race(race)
         record["races"] = np.full(len(record["concept_ids"]), race_id)
-        assert not pd.isna(record["ages"]).any(), f"record[ages]: {record['ages']}"
+        record["ages"] = construct_age_sequence(record["concept_ids"])
         record["position_ids"] = [
             encode_demographics(
                 age=age,
