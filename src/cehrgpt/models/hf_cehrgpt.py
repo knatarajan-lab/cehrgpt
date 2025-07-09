@@ -18,11 +18,7 @@ from transformers.generation.stopping_criteria import (
 from transformers.generation.streamers import BaseStreamer
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.pytorch_utils import Conv1D
-from transformers.utils import (
-    is_accelerate_available,
-    is_flash_attn_2_available,
-    logging,
-)
+from transformers.utils import is_flash_attn_2_available, logging
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 
 from cehrgpt.gpt_utils import (
@@ -50,7 +46,7 @@ def extract_features_from_packed_sequence(
     attention_mask: torch.Tensor,
 ) -> torch.Tensor:
     max_index = attention_mask.nonzero(as_tuple=False).flatten()[-1]
-    padded_attention_mask = F.pad(attention_mask[:, : max_index + 1], (0, 1))
+    padded_attention_mask = f.pad(attention_mask[:, : max_index + 1], (0, 1))
     feature_indices = torch.nonzero(padded_attention_mask == 0)[:, 1] - 1
     return hidden_state[:, feature_indices]
 
