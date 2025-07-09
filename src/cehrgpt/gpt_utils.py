@@ -63,7 +63,11 @@ class RandomSampleCache:
 
 
 def construct_age_sequence(concept_ids: List[str]) -> List[int]:
-    age_str = concept_ids[1].split(":")[1]
+    age_token = concept_ids[1]
+    assert age_token.lower().startswith(
+        "age"
+    ), f"The second token is not a valid age token. The first 4 tokens are: {concept_ids[:4]}"
+    age_str = age_token.split(":")[1]
     assert age_str.isnumeric(), f"age_str: {age_str}"
     ages = []
     time_delta = 0
