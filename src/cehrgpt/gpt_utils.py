@@ -69,9 +69,9 @@ def multiple_of_10(n: int) -> int:
 def encode_demographics(
     age: int, gender: int, race: int, max_age=200, max_gender=10, max_race=10
 ) -> int:
-    assert 0 <= age < max_age
-    assert 0 <= gender < max_gender
-    assert 0 <= race < max_race
+    assert 0 <= age < max_age, f"age: {age}"
+    assert 0 <= gender < max_gender, f"gender: {gender}"
+    assert 0 <= race < max_race, f"race: {race}"
     return age + max_age * gender + max_age * max_gender * race
 
 
