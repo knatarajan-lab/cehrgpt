@@ -566,6 +566,16 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         return self._att_tokenizer.get_vocab_size()
 
     @property
+    def gender_size(self) -> int:
+        # Plus one for the unknown
+        return len(self._gender_map) + 1
+
+    @property
+    def race_size(self) -> int:
+        # Plus one for the unknown
+        return len(self._race_map) + 1
+
+    @property
     def pad_value_token_id(self):
         return self._padding_value_token_id
 
