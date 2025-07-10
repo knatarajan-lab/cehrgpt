@@ -51,8 +51,6 @@ CEHRGPT_COLUMNS = [
     "epoch_times",
     "ages",
     "position_ids",
-    "genders",
-    "races",
     "ages",
 ]
 
@@ -442,9 +440,9 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         # If any concept has a value associated with it, we normalize the value
         record["input_ids"] = self._concept_tokenizer.encode(record["concept_ids"])
         gender_id = self._concept_tokenizer.encode_gender(gender)
-        record["genders"] = np.full(len(record["concept_ids"]), gender_id)
+        record["gender"] = gender_id
         race_id = self._concept_tokenizer.encode_race(race)
-        record["races"] = np.full(len(record["concept_ids"]), race_id)
+        record["racer"] = race_id
         record["position_ids"] = [
             encode_demographics(
                 age=age,

@@ -28,8 +28,8 @@ CEHRGPT_COLUMNS = [
     "genders",
     "races",
     "position_ids",
-    "genders",
-    "races",
+    "gender",
+    "race",
     "ages",
 ]
 
