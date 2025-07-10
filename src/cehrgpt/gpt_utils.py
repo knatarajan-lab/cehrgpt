@@ -69,9 +69,10 @@ class RandomSampleCache:
 def construct_age_sequence(
     concept_ids: List[str], ages: Optional[List[int]] = None
 ) -> List[int]:
-    age_token = concept_ids[1]
-    if age_token.lower().startswith("age"):
-        age_str = age_token.split(":")[1]
+    if ages is not None:
+        return ages
+    elif concept_ids[1].lower().startswith("age"):
+        age_str = concept_ids[1].split(":")[1]
         assert age_str.isnumeric(), f"age_str: {age_str}"
         ages = []
         time_delta = 0
@@ -79,8 +80,6 @@ def construct_age_sequence(
             if is_att_token(concept_id):
                 time_delta += extract_time_interval_in_days(concept_id)
             ages.append(int(age_str) + time_delta // 365)
-        return ages
-    elif ages is not None:
         return ages
     else:
         logger.warning(

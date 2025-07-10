@@ -404,17 +404,18 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         record["gender"] = gender_id
         race_id = self._concept_tokenizer.encode_race(race)
         record["racer"] = race_id
-        record["position_ids"] = [
-            encode_demographics(
-                age=age,
-                race=race_id,
-                gender=gender_id,
-                max_age=200,
-                max_race=multiple_of_10(self._concept_tokenizer.race_size),
-                max_gender=multiple_of_10(self._concept_tokenizer.gender_size),
-            )
-            for age in np.clip(record["ages"], a_min=0, a_max=120)
-        ]
+        record["position_ids"] = np.clip(record["ages"], a_min=0, a_max=120)
+        # record["position_ids"] = [
+        #     encode_demographics(
+        #         age=age,
+        #         race=race_id,
+        #         gender=gender_id,
+        #         max_age=200,
+        #         max_race=multiple_of_10(self._concept_tokenizer.race_size),
+        #         max_gender=multiple_of_10(self._concept_tokenizer.gender_size),
+        #     )
+        #     for age in np.clip(record["ages"], a_min=0, a_max=120)
+        # ]
         assert len(record["input_ids"]) == len(record["concept_ids"]), (
             "The number of tokens must equal to the number of concepts\n"
             f"decoded concept_ids: {self._concept_tokenizer.decode(record['input_ids'], skip_special_tokens=False)}"
