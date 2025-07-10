@@ -187,6 +187,13 @@ done < "$TEMP_COHORT_LIST"
 while read -r cohort_name; do
     cohort_dir="$OUTPUT_DIR/$cohort_name"
     output_dir="$cohort_dir/$MODEL_NAME"
+    metrics_file="$output_dir/logistic/metrics.json"
+
+    # Check if metrics file exists to determine if cohort has been processed
+    if [ -f "$metrics_file" ]; then
+        log "Skipping cohort $cohort_name: metrics file already exists at $metrics_file"
+        continue
+    fi
 
     log "===================================================="
     log "Processing cohort: $cohort_name"
@@ -208,7 +215,7 @@ while read -r cohort_name; do
         --preprocessing_num_workers \"$PREPROCESSING_WORKERS\" \
         --per_device_eval_batch_size \"$BATCH_SIZE\" \
         --max_tokens_per_batch \"$MAX_TOKENS_PER_BATCH\" \
-        --torch_type \"$TORCH_TYPE\""
+        --torch_dtype \"$TORCH_TYPE\""
 
     # Add sample packing flag if not disabled
     if [ "$DISABLE_SAMPLE_PACKING" = "false" ]; then
