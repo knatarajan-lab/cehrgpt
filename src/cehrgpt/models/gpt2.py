@@ -154,7 +154,7 @@ class GPT2AttentionRoPE(GPT2Attention):
         if self.apply_rotary and position_ids is not None:
             query = self.rope(query, position_ids)
             key = self.rope(key, position_ids)
-            value = self.rope(value, position_ids)
+            # value = self.rope(value, position_ids)
 
         query = self._split_heads(query, self.num_heads, self.head_dim)
         key = self._split_heads(key, self.num_heads, self.head_dim)
@@ -238,7 +238,7 @@ class GPT2FlashAttention(GPT2Attention):
         if self.apply_rotary and position_ids is not None:
             query = self.rope(query, position_ids)
             key = self.rope(key, position_ids)
-            value = self.rope(value, position_ids)
+            # value = self.rope(value, position_ids)
 
         query = self._split_heads(query, self.num_heads, self.head_dim)
         key = self._split_heads(key, self.num_heads, self.head_dim)
