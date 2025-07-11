@@ -1092,18 +1092,19 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             for ages, race_id, gender_id in zip(
                 batched_ages, batched_race, batched_gender
             ):
-                position_ids = [
-                    encode_demographics(
-                        age=age,
-                        race=race_id,
-                        gender=gender_id,
-                        max_age=200,
-                        max_race=multiple_of_10(tokenizer.race_size),
-                        max_gender=multiple_of_10(tokenizer.gender_size),
-                    )
-                    for age in np.clip(ages, a_min=0, a_max=120)
-                ]
-                batched_position_ids.append(position_ids)
+                batched_position_ids.append(np.clip(ages, a_min=0, a_max=120).tolist())
+                # position_ids = [
+                #     encode_demographics(
+                #         age=age,
+                #         race=race_id,
+                #         gender=gender_id,
+                #         max_age=200,
+                #         max_race=multiple_of_10(tokenizer.race_size),
+                #         max_gender=multiple_of_10(tokenizer.gender_size),
+                #     )
+                #     for age in np.clip(ages, a_min=0, a_max=120)
+                # ]
+                # batched_position_ids.append(position_ids)
             return torch.tensor(batched_position_ids)
         return None
 
