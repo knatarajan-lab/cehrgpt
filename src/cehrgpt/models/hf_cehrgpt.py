@@ -28,6 +28,7 @@ from cehrgpt.gpt_utils import (
     is_att_token,
     multiple_of_10,
 )
+from cehrgpt.models.activations import RMSNorm
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.gpt2 import GPT2Block, is_sample_pack
 from cehrgpt.models.hf_modeling_outputs import (
@@ -36,7 +37,6 @@ from cehrgpt.models.hf_modeling_outputs import (
     CehrGptOutputWithPast,
     CehrGptSequenceClassifierOutput,
 )
-from cehrgpt.models.rmsnorm import RMSNorm
 
 logger = logging.get_logger(__name__)
 
@@ -464,7 +464,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             gpt_block.is_causal = True
             gpt_blocks.append(gpt_block)
         self.h = nn.ModuleList(gpt_blocks)
-        self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        self.ln_f = RMSNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 
         # Model parallel
         self.model_parallel = False
