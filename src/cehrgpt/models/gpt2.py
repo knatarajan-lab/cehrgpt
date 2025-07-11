@@ -3,8 +3,10 @@ from typing import Optional, Tuple, Union
 import torch.nn.functional as f
 import torch.utils.checkpoint
 from torch import nn
-from transformers.models.gpt2.modeling_gpt2 import GPT2MLP, GPT2Attention
+from transformers.models.gpt2.modeling_gpt2 import Conv1D, GPT2Attention
 from transformers.utils import is_flash_attn_2_available, logging
+
+from cehrgpt.models.activations import RMSNorm, SwiGLU
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -413,6 +415,25 @@ class GPT2FlashAttention(GPT2Attention):
         )
 
 
+class GPT2MLP(nn.Module):
+    def __init__(self, intermediate_size, config):
+        super().__init__()
+        embed_dim = config.hidden_size
+        self.c_fc = Conv1D(intermediate_size, embed_dim)
+        self.c_proj = Conv1D(embed_dim, intermediate_size)
+        self.act = SwiGLU(intermediate_size)
+        self.dropout = nn.Dropout(config.resid_pdrop)
+
+    def forward(
+        self, hidden_states: Optional[Tuple[torch.FloatTensor]]
+    ) -> torch.FloatTensor:
+        hidden_states = self.c_fc(hidden_states)
+        hidden_states = self.act(hidden_states)
+        hidden_states = self.c_proj(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        return hidden_states
+
+
 class GPT2Block(nn.Module):
     def __init__(self, config, layer_idx=None):
         super().__init__()
@@ -423,19 +444,17 @@ class GPT2Block(nn.Module):
             if getattr(config, "_attn_implementation", "eager") == "flash_attention_2"
             else GPT2AttentionRoPE
         )
-        self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
+        self.ln_1 = RMSNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.attn = attention_class(
             config=config, layer_idx=layer_idx, apply_rotary=config.apply_rotary
         )
-        self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
+        self.ln_2 = RMSNorm(hidden_size, eps=config.layer_norm_epsilon)
 
         if config.add_cross_attention:
             self.crossattention = attention_class(
                 config=config, is_cross_attention=True, layer_idx=layer_idx
             )
-            self.ln_cross_attn = nn.LayerNorm(
-                hidden_size, eps=config.layer_norm_epsilon
-            )
+            self.ln_cross_attn = RMSNorm(hidden_size, eps=config.layer_norm_epsilon)
 
         self.mlp = GPT2MLP(inner_dim, config)
 
