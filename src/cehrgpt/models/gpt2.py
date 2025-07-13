@@ -3,6 +3,7 @@ from typing import Optional, Tuple, Union
 import torch.nn.functional as f
 import torch.utils.checkpoint
 from torch import nn
+from transformers.activations import ACT2FN
 from transformers.models.gpt2.modeling_gpt2 import Conv1D, GPT2Attention
 from transformers.utils import is_flash_attn_2_available, logging
 
@@ -421,7 +422,10 @@ class GPT2MLP(nn.Module):
         embed_dim = config.hidden_size
         self.c_fc = Conv1D(intermediate_size, embed_dim)
         self.c_proj = Conv1D(embed_dim, intermediate_size)
-        self.act = SwiGLU(intermediate_size)
+        if config.activation_function == "swiglu":
+            self.act = SwiGLU(intermediate_size=intermediate_size)
+        else:
+            self.act = ACT2FN[config.activation_function]
         self.dropout = nn.Dropout(config.resid_pdrop)
 
     def forward(

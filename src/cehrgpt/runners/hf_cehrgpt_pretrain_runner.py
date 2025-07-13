@@ -20,7 +20,7 @@ from cehrbert.runners.runner_util import (
     load_parquet_as_dataset,
 )
 from datasets import Dataset, DatasetDict, IterableDatasetDict, load_from_disk
-from transformers import EarlyStoppingCallback, Trainer, TrainingArguments, set_seed
+from transformers import EarlyStoppingCallback, Trainer, set_seed
 from transformers.trainer_utils import is_main_process
 from transformers.utils import is_flash_attn_2_available, logging
 
@@ -194,6 +194,7 @@ def load_and_create_model(
         model_args_cehrgpt = model_args.as_dict()
         model_args_cehrgpt.pop("attn_implementation")
         model_config = CEHRGPTConfig(
+            activation_function=cehrgpt_args.activation_function,
             vocab_size=tokenizer.vocab_size,
             value_vocab_size=tokenizer.value_vocab_size,
             time_token_vocab_size=tokenizer.time_token_vocab_size,
