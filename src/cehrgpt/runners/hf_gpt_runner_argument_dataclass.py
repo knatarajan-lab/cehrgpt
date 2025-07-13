@@ -1,11 +1,19 @@
 import dataclasses
-from typing import List, Optional
+from typing import List, Literal, Optional
+
+from cehrgpt.models.gpt2 import ACT2FN
 
 
 @dataclasses.dataclass
 class CehrGPTArguments:
     """Arguments pertaining to what data we are going to input our model for training and eval."""
 
+    activation_function: Literal[tuple(ACT2FN.keys()) + ("swiglu",)] = (
+        dataclasses.field(
+            default="gelu_new",
+            metadata={"help": "The activation function to use"},
+        )
+    )
     include_inpatient_hour_token: Optional[bool] = dataclasses.field(
         default=True,
         metadata={"help": "Include inpatient hour token"},

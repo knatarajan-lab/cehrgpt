@@ -211,6 +211,7 @@ def load_and_create_model(
         model_args_cehrgpt = model_args.as_dict()
         model_args_cehrgpt.pop("attn_implementation")
         model_config = CEHRGPTConfig(
+            activation_function=cehrgpt_args.activation_function,
             vocab_size=tokenizer.vocab_size,
             value_vocab_size=tokenizer.value_vocab_size,
             time_token_vocab_size=tokenizer.time_token_vocab_size,
