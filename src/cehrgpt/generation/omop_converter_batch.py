@@ -270,20 +270,24 @@ def gpt_to_omop_converter_batch(
 
         is_numeric_types = (
             is_numeric_types[START_TOKEN_SIZE:]
-            if not pd.isna(is_numeric_types)
+            if is_numeric_types is not None and not np.all(pd.isna(is_numeric_types))
             else None
         )
         number_as_values = (
             number_as_values[START_TOKEN_SIZE:]
-            if not pd.isna(number_as_values)
+            if number_as_values is not None and not np.all(pd.isna(number_as_values))
             else None
         )
         concept_as_values = (
             concept_as_values[START_TOKEN_SIZE:]
-            if not pd.isna(concept_as_values)
+            if concept_as_values is not None and not np.all(pd.isna(concept_as_values))
             else None
         )
-        units = units[START_TOKEN_SIZE:] if not pd.isna(units) else None
+        units = (
+            units[START_TOKEN_SIZE:]
+            if units is not None and not np.all(pd.isna(units))
+            else None
+        )
 
         # TODO:Need to decode if the input is tokenized
         [start_year, start_age, start_gender, start_race] = concept_ids[
