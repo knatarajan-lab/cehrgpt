@@ -445,6 +445,9 @@ def gpt_to_omop_converter_batch(
             ]:
                 # If it's a start token, skip it
                 pass
+            elif event.endswith("/0"):
+                # This should capture the concept such as Visit/0, Discharge/0
+                pass
             else:
                 try:
                     concept_id = int(event)
