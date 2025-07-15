@@ -7,7 +7,7 @@ from transformers.activations import ACT2FN
 from transformers.models.gpt2.modeling_gpt2 import Conv1D, GPT2Attention
 from transformers.utils import is_flash_attn_2_available, logging
 
-from cehrgpt.models.activations import RMSNorm, SwiGLU
+from cehrgpt.models.activations import SwiGLU
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -448,17 +448,19 @@ class GPT2Block(nn.Module):
             if getattr(config, "_attn_implementation", "eager") == "flash_attention_2"
             else GPT2AttentionRoPE
         )
-        self.ln_1 = RMSNorm(hidden_size, eps=config.layer_norm_epsilon)
+        self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.attn = attention_class(
             config=config, layer_idx=layer_idx, apply_rotary=config.apply_rotary
         )
-        self.ln_2 = RMSNorm(hidden_size, eps=config.layer_norm_epsilon)
+        self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
 
         if config.add_cross_attention:
             self.crossattention = attention_class(
                 config=config, is_cross_attention=True, layer_idx=layer_idx
             )
-            self.ln_cross_attn = RMSNorm(hidden_size, eps=config.layer_norm_epsilon)
+            self.ln_cross_attn = nn.LayerNorm(
+                hidden_size, eps=config.layer_norm_epsilon
+            )
 
         self.mlp = GPT2MLP(inner_dim, config)
 
