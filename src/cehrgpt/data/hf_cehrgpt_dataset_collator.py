@@ -1021,20 +1021,39 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 np.ones_like(input_ids).tolist() + ([1, 0] if add_eos_token else [0])
             )
             num_tokens_to_pad = 1 + int(add_eos_token)
-            current_position_ids.extend(
-                np.clip(
-                    list(range(len(input_ids) + num_tokens_to_pad)),
-                    0,
-                    self.max_position_embeddings - 1,
+            if "position_ids" in example:
+                position_ids = (
+                    example["position_ids"].tolist()
+                    if isinstance(example["position_ids"], torch.Tensor)
+                    else list(example["position_ids"])
                 )
-            )
+                current_position_ids.extend(
+                    position_ids + [max(position_ids)] * num_tokens_to_pad
+                )
+            else:
+                current_position_ids.extend(
+                    np.clip(
+                        list(range(len(input_ids) + num_tokens_to_pad)),
+                        0,
+                        self.max_position_embeddings - 1,
+                    )
+                )
 
             if self.include_values:
                 current_value_indicators.extend(
-                    list(example["value_indicators"]) + [False] * num_tokens_to_pad
+                    (
+                        example["value_indicators"].tolist()
+                        if isinstance(example["value_indicators"], torch.Tensor)
+                        else list(example["value_indicators"])
+                    )
+                    + [False] * num_tokens_to_pad
                 )
                 current_values.extend(
-                    list(example["values"])
+                    (
+                        example["values"].tolist()
+                        if isinstance(example["values"], torch.Tensor)
+                        else list(example["values"])
+                    )
                     + [self.tokenizer.pad_value_token_id] * num_tokens_to_pad
                 )
 
