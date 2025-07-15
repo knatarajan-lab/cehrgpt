@@ -28,6 +28,7 @@ from cehrgpt.gpt_utils import (
     is_att_token,
     multiple_of_10,
 )
+from cehrgpt.models.activations import RMSNorm
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.gpt2 import GPT2Block, is_sample_pack
 from cehrgpt.models.hf_modeling_outputs import (
@@ -77,16 +78,23 @@ def create_sample_packing_attention_mask(attention_mask: torch.Tensor) -> torch.
 
 
 class MotorTaskHead(nn.Module):
-    def __init__(self, input_dim, motor_tte_vocab_size, motor_num_time_pieces):
+    def __init__(
+        self,
+        input_dim,
+        motor_tte_vocab_size,
+        motor_num_time_pieces,
+        eps=1e-6,
+    ):
         super(MotorTaskHead, self).__init__()
         self.input_dim = input_dim
         self.motor_tte_vocab_size = motor_tte_vocab_size
         self.motor_num_time_pieces = motor_num_time_pieces
         self.linear = nn.Sequential(
-            nn.Linear(input_dim, input_dim // 2),
-            nn.LayerNorm(input_dim // 2),
+            nn.Linear(input_dim, input_dim * motor_num_time_pieces),
+            RMSNorm(input_dim * motor_num_time_pieces, eps),
             nn.Linear(
-                input_dim // 2, motor_tte_vocab_size * self.motor_num_time_pieces
+                input_dim * motor_num_time_pieces,
+                motor_tte_vocab_size * self.motor_num_time_pieces,
             ),
         )
 
@@ -924,7 +932,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         if self.config.include_motor_time_to_event:
             self.motor_tte = MotorTaskHead(
-                config.n_embd, config.motor_tte_vocab_size, config.motor_num_time_pieces
+                input_dim=config.n_embd,
+                motor_tte_vocab_size=config.motor_tte_vocab_size,
+                motor_num_time_pieces=config.motor_num_time_pieces,
             )
 
         # Model parallel
