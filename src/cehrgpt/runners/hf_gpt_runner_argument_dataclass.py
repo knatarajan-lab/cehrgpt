@@ -175,6 +175,10 @@ class CehrGPTArguments:
             "help": "A threshold to denote how much the specified metric must improve to satisfy early stopping conditions."
         },
     )
+    inner_dim: Optional[int] = dataclasses.field(
+        default=None,
+        metadata={"help": "The dimensionality of the hidden layer"},
+    )
     apply_rotary: Optional[bool] = dataclasses.field(
         default=False,
         metadata={
