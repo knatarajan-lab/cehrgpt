@@ -423,7 +423,7 @@ class GPT2MLP(nn.Module):
         self.c_fc = Conv1D(intermediate_size, embed_dim)
         self.c_proj = Conv1D(embed_dim, intermediate_size)
         if config.activation_function == "swiglu":
-            self.act = SwiGLU(intermediate_size=intermediate_size)
+            self.act = SwiGLU(input_dim=intermediate_size)
         else:
             self.act = ACT2FN[config.activation_function]
         self.dropout = nn.Dropout(config.resid_pdrop)

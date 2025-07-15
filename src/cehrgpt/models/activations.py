@@ -5,19 +5,19 @@ from __future__ import absolute_import, division, print_function
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import transformers.pytorch_utils
 
 
 class SwiGLU(nn.Module):
-    def __init__(self, intermediate_size: int):
-        super().__init__()
-        self.linear1 = nn.Linear(intermediate_size, intermediate_size, bias=False)
-        self.linear2 = nn.Linear(intermediate_size, intermediate_size, bias=False)
-        self.linear3 = nn.Linear(intermediate_size, intermediate_size, bias=False)
-        self.swish = nn.SiLU()
+    def __init__(self, input_dim):
+        super(SwiGLU, self).__init__()
+        self.input_dim = input_dim
+        self.linear = nn.Linear(input_dim, input_dim * 2)  # produces [x1, x2]
 
     def forward(self, x):
-        return self.linear3(self.swish(self.linear2(x)) * self.linear1(x))
+        x1, x2 = self.linear(x).chunk(2, dim=-1)
+        return x1 * F.silu(x2)  # SwiGLU: x1 * SiLU(x2)
 
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Mistral
