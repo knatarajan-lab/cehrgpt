@@ -89,27 +89,26 @@ class MotorTaskHead(nn.Module):
         self.input_dim = input_dim
         self.motor_tte_vocab_size = motor_tte_vocab_size
         self.motor_num_time_pieces = motor_num_time_pieces
-        self.linear = nn.Sequential(
-            nn.Linear(input_dim, input_dim * motor_num_time_pieces),
-            RMSNorm(input_dim * motor_num_time_pieces, eps),
-            nn.Linear(
-                input_dim * motor_num_time_pieces,
-                motor_tte_vocab_size * self.motor_num_time_pieces,
-            ),
-        )
+        self.final_layer = nn.Linear(input_dim, input_dim * motor_num_time_pieces)
+        self.norm = RMSNorm(input_dim, eps)
+        self.task_layer = nn.Linear(input_dim, motor_tte_vocab_size)
 
     def forward(self, x):
         # Ensure scale is positive
         length = x.shape[0]
         # (num_visits_in_batch, motor_tte_vocab_size * motor_num_time_pieces)
-        lambda_p = f.softplus(self.linear(x))
+        x = self.final_layer(x).reshape(
+            length, self.motor_num_time_pieces, self.input_dim
+        )
+        x = self.norm(x)
+        x = self.task_layer(x)
+        lambda_p = f.softplus(x)
+
         # Check for NaN values
         if torch.isnan(lambda_p).any():
             logger.warning(f"NaN values found in scale_param. x: {x}")
         # (num_visits_in_batch,  motor_num_time_pieces, motor_tte_vocab_size,)
-        return lambda_p.view(
-            length, self.motor_num_time_pieces, self.motor_tte_vocab_size
-        )
+        return lambda_p
 
 
 class VisitTimeToEventHead(nn.Module):
