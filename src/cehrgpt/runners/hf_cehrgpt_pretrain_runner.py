@@ -226,6 +226,7 @@ def load_and_create_model(
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
             ve_token_id=tokenizer.ve_token_id,
             n_inner=cehrgpt_args.inner_dim,
+            decoder_mlp=cehrgpt_args.decoder_mlp,
             **model_args_cehrgpt,
         )
 

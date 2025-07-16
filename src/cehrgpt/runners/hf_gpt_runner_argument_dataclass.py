@@ -8,11 +8,13 @@ from cehrgpt.models.gpt2 import ACT2FN
 class CehrGPTArguments:
     """Arguments pertaining to what data we are going to input our model for training and eval."""
 
-    activation_function: Literal[tuple(ACT2FN.keys()) + ("swiglu",)] = (
-        dataclasses.field(
-            default="gelu_new",
-            metadata={"help": "The activation function to use"},
-        )
+    activation_function: Literal[tuple(ACT2FN.keys())] = dataclasses.field(
+        default="gelu_new",
+        metadata={"help": "The activation function to use"},
+    )
+    decoder_mlp: Literal["GPT2MLP", "LlamaMLP"] = dataclasses.field(
+        default="GPT2MLP",
+        metadata={"help": "The decoder MLP architecture"},
     )
     include_inpatient_hour_token: Optional[bool] = dataclasses.field(
         default=True,
