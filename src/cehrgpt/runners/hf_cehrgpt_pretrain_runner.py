@@ -244,6 +244,7 @@ def load_and_create_model(
             ve_token_id=tokenizer.ve_token_id,
             add_cross_attention=cehrgpt_args.add_cross_attention,
             n_inner=cehrgpt_args.inner_dim,
+            decoder_mlp=cehrgpt_args.decoder_mlp,
             **model_args_cehrgpt,
         )
 

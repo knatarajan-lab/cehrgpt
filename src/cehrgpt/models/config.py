@@ -106,6 +106,8 @@ class CEHRGPTConfig(PretrainedConfig):
         n_head=12,
         n_inner=None,
         activation_function="gelu_new",
+        decoder_mlp="GPT2MLP",
+        mlp_bias=False,
         resid_pdrop=0.1,
         embd_pdrop=0.1,
         attn_pdrop=0.1,
@@ -169,6 +171,8 @@ class CEHRGPTConfig(PretrainedConfig):
         self.n_head = n_head
         self.n_inner = n_inner
         self.activation_function = activation_function
+        self.decoder_mlp = decoder_mlp
+        self.mlp_bias = mlp_bias
         self.resid_pdrop = resid_pdrop
         self.embd_pdrop = embd_pdrop
         self.attn_pdrop = attn_pdrop

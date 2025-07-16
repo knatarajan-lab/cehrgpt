@@ -7,11 +7,11 @@ from transformers.activations import ACT2FN
 from transformers.models.gpt2.modeling_gpt2 import Conv1D, GPT2Attention
 from transformers.utils import is_flash_attn_2_available, logging
 
-from cehrgpt.models.activations import SwiGLU
-
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
+
+from cehrgpt.models.activations import RMSNorm
 
 logger = logging.get_logger("transformers")
 
@@ -416,16 +416,35 @@ class GPT2FlashAttention(GPT2Attention):
         )
 
 
+class LlamaMLP(nn.Module):
+    def __init__(self, intermediate_size, config):
+        super().__init__()
+        self.config = config
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = intermediate_size
+        self.gate_proj = nn.Linear(
+            self.hidden_size, self.intermediate_size, bias=config.mlp_bias
+        )
+        self.up_proj = nn.Linear(
+            self.hidden_size, self.intermediate_size, bias=config.mlp_bias
+        )
+        self.down_proj = nn.Linear(
+            self.intermediate_size, self.hidden_size, bias=config.mlp_bias
+        )
+        self.act_fn = ACT2FN[config.activation_function]
+
+    def forward(self, x: Optional[Tuple[torch.FloatTensor]]) -> torch.FloatTensor:
+        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        return down_proj
+
+
 class GPT2MLP(nn.Module):
     def __init__(self, intermediate_size, config):
         super().__init__()
         embed_dim = config.hidden_size
         self.c_fc = Conv1D(intermediate_size, embed_dim)
         self.c_proj = Conv1D(embed_dim, intermediate_size)
-        if config.activation_function == "swiglu":
-            self.act = SwiGLU(input_dim=intermediate_size)
-        else:
-            self.act = ACT2FN[config.activation_function]
+        self.act = ACT2FN[config.activation_function]
         self.dropout = nn.Dropout(config.resid_pdrop)
 
     def forward(
@@ -448,21 +467,27 @@ class GPT2Block(nn.Module):
             if getattr(config, "_attn_implementation", "eager") == "flash_attention_2"
             else GPT2AttentionRoPE
         )
-        self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
+        self.input_layernorm = RMSNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.attn = attention_class(
             config=config, layer_idx=layer_idx, apply_rotary=config.apply_rotary
         )
-        self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
+        self.post_attention_layernorm = RMSNorm(
+            hidden_size, eps=config.layer_norm_epsilon
+        )
 
         if config.add_cross_attention:
             self.crossattention = attention_class(
                 config=config, is_cross_attention=True, layer_idx=layer_idx
             )
-            self.ln_cross_attn = nn.LayerNorm(
-                hidden_size, eps=config.layer_norm_epsilon
-            )
+            self.ln_cross_attn = RMSNorm(hidden_size, eps=config.layer_norm_epsilon)
 
-        self.mlp = GPT2MLP(inner_dim, config)
+        decoder_mlp_function = getattr(config, "decoder_mlp", "GPT2MLP")
+        if decoder_mlp_function == "GPT2MLP":
+            self.mlp = GPT2MLP(inner_dim, config)
+        elif getattr(config, "decoder_mlp", "GPT2Block") == "LlamaMLP":
+            self.mlp = LlamaMLP(inner_dim, config)
+        else:
+            raise RuntimeError("You must set decoder_mlp to one of (GPT2MLP, LlamaMLP)")
 
     def forward(
         self,
@@ -480,7 +505,7 @@ class GPT2Block(nn.Module):
         Optional[Tuple[torch.Tensor, Tuple[torch.FloatTensor, ...]]],
     ]:
         residual = hidden_states
-        hidden_states = self.ln_1(hidden_states)
+        hidden_states = self.input_layernorm(hidden_states)
         attn_outputs = self.attn(
             hidden_states,
             position_ids=position_ids,
@@ -520,7 +545,7 @@ class GPT2Block(nn.Module):
             )  # add cross attentions if we output attention weights
 
         residual = hidden_states
-        hidden_states = self.ln_2(hidden_states)
+        hidden_states = self.post_attention_layernorm(hidden_states)
         feed_forward_hidden_states = self.mlp(hidden_states)
         # residual connection
         hidden_states = residual + feed_forward_hidden_states
