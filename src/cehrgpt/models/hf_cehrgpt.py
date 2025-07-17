@@ -92,6 +92,9 @@ class MotorTaskHead(nn.Module):
         self.final_layer = nn.Linear(input_dim, input_dim * motor_num_time_pieces)
         self.norm = RMSNorm(input_dim, eps)
         self.task_layer = nn.Linear(input_dim, motor_tte_vocab_size)
+        self.task_time_bias = nn.Parameter(
+            torch.zeros(1, self.motor_num_time_pieces, motor_tte_vocab_size)
+        )
 
     def forward(self, x):
         # Ensure scale is positive
@@ -101,7 +104,7 @@ class MotorTaskHead(nn.Module):
             length, self.motor_num_time_pieces, self.input_dim
         )
         x = self.norm(x)
-        x = self.task_layer(x)
+        x = self.task_layer(x) + self.task_time_bias
         lambda_p = f.softplus(x)
 
         # Check for NaN values
