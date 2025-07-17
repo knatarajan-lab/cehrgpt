@@ -545,8 +545,8 @@ class CehrGptDataCollator:
                     n_tte_predictions,
                     self.tokenizer.motor_tte_vocab_size,
                 ),
-                fill_value=0,
-                dtype=np.int32,
+                fill_value=0.0,
+                dtype=np.float32,
             )
             motor_tte_event_indicator = np.zeros(
                 (
