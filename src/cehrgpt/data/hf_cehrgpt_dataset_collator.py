@@ -535,7 +535,7 @@ class CehrGptDataCollator:
                 time_vectors.append(time_vector)
                 global_event_indicators.append(event_indicator)
 
-            time_vectors = np.asarray(time_vectors)
+            time_vectors = np.asarray(time_vectors, dtype=np.float32)
             global_event_indicators = np.asarray(global_event_indicators).astype(bool)
             n_tte_predictions = len(time_vectors)
 
@@ -571,6 +571,11 @@ class CehrGptDataCollator:
                     start = self.motor_time_interval * bin_num
                     end = self.motor_time_interval * (bin_num + 1)
                     time_in_bin = np.clip(time_vectors - start, 0, end - start)
+
+                    mask = time_in_bin != 0
+                    time_in_bin[mask] = np.log2(time_in_bin[mask])
+                    time_in_bin[~mask] = -torch.inf
+
                     motor_tte_time[bin_num] = time_in_bin
                     event_indicator = (
                         global_event_indicators
@@ -578,7 +583,7 @@ class CehrGptDataCollator:
                         & (time_vectors < end)
                     )
                     motor_tte_event_indicator[bin_num] = event_indicator
-                    motor_tte_mask[bin_num] = time_in_bin > 0 | event_indicator
+                    motor_tte_mask[bin_num] = mask | event_indicator
 
             motor_tte_times.append(motor_tte_time.swapaxes(0, 1))
             motor_tte_event_indicators.append(motor_tte_event_indicator.swapaxes(0, 1))

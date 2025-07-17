@@ -105,13 +105,13 @@ class MotorTaskHead(nn.Module):
         )
         x = self.norm(x)
         x = self.task_layer(x) + self.task_time_bias
-        lambda_p = f.softplus(x)
+        # lambda_p = f.softplus(x)
 
-        # Check for NaN values
-        if torch.isnan(lambda_p).any():
-            logger.warning(f"NaN values found in scale_param. x: {x}")
-        # (num_visits_in_batch,  motor_num_time_pieces, motor_tte_vocab_size,)
-        return lambda_p
+        # # Check for NaN values
+        # if torch.isnan(lambda_p).any():
+        #     logger.warning(f"NaN values found in scale_param. x: {x}")
+        # # (num_visits_in_batch,  motor_num_time_pieces, motor_tte_vocab_size,)
+        return x
 
 
 class VisitTimeToEventHead(nn.Module):
@@ -1171,9 +1171,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         motor_tte_event_indicators = motor_tte_event_indicators.reshape(
             (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
         )[:motor_end_index]
-        motor_tte_masks = motor_tte_masks.view(
-            (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
-        )[:motor_end_index]
+        # motor_tte_masks = motor_tte_masks.view(
+        #     (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
+        # )[:motor_end_index]
 
         tte_features = hidden_states[motor_tte_task_indicators].view(
             (-1, self.config.n_embd)
@@ -1187,21 +1187,27 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         )
 
         # Get Exponential parameters from model
-        lambda_p = self.motor_tte(tte_features)
+        time_dependent_logits = self.motor_tte(tte_features)
 
         # Compute event loss
         # Calculate the accumulative hazard
         # exp(-sum_{j} lambda_j)
-        survival_loss = (
-            torch.where(motor_tte_masks, lambda_p * motor_tte_times, 0)
-            .sum(dim=1)
-            .mean()
-        )
+        survival_loss = torch.exp2(time_dependent_logits + motor_tte_times).mean()
         event_loss = (
-            -torch.where(motor_tte_event_indicators, torch.log(lambda_p), 0)
-            .sum(dim=1)
-            .mean()
+            -math.log(2)
+            * torch.where(motor_tte_event_indicators, time_dependent_logits, 0).mean()
         )
+
+        # survival_loss = (
+        #     torch.where(motor_tte_masks, lambda_p * motor_tte_times, 0)
+        #     .sum(dim=1)
+        #     .mean()
+        # )
+        # event_loss = (
+        #     -torch.where(motor_tte_event_indicators, torch.log(lambda_p), 0)
+        #     .sum(dim=1)
+        #     .mean()
+        # )
         return survival_loss + event_loss
 
     def forward(
