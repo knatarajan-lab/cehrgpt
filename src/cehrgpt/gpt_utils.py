@@ -314,11 +314,11 @@ def is_age_token(token: str) -> bool:
 
 
 def is_gender_token(token: str) -> bool:
-    return token in GENDER_CONCEPT_LIST
+    return token in GENDER_CONCEPT_LIST or token.upper().startswith("GENDER")
 
 
 def is_race_token(token: str) -> bool:
-    return token in RACE_CONCEPT_LIST
+    return token in RACE_CONCEPT_LIST or token.upper().startswith("RACE")
 
 
 def is_visit_start(token: Optional[str]):
@@ -340,7 +340,9 @@ def is_death_token(token: str) -> bool:
 
 
 def is_outpatient_visit_type_token(token: Union[str, int]) -> bool:
-    return str(token) in OUTPATIENT_VISIT_CONCEPT_LIST
+    return str(token) in OUTPATIENT_VISIT_CONCEPT_LIST or str(token).upper().startswith(
+        "VISIT"
+    )
 
 
 def is_inpatient_visit_type_token(token: Union[str, int]) -> bool:
@@ -352,7 +354,9 @@ def is_visit_type_token(token: Union[str, int]) -> bool:
 
 
 def is_discharge_type_token(token: Union[str, int]) -> bool:
-    return str(token) in DISCHARGE_CONCEPT_LIST
+    return str(token) in DISCHARGE_CONCEPT_LIST or str(token).upper().startswith(
+        "DISCHARGE"
+    )
 
 
 def is_visit_att_tokens(token: str) -> bool:
