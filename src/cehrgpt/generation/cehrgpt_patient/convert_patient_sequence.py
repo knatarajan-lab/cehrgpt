@@ -363,9 +363,9 @@ class PatientSequenceConverter:
                     events.append(event)
 
         if visit_start_datetime is None:
-            visit_start_datetime = events[0].get("time")
+            visit_start_datetime = events[0].time
         if visit_end_datetime is None:
-            visit_start_datetime = events[-1].get("time")
+            visit_start_datetime = events[-1].time
 
         visit_type = concept_map.get(str(visit_concept_id), None)
         discharge_facility = concept_map.get(

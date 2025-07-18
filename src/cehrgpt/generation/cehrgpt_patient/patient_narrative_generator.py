@@ -61,6 +61,8 @@ def convert_concepts_to_patient_narrative(
         text_values=text_values,
         units=units,
     )
+
+    narrative = None
     if patient_sequence_converter.is_validation_passed:
         patient = patient_sequence_converter.get_patient(
             domain_map=concept_domain_mapping, concept_map=concept_name_mapping
@@ -73,7 +75,7 @@ def convert_concepts_to_patient_narrative(
             starting_index,
             patient_sequence_converter.get_error_messages(),
         )
-        narrative = None
+
     return narrative, starting_index, end_index
 
 
