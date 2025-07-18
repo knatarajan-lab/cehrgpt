@@ -113,6 +113,99 @@ class CehrGptDataCollator:
 
         return [float(default_value(_)) for _ in concept_ids]
 
+    def __call__(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
+
+        sample_packing = getattr(self, "sample_packing", False)
+        examples = [self.generate_start_end_index(_, sample_packing) for _ in examples]
+        examples = [self.random_sort(_) for _ in examples]
+        batch = {}
+
+        # Assume that each example in the batch is a dictionary with 'input_ids' and 'attention_mask'
+        batch_input_ids = [
+            self._try_reverse_tensor(self._convert_to_tensor(example["input_ids"]))
+            for example in examples
+        ]
+
+        batch_attention_mask = [
+            self._try_reverse_tensor(
+                self._convert_to_tensor(example["attention_mask"]).to(torch.float)
+                if "attention_mask" in example
+                else torch.ones_like(
+                    self._convert_to_tensor(example["input_ids"]), dtype=torch.float
+                )
+            )
+            for example in examples
+        ]
+
+        # Pad sequences to the max length in the batch
+        batch["input_ids"] = self._try_reverse_tensor(
+            pad_sequence(
+                batch_input_ids,
+                batch_first=True,
+                padding_value=self.tokenizer.pad_token_id,
+            ).to(torch.int64)
+        )
+
+        batch["attention_mask"] = self._try_reverse_tensor(
+            pad_sequence(batch_attention_mask, batch_first=True, padding_value=0.0)
+        )
+        assert batch["input_ids"].shape[1] <= self.max_length
+        assert batch["attention_mask"].shape[1] <= self.max_length
+        assert batch["attention_mask"].shape[1] == batch["input_ids"].shape[1], (
+            f'batch["attention_mask"].shape[1]: {batch["attention_mask"].shape[1]}, '
+            f'batch["input_ids"].shape[1]: {batch["input_ids"].shape[1]}'
+        )
+        assert batch["input_ids"].max() < self.tokenizer.vocab_size, (
+            f"batch['input_ids'].max(): {batch['input_ids'].max()} must be smaller than "
+            f"self.tokenizer.vocab_size: {self.tokenizer.vocab_size}. "
+            f"batch['input_ids']: {batch['input_ids']} "
+        )
+
+        if "position_ids" in examples[0]:
+            batch_position_ids = [
+                self._try_reverse_tensor(
+                    self._convert_to_tensor(example["position_ids"])
+                )
+                for example in examples
+            ]
+            # Pad sequences to the max length in the batch
+            batch["position_ids"] = self._try_reverse_tensor(
+                pad_sequence(
+                    batch_position_ids,
+                    batch_first=True,
+                    padding_value=0,
+                ).to(torch.int64)
+            )
+
+        if self.pretraining:
+            batch["labels"] = torch.where(
+                (batch["input_ids"] != self.tokenizer.pad_token_id)
+                & batch["attention_mask"].to(torch.bool),
+                batch["input_ids"],
+                -100,
+            )
+
+        if self.use_sub_time_tokenization:
+            time_token_indicators = torch.isin(batch["input_ids"], self.time_tokens)
+            masked_tokens = batch["input_ids"].clone()
+            masked_tokens[~time_token_indicators] = -1
+            # Get the index of the sub_time_tokens from the time_tokens tensor
+            sub_time_token_indices = torch.argmax(
+                (
+                    masked_tokens.unsqueeze(-1)
+                    == self.time_tokens.unsqueeze(0).unsqueeze(0)
+                ).to(torch.int32),
+                dim=-1,
+            )
+            sub_time_tokens = self.mapped_sub_time_tokens[sub_time_token_indices]
+            batch["time_token_indicators"] = time_token_indicators
+            batch["sub_time_tokens"] = sub_time_tokens
+
+        if self.data_collector_hooks:
+            for hook in self.data_collector_hooks:
+                batch.update(hook(examples))
+        return batch
+
     def include_ttv_prediction_hook(
         self, examples: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
@@ -341,99 +434,6 @@ class CehrGptDataCollator:
             self.fine_tuning_data_hook,
             self.include_motor_tte_data_hook,
         ]
-
-    def __call__(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
-
-        sample_packing = getattr(self, "sample_packing", False)
-        examples = [self.generate_start_end_index(_, sample_packing) for _ in examples]
-        examples = [self.random_sort(_) for _ in examples]
-        batch = {}
-
-        # Assume that each example in the batch is a dictionary with 'input_ids' and 'attention_mask'
-        batch_input_ids = [
-            self._try_reverse_tensor(self._convert_to_tensor(example["input_ids"]))
-            for example in examples
-        ]
-
-        batch_attention_mask = [
-            self._try_reverse_tensor(
-                self._convert_to_tensor(example["attention_mask"]).to(torch.float)
-                if "attention_mask" in example
-                else torch.ones_like(
-                    self._convert_to_tensor(example["input_ids"]), dtype=torch.float
-                )
-            )
-            for example in examples
-        ]
-
-        # Pad sequences to the max length in the batch
-        batch["input_ids"] = self._try_reverse_tensor(
-            pad_sequence(
-                batch_input_ids,
-                batch_first=True,
-                padding_value=self.tokenizer.pad_token_id,
-            ).to(torch.int64)
-        )
-
-        batch["attention_mask"] = self._try_reverse_tensor(
-            pad_sequence(batch_attention_mask, batch_first=True, padding_value=0.0)
-        )
-        assert batch["input_ids"].shape[1] <= self.max_length
-        assert batch["attention_mask"].shape[1] <= self.max_length
-        assert batch["attention_mask"].shape[1] == batch["input_ids"].shape[1], (
-            f'batch["attention_mask"].shape[1]: {batch["attention_mask"].shape[1]}, '
-            f'batch["input_ids"].shape[1]: {batch["input_ids"].shape[1]}'
-        )
-        assert batch["input_ids"].max() < self.tokenizer.vocab_size, (
-            f"batch['input_ids'].max(): {batch['input_ids'].max()} must be smaller than "
-            f"self.tokenizer.vocab_size: {self.tokenizer.vocab_size}. "
-            f"batch['input_ids']: {batch['input_ids']} "
-        )
-
-        if "position_ids" in examples[0]:
-            batch_position_ids = [
-                self._try_reverse_tensor(
-                    self._convert_to_tensor(example["position_ids"])
-                )
-                for example in examples
-            ]
-            # Pad sequences to the max length in the batch
-            batch["position_ids"] = self._try_reverse_tensor(
-                pad_sequence(
-                    batch_position_ids,
-                    batch_first=True,
-                    padding_value=0,
-                ).to(torch.int64)
-            )
-
-        if self.pretraining:
-            batch["labels"] = torch.where(
-                (batch["input_ids"] != self.tokenizer.pad_token_id)
-                & batch["attention_mask"].to(torch.bool),
-                batch["input_ids"],
-                -100,
-            )
-
-        if self.use_sub_time_tokenization:
-            time_token_indicators = torch.isin(batch["input_ids"], self.time_tokens)
-            masked_tokens = batch["input_ids"].clone()
-            masked_tokens[~time_token_indicators] = -1
-            # Get the index of the sub_time_tokens from the time_tokens tensor
-            sub_time_token_indices = torch.argmax(
-                (
-                    masked_tokens.unsqueeze(-1)
-                    == self.time_tokens.unsqueeze(0).unsqueeze(0)
-                ).to(torch.int32),
-                dim=-1,
-            )
-            sub_time_tokens = self.mapped_sub_time_tokens[sub_time_token_indices]
-            batch["time_token_indicators"] = time_token_indicators
-            batch["sub_time_tokens"] = sub_time_tokens
-
-        if self.data_collector_hooks:
-            for hook in self.data_collector_hooks:
-                batch.update(hook(examples))
-        return batch
 
     def create_time_to_event_labels(self, record: Dict[str, Any]) -> Dict[str, Any]:
         """
