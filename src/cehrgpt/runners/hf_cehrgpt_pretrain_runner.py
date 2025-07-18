@@ -22,12 +22,10 @@ from cehrbert.runners.runner_util import (
 )
 from datasets import Dataset, DatasetDict, IterableDatasetDict, load_from_disk
 from transformers import (
-    AutoConfig,
     AutoModel,
     AutoTokenizer,
     EarlyStoppingCallback,
     Trainer,
-    TrainingArguments,
     set_seed,
 )
 from transformers.trainer_utils import is_main_process
@@ -261,6 +259,9 @@ def load_and_create_model(
 
 def main():
     cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
+
+    if cehrgpt_args.sample_packing and cehrgpt_args.add_cross_attention:
+        raise RuntimeError("sample_packing is not supported when the encoder is used")
 
     if cehrgpt_args.sample_packing and data_args.streaming:
         raise RuntimeError(
@@ -520,6 +521,24 @@ def main():
                 cehrgpt_tokenizer.pretrained_embeddings,
             )
 
+    # Detecting last checkpoint.
+    last_checkpoint = get_last_hf_checkpoint(training_args)
+
+    # Set seed before initializing model.
+    set_seed(training_args.seed)
+
+    if not data_args.streaming and not cehrgpt_args.sample_packing:
+        processed_dataset.set_format("pt")
+
+    callbacks = []
+    if cehrgpt_args.use_early_stopping:
+        callbacks.append(
+            CustomEarlyStoppingCallback(
+                model_args.early_stopping_patience,
+                cehrgpt_args.early_stopping_threshold,
+            )
+        )
+
     if model.config.add_cross_attention:
         # register cehrgpt in the huggingface model list
         register_cehrgpt_in_hf()
@@ -592,69 +611,38 @@ def main():
             ),
             allowed_clinical_conditions=load_allowed_clinical_conditions(cehrgpt_args),
         )
-        data_collator = InstructCehrGptDataCollator(
+        trainer_class = Trainer
+        data_collator_fn = partial(
+            InstructCehrGptDataCollator,
             clinical_statement_generator=clinical_statement_generator,
             concept_name_mapping=concept_map,
             concept_domain_mapping=concept_domain,
             encoder_tokenizer=encoder_tokenizer,
-            tokenizer=cehrgpt_tokenizer,
-            max_length=model_args.max_position_embeddings,
-            shuffle_records=data_args.shuffle_records,
-            include_ttv_prediction=model_args.include_ttv_prediction,
-            use_sub_time_tokenization=model_args.use_sub_time_tokenization,
-            include_values=model_args.include_values,
         )
     else:
-        data_collator = CehrGptDataCollator(
-            tokenizer=cehrgpt_tokenizer,
-            max_length=model_args.max_position_embeddings,
-            shuffle_records=data_args.shuffle_records,
-            include_ttv_prediction=model_args.include_ttv_prediction,
-            use_sub_time_tokenization=model_args.use_sub_time_tokenization,
-            include_values=model_args.include_values,
-        )
-
-    # Detecting last checkpoint.
-    last_checkpoint = get_last_hf_checkpoint(training_args)
-
-    # Set seed before initializing model.
-    set_seed(training_args.seed)
-
-    if not data_args.streaming and not cehrgpt_args.sample_packing:
-        processed_dataset.set_format("pt")
-
-    callbacks = []
-    if cehrgpt_args.use_early_stopping:
-        callbacks.append(
-            CustomEarlyStoppingCallback(
-                model_args.early_stopping_patience,
-                cehrgpt_args.early_stopping_threshold,
+        if cehrgpt_args.sample_packing:
+            trainer_class = partial(
+                SamplePackingTrainer,
+                max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
+                max_position_embeddings=model_args.max_position_embeddings,
+                train_lengths=processed_dataset["train"]["num_of_concepts"],
+                validation_lengths=(
+                    processed_dataset["validation"]
+                    if "validation" in processed_dataset
+                    else processed_dataset["test"]
+                )["num_of_concepts"],
             )
-        )
-
-    if cehrgpt_args.sample_packing:
-        trainer_class = partial(
-            SamplePackingTrainer,
-            max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
-            max_position_embeddings=model_args.max_position_embeddings,
-            train_lengths=processed_dataset["train"]["num_of_concepts"],
-            validation_lengths=(
-                processed_dataset["validation"]
-                if "validation" in processed_dataset
-                else processed_dataset["test"]
-            )["num_of_concepts"],
-        )
-        training_args.per_device_train_batch_size = 1
-        training_args.per_device_eval_batch_size = 1
-        data_collator_fn = partial(
-            SamplePackingCehrGptDataCollator,
-            cehrgpt_args.max_tokens_per_batch,
-            model_args.max_position_embeddings,
-            add_end_token_in_sample_packing=cehrgpt_args.add_end_token_in_sample_packing,
-        )
-    else:
-        trainer_class = Trainer
-        data_collator_fn = CehrGptDataCollator
+            training_args.per_device_train_batch_size = 1
+            training_args.per_device_eval_batch_size = 1
+            data_collator_fn = partial(
+                SamplePackingCehrGptDataCollator,
+                cehrgpt_args.max_tokens_per_batch,
+                model_args.max_position_embeddings,
+                add_end_token_in_sample_packing=cehrgpt_args.add_end_token_in_sample_packing,
+            )
+        else:
+            trainer_class = Trainer
+            data_collator_fn = CehrGptDataCollator
 
     trainer = trainer_class(
         model=model,
