@@ -80,7 +80,7 @@ class CEHRGPTToken:
             VISIT_UNKNOWN_TOKEN,
             DISCHARGE_UNKNOWN_TOKEN,
         ]:
-            return 0
+            return "0"
         return self.name
 
 

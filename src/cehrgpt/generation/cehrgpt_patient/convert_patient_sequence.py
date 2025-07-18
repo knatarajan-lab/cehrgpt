@@ -266,10 +266,10 @@ class PatientSequenceConverter:
             return CehrGptPatient(
                 patient_id=self.person_id,
                 birth_datetime=birth_datetime,
-                gender_concept_id=int(gender_token.name),
+                gender_concept_id=int(gender_token.get_name()),
                 gender=concept_map.get(gender_token.name, None),
                 race_concept_id=int(race_token.get_name()),
-                race=concept_map.get(race_token.name, None),
+                race=concept_map.get(race_token.get_name(), None),
                 visits=visits,
             )
         return None
@@ -326,32 +326,32 @@ class PatientSequenceConverter:
         visit_end_datetime: Optional[datetime.datetime] = None
         events = []
         for token in visit_tokens:
+            token_name = token.get_name()
             if token.type == TokenType.VS:
                 visit_start_datetime = datetime_cursor.current_datetime
             elif token.type == TokenType.VE:
                 visit_end_datetime = datetime_cursor.current_datetime
             elif token.type in [TokenType.OUTPATIENT_VISIT, TokenType.INPATIENT_VISIT]:
-                visit_concept_id = int(token.name)
+                visit_concept_id = token_name
             elif token.type == TokenType.VISIT_DISCHARGE:
-                discharge_to_concept_id = int(token.name)
+                discharge_to_concept_id = token_name
             elif token.type == TokenType.INPATIENT_ATT:
-                datetime_cursor.add_days(extract_time_interval_in_days(token.name))
+                datetime_cursor.add_days(extract_time_interval_in_days(token_name))
             elif token.type == TokenType.INPATIENT_HOUR:
-                datetime_cursor.add_hours(extract_hours_from_hour_token(token.name))
+                datetime_cursor.add_hours(extract_hours_from_hour_token(token_name))
             elif token.type in clinical_token_types or token.type == TokenType.DEATH:
                 domain = domain_map.get(
-                    token.name, "Death" if token.type == TokenType.DEATH else "Unknown"
+                    token_name, "Death" if token.type == TokenType.DEATH else "Unknown"
                 )
                 record_id = (
                     self.id_generator.get_next_id_by_domain(domain)
                     if self.id_generator
                     else None
                 )
-
                 event = CehrGptEvent(
                     time=datetime_cursor.current_datetime,
-                    code=token.name,
-                    code_label=concept_map.get(token.name, None),
+                    code=token_name,
+                    code_label=concept_map.get(token_name, None),
                     text_value=token.text_value,
                     numeric_value=token.numeric_value,
                     unit=token.unit,
