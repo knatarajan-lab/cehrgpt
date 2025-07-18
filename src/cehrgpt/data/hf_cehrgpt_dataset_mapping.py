@@ -42,6 +42,7 @@ CEHRGPT_COLUMNS = [
     "units",
     "position_ids",
     "ages",
+    "epoch_times",
 ]
 
 

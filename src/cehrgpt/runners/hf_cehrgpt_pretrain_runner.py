@@ -267,6 +267,10 @@ def main():
     if cehrgpt_args.sample_packing and cehrgpt_args.add_cross_attention:
         raise RuntimeError("sample_packing is not supported when the encoder is used")
 
+    # MOTOR label requires additional inputs from the dataset
+    if cehrgpt_args.include_motor_time_to_event:
+        training_args.remove_unused_columns = False
+
     if cehrgpt_args.sample_packing and data_args.streaming:
         raise RuntimeError(
             f"sample_packing is not supported when streaming is enabled, please set streaming to False"
