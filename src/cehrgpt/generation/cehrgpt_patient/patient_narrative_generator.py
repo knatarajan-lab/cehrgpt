@@ -1,50 +1,26 @@
-import argparse
 import logging
 import os
-import uuid
-from typing import Any, Dict, List, Optional, Tuple
+import sys
+from functools import partial
+from typing import Dict, List, Optional, Tuple
 
+import pandas as pd
 import polars as pl
-from cehrbert.runners.runner_util import load_parquet_as_dataset
+from tqdm import tqdm
 
-from cehrgpt.data.hf_cehrgpt_dataset import apply_cehrbert_dataset_mapping
-from cehrgpt.data.hf_cehrgpt_dataset_mapping import DatasetMapping
 from cehrgpt.generation.cehrgpt_patient.convert_patient_sequence import (
     get_cehrgpt_patient_converter,
+)
+from cehrgpt.generation.omop_converter_batch import (
+    create_arg_parser,
+    get_num_records,
+    main_parallel,
+    record_generator,
 )
 from cehrgpt.gpt_utils import random_slice_gpt_sequence
 from cehrgpt.omop.vocab_utils import generate_concept_maps
 
 logger = logging.getLogger(__name__)
-
-
-class GeneratePatientNarrativeMapping(DatasetMapping):
-    def __init__(
-        self,
-        context_window: int,
-        concept_name_mapping: Dict[str, str],
-        concept_domain_mapping: Dict[str, str],
-    ):
-        self.context_window = context_window
-        self.concept_name_mapping = concept_name_mapping
-        self.concept_domain_mapping = concept_domain_mapping
-
-    def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        patient_narrative, start_index, end_index = (
-            convert_concepts_to_patient_narrative(
-                record["concept_ids"],
-                self.concept_name_mapping,
-                self.concept_domain_mapping,
-                self.context_window,
-                record.get("person_id", None),
-            )
-        )
-        record["patient_narrative"] = {
-            "narrative": patient_narrative,
-            "start_index": start_index,
-            "end_index": end_index,
-        }
-        return record
 
 
 def convert_concepts_to_patient_narrative(
@@ -53,6 +29,9 @@ def convert_concepts_to_patient_narrative(
     concept_domain_mapping: Dict[str, str],
     context_window: int,
     person_id: Optional[int] = None,
+    numeric_values: Optional[List[float]] = None,
+    text_values: Optional[List[str]] = None,
+    units: Optional[List[str]] = None,
 ) -> Tuple[str, int, int]:
     pat_seq = list(concept_ids)
     starting_index = 0
@@ -62,8 +41,25 @@ def convert_concepts_to_patient_narrative(
             concept_ids=concept_ids, max_seq_len=context_window
         )
         pat_seq = demographic_tokens + pat_seq[starting_index:end_index]
+        if numeric_values is not None:
+            numeric_values = [0.0] * len(demographic_tokens) + list(
+                numeric_values[starting_index:end_index]
+            )
+        if text_values is not None:
+            text_values = [None] * len(demographic_tokens) + list(
+                text_values[starting_index:end_index]
+            )
+        if units is not None:
+            units = ["N/A"] * len(demographic_tokens) + list(
+                units[starting_index:end_index]
+            )
+
     patient_sequence_converter = get_cehrgpt_patient_converter(
-        concept_ids=pat_seq, concept_domain_mapping=concept_domain_mapping
+        concept_ids=pat_seq,
+        concept_domain_mapping=concept_domain_mapping,
+        numeric_values=numeric_values,
+        text_values=text_values,
+        units=units,
     )
     if patient_sequence_converter.is_validation_passed:
         patient = patient_sequence_converter.get_patient(
@@ -81,67 +77,96 @@ def convert_concepts_to_patient_narrative(
     return narrative, starting_index, end_index
 
 
-def main(args):
-    pat_seq_dataset = load_parquet_as_dataset(args.patient_sequence_dir)
-    concept_dataframe = pl.read_parquet(os.path.join(args.concept_dir, "*parquet"))
-    concept_name_mapping, concept_domain_mapping = generate_concept_maps(
-        concept_dataframe
-    )
+def generate_patient_narratives(
+    patient_sequence_parquet_files: List[str],
+    concept_domain_map: Dict[str, str],
+    output_folder: str,
+    buffer_size: int,
+    *args,
+    **kwargs,
+) -> None:
+    context_window: Optional[int] = kwargs.get("context_window", None)
+    concept_name_map: Optional[Dict[str, str]] = kwargs.get("concept_name_map", None)
 
-    transformed_pat_seq_dataset = apply_cehrbert_dataset_mapping(
-        pat_seq_dataset,
-        mapping_function=GeneratePatientNarrativeMapping(
-            context_window=args.context_window,
-            concept_name_mapping=concept_name_mapping,
-            concept_domain_mapping=concept_domain_mapping,
-        ),
-        batch_size=args.batch_size,
-        num_proc=args.num_proc,
-        streaming=args.streaming,
-    )
-    for i, batched_dataset_df in enumerate(
-        transformed_pat_seq_dataset.to_pandas(batch_size=args.batch_size, batched=True)
-    ):
-        batched_dataset_df.to_parquet(
-            os.path.join(args.output_dir, f"{str(uuid.uuid4())}.parquet")
+    if context_window is None:
+        raise RuntimeError("context_window must be specified")
+
+    if concept_domain_map is None:
+        raise RuntimeError("concept_domain_map must be specified")
+
+    converted_narratives = []
+    patient_record_generator = record_generator(patient_sequence_parquet_files)
+    total_record = get_num_records(patient_sequence_parquet_files)
+    for index, record in tqdm(enumerate(patient_record_generator), total=total_record):
+        concept_ids = getattr(record, "concept_ids")
+        numeric_values = getattr(record, "number_as_values", None)
+        text_values = getattr(record, "concept_as_values", None)
+        units = getattr(record, "units", None)
+        person_id = getattr(record, "person_id", None)
+        label = getattr(record, "label", None)
+        index_date = getattr(record, "index_date", None)
+
+        narrative, starting_index, end_index = convert_concepts_to_patient_narrative(
+            concept_ids=concept_ids,
+            concept_name_mapping=concept_name_map,
+            concept_domain_mapping=concept_domain_map,
+            context_window=context_window,
+            person_id=person_id,
+            numeric_values=numeric_values,
+            text_values=text_values,
+            units=units,
         )
+        if narrative is not None:
+            converted_narratives.append(
+                {
+                    "person_id": person_id,
+                    "narrative": narrative,
+                    "starting_index": starting_index,
+                    "ending_index": end_index,
+                    "label": label,
+                    "index_date": index_date,
+                }
+            )
+        if index != 0 and index % buffer_size == 0:
+            if converted_narratives:
+                pd.DataFrame(
+                    converted_narratives,
+                    columns=[
+                        "person_id",
+                        "index_date",
+                        "label",
+                        "narrative",
+                        "starting_index",
+                        "ending_index",
+                    ],
+                ).to_parquet(os.path.join(output_folder, f"batch_{index}.parquet"))
+                converted_narratives.clear()
+
+    # Final flush to the disk if there are still records in the cache
+    if converted_narratives:
+        pd.DataFrame(
+            converted_narratives,
+            columns=[
+                "person_id",
+                "index_date",
+                "label",
+                "narrative",
+                "starting_index",
+                "ending_index",
+            ],
+        ).to_parquet(os.path.join(output_folder, f"batch_final.parquet"))
+        converted_narratives.clear()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser("Generate patient narratives")
-    parser.add_argument(
-        "--patient_sequence_dir",
-        required=True,
-        help="The patient sequence data dir",
+    args = create_arg_parser()
+    concept_dataframe = pl.read_parquet(os.path.join(args.concept_path, "*parquet"))
+    concept_name_map, _ = generate_concept_maps(concept_dataframe)
+    main_parallel(
+        args,
+        partial(
+            generate_patient_narratives,
+            context_window=sys.maxsize,
+            concept_name_map=concept_name_map,
+        ),
     )
-    parser.add_argument(
-        "--concept_dir",
-        required=True,
-    )
-    parser.add_argument(
-        "--context_window",
-        required=True,
-        type=int,
-        help="Context window size",
-    )
-    parser.add_argument(
-        "--batch_size",
-        required=False,
-        type=int,
-        default=128,
-    )
-    parser.add_argument(
-        "--num_proc",
-        required=False,
-        type=int,
-        default=4,
-    )
-    parser.add_argument(
-        "--streaming",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--output_dir",
-        required=True,
-    )
-    main(parser.parse_args())
