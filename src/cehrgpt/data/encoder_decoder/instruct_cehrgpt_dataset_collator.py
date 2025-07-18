@@ -33,6 +33,8 @@ class InstructCehrGptDataCollator(CehrGptDataCollator):
         self.clinical_statement_generator = clinical_statement_generator
         self.concept_name_mapping = concept_name_mapping
         self.concept_domain_mapping = concept_domain_mapping
+        # The encode-decoder data loader does not support sample packing
+        self.sample_packing = False
 
     def __call__(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
         batch = super().__call__(examples)
@@ -84,7 +86,12 @@ class InstructCehrGptDataCollator(CehrGptDataCollator):
     ) -> Optional[List[Callable[[List[Dict[str, Any]]], Dict[str, Any]]]]:
         return super().get_data_collector_hooks() + [self.encoder_input_hook]
 
-    def generate_start_end_index(self, record: Dict[str, Any]) -> Dict[str, Any]:
+    def generate_start_end_index(
+        self,
+        record: Dict[str, Any],
+        sample_packing: bool = None,
+        max_length_allowed: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Adding the start and end indices to extract a portion of the patient sequence."""
         # concept_ids will be used to for time to event predictions and identifying the visit starts
         input_ids = record["input_ids"]
