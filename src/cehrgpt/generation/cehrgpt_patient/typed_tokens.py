@@ -2,6 +2,13 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Dict, List, Optional, Union
 
+from cehrbert_data.const.artificial_tokens import (
+    DISCHARGE_UNKNOWN_TOKEN,
+    GENDER_UNKNOWN_TOKEN,
+    RACE_UNKNOWN_TOKEN,
+    VISIT_UNKNOWN_TOKEN,
+)
+
 from cehrgpt.gpt_utils import (
     is_age_token,
     is_death_token,
@@ -67,6 +74,13 @@ class CEHRGPTToken:
     def get_name(self) -> Union[int, str]:
         if self.type in [TokenType.YEAR, TokenType.AGE]:
             return int(self.name.split(":")[1])
+        if self.name in [
+            RACE_UNKNOWN_TOKEN,
+            GENDER_UNKNOWN_TOKEN,
+            VISIT_UNKNOWN_TOKEN,
+            DISCHARGE_UNKNOWN_TOKEN,
+        ]:
+            return 0
         return self.name
 
 
