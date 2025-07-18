@@ -1,6 +1,6 @@
 import copy
 import random
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 import torch
@@ -185,9 +185,23 @@ class CehrGptDataCollator:
                 -100,
             )
 
+        if self.data_collector_hooks:
+            for hook in self.data_collector_hooks:
+                if hook == self.include_time_decomposition_prediction_hook:
+                    batch.update(hook(batch))
+                else:
+                    batch.update(hook(examples))
+        return batch
+
+    def include_time_decomposition_prediction_hook(
+        self, existing_batch: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        batch = {}
         if self.use_sub_time_tokenization:
-            time_token_indicators = torch.isin(batch["input_ids"], self.time_tokens)
-            masked_tokens = batch["input_ids"].clone()
+            time_token_indicators = torch.isin(
+                existing_batch["input_ids"], self.time_tokens
+            )
+            masked_tokens = existing_batch["input_ids"].clone()
             masked_tokens[~time_token_indicators] = -1
             # Get the index of the sub_time_tokens from the time_tokens tensor
             sub_time_token_indices = torch.argmax(
@@ -200,13 +214,9 @@ class CehrGptDataCollator:
             sub_time_tokens = self.mapped_sub_time_tokens[sub_time_token_indices]
             batch["time_token_indicators"] = time_token_indicators
             batch["sub_time_tokens"] = sub_time_tokens
-
-        if self.data_collector_hooks:
-            for hook in self.data_collector_hooks:
-                batch.update(hook(examples))
         return batch
 
-    def include_ttv_prediction_hook(
+    def include_time_to_event_prediction_hook(
         self, examples: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         batch = {}
@@ -369,7 +379,9 @@ class CehrGptDataCollator:
                 )
         return batch
 
-    def fine_tuning_data_hook(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def include_fine_tuning_data_hook(
+        self, examples: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
         bz = len(examples)
         batch = {}
         if "person_id" in examples[0]:
@@ -427,12 +439,15 @@ class CehrGptDataCollator:
 
     def get_data_collector_hooks(
         self,
-    ) -> Optional[List[Callable[[List[Dict[str, Any]]], Dict[str, Any]]]]:
+    ) -> Optional[
+        List[Callable[[Union[List[Dict[str, Any]], Dict[str, Any]]], Dict[str, Any]]]
+    ]:
         return [
             self.include_value_hook,
-            self.include_ttv_prediction_hook,
-            self.fine_tuning_data_hook,
+            self.include_time_decomposition_prediction_hook,
+            self.include_time_to_event_prediction_hook,
             self.include_motor_tte_data_hook,
+            self.include_fine_tuning_data_hook,
         ]
 
     def create_time_to_event_labels(self, record: Dict[str, Any]) -> Dict[str, Any]:
