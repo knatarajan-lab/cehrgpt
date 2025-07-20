@@ -30,7 +30,12 @@ from cehrgpt.gpt_utils import (
 )
 from cehrgpt.models.activations import RMSNorm
 from cehrgpt.models.config import CEHRGPTConfig
-from cehrgpt.models.gpt2 import GPT2Block, is_sample_pack
+from cehrgpt.models.gpt2 import (
+    GPT2Attention,
+    GPT2Block,
+    GPT2FlashAttention,
+    is_sample_pack,
+)
 from cehrgpt.models.hf_modeling_outputs import (
     CehrGptCausalLMOutput,
     CehrGptGenerateDecoderOnlyOutput,

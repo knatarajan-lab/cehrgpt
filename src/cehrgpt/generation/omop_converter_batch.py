@@ -33,7 +33,6 @@ from cehrgpt.gpt_utils import (
     is_visit_start,
 )
 from cehrgpt.models.special_tokens import OOV_CONCEPT_MAP, STOP_TOKENS
-from cehrgpt.models.tokenization_hf_cehrgpt import END_TOKEN
 
 OOV = "[OOV]"
 CURRENT_PATH = Path(__file__).parent

@@ -462,6 +462,7 @@ class CehrGptDataCollator:
                 - "event_indicators": np.ndarray of shape [num_visits, motor_vocab_size], where 0 = event occurred, 1 = censored
         """
         input_ids = record["input_ids"]
+        # packed_event_times = list(map(lambda t: t // 3600, record["epoch_times"]))
         packed_event_times = record["epoch_times"]
         sample_packing = getattr(self, "sample_packing", False)
 
@@ -730,12 +731,13 @@ class CehrGptDataCollator:
                         self._convert_to_tensor([0]),
                     ]
                 )
-                record["epoch_times"] = torch.concat(
-                    [
-                        self._convert_to_tensor(record["epoch_times"]),
-                        self._convert_to_tensor(record["epoch_times"][-1]),
-                    ]
-                )
+                if self.include_motor_time_to_event:
+                    record["epoch_times"] = torch.concat(
+                        [
+                            self._convert_to_tensor(record["epoch_times"]),
+                            self._convert_to_tensor(record["epoch_times"][-1]),
+                        ]
+                    )
                 if self.include_values:
                     record["value_indicators"] = torch.concat(
                         [
@@ -773,9 +775,10 @@ class CehrGptDataCollator:
                 record["position_ids"] = self._convert_to_tensor(
                     record["position_ids"][start_index : end_index + 1]
                 )
-                record["epoch_times"] = self._convert_to_tensor(
-                    record["epoch_times"][start_index: end_index + 1]
-                )
+                if self.include_motor_time_to_event:
+                    record["epoch_times"] = self._convert_to_tensor(
+                        record["epoch_times"][start_index : end_index + 1]
+                    )
                 if self.include_values:
                     record["value_indicators"] = self._convert_to_tensor(
                         record["value_indicators"][start_index : end_index + 1]
@@ -783,11 +786,12 @@ class CehrGptDataCollator:
                     record["values"] = self._convert_to_tensor(
                         record["values"][start_index : end_index + 1]
                     )
-
                 if self.include_ttv_prediction:
                     record["time_to_visits"] = self._convert_to_tensor(
                         self._convert_time_to_event(
                             concept_ids[start_index : end_index + 1]
+                        )
+                    )
                 return record
 
             # The default employs a right truncation strategy, where the demographic prompt is reserved
@@ -803,13 +807,14 @@ class CehrGptDataCollator:
             record["position_ids"] = self._convert_to_tensor(
                 record["position_ids"][0:end_index]
             )
-            record["epoch_times"] = self._convert_to_tensor(
-                record["epoch_times"][0:end_index]
-            )
             # We want to make sure we take the subset of attention_mask in sample packing if this field is available
             if sample_packing and "attention_mask" in record:
                 record["attention_mask"] = record["attention_mask"][0:end_index]
 
+            if self.include_motor_time_to_event:
+                record["epoch_times"] = self._convert_to_tensor(
+                    record["epoch_times"][0:end_index]
+                )
             if self.include_values:
                 record["value_indicators"] = self._convert_to_tensor(
                     record["value_indicators"][0:end_index]
@@ -852,18 +857,19 @@ class CehrGptDataCollator:
                                 ),
                             ]
                         )
-                        record["epoch_times"] = torch.concat(
-                            [
-                                torch.full(
-                                    [DEMOGRAPHIC_PROMPT_SIZE],
-                                    fill_value=record["epoch_times"][token_index],
-                                    dtype=torch.float32,
-                                ),
-                                self._convert_to_tensor(
-                                    record["epoch_times"][token_index:seq_length]
-                                ),
-                            ]
-                        )
+                        if self.include_motor_time_to_event:
+                            record["epoch_times"] = torch.concat(
+                                [
+                                    torch.full(
+                                        [DEMOGRAPHIC_PROMPT_SIZE],
+                                        fill_value=record["epoch_times"][token_index],
+                                        dtype=torch.float32,
+                                    ),
+                                    self._convert_to_tensor(
+                                        record["epoch_times"][token_index:seq_length]
+                                    ),
+                                ]
+                            )
 
                         if self.include_values:
                             record["value_indicators"] = torch.concat(
@@ -910,12 +916,13 @@ class CehrGptDataCollator:
                     if current_token == self.vs_token_id:
                         record["input_ids"] = record["input_ids"][i:end_index]
                         record["position_ids"] = record["position_ids"][i:end_index]
-                        record["epoch_times"] = record["epoch_times"][i:end_index]
                         if sample_packing and "attention_mask" in record:
                             record["attention_mask"] = record["attention_mask"][
                                 i:end_index
                             ]
 
+                        if self.include_motor_time_to_event:
+                            record["epoch_times"] = record["epoch_times"][i:end_index]
                         if self.include_values:
                             record["value_indicators"] = record["value_indicators"][
                                 i:end_index
@@ -934,13 +941,15 @@ class CehrGptDataCollator:
                 record["position_ids"] = self._convert_to_tensor(
                     record["position_ids"][-new_max_length:]
                 )
-                record["epoch_times"] = self._convert_to_tensor(
-                    record["epoch_times"][-new_max_length:]
-                )
                 if sample_packing and "attention_mask" in record:
                     record["attention_mask"] = record["attention_mask"][
                         -new_max_length:
                     ]
+
+                if self.include_motor_time_to_event:
+                    record["epoch_times"] = self._convert_to_tensor(
+                        record["epoch_times"][-new_max_length:]
+                    )
                 if self.include_values:
                     record["value_indicators"] = record["value_indicators"][
                         -new_max_length:
@@ -965,12 +974,13 @@ class CehrGptDataCollator:
                         self._convert_to_tensor([0]),
                     ]
                 )
-                record["epoch_times"] = torch.concat(
-                    [
-                        self._convert_to_tensor(record["epoch_times"]),
-                        self._convert_to_tensor(record["epoch_times"][-1]),
-                    ]
-                )
+                if self.include_motor_time_to_event:
+                    record["epoch_times"] = torch.concat(
+                        [
+                            self._convert_to_tensor(record["epoch_times"]),
+                            self._convert_to_tensor(record["epoch_times"][-1]),
+                        ]
+                    )
                 if self.include_values:
                     record["value_indicators"] = torch.concat(
                         [
@@ -993,7 +1003,7 @@ class CehrGptDataCollator:
                             self._convert_to_tensor([-100.0]),
                         ]
                     )
-        return record
+            return record
 
 
 class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
@@ -1074,15 +1084,15 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                         self.max_position_embeddings - 1,
                     )
                 )
-
-            epoch_times = (
-                example["epoch_times"].tolist()
-                if isinstance(example["epoch_times"], torch.Tensor)
-                else list(example["epoch_times"])
-            )
-            current_epoch_times.extend(
-                epoch_times + [max(epoch_times)] * num_tokens_to_pad
-            )
+            if self.include_motor_time_to_event:
+                epoch_times = (
+                    example["epoch_times"].tolist()
+                    if isinstance(example["epoch_times"], torch.Tensor)
+                    else list(example["epoch_times"])
+                )
+                current_epoch_times.extend(
+                    epoch_times + [max(epoch_times)] * num_tokens_to_pad
+                )
 
             if self.include_values:
                 current_value_indicators.extend(
@@ -1122,8 +1132,9 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
             "input_ids": current_input_ids,
             "attention_mask": current_attention_mask,
             "position_ids": current_position_ids,
-            "epoch_times": current_epoch_times,
         }
+        if self.include_motor_time_to_event:
+            packed_example.update({"epoch_times": current_epoch_times})
         if self.include_values:
             packed_example.update({"value_indicators": current_value_indicators})
             packed_example.update({"values": current_values})
