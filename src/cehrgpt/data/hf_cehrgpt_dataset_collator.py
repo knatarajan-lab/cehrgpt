@@ -735,7 +735,7 @@ class CehrGptDataCollator:
                     record["epoch_times"] = torch.concat(
                         [
                             self._convert_to_tensor(record["epoch_times"]),
-                            self._convert_to_tensor(record["epoch_times"][-1]),
+                            self._convert_to_tensor([record["epoch_times"][-1]]),
                         ]
                     )
                 if self.include_values:
