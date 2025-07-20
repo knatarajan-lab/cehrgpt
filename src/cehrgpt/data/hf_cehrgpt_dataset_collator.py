@@ -429,7 +429,7 @@ class CehrGptDataCollator:
             for i in range(len(packed_concept_ids)):
                 if packed_concept_ids[i] == self.tokenizer.pad_token:
                     # If we encounter consecutive pads, we should break out of the loop
-                    if pad_indices and pad_indices[-1] == self.tokenizer.pad_token:
+                    if pad_indices and pad_indices[-1] == i - 1:
                         break
                     pad_indices.append(i)
 
@@ -481,29 +481,6 @@ class CehrGptDataCollator:
                 elif self.tokenizer.is_motor_time_to_event_code(concept_id):
                     time_to_event_dict[concept_id] = event_time
                 motor_tte_label_indicator.append(is_included)
-                #     # Update TTE for existing concepts, or add new ones seen in this visit
-                #     for existing_concept_id in list(time_to_event_dict.keys()):
-                #         if existing_concept_id in next_future_visit_concepts:
-                #             time_to_event_dict[existing_concept_id] = time_interval
-                #         else:
-                #             time_to_event_dict[existing_concept_id] += time_interval
-                #
-                #     for next_concept_id in next_future_visit_concepts:
-                #         if next_concept_id not in time_to_event_dict:
-                #             time_to_event_dict[next_concept_id] = time_interval
-                #
-                #     time_to_event_data.append(copy.deepcopy(time_to_event_dict))
-                #     # Record the censor time at the end of the visit
-                #     if censor_times:
-                #         censor_times.append(censor_times[-1] + time_interval)
-                #     else:
-                #         censor_times.append(time_interval)
-                #     next_future_visit_concepts.clear()
-                #
-                # elif self.tokenizer.is_motor_time_to_event_code(concept_id):
-                #     next_future_visit_concepts.add(concept_id)
-                #
-                # motor_tte_label_indicator.append(is_included)
 
             if len(time_to_event_data) == 0:
                 LOG.debug(
