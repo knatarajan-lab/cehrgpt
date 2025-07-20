@@ -213,3 +213,44 @@ class CehrGPTArguments:
         default=1 / 1000,
         metadata={"help": "The min_prevalence to keep the concepts in the tokenizer"},
     )
+    add_cross_attention: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to use the encoder decoder"
+        },
+    )
+    encoder_trainable: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={"help": "A flag to indicate whether the encoder is trainable"},
+    )
+    encoder_model_name_or_path: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": (
+                "The model checkpoint for weights initialization. "
+                "Don't set if you want to train a model from scratch."
+            )
+        },
+    )
+    encoder_tokenizer_name_or_path: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "Pretrained tokenizer name or path if not the same as model_name"
+        },
+    )
+    knowledge_graph_path: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={"help": "Knowledge graph path"},
+    )
+    vocabulary_dir: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "The vocabulary directory containing concept and concept_ancestor"
+        },
+    )
+    allowed_clinical_conditions_path: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "The pickle file that contains a list of conditions allowed for making clinical statements"
+        },
+    )

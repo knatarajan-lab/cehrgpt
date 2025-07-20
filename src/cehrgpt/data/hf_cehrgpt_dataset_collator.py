@@ -1,6 +1,6 @@
 import copy
 import random
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 import torch
@@ -66,6 +66,8 @@ class CehrGptDataCollator:
         self.motor_num_time_pieces = motor_num_time_pieces
         self.motor_time_interval = TIME_TO_EVENT_MAX_TIME // motor_num_time_pieces
 
+        self.data_collector_hooks = self.get_data_collector_hooks()
+
         if self.use_sub_time_tokenization:
             token_to_time_token_mapping = tokenizer.token_to_time_token_mapping
             if not token_to_time_token_mapping:
@@ -111,7 +113,8 @@ class CehrGptDataCollator:
 
         return [float(default_value(_)) for _ in concept_ids]
 
-    def __call__(self, examples):
+    def __call__(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
+
         sample_packing = getattr(self, "sample_packing", False)
         examples = [self.generate_start_end_index(_, sample_packing) for _ in examples]
         examples = [self.random_sort(_) for _ in examples]
@@ -182,9 +185,23 @@ class CehrGptDataCollator:
                 -100,
             )
 
+        if self.data_collector_hooks:
+            for hook in self.data_collector_hooks:
+                if hook == self.include_time_decomposition_prediction_hook:
+                    batch.update(hook(batch))
+                else:
+                    batch.update(hook(examples))
+        return batch
+
+    def include_time_decomposition_prediction_hook(
+        self, existing_batch: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        batch = {}
         if self.use_sub_time_tokenization:
-            time_token_indicators = torch.isin(batch["input_ids"], self.time_tokens)
-            masked_tokens = batch["input_ids"].clone()
+            time_token_indicators = torch.isin(
+                existing_batch["input_ids"], self.time_tokens
+            )
+            masked_tokens = existing_batch["input_ids"].clone()
             masked_tokens[~time_token_indicators] = -1
             # Get the index of the sub_time_tokens from the time_tokens tensor
             sub_time_token_indices = torch.argmax(
@@ -197,7 +214,12 @@ class CehrGptDataCollator:
             sub_time_tokens = self.mapped_sub_time_tokens[sub_time_token_indices]
             batch["time_token_indicators"] = time_token_indicators
             batch["sub_time_tokens"] = sub_time_tokens
+        return batch
 
+    def include_time_to_event_prediction_hook(
+        self, examples: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        batch = {}
         if self.include_ttv_prediction:
             batch_time_to_visits = [
                 self._try_reverse_tensor(
@@ -210,7 +232,12 @@ class CehrGptDataCollator:
                     batch_time_to_visits, batch_first=True, padding_value=-100.0
                 )
             )
+        return batch
 
+    def include_motor_tte_data_hook(
+        self, examples: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        batch = {}
         if self.include_motor_time_to_event:
             examples_with_motor_tte = [
                 self.create_time_to_event_labels(_) for _ in examples
@@ -315,7 +342,10 @@ class CehrGptDataCollator:
                         torch.full((padded_length, 1), 0, dtype=torch.int32),
                     ]
                 ).reshape((batch_size, -1))
+        return batch
 
+    def include_value_hook(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
+        batch = {}
         if self.include_values:
             batch_value_indicators = [
                 self._try_reverse_tensor(
@@ -347,8 +377,13 @@ class CehrGptDataCollator:
                 batch["true_values"] = torch.where(
                     batch["value_indicators"], batch["values"].clone(), -100
                 )
+        return batch
 
+    def include_fine_tuning_data_hook(
+        self, examples: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
         bz = len(examples)
+        batch = {}
         if "person_id" in examples[0]:
             batch["person_id"] = (
                 torch.cat(
@@ -400,8 +435,20 @@ class CehrGptDataCollator:
                 .to(torch.float32)
                 .reshape(bz, -1)
             )
-
         return batch
+
+    def get_data_collector_hooks(
+        self,
+    ) -> Optional[
+        List[Callable[[Union[List[Dict[str, Any]], Dict[str, Any]]], Dict[str, Any]]]
+    ]:
+        return [
+            self.include_value_hook,
+            self.include_time_decomposition_prediction_hook,
+            self.include_time_to_event_prediction_hook,
+            self.include_motor_tte_data_hook,
+            self.include_fine_tuning_data_hook,
+        ]
 
     def create_time_to_event_labels(self, record: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -712,24 +759,23 @@ class CehrGptDataCollator:
                 start_index, end_index, demographic_tokens = random_slice_gpt_sequence(
                     concept_ids, new_max_length
                 )
-                if start_index != end_index:
-                    record["input_ids"] = self._convert_to_tensor(
-                        record["input_ids"][start_index : end_index + 1]
+                record["input_ids"] = self._convert_to_tensor(
+                    record["input_ids"][start_index : end_index + 1]
+                )
+                if self.include_values:
+                    record["value_indicators"] = self._convert_to_tensor(
+                        record["value_indicators"][start_index : end_index + 1]
+                    ).to(torch.bool)
+                    record["values"] = self._convert_to_tensor(
+                        record["values"][start_index : end_index + 1]
                     )
-                    if self.include_values:
-                        record["value_indicators"] = self._convert_to_tensor(
-                            record["value_indicators"][start_index : end_index + 1]
-                        ).to(torch.bool)
-                        record["values"] = self._convert_to_tensor(
-                            record["values"][start_index : end_index + 1]
+                if self.include_ttv_prediction:
+                    record["time_to_visits"] = self._convert_to_tensor(
+                        self._convert_time_to_event(
+                            concept_ids[start_index : end_index + 1]
                         )
-                    if self.include_ttv_prediction:
-                        record["time_to_visits"] = self._convert_to_tensor(
-                            self._convert_time_to_event(
-                                concept_ids[start_index : end_index + 1]
-                            )
-                        )
-                    return record
+                    )
+                return record
 
             # The default employs a right truncation strategy, where the demographic prompt is reserved
             end_index = new_max_length
@@ -892,7 +938,7 @@ class CehrGptDataCollator:
                             self._convert_to_tensor([-100.0]),
                         ]
                     )
-            return record
+        return record
 
 
 class SamplePackingCehrGptDataCollator(CehrGptDataCollator):

@@ -1,6 +1,7 @@
 import os
+import pickle
 from functools import partial
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 import numpy as np
 import torch
@@ -20,7 +21,13 @@ from cehrbert.runners.runner_util import (
     load_parquet_as_dataset,
 )
 from datasets import Dataset, DatasetDict, IterableDatasetDict, load_from_disk
-from transformers import EarlyStoppingCallback, Trainer, TrainingArguments, set_seed
+from transformers import (
+    AutoModel,
+    AutoTokenizer,
+    EarlyStoppingCallback,
+    Trainer,
+    set_seed,
+)
 from transformers.trainer_utils import is_main_process
 from transformers.utils import is_flash_attn_2_available, logging
 
@@ -31,6 +38,7 @@ from cehrgpt.data.hf_cehrgpt_dataset_collator import (
 )
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
 from cehrgpt.models.config import CEHRGPTConfig
+from cehrgpt.models.encoder_decoder.monkey_patch_cehrgpt import register_cehrgpt_in_hf
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
@@ -158,6 +166,7 @@ def load_and_create_model(
                 attn_implementation=attn_implementation,
                 torch_dtype=torch_dtype,
             )
+
             if (
                 pretrained_model.config.max_position_embeddings
                 < model_args.max_position_embeddings
@@ -171,7 +180,15 @@ def load_and_create_model(
                 pretrained_model.resize_position_embeddings(
                     model_args.max_position_embeddings
                 )
+
+            # We need to instantiate some layers for cross attention for the pretrained model
+            if (
+                cehrgpt_args.add_cross_attention
+                and not pretrained_model.config.add_cross_attention
+            ):
+                pretrained_model.enable_cross_attention()
             return pretrained_model
+
         except Exception as e:
             LOG.error(
                 f"When continue_pretrain is set to True, it assumes that CEHR-GPT has been trained "
@@ -223,6 +240,7 @@ def load_and_create_model(
             motor_time_to_event_weight=cehrgpt_args.motor_time_to_event_weight,
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
             ve_token_id=tokenizer.ve_token_id,
+            add_cross_attention=cehrgpt_args.add_cross_attention,
             **model_args_cehrgpt,
         )
 
@@ -241,6 +259,9 @@ def load_and_create_model(
 
 def main():
     cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
+
+    if cehrgpt_args.sample_packing and cehrgpt_args.add_cross_attention:
+        raise RuntimeError("sample_packing is not supported when the encoder is used")
 
     if cehrgpt_args.sample_packing and data_args.streaming:
         raise RuntimeError(
@@ -518,29 +539,110 @@ def main():
             )
         )
 
-    if cehrgpt_args.sample_packing:
-        trainer_class = partial(
-            SamplePackingTrainer,
-            max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
-            max_position_embeddings=model_args.max_position_embeddings,
-            train_lengths=processed_dataset["train"]["num_of_concepts"],
-            validation_lengths=(
-                processed_dataset["validation"]
-                if "validation" in processed_dataset
-                else processed_dataset["test"]
-            )["num_of_concepts"],
+    if model.config.add_cross_attention:
+        # register cehrgpt in the huggingface model list
+        register_cehrgpt_in_hf()
+        model.config.add_cross_attention = True
+        import polars as pl
+
+        from cehrgpt.data.encoder_decoder.instruct_cehrgpt_dataset_collator import (
+            InstructCehrGptDataCollator,
         )
-        training_args.per_device_train_batch_size = 1
-        training_args.per_device_eval_batch_size = 1
+        from cehrgpt.generation.cehrgpt_patient.clinical_statement_generator import (
+            ClinicalStatementGenerator,
+            ConditionDrugKnowledgeGraph,
+        )
+        from cehrgpt.models.encoder_decoder.instruct_hf_cehrgpt import (
+            InstructCEHRGPTModel,
+        )
+        from cehrgpt.omop.vocab_utils import (
+            create_drug_ingredient_to_brand_drug_map,
+            generate_concept_maps,
+        )
+
+        if (
+            not cehrgpt_args.encoder_model_name_or_path
+            or not cehrgpt_args.encoder_tokenizer_name_or_path
+        ):
+            raise RuntimeError(
+                "When add_cross_attention is set to True, "
+                "encoder_model_name_or_path and encoder_tokenizer_name_or_path must be provided"
+            )
+        if not cehrgpt_args.knowledge_graph_path:
+            raise RuntimeError(
+                "When add_cross_attention is set to True, "
+                "knowledge_graph_path must be provided"
+            )
+        if not cehrgpt_args.vocabulary_dir:
+            raise RuntimeError(
+                "When add_cross_attention is set to True, "
+                "vocabulary_dir must be provided"
+            )
+
+        encoder_tokenizer = AutoTokenizer.from_pretrained(
+            cehrgpt_args.encoder_tokenizer_name_or_path
+        )
+        encoder_tokenizer.save_pretrained(training_args.output_dir)
+        encoder_model = AutoModel.from_pretrained(
+            cehrgpt_args.encoder_model_name_or_path
+        )
+        setattr(
+            encoder_model.config, "encoder_trainable", cehrgpt_args.encoder_trainable
+        )
+        model = InstructCEHRGPTModel.from_encoder_decoder_pretrained(
+            encoder_model=encoder_model, decoder_model=model
+        )
+        with open(cehrgpt_args.knowledge_graph_path, "rb") as f:
+            knowledge_graph = pickle.load(f)
+        concept = pl.read_parquet(
+            os.path.join(cehrgpt_args.vocabulary_dir, "concept", "*parquet")
+        )
+        concept_ancestor = pl.read_parquet(
+            os.path.join(cehrgpt_args.vocabulary_dir, "concept_ancestor", "*parquet")
+        )
+        drug_ingredient_to_brand_drug_map = create_drug_ingredient_to_brand_drug_map(
+            concept, concept_ancestor
+        )
+        concept_map, concept_domain = generate_concept_maps(concept)
+        clinical_statement_generator = ClinicalStatementGenerator(
+            condition_drug_knowledge_graph=ConditionDrugKnowledgeGraph(
+                knowledge_graph=knowledge_graph,
+                drug_ingredient_to_brand_drug_map=drug_ingredient_to_brand_drug_map,
+            ),
+            allowed_clinical_conditions=load_allowed_clinical_conditions(cehrgpt_args),
+        )
+        trainer_class = Trainer
         data_collator_fn = partial(
-            SamplePackingCehrGptDataCollator,
-            cehrgpt_args.max_tokens_per_batch,
-            model_args.max_position_embeddings,
-            add_end_token_in_sample_packing=cehrgpt_args.add_end_token_in_sample_packing,
+            InstructCehrGptDataCollator,
+            clinical_statement_generator=clinical_statement_generator,
+            concept_name_mapping=concept_map,
+            concept_domain_mapping=concept_domain,
+            encoder_tokenizer=encoder_tokenizer,
         )
     else:
-        trainer_class = Trainer
-        data_collator_fn = CehrGptDataCollator
+        if cehrgpt_args.sample_packing:
+            trainer_class = partial(
+                SamplePackingTrainer,
+                max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
+                max_position_embeddings=model_args.max_position_embeddings,
+                train_lengths=processed_dataset["train"]["num_of_concepts"],
+                validation_lengths=(
+                    processed_dataset["validation"]
+                    if "validation" in processed_dataset
+                    else processed_dataset["test"]
+                )["num_of_concepts"],
+            )
+            training_args.per_device_train_batch_size = 1
+            training_args.per_device_eval_batch_size = 1
+            data_collator_fn = partial(
+                SamplePackingCehrGptDataCollator,
+                cehrgpt_args.max_tokens_per_batch,
+                model_args.max_position_embeddings,
+                add_end_token_in_sample_packing=cehrgpt_args.add_end_token_in_sample_packing,
+            )
+        else:
+            trainer_class = Trainer
+            data_collator_fn = CehrGptDataCollator
 
     trainer = trainer_class(
         model=model,
@@ -582,6 +684,31 @@ def main():
     trainer.log_metrics("train", metrics)
     trainer.save_metrics("train", metrics)
     trainer.save_state()
+
+
+def load_allowed_clinical_conditions(
+    cehrgpt_args: CehrGPTArguments,
+) -> Optional[List[int]]:
+    try:
+        with open(cehrgpt_args.allowed_clinical_conditions_path, "rb") as f:
+            allowed_conditions = pickle.load(f)
+            if not isinstance(allowed_conditions, list):
+                allowed_conditions = None
+            else:
+                allowed_conditions = [
+                    int(_)
+                    for _ in allowed_conditions
+                    if isinstance(int, _) or str.isnumeric(str(_))
+                ]
+    except Exception as e:
+        LOG.warning(
+            "The allowed encoder conditions cannot be loaded at %s.\n Setting allowed_conditions=None\n."
+            "Caught exception: %s",
+            cehrgpt_args.allowed_clinical_conditions_path,
+            e,
+        )
+        allowed_conditions = None
+    return allowed_conditions
 
 
 if __name__ == "__main__":
