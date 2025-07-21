@@ -2,6 +2,7 @@ import os
 from functools import partial
 from typing import Optional, Union
 
+import datasets
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -120,8 +121,11 @@ def load_and_create_tokenizer(
                 f"Tried to create the tokenizer, however the dataset is not provided."
             )
         LOG.info("Started training the tokenizer ...")
+        train_val_dataset = datasets.concatenate_datasets(
+            [dataset["train"], dataset["validation"]]
+        )
         tokenizer = CehrGptTokenizer.train_tokenizer(
-            dataset,
+            train_val_dataset,
             concept_name_mapping,
             data_args,
             PretrainedEmbeddings(cehrgpt_args.pretrained_embedding_path),
