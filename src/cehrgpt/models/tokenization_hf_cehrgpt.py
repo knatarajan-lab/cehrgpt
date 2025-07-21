@@ -202,7 +202,7 @@ def create_bins_with_spline(samples, num_bins, d_freedom=3) -> List[Dict[str, An
 
 
 def map_motor_tte_statistics(
-    batch: Dict[str, Any], motor_time_to_event_codes: List[str]
+    batch: Dict[str, Any], allowed_motor_codes: List[str]
 ) -> Dict[str, Any]:
     motor_event_times = femr.stat_utils.ReservoirSampler(100_000)
     task_tte_stats: Dict[str, int] = collections.defaultdict(int)
@@ -234,14 +234,14 @@ def map_motor_tte_statistics(
                     # Keep track of the time to event value
                     for tte in time_to_event_dict.values():
                         motor_event_times.add(tte, 1)
-                    for motor_code in motor_time_to_event_codes:
+                    for motor_code in allowed_motor_codes:
                         if motor_code in time_to_event_dict:
                             task_tte_stats[motor_code] += 1
                         else:
                             task_censor_stats[motor_code] += 1
 
                     next_future_visit_concepts.clear()
-            elif concept_id in motor_time_to_event_codes:
+            elif concept_id in allowed_motor_codes:
                 next_future_visit_concepts.add(concept_id)
 
         return {
@@ -254,10 +254,10 @@ def map_motor_tte_statistics(
 def compute_motor_tte_statistics(
     dataset: Dataset,
     data_args: DataTrainingArguments,
-    motor_time_to_event_codes: List[str],
+    allowed_motor_codes: List[str],
 ) -> Dict[str, Any]:
     map_motor_tte_statistics_partial = partial(
-        map_motor_tte_statistics, motor_time_to_event_codes=motor_time_to_event_codes
+        map_motor_tte_statistics, allowed_motor_codes=allowed_motor_codes
     )
     if data_args.streaming:
         first_example = next(iter(dataset))
