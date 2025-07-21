@@ -259,6 +259,7 @@ def compute_motor_tte_statistics(
     map_motor_tte_statistics_partial = partial(
         map_motor_tte_statistics, allowed_motor_codes=allowed_motor_codes
     )
+    LOG.info("Collecting MOTOR TTE statistics")
     if data_args.streaming:
         first_example = next(iter(dataset))
         parts = dataset.map(
@@ -1421,7 +1422,6 @@ class CehrGptTokenizer(PreTrainedTokenizer):
 
         motor_task_info = None
         if num_motor_tasks and allowed_motor_codes:
-            LOG.info("Collecting MOTOR TTE statistics")
             motor_tte_statistics = compute_motor_tte_statistics(
                 dataset, data_args, allowed_motor_codes
             )
