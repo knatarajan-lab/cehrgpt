@@ -205,8 +205,11 @@ def map_motor_tte_statistics(
     batch: Dict[str, Any], motor_time_to_event_codes: List[str]
 ) -> Dict[str, Any]:
     motor_event_times = femr.stat_utils.ReservoirSampler(100_000)
+    task_tte_stats: Dict[str, int] = collections.defaultdict(int)
+    task_censor_stats: Dict[str, int] = collections.defaultdict(int)
     for concept_ids in batch["concept_ids"]:
         # First collect TTE data in reverse chronological order
+        censor_time = 0
         time_to_event_dict: Dict[str, int] = {}
         next_future_visit_concepts = set()
         # Reverse walk through concept_ids to calculate TTE from each [VE] point
@@ -225,13 +228,27 @@ def map_motor_tte_statistics(
                         if next_concept_id not in time_to_event_dict:
                             time_to_event_dict[next_concept_id] = time_interval
 
+                    # Record the censor time at the end of the visit
+                    censor_time += time_interval
+
+                    # Keep track of the time to event value
                     for tte in time_to_event_dict.values():
                         motor_event_times.add(tte, 1)
+                    for motor_code in motor_time_to_event_codes:
+                        if motor_code in time_to_event_dict:
+                            task_tte_stats[motor_code] += 1
+                        else:
+                            task_censor_stats[motor_code] += 1
+
                     next_future_visit_concepts.clear()
             elif concept_id in motor_time_to_event_codes:
                 next_future_visit_concepts.add(concept_id)
 
-        return {"motor_event_times": motor_event_times}
+        return {
+            "motor_event_times": motor_event_times,
+            "task_tte_stats": task_tte_stats,
+            "task_censor_stats": task_censor_stats,
+        }
 
 
 def compute_motor_tte_statistics(
@@ -267,6 +284,10 @@ def compute_motor_tte_statistics(
             current = fixed_stat
         else:
             current["motor_event_times"].combine(fixed_stat["motor_event_times"])
+            for k, v in fixed_stat["task_tte_stats"].items():
+                current["task_tte_stats"][k] += v
+            for k, v in fixed_stat["task_censor_stats"].items():
+                current["task_censor_stats"][k] += v
     return current
 
 
@@ -1413,16 +1434,30 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                     motor_time_to_event_codes.append(concept_id)
                 else:
                     break
-            LOG.info(
-                f"{len(motor_time_to_event_codes)} number of tasks have been added as MOTOR tasks"
-            )
             LOG.info("Collecting MOTOR TTE statistics")
             motor_tte_statistics = compute_motor_tte_statistics(
                 dataset, data_args, motor_time_to_event_codes
             )
+
+            def filter_rare_task(code):
+                tte_stats = motor_tte_statistics["task_tte_stats"][code]
+                censor_stats = motor_tte_statistics["task_censor_stats"][code]
+                frac_events = tte_stats / (tte_stats + censor_stats)
+                if frac_events < 1 / 1000:
+                    LOG.info("Ran into very rare task %s with %s", code, frac_events)
+                return frac_events >= 1 / 1000
+
+            filtered_motor_time_to_event_codes = list(
+                filter(filter_rare_task, motor_time_to_event_codes)
+            )
+            LOG.info(
+                f"{len(filtered_motor_time_to_event_codes)} number of tasks have been added as MOTOR tasks"
+            )
             motor_task_info = {
                 "motor_event_times": motor_tte_statistics["motor_event_times"],
-                "motor_time_to_event_codes": motor_time_to_event_codes,
+                "task_tte_stats": motor_tte_statistics["task_tte_stats"],
+                "task_censor_stats": motor_tte_statistics["task_censor_stats"],
+                "motor_time_to_event_codes": filtered_motor_time_to_event_codes,
             }
 
         gender_map = {
