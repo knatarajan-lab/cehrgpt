@@ -521,14 +521,18 @@ class CehrGptDataCollator:
                     self.tokenizer.motor_tte_vocab_size,
                     dtype=np.int32,
                 )
-                visit_token_ids = [
-                    self.tokenizer.get_motor_token_id(concept_id)
-                    for concept_id in visit_tte_data.keys()
-                ]
-                visit_tte_values = list(visit_tte_data.values())
+                motor_token_ids, tte_values = map(
+                    list,
+                    zip(
+                        *[
+                            (self.tokenizer.get_motor_token_id(concept_id), tte)
+                            for concept_id, tte in visit_tte_data.items()
+                        ]
+                    ),
+                )
 
-                time_vector[visit_token_ids] = visit_tte_values
-                event_indicator[visit_token_ids] = 1  # not censored (event occurred)
+                time_vector[motor_token_ids] = tte_values
+                event_indicator[motor_token_ids] = 1  # not censored (event occurred)
 
                 time_vectors.append(time_vector)
                 global_event_indicators.append(event_indicator)
