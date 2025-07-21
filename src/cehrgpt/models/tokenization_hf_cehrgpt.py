@@ -1308,7 +1308,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         concept_name_mapping: Dict[str, str],
         data_args: DataTrainingArguments,
         pretrained_concept_embedding_model: PretrainedEmbeddings = None,
-        allowed_motor_codes: Optional[List[int]] = None,
+        allowed_motor_codes: Optional[List[str]] = None,
         num_motor_tasks: Optional[int] = None,
         apply_entropy_filter: bool = False,
         min_prevalence: float = 1 / 1000,
@@ -1421,6 +1421,10 @@ class CehrGptTokenizer(PreTrainedTokenizer):
 
         motor_task_info = None
         if num_motor_tasks and allowed_motor_codes:
+            LOG.info("Collecting MOTOR TTE statistics")
+            motor_tte_statistics = compute_motor_tte_statistics(
+                dataset, data_args, allowed_motor_codes
+            )
             motor_time_to_event_codes = []
             for concept_id, _ in sorted(
                 concept_code_entropies.items(), key=lambda t: t[1]
@@ -1430,34 +1434,30 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                     or concept_id not in qualified_codes
                 ):
                     continue
+
+                tte_stats = motor_tte_statistics["task_tte_stats"][concept_id]
+                censor_stats = motor_tte_statistics["task_censor_stats"][concept_id]
+                frac_events = tte_stats / (tte_stats + censor_stats)
+
+                if frac_events < 1 / 1000:
+                    LOG.info(
+                        "Ran into very rare task %s with %s", concept_id, frac_events
+                    )
+                    continue
+
                 if len(motor_time_to_event_codes) < num_motor_tasks:
                     motor_time_to_event_codes.append(concept_id)
                 else:
                     break
-            LOG.info("Collecting MOTOR TTE statistics")
-            motor_tte_statistics = compute_motor_tte_statistics(
-                dataset, data_args, motor_time_to_event_codes
-            )
 
-            def filter_rare_task(code):
-                tte_stats = motor_tte_statistics["task_tte_stats"][code]
-                censor_stats = motor_tte_statistics["task_censor_stats"][code]
-                frac_events = tte_stats / (tte_stats + censor_stats)
-                if frac_events < 1 / 1000:
-                    LOG.info("Ran into very rare task %s with %s", code, frac_events)
-                return frac_events >= 1 / 1000
-
-            filtered_motor_time_to_event_codes = list(
-                filter(filter_rare_task, motor_time_to_event_codes)
-            )
             LOG.info(
-                f"{len(filtered_motor_time_to_event_codes)} number of tasks have been added as MOTOR tasks"
+                f"{len(motor_time_to_event_codes)} number of tasks have been added as MOTOR tasks"
             )
             motor_task_info = {
                 "motor_event_times": motor_tte_statistics["motor_event_times"],
                 "task_tte_stats": motor_tte_statistics["task_tte_stats"],
                 "task_censor_stats": motor_tte_statistics["task_censor_stats"],
-                "motor_time_to_event_codes": filtered_motor_time_to_event_codes,
+                "motor_time_to_event_codes": motor_time_to_event_codes,
             }
 
         gender_map = {
