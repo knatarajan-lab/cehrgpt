@@ -56,6 +56,11 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
         time_to_visits: Optional[torch.FloatTensor] = None,
         time_token_indicators: Optional[torch.BoolTensor] = None,
         sub_time_tokens: Optional[torch.LongTensor] = None,
+        motor_tte_times: Optional[torch.FloatTensor] = None,
+        motor_tte_event_indicators: Optional[torch.BoolTensor] = None,
+        motor_tte_task_indicators: Optional[torch.BoolTensor] = None,
+        motor_tte_masks: Optional[torch.BoolTensor] = None,
+        motor_end_index: Optional[torch.LongTensor] = None,
         # This is added so person_id can be passed to the collator
         person_id: Optional[torch.LongTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
@@ -96,6 +101,11 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
             time_to_visits=time_to_visits,
             time_token_indicators=time_token_indicators,
             sub_time_tokens=sub_time_tokens,
+            motor_tte_times=motor_tte_times,
+            motor_tte_event_indicators=motor_tte_event_indicators,
+            motor_tte_task_indicators=motor_tte_task_indicators,
+            motor_tte_masks=motor_tte_masks,
+            motor_end_index=motor_end_index,
             past_key_values=past_key_values,
             position_ids=position_ids,
             random_vectors=random_vectors,
@@ -125,16 +135,19 @@ class InstructCEHRGPTModel(EncoderDecoderModel):
     def prepare_inputs_for_generation(
         self,
         input_ids,
+        cehrgpt_tokenizer=None,
         past_key_values=None,
+        attention_mask=None,
+        use_cache=None,
+        encoder_outputs=None,
         inputs_embeds=None,
-        lab_token_ids=None,
         **kwargs,
     ):
         return self.decoder.prepare_inputs_for_generation(
             input_ids,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
-            lab_token_ids=lab_token_ids,
+            cehrgpt_tokenizer=cehrgpt_tokenizer,
             **kwargs,
         )
 

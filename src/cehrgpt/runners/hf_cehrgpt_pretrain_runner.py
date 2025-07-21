@@ -269,7 +269,7 @@ def main():
 
     # MOTOR label requires additional inputs from the dataset
     if cehrgpt_args.include_motor_time_to_event:
-        training_args.remove_unused_columns = False
+        training_args.label_names = ["labels", "epoch_times"]
 
     if cehrgpt_args.sample_packing and data_args.streaming:
         raise RuntimeError(
@@ -504,7 +504,7 @@ def main():
         processed_dataset = processed_dataset.filter(filter_func, **filter_args)
 
     model = load_and_create_model(model_args, cehrgpt_args, cehrgpt_tokenizer)
-
+    motor_tte_vocab_size = model.config.motor_tte_vocab_size
     # Try to update motor tte vocab size if the new configuration is different from the existing one
     if cehrgpt_args.include_motor_time_to_event:
         model.update_motor_tte_vocab_size(cehrgpt_tokenizer.motor_tte_vocab_size)
@@ -666,7 +666,7 @@ def main():
             use_sub_time_tokenization=model_args.use_sub_time_tokenization,
             include_values=model_args.include_values,
             include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
-            motor_tte_vocab_size=model.config.motor_tte_vocab_size,
+            motor_tte_vocab_size=motor_tte_vocab_size,
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
         ),
         train_dataset=processed_dataset["train"],

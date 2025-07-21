@@ -13,7 +13,11 @@ from cehrgpt.generation.cehrgpt_patient.clinical_statement_generator import (
     DEFAULT_CLINICAL_STATEMENT,
     ClinicalStatementGenerator,
 )
-from cehrgpt.gpt_utils import is_visit_end, random_slice_gpt_sequence
+from cehrgpt.gpt_utils import (
+    DEMOGRAPHIC_PROMPT_SIZE,
+    is_visit_end,
+    random_slice_gpt_sequence,
+)
 
 logger = logging.get_logger(__name__)
 
@@ -115,6 +119,13 @@ class InstructCehrGptDataCollator(CehrGptDataCollator):
                     self._convert_to_tensor([self.tokenizer.end_token_id]),
                 ]
             )
+            record["position_ids"] = torch.concat(
+                [
+                    self._convert_to_tensor([0]),
+                    self._convert_to_tensor(record["position_ids"]),
+                    self._convert_to_tensor([record["position_ids"][-1]]),
+                ]
+            )
             if self.include_values:
                 record["value_indicators"] = torch.concat(
                     [
@@ -153,6 +164,13 @@ class InstructCehrGptDataCollator(CehrGptDataCollator):
                     self._convert_to_tensor([self.tokenizer.start_token_id]),
                     self._convert_to_tensor(self.tokenizer.encode(demographic_tokens)),
                     self._convert_to_tensor(record["input_ids"][start : end + 1]),
+                ]
+            )
+            record["position_ids"] = torch.concat(
+                [
+                    self._convert_to_tensor([0]),
+                    torch.zeros([DEMOGRAPHIC_PROMPT_SIZE], dtype=torch.float32),
+                    self._convert_to_tensor(record["position_ids"][start : end + 1]),
                 ]
             )
 
@@ -204,7 +222,12 @@ class InstructCehrGptDataCollator(CehrGptDataCollator):
                     self._convert_to_tensor(record["input_ids"][: end + 1]),
                 ]
             )
-
+            record["position_ids"] = torch.concat(
+                [
+                    self._convert_to_tensor([0]),
+                    self._convert_to_tensor(record["position_ids"][: end + 1]),
+                ]
+            )
             if self.include_values:
                 record["value_indicators"] = torch.concat(
                     [

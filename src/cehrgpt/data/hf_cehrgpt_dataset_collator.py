@@ -728,7 +728,7 @@ class CehrGptDataCollator:
                 record["position_ids"] = torch.concat(
                     [
                         self._convert_to_tensor(record["position_ids"]),
-                        self._convert_to_tensor([0]),
+                        self._convert_to_tensor([record["position_ids"][-1]]),
                     ]
                 )
                 if self.include_motor_time_to_event:
@@ -971,7 +971,7 @@ class CehrGptDataCollator:
                 record["position_ids"] = torch.concat(
                     [
                         self._convert_to_tensor(record["position_ids"]),
-                        self._convert_to_tensor([0]),
+                        self._convert_to_tensor([record["position_ids"][-1]]),
                     ]
                 )
                 if self.include_motor_time_to_event:
