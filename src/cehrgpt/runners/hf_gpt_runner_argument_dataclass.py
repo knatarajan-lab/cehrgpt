@@ -217,6 +217,16 @@ class CehrGPTArguments:
             "help": "The number of times each motor_num_time_pieces piece has to be"
         },
     )
+    motor_use_ontology: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to use motor_use_ontology"
+        },
+    )
+    motor_vocab_dir: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={"help": "The directory where the concept data is stored."},
+    )
     concept_dir: Optional[str] = dataclasses.field(
         default=None,
         metadata={"help": "The directory where the concept data is stored."},

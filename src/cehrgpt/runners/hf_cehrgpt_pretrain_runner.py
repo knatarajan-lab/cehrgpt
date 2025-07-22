@@ -1,4 +1,5 @@
 import os
+import pickle
 from functools import partial
 from typing import Optional, Union
 
@@ -34,7 +35,8 @@ from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
-from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.models.tokenization_hf_cehrgpt import ONTOLOGY_FILE_NAME, CehrGptTokenizer
+from cehrgpt.omop.ontology import Ontology
 from cehrgpt.runners.data_utils import get_torch_dtype
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
@@ -74,24 +76,27 @@ def load_and_create_tokenizer(
     dataset: Optional[Union[Dataset, DatasetDict]] = None,
 ) -> CehrGptTokenizer:
 
+    ontology: Optional[Ontology] = None
     concept_name_mapping = {}
     allowed_motor_codes = list()
 
-    if cehrgpt_args.include_motor_time_to_event and not cehrgpt_args.concept_dir:
+    if cehrgpt_args.include_motor_time_to_event and not cehrgpt_args.motor_vocab_dir:
         raise RuntimeError(
             "concept_dir must be specified if include_motor_time_to_event is True"
         )
 
-    if cehrgpt_args.concept_dir:
+    if cehrgpt_args.motor_vocab_dir:
         import pandas as pd
         from cehrbert_data.const.artificial_tokens import DEATH_TOKEN
         from meds.schema import death_code
 
-        LOG.info("Loading concept data from disk at %s", cehrgpt_args.concept_dir)
-        concept_pd = pd.read_parquet(cehrgpt_args.concept_dir)
+        LOG.info("Loading concept data from disk at %s", cehrgpt_args.motor_vocab_dir)
+        concept_pd = pd.read_parquet(
+            os.path.join(cehrgpt_args.motor_vocab_dir, "concept")
+        )
         LOG.info(
             "Creating concept name mapping and motor_time_to_event_codes from disk at %s",
-            cehrgpt_args.concept_dir,
+            cehrgpt_args.motor_vocab_dir,
         )
         for row in concept_pd.itertuples():
             concept_name_mapping[str(getattr(row, "concept_id"))] = getattr(
@@ -109,6 +114,20 @@ def load_and_create_tokenizer(
             [DEATH_TOKEN, death_code],
         )
         allowed_motor_codes.extend([DEATH_TOKEN, death_code])
+
+        if cehrgpt_args.motor_use_ontology:
+            LOG.info("Creating ontology for MOTOR TTE predictions")
+            ontology = Ontology(cehrgpt_args.motor_vocab_dir)
+            train_val_dataset = datasets.concatenate_datasets(
+                [dataset["train"], dataset["validation"]]
+            )
+            ontology.prune_to_dataset(train_val_dataset)
+            ontology_path = os.path.join(
+                model_args.tokenizer_name_or_path, ONTOLOGY_FILE_NAME
+            )
+            with open(ontology_path, "wb") as f:
+                pickle.dump(ontology, f)
+
     # Try to load the pretrained tokenizer
     tokenizer_abspath = os.path.expanduser(model_args.tokenizer_name_or_path)
     try:
@@ -137,6 +156,7 @@ def load_and_create_tokenizer(
             ),
             apply_entropy_filter=cehrgpt_args.apply_entropy_filter,
             min_prevalence=cehrgpt_args.min_prevalence,
+            ontology=ontology,
         )
         LOG.info("Finished training the tokenizer ...")
         tokenizer.save_pretrained(tokenizer_abspath)

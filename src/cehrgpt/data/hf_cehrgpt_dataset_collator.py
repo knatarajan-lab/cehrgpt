@@ -484,9 +484,17 @@ class CehrGptDataCollator:
                         else:
                             censor_times.append(time_interval)
                         next_future_visit_concepts.clear()
-
-                elif self.tokenizer.is_motor_time_to_event_code(concept_id):
-                    next_future_visit_concepts.add(concept_id)
+                else:
+                    candidates = set()
+                    if self.tokenizer._ontology is not None:
+                        candidates |= set(
+                            self.tokenizer._ontology.get_all_parents(concept_id)
+                        )
+                    else:
+                        candidates.add(concept_id)
+                    for candidate in candidates:
+                        if self.tokenizer.is_motor_time_to_event_code(candidate):
+                            next_future_visit_concepts.add(candidate)
 
                 motor_tte_label_indicator.append(is_included)
 

@@ -1,6 +1,7 @@
 import collections
 import copy
 import json
+import math
 import os
 import pickle
 from functools import partial
@@ -8,6 +9,7 @@ from itertools import islice
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import femr
+import femr.ontology
 import numpy as np
 import scipy.stats as stats
 import transformers
@@ -39,6 +41,7 @@ from cehrgpt.models.special_tokens import (
     PAD_TOKEN,
     START_TOKEN,
 )
+from cehrgpt.omop.ontology import Ontology
 
 NUM_OF_BINS = 10
 DEGREE_OF_FREEDOM = 3
@@ -56,6 +59,7 @@ CONCEPT_STATS_FILE_NAME = "cehrgpt_concept_stats.json"
 DEMOGRAPHICS_STATS_FILE_NAME = "demographics_stats.pickle"
 CONCEPT_MAPPING_FILE_NAME = "concept_name_mapping.json"
 MOTOR_TIME_TO_EVENT_TASK_INFO_FILE_NAME = "motor_time_to_event_info.pickle"
+ONTOLOGY_FILE_NAME = "ontology.pickle"
 
 LOG = logging.get_logger("transformers")
 
@@ -202,7 +206,9 @@ def create_bins_with_spline(samples, num_bins, d_freedom=3) -> List[Dict[str, An
 
 
 def map_motor_tte_statistics(
-    batch: Dict[str, Any], allowed_motor_codes: List[str]
+    batch: Dict[str, Any],
+    allowed_motor_codes: List[str],
+    ontology: Optional[Ontology] = None,
 ) -> Dict[str, Any]:
     motor_event_times = femr.stat_utils.ReservoirSampler(100_000)
     task_tte_stats: Dict[str, int] = collections.defaultdict(int)
@@ -234,6 +240,7 @@ def map_motor_tte_statistics(
                     # Keep track of the time to event value
                     for tte in time_to_event_dict.values():
                         motor_event_times.add(tte, 1)
+
                     for motor_code in allowed_motor_codes:
                         if motor_code in time_to_event_dict:
                             task_tte_stats[motor_code] += 1
@@ -242,7 +249,12 @@ def map_motor_tte_statistics(
 
                     next_future_visit_concepts.clear()
             elif concept_id in allowed_motor_codes:
-                next_future_visit_concepts.add(concept_id)
+                if ontology is not None:
+                    next_future_visit_concepts |= set(
+                        ontology.get_all_parents(concept_id)
+                    )
+                else:
+                    next_future_visit_concepts.add(concept_id)
 
         return {
             "motor_event_times": motor_event_times,
@@ -255,9 +267,12 @@ def compute_motor_tte_statistics(
     dataset: Dataset,
     data_args: DataTrainingArguments,
     allowed_motor_codes: List[str],
+    ontology: Optional[Ontology] = None,
 ) -> Dict[str, Any]:
     map_motor_tte_statistics_partial = partial(
-        map_motor_tte_statistics, allowed_motor_codes=allowed_motor_codes
+        map_motor_tte_statistics,
+        allowed_motor_codes=allowed_motor_codes,
+        ontology=ontology,
     )
     LOG.info("Collecting MOTOR TTE statistics")
     if data_args.streaming:
@@ -390,7 +405,9 @@ def map_statistics(batch: Dict[str, Any], total_size, size=10_000) -> Dict[str, 
 
 
 def compute_statistics(
-    dataset: Dataset, data_args: DataTrainingArguments
+    dataset: Dataset,
+    data_args: DataTrainingArguments,
+    ontology: Optional[Ontology] = None,
 ) -> Dict[str, Any]:
     total = get_dataset_len(dataset)
     map_statistics_partial = partial(map_statistics, total_size=total, size=SAMPLE_SIZE)
@@ -445,19 +462,39 @@ def compute_statistics(
     ].items():
         categorical_lab_stats[(concept_id, value_as_concept)] += count
 
-    concept_code_stats = collections.defaultdict(int)
+    concept_code_stats = collections.defaultdict(float)
     for concept_id, count in current["concept_code_stats"].items():
-        concept_code_stats[concept_id] += count
+        if ontology is not None:
+            parents = ontology.get_all_parents(concept_id)
+            for parent in parents:
+                concept_code_stats[parent] += count
+        else:
+            concept_code_stats[concept_id] += count
 
-    code_weights = np.asarray(list(concept_code_stats.values())).clip(1e-8, 1 - 1e-8)
-    # Clip the values so we don't get errors when applying np.log
-    code_entropies = np.log(code_weights) * code_weights + (1 - code_weights) * np.log(
-        1 - code_weights
-    )
-
-    concept_code_entropies = {
-        k: v for k, v in zip(concept_code_stats.keys(), code_entropies)
-    }
+    concept_code_entropies = collections.defaultdict(float)
+    for concept_id, weight in concept_code_stats.items():
+        baseline = min(
+            [1]
+            + [
+                concept_code_stats[parent]
+                for parent in ontology.get_parents(concept_id)
+            ]
+        )
+        weight = weight / baseline
+        weight = min(1.0, weight)
+        if weight != 0 and weight != 1:
+            weight = baseline * (
+                weight * math.log(weight) + (1 - weight) * math.log(1 - weight)
+            )
+            concept_code_entropies[concept_id] = weight
+    # code_weights = np.asarray(list(concept_code_stats.values())).clip(1e-8, 1 - 1e-8)
+    # # Clip the values so we don't get errors when applying np.log
+    # code_entropies = np.log(code_weights) * code_weights + (1 - code_weights) * np.log(
+    #     1 - code_weights
+    # )
+    # concept_code_entropies = {
+    #     k: v for k, v in zip(concept_code_stats.keys(), code_entropies)
+    # }
 
     return {
         "numeric_lab_stats": numeric_lab_stats,
@@ -576,6 +613,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         motor_task_info: Optional[Dict[str, Any]] = None,
         gender_map: Optional[Dict[str, int]] = None,
         race_map: Optional[Dict[str, int]] = None,
+        ontology: Optional[Ontology] = None,
     ):
         self._tokenizer = tokenizer
         self._value_tokenizer = value_tokenizer
@@ -624,6 +662,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         }
         self._gender_map = gender_map if gender_map else {}
         self._race_map = race_map if race_map else {}
+        self._ontology = ontology
         super().__init__()
 
     @property
@@ -941,6 +980,10 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         ) as f:
             pickle.dump(self._motor_task_info, f)
 
+        if self._ontology is not None:
+            with open(os.path.join(save_directory, ONTOLOGY_FILE_NAME), "wb") as f:
+                pickle.dump(self._ontology, f)
+
         self._pretrained_concept_embedding_model.save(save_directory)
 
         if push_to_hub:
@@ -1080,6 +1123,16 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         with open(motor_tte_task_info_file, "rb") as file:
             motor_task_info = pickle.load(file)
 
+        ontology = None
+        ontology_file = transformers.utils.hub.cached_file(
+            pretrained_model_name_or_path,
+            ONTOLOGY_FILE_NAME,
+            **kwargs,
+        )
+        if ontology_file:
+            with open(ontology_file, "rb") as file:
+                ontology = pickle.load(file)
+
         pretrained_embedding_model = PretrainedEmbeddings(pretrained_model_name_or_path)
 
         return CehrGptTokenizer(
@@ -1095,6 +1148,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             motor_task_info,
             demographics_stats["gender_map"],
             demographics_stats["race_map"],
+            ontology=ontology,
         )
 
     @classmethod
@@ -1313,6 +1367,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         num_motor_tasks: Optional[int] = None,
         apply_entropy_filter: bool = False,
         min_prevalence: float = 1 / 1000,
+        ontology: Optional[Ontology] = None,
     ):
         """
         Train a huggingface word level tokenizer.
@@ -1325,7 +1380,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             dataset = dataset["train"]
 
         LOG.info("Calculating data statistics")
-        cehrgpt_data_statistics = compute_statistics(dataset, data_args)
+        cehrgpt_data_statistics = compute_statistics(dataset, data_args, ontology)
         numeric_lab_stats = cehrgpt_data_statistics["numeric_lab_stats"]
         categorical_lab_stats = cehrgpt_data_statistics["categorical_lab_stats"]
         concept_code_stats = cehrgpt_data_statistics["concept_code_stats"]
@@ -1423,7 +1478,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         motor_task_info = None
         if num_motor_tasks and allowed_motor_codes:
             motor_tte_statistics = compute_motor_tte_statistics(
-                dataset, data_args, allowed_motor_codes
+                dataset, data_args, allowed_motor_codes, ontology
             )
             motor_time_to_event_codes = []
             for concept_id, _ in sorted(
@@ -1482,6 +1537,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             motor_task_info,
             gender_map,
             race_map,
+            ontology,
         )
 
     @classmethod
