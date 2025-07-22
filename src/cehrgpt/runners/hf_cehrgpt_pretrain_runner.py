@@ -1,5 +1,4 @@
 import os
-import pickle
 from functools import partial
 from typing import Optional, Union
 
@@ -121,12 +120,11 @@ def load_and_create_tokenizer(
             train_val_dataset = datasets.concatenate_datasets(
                 [dataset["train"], dataset["validation"]]
             )
-            ontology.prune_to_dataset(train_val_dataset)
-            ontology_path = os.path.join(
-                model_args.tokenizer_name_or_path, ONTOLOGY_FILE_NAME
+            ontology.prune_to_dataset(
+                train_val_dataset,
+                num_proc=data_args.preprocessing_num_workers,
+                remove_ontologies={"SPL", "HemOnc", "LOINC"},
             )
-            with open(ontology_path, "wb") as f:
-                pickle.dump(ontology, f)
 
     # Try to load the pretrained tokenizer
     tokenizer_abspath = os.path.expanduser(model_args.tokenizer_name_or_path)
