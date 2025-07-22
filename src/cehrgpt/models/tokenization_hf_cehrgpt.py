@@ -465,23 +465,27 @@ def compute_statistics(
     ].items():
         categorical_lab_stats[(concept_id, value_as_concept)] += count
 
-    concept_code_stats = collections.defaultdict(float)
+    all_concept_code_stats = collections.defaultdict(float)
     for concept_id, count in current["concept_code_stats"].items():
         if ontology is not None:
             parents = ontology.get_all_parents(concept_id)
             for parent in parents:
-                concept_code_stats[parent] += count
+                all_concept_code_stats[parent] += count
         else:
-            concept_code_stats[concept_id] += count
+            all_concept_code_stats[concept_id] += count
 
-    concept_code_entropies = collections.defaultdict(float)
-    for concept_id, weight in concept_code_stats.items():
-        baseline = min(
-            [1]
-            + [
-                concept_code_stats[parent]
-                for parent in ontology.get_parents(concept_id)
-            ]
+    all_concept_code_entropies = collections.defaultdict(float)
+    for concept_id, weight in all_concept_code_stats.items():
+        baseline = (
+            min(
+                [1]
+                + [
+                    all_concept_code_stats[parent]
+                    for parent in ontology.get_parents(concept_id)
+                ]
+            )
+            if ontology is not None
+            else 1
         )
         weight = weight / baseline
         weight = min(1.0, weight)
@@ -489,7 +493,7 @@ def compute_statistics(
             weight = baseline * (
                 weight * math.log(weight) + (1 - weight) * math.log(1 - weight)
             )
-            concept_code_entropies[concept_id] = weight
+            all_concept_code_entropies[concept_id] = weight
     # code_weights = np.asarray(list(concept_code_stats.values())).clip(1e-8, 1 - 1e-8)
     # # Clip the values so we don't get errors when applying np.log
     # code_entropies = np.log(code_weights) * code_weights + (1 - code_weights) * np.log(
@@ -502,8 +506,9 @@ def compute_statistics(
     return {
         "numeric_lab_stats": numeric_lab_stats,
         "categorical_lab_stats": categorical_lab_stats,
-        "concept_code_stats": concept_code_stats,
-        "concept_code_entropies": concept_code_entropies,
+        "original_concept_codes": list(current["concept_code_stats"].keys()),
+        "all_concept_code_stats": all_concept_code_stats,
+        "all_concept_code_entropies": all_concept_code_entropies,
         "gender_list": current["gender_list"],
         "race_list": current["race_list"],
         "total": total,
@@ -1127,14 +1132,21 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             motor_task_info = pickle.load(file)
 
         ontology = None
-        ontology_file = transformers.utils.hub.cached_file(
-            pretrained_model_name_or_path,
-            ONTOLOGY_FILE_NAME,
-            **kwargs,
-        )
-        if ontology_file:
-            with open(ontology_file, "rb") as file:
-                ontology = pickle.load(file)
+        try:
+            ontology_file = transformers.utils.hub.cached_file(
+                pretrained_model_name_or_path,
+                ONTOLOGY_FILE_NAME,
+                **kwargs,
+            )
+            if ontology_file:
+                with open(ontology_file, "rb") as file:
+                    ontology = pickle.load(file)
+        except EnvironmentError | OSError:
+            LOG.warning(
+                "The ontology file %s does not existing in %s",
+                ONTOLOGY_FILE_NAME,
+                pretrained_model_name_or_path,
+            )
 
         pretrained_embedding_model = PretrainedEmbeddings(pretrained_model_name_or_path)
 
@@ -1386,8 +1398,11 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         cehrgpt_data_statistics = compute_statistics(dataset, data_args, ontology)
         numeric_lab_stats = cehrgpt_data_statistics["numeric_lab_stats"]
         categorical_lab_stats = cehrgpt_data_statistics["categorical_lab_stats"]
-        concept_code_stats = cehrgpt_data_statistics["concept_code_stats"]
-        concept_code_entropies = cehrgpt_data_statistics["concept_code_entropies"]
+        original_concept_codes = cehrgpt_data_statistics["original_concept_codes"]
+        all_concept_code_stats = cehrgpt_data_statistics["all_concept_code_stats"]
+        all_concept_code_entropies = cehrgpt_data_statistics[
+            "all_concept_code_entropies"
+        ]
 
         if apply_entropy_filter:
             min_prevalence = max(1e-8, min_prevalence)
@@ -1397,15 +1412,15 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             )
             qualified_codes = [
                 k
-                for k, v in concept_code_entropies.items()
-                if v <= min_entropy
+                for k in original_concept_codes
+                if all_concept_code_entropies[k] <= min_entropy
                 or not is_clinical_event(k, data_args.is_data_in_meds)
             ]
         else:
             qualified_codes = [
                 k
-                for k, v in concept_code_stats.items()
-                if min_prevalence <= v
+                for k in original_concept_codes
+                if min_prevalence <= all_concept_code_stats[k]
                 or not is_clinical_event(k, data_args.is_data_in_meds)
             ]
 
@@ -1485,7 +1500,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             )
             motor_time_to_event_codes = []
             for concept_id, _ in sorted(
-                concept_code_entropies.items(), key=lambda t: t[1]
+                all_concept_code_entropies.items(), key=lambda t: t[1]
             ):
                 if (
                     concept_id not in allowed_motor_codes
@@ -1532,7 +1547,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             value_tokenizer,
             att_tokenizer,
             token_to_sub_time_token_mapping,
-            concept_code_stats,
+            all_concept_code_stats,
             numeric_lab_stats,
             categorical_lab_stats,
             concept_name_mapping,

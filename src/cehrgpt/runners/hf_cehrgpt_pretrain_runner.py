@@ -81,7 +81,7 @@ def load_and_create_tokenizer(
 
     if cehrgpt_args.include_motor_time_to_event and not cehrgpt_args.motor_vocab_dir:
         raise RuntimeError(
-            "concept_dir must be specified if include_motor_time_to_event is True"
+            "motor_vocab_dir must be specified if include_motor_time_to_event is True"
         )
 
     if cehrgpt_args.motor_vocab_dir:
