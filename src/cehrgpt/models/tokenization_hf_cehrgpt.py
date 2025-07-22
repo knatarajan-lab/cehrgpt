@@ -1495,6 +1495,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
 
         motor_task_info = None
         if num_motor_tasks and allowed_motor_codes:
+            LOG.info("Computing the MOTOR TTE statistics")
             motor_tte_statistics = compute_motor_tte_statistics(
                 dataset, data_args, allowed_motor_codes, ontology
             )
@@ -1502,10 +1503,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             for concept_id, _ in sorted(
                 all_concept_code_entropies.items(), key=lambda t: t[1]
             ):
-                if (
-                    concept_id not in allowed_motor_codes
-                    or concept_id not in qualified_codes
-                ):
+                if concept_id not in allowed_motor_codes:
                     continue
 
                 tte_stats = motor_tte_statistics["task_tte_stats"][concept_id]
