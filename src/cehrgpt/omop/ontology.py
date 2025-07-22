@@ -84,14 +84,7 @@ class Ontology:
             .rows()
         ):
             self.parents_map[concept_id].add(parent_concept_id)
-
-        self.children_map = collections.defaultdict(set)
-        for concept_id, parents in self.parents_map.items():
-            for parent in parents:
-                self.children_map[parent].add(concept_id)
-
         self.all_parents_map: Dict[str, Set[str]] = {}
-        self.all_children_map: Dict[str, Set[str]] = {}
 
     def prune_to_dataset(
         self,
@@ -118,40 +111,26 @@ class Ontology:
                 (ontology not in remove_ontologies) and (c in all_parents)
             )
 
-        concept_ids = self.children_map.keys() | self.parents_map.keys()
+        concept_ids = set(self.parents_map.keys())
         for concept_id in concept_ids:
             m: Any
             if is_valid(concept_id):
-                for m in (self.children_map, self.parents_map):
+                for m in (self.parents_map, self.concept_vocabulary_map):
                     m[concept_id] = {a for a in m[concept_id] if is_valid(a)}
             else:
-                for m in (self.children_map, self.parents_map):
+                for m in (self.parents_map, self.concept_vocabulary_map):
                     if concept_id in m:
                         del m[concept_id]
 
         self.all_parents_map = {}
-        self.all_children_map = {}
 
         # Prime the pump
-        for concept_id in self.children_map.keys() | self.parents_map.keys():
+        for concept_id in self.parents_map.keys():
             self.get_all_parents(concept_id)
-
-    def get_children(self, code: str) -> Iterable[str]:
-        """Get the children for a given code."""
-        return self.children_map.get(code, set())
 
     def get_parents(self, code: str) -> Iterable[str]:
         """Get the parents for a given code."""
         return self.parents_map.get(code, set())
-
-    def get_all_children(self, code: str) -> Set[str]:
-        """Get all children, including through the ontology."""
-        if code not in self.all_children_map:
-            result = {code}
-            for child in self.children_map.get(code, set()):
-                result |= self.get_all_children(child)
-            self.all_children_map[code] = result
-        return self.all_children_map[code]
 
     def get_all_parents(self, code: str) -> Set[str]:
         """Get all parents, including through the ontology."""

@@ -208,7 +208,6 @@ def create_bins_with_spline(samples, num_bins, d_freedom=3) -> List[Dict[str, An
 def map_motor_tte_statistics(
     batch: Dict[str, Any],
     allowed_motor_codes: List[str],
-    ontology: Optional[Ontology] = None,
 ) -> Dict[str, Any]:
     motor_event_times = femr.stat_utils.ReservoirSampler(100_000)
     task_tte_stats: Dict[str, int] = collections.defaultdict(int)
@@ -246,15 +245,9 @@ def map_motor_tte_statistics(
                             task_tte_stats[motor_code] += 1
                         else:
                             task_censor_stats[motor_code] += 1
-
                     next_future_visit_concepts.clear()
-            elif concept_id in allowed_motor_codes:
-                if ontology is not None:
-                    next_future_visit_concepts |= set(
-                        ontology.get_all_parents(concept_id)
-                    )
-                else:
-                    next_future_visit_concepts.add(concept_id)
+            else:
+                next_future_visit_concepts.add(concept_id)
 
         return {
             "motor_event_times": motor_event_times,
@@ -272,9 +265,7 @@ def compute_motor_tte_statistics(
     map_motor_tte_statistics_partial = partial(
         map_motor_tte_statistics,
         allowed_motor_codes=allowed_motor_codes,
-        ontology=ontology,
     )
-    LOG.info("Collecting MOTOR TTE statistics")
     if data_args.streaming:
         first_example = next(iter(dataset))
         parts = dataset.map(
@@ -304,6 +295,18 @@ def compute_motor_tte_statistics(
                 current["task_tte_stats"][k] += v
             for k, v in fixed_stat["task_censor_stats"].items():
                 current["task_censor_stats"][k] += v
+    # Aggregate the counts for the parent concepts
+    if ontology is not None:
+        for k in list(current["task_tte_stats"].keys()):
+            for parent in ontology.get_all_parents(k):
+                if parent != k:
+                    current["task_tte_stats"][parent] += current["task_tte_stats"][k]
+        for k in list(current["task_censor_stats"].keys()):
+            for parent in ontology.get_all_parents(k):
+                if parent != k:
+                    current["task_censor_stats"][parent] += current[
+                        "task_censor_stats"
+                    ][k]
     return current
 
 
