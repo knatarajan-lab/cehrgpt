@@ -13,6 +13,7 @@ from cehrgpt.gpt_utils import (
     extract_time_interval_in_days,
     extract_time_interval_in_hours,
     is_att_token,
+    is_clinical_event,
     is_inpatient_att_token,
     is_inpatient_hour_token,
     is_visit_end,
@@ -53,6 +54,7 @@ class CehrGptDataCollator:
         self.pretraining = pretraining
         self.include_demographics = include_demographics
         self.add_linear_prob_token = add_linear_prob_token
+        self.motor_code_cache: Dict[str, List[str]] = dict()
 
         # MOTOR TTE configuration
         if include_motor_time_to_event:
@@ -489,17 +491,14 @@ class CehrGptDataCollator:
                         else:
                             censor_times.append(time_interval)
                         next_future_visit_concepts.clear()
-                else:
-                    candidates = set()
-                    if self.tokenizer._ontology is not None:
-                        candidates |= set(
-                            self.tokenizer._ontology.get_all_parents(concept_id)
-                        )
+                elif is_clinical_event(concept_id):
+                    if concept_id in self.motor_code_cache:
+                        motor_codes = self.motor_code_cache[concept_id]
                     else:
-                        candidates.add(concept_id)
-                    for candidate in candidates:
-                        if self.tokenizer.is_motor_time_to_event_code(candidate):
-                            next_future_visit_concepts.add(candidate)
+                        motor_codes = self.tokenizer.get_motor_parents(concept_id)
+                        self.motor_code_cache[concept_id] = motor_codes
+                    for motor_code in motor_codes:
+                        next_future_visit_concepts.add(motor_code)
 
                 motor_tte_label_indicator.append(is_included)
 
