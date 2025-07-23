@@ -547,14 +547,8 @@ class OptimizedMotorTTEDatasetMapping(DatasetMappingDecorator):
 
     def transform(self, record: Dict[str, Any]) -> Union[Dict[str, Any], Series]:
         """Optimized transformation function that adds motor TTE labels to a record."""
-        try:
-            motor_labels = self._create_motor_tte_labels_optimized(record)
-            record.update(motor_labels)
-        except Exception as e:
-            LOG.error(f"Error processing motor TTE labels: {e}")
-            # Return record without motor labels on error
-            return record
-
+        motor_labels = self._create_motor_tte_labels_optimized(record)
+        record.update(motor_labels)
         return record
 
     def _create_motor_tte_labels_optimized(
@@ -703,13 +697,8 @@ class VectorizedMotorTTEDatasetMapping(DatasetMappingDecorator):
 
     def transform(self, record: Dict[str, Any]) -> Union[Dict[str, Any], Series]:
         """Vectorized transformation using pre-computed token type arrays."""
-        try:
-            motor_labels = self._create_motor_tte_labels_vectorized(record)
-            record.update(motor_labels)
-        except Exception as e:
-            LOG.error(f"Error processing motor TTE labels: {e}")
-            return record
-
+        motor_labels = self._create_motor_tte_labels_vectorized(record)
+        record.update(motor_labels)
         return record
 
     def _create_motor_tte_labels_vectorized(

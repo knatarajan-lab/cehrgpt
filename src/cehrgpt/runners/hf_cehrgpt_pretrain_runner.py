@@ -74,63 +74,67 @@ def load_and_create_tokenizer(
     cehrgpt_args: CehrGPTArguments,
     dataset: Optional[Union[Dataset, DatasetDict]] = None,
 ) -> CehrGptTokenizer:
-    ontology: Optional[Ontology] = None
-    concept_name_mapping = {}
-    allowed_motor_codes = list()
-
-    if cehrgpt_args.include_motor_time_to_event and not cehrgpt_args.motor_vocab_dir:
-        raise RuntimeError(
-            "motor_vocab_dir must be specified if include_motor_time_to_event is True"
-        )
-
-    if cehrgpt_args.motor_vocab_dir:
-        import pandas as pd
-        from cehrbert_data.const.artificial_tokens import DEATH_TOKEN
-        from meds.schema import death_code
-
-        LOG.info("Loading concept data from disk at %s", cehrgpt_args.motor_vocab_dir)
-        concept_pd = pd.read_parquet(
-            os.path.join(cehrgpt_args.motor_vocab_dir, "concept")
-        )
-        LOG.info(
-            "Creating concept name mapping and motor_time_to_event_codes from disk at %s",
-            cehrgpt_args.motor_vocab_dir,
-        )
-        for row in concept_pd.itertuples():
-            concept_name_mapping[str(getattr(row, "concept_id"))] = getattr(
-                row, "concept_name"
-            )
-            if (
-                cehrgpt_args.include_motor_time_to_event
-                and getattr(row, "domain_id")
-                in ["Condition", "Procedure", "Drug", "Visit"]
-                and getattr(row, "standard_concept") == "S"
-            ):
-                allowed_motor_codes.append(str(getattr(row, "concept_id")))
-        LOG.info(
-            "Adding death codes for MOTOR TTE predictions: %s",
-            [DEATH_TOKEN, death_code],
-        )
-        allowed_motor_codes.extend([DEATH_TOKEN, death_code])
-
-        if cehrgpt_args.motor_use_ontology:
-            LOG.info("Creating ontology for MOTOR TTE predictions")
-            ontology = Ontology(cehrgpt_args.motor_vocab_dir)
-            train_val_dataset = datasets.concatenate_datasets(
-                [dataset["train"], dataset["validation"]]
-            )
-            ontology.prune_to_dataset(
-                train_val_dataset,
-                num_proc=data_args.preprocessing_num_workers,
-                remove_ontologies={"SPL", "HemOnc", "LOINC"},
-            )
 
     # Try to load the pretrained tokenizer
     tokenizer_abspath = os.path.expanduser(model_args.tokenizer_name_or_path)
-    try:
+    if tokenizer_exists(tokenizer_abspath):
         tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_abspath)
-    except Exception as e:
-        LOG.warning(e)
+    else:
+        ontology: Optional[Ontology] = None
+        concept_name_mapping = {}
+        allowed_motor_codes = list()
+        if (
+            cehrgpt_args.include_motor_time_to_event
+            and not cehrgpt_args.motor_vocab_dir
+        ):
+            raise RuntimeError(
+                "motor_vocab_dir must be specified if include_motor_time_to_event is True"
+            )
+
+        if cehrgpt_args.motor_vocab_dir:
+            import pandas as pd
+            from cehrbert_data.const.artificial_tokens import DEATH_TOKEN
+            from meds.schema import death_code
+
+            LOG.info(
+                "Loading concept data from disk at %s", cehrgpt_args.motor_vocab_dir
+            )
+            concept_pd = pd.read_parquet(
+                os.path.join(cehrgpt_args.motor_vocab_dir, "concept")
+            )
+            LOG.info(
+                "Creating concept name mapping and motor_time_to_event_codes from disk at %s",
+                cehrgpt_args.motor_vocab_dir,
+            )
+            for row in concept_pd.itertuples():
+                concept_name_mapping[str(getattr(row, "concept_id"))] = getattr(
+                    row, "concept_name"
+                )
+                if (
+                    cehrgpt_args.include_motor_time_to_event
+                    and getattr(row, "domain_id")
+                    in ["Condition", "Procedure", "Drug", "Visit"]
+                    and getattr(row, "standard_concept") == "S"
+                ):
+                    allowed_motor_codes.append(str(getattr(row, "concept_id")))
+            LOG.info(
+                "Adding death codes for MOTOR TTE predictions: %s",
+                [DEATH_TOKEN, death_code],
+            )
+            allowed_motor_codes.extend([DEATH_TOKEN, death_code])
+
+            if cehrgpt_args.motor_use_ontology:
+                LOG.info("Creating ontology for MOTOR TTE predictions")
+                ontology = Ontology(cehrgpt_args.motor_vocab_dir)
+                train_val_dataset = datasets.concatenate_datasets(
+                    [dataset["train"], dataset["validation"]]
+                )
+                ontology.prune_to_dataset(
+                    train_val_dataset,
+                    num_proc=data_args.preprocessing_num_workers,
+                    remove_ontologies={"SPL", "HemOnc", "LOINC"},
+                )
+
         if dataset is None:
             raise RuntimeError(
                 f"Failed to load the tokenizer from {tokenizer_abspath} with the error \n{e}\n"
