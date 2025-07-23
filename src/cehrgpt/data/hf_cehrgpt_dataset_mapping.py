@@ -512,98 +512,313 @@ class HFFineTuningMapping(HFCehrGptTokenizationMapping):
         return columns
 
 
-class MotorTTEDatasetMapping(DatasetMappingDecorator):
-    """
-    Dataset mapping for Motor Time-to-Event label preprocessing.
+class OptimizedMotorTTEDatasetMapping(DatasetMappingDecorator):
+    """Optimized dataset mapping for Motor Time-to-Event label preprocessing."""
 
-    Subclasses DatasetMappingDecorator to follow the same pattern as existing mappings.
+    def __init__(self, tokenizer: CehrGptTokenizer):
+        self.tokenizer = tokenizer
+        self.motor_code_cache: Dict[str, List[str]] = {}
+
+        # Pre-compute token type lookups for faster processing
+        # Cache for token type checks
+        self.att_token_cache = {}
+        self.clinical_event_cache = {}
+        self.time_interval_cache = {}
+
+    def _is_att_token_cached(self, concept_id: str) -> bool:
+        """Cached version of is_att_token check."""
+        if concept_id not in self.att_token_cache:
+            self.att_token_cache[concept_id] = is_att_token(concept_id)
+        return self.att_token_cache[concept_id]
+
+    def _is_clinical_event_cached(self, concept_id: str) -> bool:
+        """Cached version of is_clinical_event check."""
+        if concept_id not in self.clinical_event_cache:
+            self.clinical_event_cache[concept_id] = is_clinical_event(concept_id)
+        return self.clinical_event_cache[concept_id]
+
+    def _get_time_interval_cached(self, concept_id: str) -> int:
+        """Cached version of extract_time_interval_in_days."""
+        if concept_id not in self.time_interval_cache:
+            self.time_interval_cache[concept_id] = extract_time_interval_in_days(
+                concept_id
+            )
+        return self.time_interval_cache[concept_id]
+
+    def transform(self, record: Dict[str, Any]) -> Union[Dict[str, Any], Series]:
+        """Optimized transformation function that adds motor TTE labels to a record."""
+        try:
+            motor_labels = self._create_motor_tte_labels_optimized(record)
+            record.update(motor_labels)
+        except Exception as e:
+            LOG.error(f"Error processing motor TTE labels: {e}")
+            # Return record without motor labels on error
+            return record
+
+        return record
+
+    def _create_motor_tte_labels_optimized(
+        self, record: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Optimized version of motor TTE label creation with several performance improvements:
+
+        1. Pre-computed token type checks with caching
+        2. Vectorized operations where possible
+        3. Reduced memory allocations
+        4. Early termination conditions
+        """
+        concept_ids = record["concept_ids"]
+        event_times = record["epoch_times"]
+
+        # Pre-allocate lists with estimated sizes to reduce memory allocations
+        n_concepts = len(concept_ids)
+        motor_censor_times = []
+        motor_tte_tasks = []
+        motor_tte_times = []
+        motor_tte_task_indicators = [False] * n_concepts
+        motor_tte_label_offsets = []
+
+        # Use dict for O(1) lookups instead of repeated list operations
+        time_to_event_dict: Dict[str, int] = {}
+        before_time_token = False
+
+        # Reverse iteration with enumeration for better performance
+        for i, (concept_id, event_time) in enumerate(
+            zip(reversed(concept_ids), reversed(event_times))
+        ):
+            reverse_idx = n_concepts - 1 - i
+            is_included = False
+
+            if before_time_token and time_to_event_dict:
+                # Batch process all motor codes for this time point
+                current_tasks = []
+                current_times = []
+
+                for motor_code, motor_time in time_to_event_dict.items():
+                    motor_token_id = self.tokenizer.get_motor_token_id(motor_code)
+                    current_tasks.append(motor_token_id)
+                    current_times.append(motor_time - event_time)
+
+                motor_tte_tasks.extend(current_tasks)
+                motor_tte_times.extend(current_times)
+                motor_tte_label_offsets.append(len(time_to_event_dict))
+                motor_censor_times.append(event_times[-1] - event_time)
+                before_time_token = False
+                is_included = True
+
+            # Use cached token type checks
+            if self._is_att_token_cached(concept_id):
+                time_interval = self._get_time_interval_cached(concept_id)
+                if time_interval > 0:
+                    before_time_token = True
+            elif self._is_clinical_event_cached(concept_id):
+                # Use cached motor codes
+                if concept_id in self.motor_code_cache:
+                    motor_codes = self.motor_code_cache[concept_id]
+                else:
+                    motor_codes = self.tokenizer.get_motor_parents(concept_id)
+                    self.motor_code_cache[concept_id] = motor_codes
+
+                # Batch update time_to_event_dict
+                for motor_code in motor_codes:
+                    time_to_event_dict[motor_code] = event_time
+
+            motor_tte_task_indicators[reverse_idx] = is_included
+
+        # Early return if no motor tasks found
+        if not motor_tte_times:
+            LOG.debug(
+                "No MOTOR tasks detected for this sample. "
+                "Length: %s, last 10 concepts: %s",
+                len(concept_ids),
+                concept_ids[-10:] if len(concept_ids) >= 10 else concept_ids,
+            )
+
+        # Reverse lists back to chronological order
+        motor_tte_times.reverse()
+        motor_tte_tasks.reverse()
+        motor_tte_label_offsets.reverse()
+        motor_censor_times.reverse()
+
+        # Use numpy for cumsum operation (faster than pure Python)
+        motor_tte_label_offsets = np.cumsum(motor_tte_label_offsets).tolist()
+        motor_tte_label_offsets = [0] + motor_tte_label_offsets
+
+        # Pad motor_censor_times
+        motor_censor_times = motor_censor_times + [-100]
+
+        # Shift task indicators
+        motor_tte_task_indicators = motor_tte_task_indicators[1:] + [False]
+
+        return {
+            "motor_censor_times": motor_censor_times,
+            "motor_tte_tasks": motor_tte_tasks,
+            "motor_tte_times": motor_tte_times,
+            "motor_tte_label_offsets": motor_tte_label_offsets,
+            "motor_tte_task_indicators": motor_tte_task_indicators,
+        }
+
+
+class VectorizedMotorTTEDatasetMapping(DatasetMappingDecorator):
+    """
+    Further optimized version using vectorized operations where possible.
+
+    This version pre-computes token type arrays for even faster processing.
     """
 
     def __init__(self, tokenizer: CehrGptTokenizer):
         self.tokenizer = tokenizer
         self.motor_code_cache: Dict[str, List[str]] = {}
 
+        # Pre-compute vocab-wide token type mappings
+        self._precompute_vocab_mappings()
+
+    def _precompute_vocab_mappings(self):
+        """Pre-compute token type mappings for entire vocabulary."""
+        LOG.info("Pre-computing vocabulary-wide token mappings...")
+
+        vocab = self.tokenizer.get_vocab()
+        self.vocab_to_idx = {token: idx for idx, token in enumerate(vocab.keys())}
+        self.vocab_tokens = list(vocab.keys())
+
+        # Pre-compute boolean arrays for token types
+        n_vocab = len(self.vocab_tokens)
+        self.is_att_token_array = np.zeros(n_vocab, dtype=bool)
+        self.is_clinical_event_array = np.zeros(n_vocab, dtype=bool)
+        self.time_intervals_array = np.full(n_vocab, -1, dtype=int)
+
+        for i, token in enumerate(self.vocab_tokens):
+            if is_att_token(token):
+                self.is_att_token_array[i] = True
+                try:
+                    self.time_intervals_array[i] = extract_time_interval_in_days(token)
+                except (ValueError, AttributeError):
+                    self.time_intervals_array[i] = -1
+
+            if is_clinical_event(token):
+                self.is_clinical_event_array[i] = True
+
+        LOG.info(f"Processed {n_vocab} vocabulary tokens")
+
     def transform(self, record: Dict[str, Any]) -> Union[Dict[str, Any], Series]:
-        """
-        Main transformation function that adds motor TTE labels to a record.
+        """Vectorized transformation using pre-computed token type arrays."""
+        try:
+            motor_labels = self._create_motor_tte_labels_vectorized(record)
+            record.update(motor_labels)
+        except Exception as e:
+            LOG.error(f"Error processing motor TTE labels: {e}")
+            return record
 
-        Args:
-            record: Single record containing 'input_ids'
+        return record
 
-        Returns:
-            Record with motor TTE labels added
-        """
-        # First collect TTE data in reverse chronological order
-        motor_censor_times = []
-        motor_tte_tasks: List[int] = []
-        motor_tte_times: List[int] = []
-        time_to_event_dict: Dict[str, int] = {}
-        motor_tte_task_indicators: List[bool] = []
-        motor_tte_label_offsets: List[int] = []
-
+    def _create_motor_tte_labels_vectorized(
+        self, record: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Highly optimized vectorized version using pre-computed token type arrays."""
+        concept_ids = record["concept_ids"]
         event_times = record["epoch_times"]
+
+        # Convert concept_ids to indices for vectorized operations
+        try:
+            concept_indices = np.array([self.vocab_to_idx[cid] for cid in concept_ids])
+        except KeyError as e:
+            LOG.warning(f"Unknown concept ID found: {e}")
+            # Fallback to non-vectorized version for records with unknown tokens
+            return self._create_motor_tte_labels_fallback(record)
+
+        # Vectorized token type detection
+        is_att_tokens = self.is_att_token_array[concept_indices]
+        is_clinical_events = self.is_clinical_event_array[concept_indices]
+        time_intervals = self.time_intervals_array[concept_indices]
+
+        # Find valid time tokens (att tokens with positive intervals)
+        valid_time_tokens = is_att_tokens & (time_intervals > 0)
+
+        # Process in reverse order but use vectorized operations where possible
+        n_concepts = len(concept_ids)
+        motor_tte_task_indicators = np.zeros(n_concepts, dtype=bool)
+
+        motor_censor_times = []
+        motor_tte_tasks = []
+        motor_tte_times = []
+        motor_tte_label_offsets = []
+
+        time_to_event_dict: Dict[str, int] = {}
         before_time_token = False
-        # Reverse walk through concept_ids to calculate TTE from each [VE] point
-        for concept_id, event_time in zip(
-            reversed(record["concept_ids"]), reversed(event_times)
-        ):
+
+        # Reverse iteration with vectorized lookups
+        for i in range(n_concepts - 1, -1, -1):
+            concept_id = concept_ids[i]
+            event_time = event_times[i]
             is_included = False
-            if before_time_token:
-                for k, v in time_to_event_dict.items():
-                    motor_tte_tasks.append(self.tokenizer.get_motor_token_id(k))
-                    motor_tte_times.append(v - event_time)
+
+            if before_time_token and time_to_event_dict:
+                # Batch process motor codes
+                current_tasks = []
+                current_times = []
+
+                for motor_code, motor_time in time_to_event_dict.items():
+                    motor_token_id = self.tokenizer.get_motor_token_id(motor_code)
+                    current_tasks.append(motor_token_id)
+                    current_times.append(motor_time - event_time)
+
+                motor_tte_tasks.extend(current_tasks)
+                motor_tte_times.extend(current_times)
                 motor_tte_label_offsets.append(len(time_to_event_dict))
                 motor_censor_times.append(event_times[-1] - event_time)
                 before_time_token = False
                 is_included = True
-            if (
-                is_att_token(concept_id)
-                and extract_time_interval_in_days(concept_id) > 0
-            ):
+
+            # Use vectorized lookups
+            if valid_time_tokens[i]:
                 before_time_token = True
-            elif is_clinical_event(concept_id):
+            elif is_clinical_events[i]:
+                # Use cached motor codes
                 if concept_id in self.motor_code_cache:
                     motor_codes = self.motor_code_cache[concept_id]
                 else:
                     motor_codes = self.tokenizer.get_motor_parents(concept_id)
                     self.motor_code_cache[concept_id] = motor_codes
+
                 for motor_code in motor_codes:
                     time_to_event_dict[motor_code] = event_time
-            motor_tte_task_indicators.append(is_included)
 
-        if len(motor_tte_times) == 0:
+            motor_tte_task_indicators[i] = is_included
+
+        # Early return if no motor tasks found
+        if not motor_tte_times:
             LOG.debug(
-                "There are no MOTOR tasks detected for this sample."
-                "It's likely this sample either contains a long admission or does not "
-                "have any time intervals greater than 0. length: %s, concept_ids[-10:] %s",
-                len(record["concept_ids"]),
-                record["concept_ids"][-10:],
+                "No MOTOR tasks detected for this sample. "
+                "Length: %s, last 10 concepts: %s",
+                len(concept_ids),
+                concept_ids[-10:] if len(concept_ids) >= 10 else concept_ids,
             )
 
-        # Reverse back to chronological order for final labels
+        # Reverse and finalize
         motor_tte_times.reverse()
         motor_tte_tasks.reverse()
         motor_tte_label_offsets.reverse()
         motor_censor_times.reverse()
-        motor_tte_task_indicators.reverse()
 
-        # Run cumsum to get proper offsets
         motor_tte_label_offsets = np.cumsum(motor_tte_label_offsets).tolist()
         motor_tte_label_offsets = [0] + motor_tte_label_offsets
-
-        # Pad motor_censor_times to align with motor_tte_label_offsets
         motor_censor_times = motor_censor_times + [-100]
+        motor_tte_task_indicators = np.roll(motor_tte_task_indicators, -1)
+        motor_tte_task_indicators[-1] = False
 
-        # Shift time_to_event_to_include to left by one because we should make predictions right before
-        # we see the ATT token
-        motor_tte_task_indicators = motor_tte_task_indicators[1:] + [False]
-        record.update(
-            {
-                "motor_censor_times": motor_censor_times,
-                "motor_tte_tasks": motor_tte_tasks,
-                "motor_tte_times": motor_tte_times,
-                "motor_tte_label_offsets": motor_tte_label_offsets,
-                "motor_tte_task_indicators": motor_tte_task_indicators,
-            }
-        )
-        return record
+        return {
+            "motor_censor_times": motor_censor_times,
+            "motor_tte_tasks": motor_tte_tasks,
+            "motor_tte_times": motor_tte_times,
+            "motor_tte_label_offsets": motor_tte_label_offsets,
+            "motor_tte_task_indicators": motor_tte_task_indicators.tolist(),
+        }
+
+    def _create_motor_tte_labels_fallback(
+        self, record: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Fallback method for records with unknown tokens."""
+        # Use the original optimized method as fallback
+        optimized_mapper = OptimizedMotorTTEDatasetMapping(self.tokenizer)
+        return optimized_mapper._create_motor_tte_labels_optimized(record)

@@ -11,7 +11,7 @@ from datasets import Dataset, DatasetDict
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import (
     HFCehrGptTokenizationMapping,
     HFFineTuningMapping,
-    MotorTTEDatasetMapping,
+    OptimizedMotorTTEDatasetMapping,
 )
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
@@ -57,7 +57,7 @@ def create_cehrgpt_pretraining_dataset(
             dataset.remove_columns(["visit_concept_ids"])
     mappings = [HFCehrGptTokenizationMapping(cehrgpt_tokenizer)]
     if cehrgpt_args.include_motor_time_to_event:
-        mappings.append(MotorTTEDatasetMapping(cehrgpt_tokenizer))
+        mappings.append(OptimizedMotorTTEDatasetMapping(cehrgpt_tokenizer))
 
     for mapping in mappings:
         dataset = apply_cehrbert_dataset_mapping(
