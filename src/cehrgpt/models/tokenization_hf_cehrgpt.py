@@ -212,42 +212,32 @@ def map_motor_tte_statistics(
     motor_event_times = femr.stat_utils.ReservoirSampler(100_000)
     task_tte_stats: Dict[str, int] = collections.defaultdict(int)
     task_censor_stats: Dict[str, int] = collections.defaultdict(int)
-    for concept_ids in batch["concept_ids"]:
+    for concept_ids, event_times in zip(batch["concept_ids"], batch["epoch_times"]):
         # First collect TTE data in reverse chronological order
-        censor_time = 0
+        # censor_time = 0
         time_to_event_dict: Dict[str, int] = {}
-        next_future_visit_concepts = set()
+        before_time_token = False
         # Reverse walk through concept_ids to calculate TTE from each [VE] point
-        for concept_id in reversed(concept_ids):
-            if is_att_token(concept_id):
-                time_interval = extract_time_interval_in_days(concept_id)
-                if time_interval > 0:
-                    # Update TTE for existing concepts, or add new ones seen in this visit
-                    for existing_concept_id in list(time_to_event_dict.keys()):
-                        if existing_concept_id in next_future_visit_concepts:
-                            time_to_event_dict[existing_concept_id] = time_interval
-                        else:
-                            time_to_event_dict[existing_concept_id] += time_interval
+        for concept_id, event_time in zip(reversed(concept_ids), reversed(event_times)):
+            if before_time_token:
+                # censor_time = event_times[-1] - event_time
+                # Keep track of the time to event value
+                for future_time_event in time_to_event_dict.values():
+                    motor_event_times.add(future_time_event - event_time, 1)
 
-                    for next_concept_id in next_future_visit_concepts:
-                        if next_concept_id not in time_to_event_dict:
-                            time_to_event_dict[next_concept_id] = time_interval
-
-                    # Record the censor time at the end of the visit
-                    censor_time += time_interval
-
-                    # Keep track of the time to event value
-                    for tte in time_to_event_dict.values():
-                        motor_event_times.add(tte, 1)
-
-                    for motor_code in allowed_motor_codes:
-                        if motor_code in time_to_event_dict:
-                            task_tte_stats[motor_code] += 1
-                        else:
-                            task_censor_stats[motor_code] += 1
-                    next_future_visit_concepts.clear()
-            else:
-                next_future_visit_concepts.add(concept_id)
+                for motor_code in allowed_motor_codes:
+                    if motor_code in time_to_event_dict:
+                        task_tte_stats[motor_code] += 1
+                    else:
+                        task_censor_stats[motor_code] += 1
+                before_time_token = False
+            if (
+                is_att_token(concept_id)
+                and extract_time_interval_in_days(concept_id) > 0
+            ):
+                before_time_token = True
+            elif is_clinical_event(concept_id):
+                time_to_event_dict[concept_id] = event_time
 
         return {
             "motor_event_times": motor_event_times,
@@ -494,14 +484,6 @@ def compute_statistics(
                 weight * math.log(weight) + (1 - weight) * math.log(1 - weight)
             )
             all_concept_code_entropies[concept_id] = weight
-    # code_weights = np.asarray(list(concept_code_stats.values())).clip(1e-8, 1 - 1e-8)
-    # # Clip the values so we don't get errors when applying np.log
-    # code_entropies = np.log(code_weights) * code_weights + (1 - code_weights) * np.log(
-    #     1 - code_weights
-    # )
-    # concept_code_entropies = {
-    #     k: v for k, v in zip(concept_code_stats.keys(), code_entropies)
-    # }
 
     return {
         "numeric_lab_stats": numeric_lab_stats,

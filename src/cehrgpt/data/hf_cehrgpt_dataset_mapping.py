@@ -540,39 +540,27 @@ class MotorTTEDatasetMapping(DatasetMappingDecorator):
         time_to_event_dict: Dict[str, int] = {}
         motor_tte_task_indicators: List[bool] = []
         motor_tte_label_offsets: List[int] = []
-        next_future_visit_concepts = set()
 
+        event_times = record["epoch_times"]
+        before_time_token = False
         # Reverse walk through concept_ids to calculate TTE from each [VE] point
-        for concept_id in reversed(record["concept_ids"]):
+        for concept_id, event_time in zip(
+            reversed(record["concept_ids"]), reversed(event_times)
+        ):
             is_included = False
-            if is_att_token(concept_id):
-                time_interval = extract_time_interval_in_days(concept_id)
-                if time_interval > 0:
-                    # Update TTE for existing concepts, or add new ones seen in this visit
-                    for existing_concept_id in list(time_to_event_dict.keys()):
-                        if existing_concept_id in next_future_visit_concepts:
-                            time_to_event_dict[existing_concept_id] = time_interval
-                        else:
-                            time_to_event_dict[existing_concept_id] += time_interval
-
-                    for next_concept_id in next_future_visit_concepts:
-                        if next_concept_id not in time_to_event_dict:
-                            time_to_event_dict[next_concept_id] = time_interval
-
-                    is_included = True
-                    for k, v in time_to_event_dict.items():
-                        motor_tte_tasks.append(self.tokenizer.get_motor_token_id(k))
-                        motor_tte_times.append(v)
-
-                    motor_tte_label_offsets.append(len(time_to_event_dict))
-                    # Record the censor time at the end of the visit
-                    if motor_censor_times:
-                        motor_censor_times.append(
-                            motor_censor_times[-1] + time_interval
-                        )
-                    else:
-                        motor_censor_times.append(time_interval)
-                    next_future_visit_concepts.clear()
+            if before_time_token:
+                for k, v in time_to_event_dict.items():
+                    motor_tte_tasks.append(self.tokenizer.get_motor_token_id(k))
+                    motor_tte_times.append(v - event_time)
+                motor_tte_label_offsets.append(len(time_to_event_dict))
+                motor_censor_times.append(event_times[-1] - event_time)
+                before_time_token = False
+                is_included = True
+            if (
+                is_att_token(concept_id)
+                and extract_time_interval_in_days(concept_id) > 0
+            ):
+                before_time_token = True
             elif is_clinical_event(concept_id):
                 if concept_id in self.motor_code_cache:
                     motor_codes = self.motor_code_cache[concept_id]
@@ -580,8 +568,7 @@ class MotorTTEDatasetMapping(DatasetMappingDecorator):
                     motor_codes = self.tokenizer.get_motor_parents(concept_id)
                     self.motor_code_cache[concept_id] = motor_codes
                 for motor_code in motor_codes:
-                    next_future_visit_concepts.add(motor_code)
-
+                    time_to_event_dict[motor_code] = event_time
             motor_tte_task_indicators.append(is_included)
 
         if len(motor_tte_times) == 0:

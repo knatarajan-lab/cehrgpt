@@ -488,9 +488,14 @@ class CehrGptDataCollator:
 
         if n_tte_predictions > 0:
             # Putting the event time and censor time into the corresponding time bins
+            motor_time_bins = [
+                float("inf") if time_bin == float("inf") else time_bin // 3600
+                for time_bin in self.motor_time_bins
+            ]
             for bin_num, (start, end) in enumerate(
-                zip(self.motor_time_bins, self.motor_time_bins[1:])
+                zip(motor_time_bins, motor_time_bins[1:])
             ):
+                time_vectors = time_vectors // 3600
                 time_in_bin = np.clip(time_vectors - start, 0, end - start)
                 mask = time_in_bin != 0
                 time_in_bin[mask] = np.log2(time_in_bin[mask])
