@@ -20,10 +20,14 @@ from cehrbert_data.decorators.patient_event_decorator_base import get_att_functi
 from datasets.formatting.formatting import LazyBatch
 from dateutil.relativedelta import relativedelta
 from pandas import Series
+from transformers.utils import logging
 
 from cehrgpt.gpt_utils import (
     construct_age_sequence,
     encode_demographics,
+    extract_time_interval_in_days,
+    is_att_token,
+    is_clinical_event,
     multiple_of_10,
 )
 from cehrgpt.models.tokenization_hf_cehrgpt import (
@@ -44,6 +48,8 @@ CEHRGPT_COLUMNS = [
     "ages",
     "epoch_times",
 ]
+
+LOG = logging.get_logger(__name__)
 
 
 def convert_date_to_posix_time(index_date: datetime.date) -> float:
@@ -504,3 +510,113 @@ class HFFineTuningMapping(HFCehrGptTokenizationMapping):
         columns = super().remove_columns()
         columns.append("label")
         return columns
+
+
+class MotorTTEDatasetMapping(DatasetMappingDecorator):
+    """
+    Dataset mapping for Motor Time-to-Event label preprocessing.
+
+    Subclasses DatasetMappingDecorator to follow the same pattern as existing mappings.
+    """
+
+    def __init__(self, tokenizer: CehrGptTokenizer):
+        self.tokenizer = tokenizer
+        self.motor_code_cache: Dict[str, List[str]] = {}
+
+    def transform(self, record: Dict[str, Any]) -> Union[Dict[str, Any], Series]:
+        """
+        Main transformation function that adds motor TTE labels to a record.
+
+        Args:
+            record: Single record containing 'input_ids'
+
+        Returns:
+            Record with motor TTE labels added
+        """
+        # First collect TTE data in reverse chronological order
+        motor_censor_times = []
+        motor_tte_tasks: List[int] = []
+        motor_tte_times: List[int] = []
+        time_to_event_dict: Dict[str, int] = {}
+        motor_tte_task_indicators: List[bool] = []
+        motor_tte_label_offsets: List[int] = []
+        next_future_visit_concepts = set()
+
+        # Reverse walk through concept_ids to calculate TTE from each [VE] point
+        for concept_id in reversed(record["concept_ids"]):
+            is_included = False
+            if is_att_token(concept_id):
+                time_interval = extract_time_interval_in_days(concept_id)
+                if time_interval > 0:
+                    # Update TTE for existing concepts, or add new ones seen in this visit
+                    for existing_concept_id in list(time_to_event_dict.keys()):
+                        if existing_concept_id in next_future_visit_concepts:
+                            time_to_event_dict[existing_concept_id] = time_interval
+                        else:
+                            time_to_event_dict[existing_concept_id] += time_interval
+
+                    for next_concept_id in next_future_visit_concepts:
+                        if next_concept_id not in time_to_event_dict:
+                            time_to_event_dict[next_concept_id] = time_interval
+
+                    is_included = True
+                    for k, v in time_to_event_dict.items():
+                        motor_tte_tasks.append(self.tokenizer.get_motor_token_id(k))
+                        motor_tte_times.append(v)
+
+                    motor_tte_label_offsets.append(len(time_to_event_dict))
+                    # Record the censor time at the end of the visit
+                    if motor_censor_times:
+                        motor_censor_times.append(
+                            motor_censor_times[-1] + time_interval
+                        )
+                    else:
+                        motor_censor_times.append(time_interval)
+                    next_future_visit_concepts.clear()
+            elif is_clinical_event(concept_id):
+                if concept_id in self.motor_code_cache:
+                    motor_codes = self.motor_code_cache[concept_id]
+                else:
+                    motor_codes = self.tokenizer.get_motor_parents(concept_id)
+                    self.motor_code_cache[concept_id] = motor_codes
+                for motor_code in motor_codes:
+                    next_future_visit_concepts.add(motor_code)
+
+            motor_tte_task_indicators.append(is_included)
+
+        if len(motor_tte_times) == 0:
+            LOG.debug(
+                "There are no MOTOR tasks detected for this sample."
+                "It's likely this sample either contains a long admission or does not "
+                "have any time intervals greater than 0. length: %s, concept_ids[-10:] %s",
+                len(record["concept_ids"]),
+                record["concept_ids"][-10:],
+            )
+
+        # Reverse back to chronological order for final labels
+        motor_tte_times.reverse()
+        motor_tte_tasks.reverse()
+        motor_tte_label_offsets.reverse()
+        motor_censor_times.reverse()
+        motor_tte_task_indicators.reverse()
+
+        # Run cumsum to get proper offsets
+        motor_tte_label_offsets = np.cumsum(motor_tte_label_offsets).tolist()
+        motor_tte_label_offsets = [0] + motor_tte_label_offsets
+
+        # Pad motor_censor_times to align with motor_tte_label_offsets
+        motor_censor_times = motor_censor_times + [-100]
+
+        # Shift time_to_event_to_include to left by one because we should make predictions right before
+        # we see the ATT token
+        motor_tte_task_indicators = motor_tte_task_indicators[1:] + [False]
+        record.update(
+            {
+                "motor_censor_times": motor_censor_times,
+                "motor_tte_tasks": motor_tte_tasks,
+                "motor_tte_times": motor_tte_times,
+                "motor_tte_label_offsets": motor_tte_label_offsets,
+                "motor_tte_task_indicators": motor_tte_task_indicators,
+            }
+        )
+        return record

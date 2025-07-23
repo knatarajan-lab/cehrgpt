@@ -74,7 +74,6 @@ def load_and_create_tokenizer(
     cehrgpt_args: CehrGPTArguments,
     dataset: Optional[Union[Dataset, DatasetDict]] = None,
 ) -> CehrGptTokenizer:
-
     ontology: Optional[Ontology] = None
     concept_name_mapping = {}
     allowed_motor_codes = list()
@@ -270,7 +269,14 @@ def main():
 
     # MOTOR label requires additional inputs from the dataset
     if cehrgpt_args.include_motor_time_to_event:
-        training_args.label_names = ["labels"]
+        training_args.label_names = [
+            "labels",
+            "motor_censor_times",
+            "motor_tte_tasks",
+            "motor_tte_times",
+            "motor_tte_label_offsets",
+            "motor_tte_task_indicators",
+        ]
 
     if cehrgpt_args.sample_packing and data_args.streaming:
         raise RuntimeError(
@@ -447,6 +453,7 @@ def main():
                 dataset=dataset,
                 cehrgpt_tokenizer=cehrgpt_tokenizer,
                 data_args=data_args,
+                cehrgpt_args=cehrgpt_args,
                 cache_file_collector=cache_file_collector,
             )
             # only save the data to the disk if it is not streaming
