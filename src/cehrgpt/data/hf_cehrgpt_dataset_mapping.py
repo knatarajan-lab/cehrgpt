@@ -706,7 +706,7 @@ class VectorizedMotorTTEDatasetMapping(DatasetMappingDecorator):
     ) -> Dict[str, Any]:
         """Highly optimized vectorized version using pre-computed token type arrays."""
         concept_ids = record["concept_ids"]
-        event_times = record["epoch_times"]
+        event_times = np.asarray(record["epoch_times"])
 
         # Convert concept_ids to indices for vectorized operations
         try:
@@ -728,41 +728,40 @@ class VectorizedMotorTTEDatasetMapping(DatasetMappingDecorator):
         n_concepts = len(concept_ids)
         motor_tte_task_indicators = np.zeros(n_concepts, dtype=bool)
 
-        motor_censor_times = []
+        # Compute the vectorized censor times
+        motor_censor_times = (
+            event_times[-1] - event_times[np.roll(valid_time_tokens, -1)]
+        ).tolist()
         motor_tte_tasks = []
         motor_tte_times = []
         motor_tte_label_offsets = []
 
-        time_to_event_dict: Dict[str, int] = {}
-        before_time_token = False
+        time_to_event_dict: Dict[str, Any] = {}
+        before_time_token_indices = np.where(np.roll(valid_time_tokens, -1))[0].tolist()
 
-        # Reverse iteration with vectorized lookups
-        for i in range(n_concepts - 1, -1, -1):
-            concept_id = concept_ids[i]
-            event_time = event_times[i]
-            is_included = False
+        for start_index, end_index in zip(
+            reversed(before_time_token_indices),
+            reversed(before_time_token_indices[1:] + [n_concepts]),
+        ):
+            motor_tte_task_indicators[start_index] = True
+            current_event_time = event_times[start_index]
+            # Slice out all the tokens between two time intervals
+            # start_index + 1 excludes the prediction token
+            # end_index + 1 includes the last token right before the time token due to exclusive right indexing
+            section_concept_indices = concept_indices[start_index + 1 : end_index + 1]
+            section_event_times = event_times[start_index + 1 : end_index + 1]
+            section_is_clinical_events = is_clinical_events[
+                start_index + 1 : end_index + 1
+            ]
+            section_clinical_concept_indices = section_concept_indices[
+                section_is_clinical_events
+            ]
+            section_event_times = section_event_times[section_is_clinical_events]
 
-            if before_time_token and time_to_event_dict:
-                # Batch process motor codes
-                current_tasks = []
-                current_times = []
-
-                for motor_code, motor_time in time_to_event_dict.items():
-                    motor_token_id = self.tokenizer.get_motor_token_id(motor_code)
-                    current_tasks.append(motor_token_id)
-                    current_times.append(motor_time - event_time)
-
-                motor_tte_tasks.extend(current_tasks)
-                motor_tte_times.extend(current_times)
-                motor_tte_label_offsets.append(len(time_to_event_dict))
-                motor_censor_times.append(event_times[-1] - event_time)
-                before_time_token = False
-                is_included = True
-
-            # Use vectorized lookups
-            if valid_time_tokens[i]:
-                before_time_token = True
-            elif is_clinical_events[i]:
+            for i in range(len(section_clinical_concept_indices) - 1, -1, -1):
+                concept_index = section_clinical_concept_indices[i]
+                concept_event_time = section_event_times[i]
+                concept_id = self.vocab_tokens[concept_index]
                 # Use cached motor codes
                 if concept_id in self.motor_code_cache:
                     motor_codes = self.motor_code_cache[concept_id]
@@ -771,9 +770,18 @@ class VectorizedMotorTTEDatasetMapping(DatasetMappingDecorator):
                     self.motor_code_cache[concept_id] = motor_codes
 
                 for motor_code in motor_codes:
-                    time_to_event_dict[motor_code] = event_time
+                    time_to_event_dict[motor_code] = concept_event_time
 
-            motor_tte_task_indicators[i] = is_included
+            current_tasks = []
+            current_times = []
+            for motor_code, motor_time in time_to_event_dict.items():
+                motor_token_id = self.tokenizer.get_motor_token_id(motor_code)
+                current_tasks.append(motor_token_id)
+                current_times.append(motor_time - current_event_time)
+
+            motor_tte_tasks.extend(current_tasks)
+            motor_tte_times.extend(current_times)
+            motor_tte_label_offsets.append(len(time_to_event_dict))
 
         # Early return if no motor tasks found
         if not motor_tte_times:
@@ -793,8 +801,6 @@ class VectorizedMotorTTEDatasetMapping(DatasetMappingDecorator):
         motor_tte_label_offsets = np.cumsum(motor_tte_label_offsets).tolist()
         motor_tte_label_offsets = [0] + motor_tte_label_offsets
         motor_censor_times = motor_censor_times + [-100]
-        motor_tte_task_indicators = np.roll(motor_tte_task_indicators, -1)
-        motor_tte_task_indicators[-1] = False
 
         return {
             "motor_censor_times": motor_censor_times,
