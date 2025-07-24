@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+import uuid
 from functools import partial
 from typing import Dict, List, Optional, Tuple
 
@@ -141,7 +142,7 @@ def generate_patient_narratives(
                         "starting_index",
                         "ending_index",
                     ],
-                ).to_parquet(os.path.join(output_folder, f"batch_{index}.parquet"))
+                ).to_parquet(os.path.join(output_folder, f"{uuid.uuid4()}.parquet"))
                 converted_narratives.clear()
 
     # Final flush to the disk if there are still records in the cache
@@ -156,7 +157,7 @@ def generate_patient_narratives(
                 "starting_index",
                 "ending_index",
             ],
-        ).to_parquet(os.path.join(output_folder, f"batch_final.parquet"))
+        ).to_parquet(os.path.join(output_folder, f"batch_final_{uuid.uuid4()}.parquet"))
         converted_narratives.clear()
 
 
