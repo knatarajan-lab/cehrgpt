@@ -3,6 +3,7 @@ from typing import Any, Dict, Generator, List, Optional, Union
 
 import numpy as np
 import pandas as pd
+from cehrbert.data_generators.hf_data_generator import UNKNOWN_VALUE
 from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import (
     ED_VISIT_TYPE_CODES,
     INPATIENT_VISIT_TYPE_CODES,
@@ -15,6 +16,12 @@ from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import (
 )
 from cehrbert.med_extension.schema_extension import Event
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
+from cehrbert_data.const.artificial_tokens import (
+    DISCHARGE_UNKNOWN_TOKEN,
+    GENDER_UNKNOWN_TOKEN,
+    RACE_UNKNOWN_TOKEN,
+    VISIT_UNKNOWN_TOKEN,
+)
 from cehrbert_data.const.common import NA
 from cehrbert_data.decorators.patient_event_decorator_base import get_att_function
 from datasets.formatting.formatting import LazyBatch
@@ -134,7 +141,9 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
         if isinstance(birth_datetime, pd.Timestamp):
             birth_datetime = birth_datetime.to_pydatetime()
         gender = record["gender"]
+        gender = GENDER_UNKNOWN_TOKEN if gender == UNKNOWN_VALUE else gender
         race = record["race"]
+        race = RACE_UNKNOWN_TOKEN if race == UNKNOWN_VALUE else race
         visits = record["visits"]
         # This indicates this is columnar format
         if isinstance(visits, dict):
@@ -303,8 +312,13 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                     # facility event
                     discharge_facility = get_value(visit, "discharge_facility")
                     if not discharge_facility:
-                        discharge_facility = "0"
-
+                        discharge_facility = DISCHARGE_UNKNOWN_TOKEN
+                    else:
+                        discharge_facility = (
+                            DISCHARGE_UNKNOWN_TOKEN
+                            if discharge_facility == UNKNOWN_VALUE
+                            else discharge_facility
+                        )
                     self._update_cehrgpt_record(
                         cehrgpt_record,
                         code=discharge_facility,
