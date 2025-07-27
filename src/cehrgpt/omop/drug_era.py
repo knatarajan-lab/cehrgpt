@@ -12,7 +12,7 @@ def main(args):
         continue_job=args.continue_job,
         table_name=DRUG_ERA,
         query_template=DRUG_ERA_QUERY,
-        dependency_list=["condition_occurrence", "concept_ancestor", "concept"],
+        dependency_list=["drug_exposure", "concept_ancestor", "concept"],
     ).build()
 
 
