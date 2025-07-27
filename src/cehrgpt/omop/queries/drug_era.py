@@ -40,13 +40,13 @@ cte_drug_period AS
         SELECT
             *,
             CASE
-                WHEN prev_end_date IS NOT NULL THEN DATEDIFF(DAY, drug_exposure_start_date, prev_end_date)
+                WHEN prev_end_date IS NOT NULL THEN DATEDIFF(prev_end_date, drug_exposure_start_date)
                 ELSE NULL
             END AS days_gap,
             CASE
                 WHEN prev_end_date IS NOT NULL THEN
                     CASE
-                        WHEN DATEDIFF(DAY, drug_exposure_start_date, prev_end_date) >= -30 THEN 0
+                        WHEN DATEDIFF(prev_end_date, drug_exposure_start_date) >= -30 THEN 0
                         ELSE 1
                     END
                 ELSE 1
@@ -62,7 +62,7 @@ SELECT
     d.drug_era_start_date,
     d.drug_era_end_date,
     d.drug_exposure_count,
-    DATEDIFF(DAY, LAG(d.drug_era_end_date, 1) OVER(PARTITION BY d.person_id, d.drug_concept_id ORDER BY d.drug_era_start_date), d.drug_era_start_date) AS gap_days
+    DATEDIFF(d.drug_era_start_date, LAG(d.drug_era_end_date, 1) OVER(PARTITION BY d.person_id, d.drug_concept_id ORDER BY d.drug_era_start_date)) AS gap_days
 FROM
 (
     SELECT
