@@ -48,6 +48,26 @@ def parse_diabetes_arguments():
         help="Spark master URL (default: local[*])",
     )
 
+    parser.add_argument(
+        "--save-cohort",
+        action="store_true",
+        default=False,
+        help="Save cohort tables as parquet files",
+    )
+
+    parser.add_argument(
+        "--small-cell-suppression-threshold",
+        type=int,
+        default=0,
+        help="Small cell suppression threshold (default: 0)",
+    )
+
+    parser.add_argument(
+        "--generate-drug-sequence",
+        action="store_true",
+        required=True,
+    )
+
     return parser.parse_args()
 
 
@@ -85,6 +105,12 @@ def main():
         diabetes_args.spark_master,
         "--study-name",
         DIABETES_CONFIG["study_name"],
+        "--save-cohort",
+        diabetes_args.save_cohort,
+        "--small-cell-suppression-threshold",
+        diabetes_args.small_cell_suppression_threshold,
+        "--generate-drug-sequence",
+        diabetes_args.generate_drug_sequence,
     ]
     # Parse arguments using the generalized script's parser and call its main function
     treatment_main()

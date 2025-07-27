@@ -11,6 +11,8 @@ import sys
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as f
+from pyspark.sql import types as t
+from pyspark.sql.window import Window
 
 
 def parse_arguments():
@@ -69,6 +71,19 @@ def parse_arguments():
         action="store_true",
         default=False,
         help="Save cohort tables as parquet files",
+    )
+
+    parser.add_argument(
+        "--small-cell-suppression-threshold",
+        type=int,
+        default=0,
+        help="Small cell suppression threshold (default: 0)",
+    )
+
+    parser.add_argument(
+        "--generate-drug-sequence",
+        action="store_true",
+        required=True,
     )
 
     return parser.parse_args()
@@ -518,6 +533,251 @@ def create_htn_match_cohort(spark, study_name):
     return HTN_MatchCohort
 
 
+def create_qualifying_cohort(
+    study_name, drug_concepts, target_conditions, exclusion_conditions, spark
+):
+    # Create drug concept mapping
+    create_drug_concept_mapping(spark, drug_concepts)
+    # Create HTN index cohort
+    create_htn_index_cohort(spark, drug_concepts, study_name)
+    # Create all cohorts in sequence - keeping exact original function calls
+    create_htn_e0(spark, exclusion_conditions, study_name)
+    create_htn_t0(spark, drug_concepts, study_name)
+    create_htn_t1(spark, target_conditions, study_name)
+    create_htn_t2(spark, drug_concepts, study_name)
+    create_htn_t3(spark, drug_concepts, study_name)
+    create_htn_t4(spark, drug_concepts, study_name)
+    create_htn_t5(spark, drug_concepts, study_name)
+    create_htn_t6(spark, drug_concepts, study_name)
+    create_htn_t7(spark, drug_concepts, study_name)
+    create_htn_t8(spark, drug_concepts, study_name)
+    create_htn_t9(spark, drug_concepts, study_name)
+    # Create final cohort
+    htn_match_cohort = create_htn_match_cohort(spark, study_name)
+    return htn_match_cohort
+
+
+def create_drug_sequences(
+    qualifying_cohort, drug_era, concept, concept_ancestor, drug_concept_ids
+):
+    """Create drug sequences for the matching cohort."""
+
+    # Get all drugs that the matching cohort had taken
+    drug_sequences = (
+        drug_era.join(
+            qualifying_cohort, drug_era.person_id == qualifying_cohort.person_id
+        )
+        .join(
+            concept_ancestor,
+            (drug_era.drug_concept_id == concept_ancestor.descendant_concept_id)
+            & (concept_ancestor.ancestor_concept_id.isin(drug_concept_ids)),
+        )
+        .join(concept, drug_era.drug_concept_id == concept.concept_id)
+        .select(
+            "person_id",
+            "drug_concept_id",
+            f.year(qualifying_cohort.index_date).alias("index_year"),
+            "drug_era_start_date",
+            concept.concept_name,
+        )
+        .groupBy("person_id", "drug_concept_id", "index_year", "concept_name")
+        .agg(f.min("drug_era_start_date").alias("drug_start_date"))
+        .withColumn(
+            "drug_seq",
+            f.row_number().over(
+                Window.partitionBy("person_id").orderBy(
+                    "drug_start_date", "drug_concept_id"
+                )
+            ),
+        )
+    )
+    return drug_sequences
+
+
+def summarize_treatment_sequences(drug_sequences):
+    """Summarize the unique treatment sequences observed."""
+    print("Summarizing treatment sequences...")
+
+    # Create pivot data for each sequence position (d1, d2, ..., d20)
+    sequence_data = {}
+
+    for i in range(1, 21):  # d1 through d20
+        seq_data = drug_sequences.filter(f.col("drug_seq") == i).select(
+            "person_id",
+            f.col("drug_concept_id").alias(f"d{i}_concept_id"),
+            f.col("concept_name").alias(f"d{i}_concept_name"),
+            "index_year",
+        )
+        sequence_data[f"d{i}"] = seq_data
+
+    # Start with persons and their first drug (d1)
+    summary_base = (
+        drug_sequences.select("person_id", "index_year")
+        .distinct()
+        .join(sequence_data["d1"], ["person_id", "index_year"], "left")
+    )
+
+    # Left join all subsequent drugs
+    for i in range(2, 21):
+        summary_base = summary_base.join(
+            sequence_data[f"d{i}"], ["person_id", "index_year"], "left"
+        )
+
+    # Group and count sequences
+    group_cols = ["index_year"]
+    for i in range(1, 21):
+        group_cols.extend([f"d{i}_concept_id", f"d{i}_concept_name"])
+
+    drug_seq_summary = (
+        summary_base.groupBy(*group_cols)
+        .agg(f.countDistinct("person_id").alias("num_persons"))
+        .filter(f.col("num_persons") > 0)  # Remove empty sequences
+    )
+    return drug_seq_summary
+
+
+def apply_small_cell_suppression(drug_seq_summary, threshold=0):
+    """Apply small cell count suppression logic."""
+    print(f"Applying small cell suppression (threshold: {threshold})")
+
+    # Apply basic suppression - replace small counts with "Other"
+    for i in range(1, 21):
+        drug_seq_summary = drug_seq_summary.withColumn(
+            f"d{i}_concept_id",
+            f.when(
+                (f.col(f"d{i}_concept_id").isNotNull())
+                & (f.col("num_persons") < threshold),
+                -1,
+            ).otherwise(f.col(f"d{i}_concept_id")),
+        ).withColumn(
+            f"d{i}_concept_name",
+            f.when(f.col(f"d{i}_concept_id") == -1, "Other").otherwise(
+                f.col(f"d{i}_concept_name")
+            ),
+        )
+
+    # Re-aggregate after suppression
+    group_cols = ["index_year"]
+    for i in range(1, 21):
+        group_cols.extend([f"d{i}_concept_id", f"d{i}_concept_name"])
+
+    final_summary = drug_seq_summary.groupBy(*group_cols).agg(
+        f.sum("num_persons").alias("num_persons")
+    )
+    return final_summary
+
+
+def create_summary_tables(
+    spark,
+    person,
+    drug_exposure,
+    observation_period,
+    concept_ancestor,
+    match_cohort,
+    final_drug_seq_summary,
+    tx_list,
+):
+    """Create final summary tables for export."""
+    print("Creating summary tables...")
+    # Summary counts
+    summary_data = []
+
+    # Total persons
+    total_persons = person.count()
+    summary_data.append(("Number of persons", total_persons))
+
+    # Persons with at least one drug exposure
+    persons_with_drugs = (
+        drug_exposure.join(
+            concept_ancestor,
+            (drug_exposure.drug_concept_id == concept_ancestor.descendant_concept_id)
+            & (concept_ancestor.ancestor_concept_id.isin(tx_list)),
+        )
+        .select("person_id")
+        .distinct()
+        .count()
+    )
+    summary_data.append(
+        ("Number of persons with at least one drug exposure", persons_with_drugs)
+    )
+
+    # Persons with sufficient observation time
+    sufficient_observation = (
+        drug_exposure.join(
+            concept_ancestor,
+            (drug_exposure.drug_concept_id == concept_ancestor.descendant_concept_id)
+            & (concept_ancestor.ancestor_concept_id.isin(tx_list)),
+        )
+        .groupBy("person_id")
+        .agg(f.min("drug_exposure_start_date").alias("first_drug"))
+        .join(observation_period, "person_id")
+        .filter(
+            (
+                f.date_add(observation_period.observation_period_start_date, 365)
+                <= f.col("first_drug")
+            )
+            & (
+                f.date_add(f.col("first_drug"), 1095)
+                <= observation_period.observation_period_end_date
+            )
+        )
+        .select("person_id")
+        .distinct()
+        .count()
+    )
+    summary_data.append(
+        ("Number of persons with sufficient observation time", sufficient_observation)
+    )
+
+    # Final qualifying cohort
+    final_cohort_count = match_cohort.count()
+    summary_data.append(
+        ("Number of persons in final qualifying cohort", final_cohort_count)
+    )
+
+    # Create summary DataFrame
+    summary_schema = t.StructType(
+        [
+            t.StructField("count_type", t.StringType(), True),
+            t.StructField("num_persons", t.IntegerType(), True),
+        ]
+    )
+
+    summary_df = spark.createDataFrame(summary_data, summary_schema)
+
+    # Person counts by year
+    person_counts = final_drug_seq_summary.groupBy("index_year").agg(
+        f.sum("num_persons").alias("num_persons")
+    )
+
+    # Add overall count (year 9999)
+    overall_count = (
+        final_drug_seq_summary.agg(f.sum("num_persons").alias("num_persons"))
+        .withColumn("index_year", f.lit(9999))
+        .select("index_year", "num_persons")
+    )
+
+    person_counts_final = person_counts.union(overall_count)
+
+    # Add overall sequences (year 9999)
+    overall_sequences = (
+        final_drug_seq_summary.drop("index_year")
+        .groupBy(
+            *[
+                col
+                for col in final_drug_seq_summary.columns
+                if col != "index_year" and col != "num_persons"
+            ]
+        )
+        .agg(f.sum("num_persons").alias("num_persons"))
+        .withColumn("index_year", f.lit(9999))
+    )
+
+    seq_counts_final = final_drug_seq_summary.union(overall_sequences)
+    # Store results
+    return summary_df, person_counts_final, seq_counts_final
+
+
 def main():
     args = parse_arguments()
     # Parse concept IDs
@@ -558,6 +818,7 @@ def main():
         condition_era = spark.read.parquet(
             os.path.join(args.omop_folder, "condition_era")
         )
+        drug_era = spark.read.parquet(os.path.join(args.omop_folder, "drug_era"))
 
         print(f"person: {person.select('person_id').distinct().count()}")
         print(f"visit_occurrence: {visit_occurrence.count()}")
@@ -565,6 +826,8 @@ def main():
         print(f"procedure_occurrence: {procedure_occurrence.count()}")
         print(f"drug_exposure: {drug_exposure.count()}")
         print(f"observation_period: {observation_period.count()}")
+        print(f"condition_era: {condition_era.count()}")
+        print(f"drug_era: {drug_era.count()}")
 
         concept = spark.read.parquet(os.path.join(args.omop_folder, "concept"))
         concept_ancestor = spark.read.parquet(
@@ -579,47 +842,98 @@ def main():
         drug_exposure.createOrReplaceTempView("drug_exposure")
         observation_period.createOrReplaceTempView("observation_period")
         condition_era.createOrReplaceTempView("condition_era")
+        drug_era.createOrReplaceTempView("drug_era")
 
         concept_ancestor.createOrReplaceTempView("concept_ancestor")
         concept.createOrReplaceTempView("concept")
 
-        # Create drug concept mapping
-        create_drug_concept_mapping(spark, drug_concepts)
+        qualifying_cohort_cohort = create_qualifying_cohort(
+            args.study_name,
+            drug_concepts,
+            target_conditions,
+            exclusion_conditions,
+            spark,
+        )
 
-        # Create HTN index cohort
-        create_htn_index_cohort(spark, drug_concepts, args.study_name)
+        # Save results
+        if not os.path.exists(args.output_folder):
+            os.makedirs(args.output_folder)
 
-        # Create all cohorts in sequence - keeping exact original function calls
-        create_htn_e0(spark, exclusion_conditions, args.study_name)
-        create_htn_t0(spark, drug_concepts, args.study_name)
-        create_htn_t1(spark, target_conditions, args.study_name)
-        create_htn_t2(spark, drug_concepts, args.study_name)
-        create_htn_t3(spark, drug_concepts, args.study_name)
-        create_htn_t4(spark, drug_concepts, args.study_name)
-        create_htn_t5(spark, drug_concepts, args.study_name)
-        create_htn_t6(spark, drug_concepts, args.study_name)
-        create_htn_t7(spark, drug_concepts, args.study_name)
-        create_htn_t8(spark, drug_concepts, args.study_name)
-        create_htn_t9(spark, drug_concepts, args.study_name)
-
-        # Create final cohort
-        htn_match_cohort = create_htn_match_cohort(spark, args.study_name)
-
-        if args.save_cohort:
-            # Save results
-            if not os.path.exists(args.output_folder):
-                os.makedirs(args.output_folder)
-
-            output_path = os.path.join(args.output_folder, "htn_match_cohort")
-            htn_match_cohort.write.mode("overwrite").parquet(output_path)
-
-            # Read back and count
-            htn_match_cohort = spark.read.parquet(output_path)
-        final_count = htn_match_cohort.count()
+        output_path = os.path.join(
+            args.output_folder, f"{args.study_name}_match_cohort"
+        )
+        qualifying_cohort_cohort.write.mode("overwrite").parquet(output_path)
+        # Read back and count
+        qualifying_cohort_cohort = spark.read.parquet(output_path)
+        final_count = qualifying_cohort_cohort.count()
         print(f"Final cohort count: {final_count}")
 
-        print("Analysis completed successfully!")
+        if args.generate_drug_sequence:
+            drug_sequences = create_drug_sequences(
+                qualifying_cohort_cohort,
+                drug_era,
+                concept,
+                concept_ancestor,
+                drug_concepts,
+            )
+            drug_sequences.write.mode("overwrite").parquet(
+                os.path.join(output_path, f"{args.study_name}_drug_sequences")
+            )
+            drug_sequences = spark.read.parquet(
+                os.path.join(output_path, f"{args.study_name}_drug_sequences")
+            )
+            print(
+                f"Created drug sequences for {drug_sequences.select('person_id').distinct().count()} patients"
+            )
+            drug_seq_summary = summarize_treatment_sequences(drug_sequences)
+            drug_seq_summary.write.mode("overwrite").parquet(
+                os.path.join(output_path, f"{args.study_name}_drug_sequence_summary")
+            )
+            print(
+                f"After suppression: {drug_seq_summary.count()} unique treatment sequences"
+            )
 
+            if args.small_cell_suppression_threshold > 0:
+                drug_seq_summary = apply_small_cell_suppression(
+                    drug_seq_summary, threshold=args.small_cell_suppression_threshold
+                )
+                drug_seq_summary.write.mode("overwrite").parquet(
+                    os.path.join(
+                        output_path,
+                        f"{args.study_name}_drug_sequence_summary_small_cell_suppression",
+                    )
+                )
+                drug_seq_summary = spark.read.parquet(
+                    os.path.join(
+                        output_path,
+                        f"{args.study_name}_drug_sequence_summary_small_cell_suppression",
+                    )
+                )
+                print(
+                    f"After suppression: {drug_seq_summary.count()} unique treatment sequences"
+                )
+
+            summary_df, person_counts_final, seq_counts_final = create_summary_tables(
+                spark,
+                person,
+                drug_exposure,
+                observation_period,
+                concept_ancestor,
+                qualifying_cohort_cohort,
+                drug_seq_summary,
+                drug_concepts,
+            )
+            summary_df.write.mode("overwrite").parquet(
+                os.path.join(output_path, f"{args.study_name}_summary")
+            )
+            person_counts_final.write.mode("overwrite").parquet(
+                os.path.join(output_path, f"{args.study_name}_person_count_final")
+            )
+            seq_counts_final.write.mode("overwrite").parquet(
+                os.path.join(output_path, f"{args.study_name}_sequence_count_final")
+            )
+
+        print("Analysis completed successfully!")
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)

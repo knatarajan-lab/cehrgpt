@@ -48,6 +48,26 @@ def parse_htn_arguments():
         help="Spark master URL (default: local[*])",
     )
 
+    parser.add_argument(
+        "--save-cohort",
+        action="store_true",
+        default=False,
+        help="Save cohort tables as parquet files",
+    )
+
+    parser.add_argument(
+        "--small-cell-suppression-threshold",
+        type=int,
+        default=0,
+        help="Small cell suppression threshold (default: 0)",
+    )
+
+    parser.add_argument(
+        "--generate-drug-sequence",
+        action="store_true",
+        required=True,
+    )
+
     return parser.parse_args()
 
 
@@ -85,6 +105,12 @@ def main():
         htn_args.spark_master,
         "--study-name",
         HTN_CONFIG["study_name"],
+        "--save-cohort",
+        htn_args.save_cohort,
+        "--small-cell-suppression-threshold",
+        htn_args.small_cell_suppression_threshold,
+        "--generate-drug-sequence",
+        htn_args.generate_drug_sequence,
     ]
     # Parse arguments using the generalized script's parser and call its main function
     treatment_main()
