@@ -53,3 +53,10 @@ python -u -m cehrgpt.omop.condition_era \
   --input_folder "$OMOP_FOLDER" \
   --output_folder "$OMOP_FOLDER" \
   --domain_table_list "condition_occurrence"
+
+# Create drug_era
+echo "Reconstructing drug_era in $OMOP_FOLDER"
+python -u -m cehrgpt.omop.drug_era \
+  --input_folder "$OMOP_FOLDER" \
+  --output_folder "$OMOP_FOLDER" \
+  --domain_table_list "drug_exposure"
