@@ -213,3 +213,7 @@ class CehrGPTArguments:
         default=1 / 1000,
         metadata={"help": "The min_prevalence to keep the concepts in the tokenizer"},
     )
+    class_weights: Optional[List[int]] = dataclasses.field(
+        default=None,
+        metadata={"help": "The class weights for training"},
+    )

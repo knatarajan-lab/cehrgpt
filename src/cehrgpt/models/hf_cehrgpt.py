@@ -2026,7 +2026,6 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
         self.model_parallel = False
         self.device_map = None
         self.gradient_checkpointing = False
-
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -2138,7 +2137,14 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
 
         loss = None
         if classifier_label is not None:
-            loss_fct = nn.BCEWithLogitsLoss()
+            if self.config.class_weights:
+                class_weights = torch.tensor(
+                    [self.config.class_weights[1] / self.config.class_weights[0]],
+                    dtype=torch.float32,
+                ).to(logits.device)
+            else:
+                class_weights = None
+            loss_fct = nn.BCEWithLogitsLoss(pos_weight=class_weights)
             loss = loss_fct(logits, classifier_label)
 
         return CehrGptSequenceClassifierOutput(

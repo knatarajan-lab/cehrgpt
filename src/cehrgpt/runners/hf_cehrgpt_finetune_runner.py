@@ -160,15 +160,22 @@ def load_finetuned_model(
 def model_init(
     model_args: ModelArguments,
     training_args: TrainingArguments,
+    cehrgpt_args: CehrGPTArguments,
     tokenizer: CehrGptTokenizer,
 ):
     model = load_finetuned_model(
         model_args, training_args, model_args.model_name_or_path
     )
+
+    if cehrgpt_args.class_weights:
+        model.config.class_weights = cehrgpt_args.class_weights
+        LOG.info(f"Setting class_weights to {model.config.class_weights}")
+
     # Enable position embeddings when position embeddings are disabled in pre-training
     if not model_args.exclude_position_ids and model.cehrgpt.exclude_position_ids:
         LOG.info(f"Enable the position_embeddings")
         model.cehrgpt.enable_position_embeddings()
+
     if model.config.max_position_embeddings < model_args.max_position_embeddings:
         LOG.info(
             f"Increase model.config.max_position_embeddings to {model_args.max_position_embeddings}"
@@ -195,6 +202,7 @@ def model_init(
             model.cehrgpt.update_pretrained_embeddings(
                 tokenizer.pretrained_token_ids, tokenizer.pretrained_embeddings
             )
+
     # Expand value tokenizer to adapt to the fine-tuning dataset
     if model.config.include_values:
         if model.config.value_vocab_size < tokenizer.value_vocab_size:
@@ -386,7 +394,7 @@ def main():
         if cehrgpt_args.hyperparameter_tuning:
             training_args = perform_hyperparameter_search(
                 trainer_class,
-                partial(model_init, model_args, training_args, tokenizer),
+                partial(model_init, model_args, training_args, cehrgpt_args, tokenizer),
                 processed_dataset,
                 data_collator,
                 training_args,
@@ -400,6 +408,7 @@ def main():
                 trainer_class,
                 model_args,
                 training_args,
+                cehrgpt_args,
                 tokenizer,
                 processed_dataset,
                 data_collator,
@@ -407,7 +416,7 @@ def main():
         else:
             # Initialize Trainer for final training on the combined train+val set
             trainer = trainer_class(
-                model=model_init(model_args, training_args, tokenizer),
+                model=model_init(model_args, training_args, cehrgpt_args, tokenizer),
                 data_collator=data_collator,
                 args=training_args,
                 train_dataset=processed_dataset["train"],
@@ -456,6 +465,7 @@ def retrain_with_full_set(
     trainer_class,
     model_args: ModelArguments,
     training_args: TrainingArguments,
+    cehrgpt_args: CehrGPTArguments,
     tokenizer: CehrGptTokenizer,
     dataset: DatasetDict,
     data_collator: CehrGptDataCollator,
@@ -474,6 +484,7 @@ def retrain_with_full_set(
         model_args (ModelArguments): Model configuration and hyperparameters.
         training_args (TrainingArguments): Training configuration, including output directory,
                                            evaluation strategy, and other training parameters.
+        cehrgpt_args (CehrGPTArguments): CehrGPT specific parameters.
         tokenizer (CehrGptTokenizer): Tokenizer instance specific to CEHR-GPT.
         dataset (DatasetDict): A dictionary containing the 'train' and 'validation' datasets.
         data_collator (CehrGptDataCollator): Data collator for handling data batching and tokenization.
@@ -493,7 +504,7 @@ def retrain_with_full_set(
     training_args.evaluation_strategy = "no"
     checkpoint = get_last_hf_checkpoint(training_args)
     final_trainer = trainer_class(
-        model=model_init(model_args, training_args, tokenizer),
+        model=model_init(model_args, training_args, cehrgpt_args, tokenizer),
         data_collator=data_collator,
         args=training_args,
         train_dataset=full_dataset,

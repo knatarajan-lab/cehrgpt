@@ -149,6 +149,7 @@ class CEHRGPTConfig(PretrainedConfig):
         entropy_penalty=False,
         entropy_penalty_alpha=0.01,
         sample_packing_max_positions=None,
+        class_weights=None,
         **kwargs,
     ):
         if token_to_time_token_mapping is None:
@@ -226,6 +227,9 @@ class CEHRGPTConfig(PretrainedConfig):
         self.entropy_penalty = entropy_penalty
         self.entropy_penalty_alpha = entropy_penalty_alpha
         self.value_prediction_loss_weight = value_prediction_loss_weight
+
+        # Class weights for fine-tuning
+        self.class_weights = class_weights
 
         kwargs["tie_word_embeddings"] = not use_pretrained_embeddings
 
