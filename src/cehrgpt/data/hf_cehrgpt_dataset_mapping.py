@@ -235,6 +235,10 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                 concept_value_mask = int(
                     numeric_value is not None or text_value is not None
                 )
+                if numeric_value is None and text_value is not None:
+                    if text_value.isnumeric():
+                        numeric_value = float(text_value)
+
                 is_numeric_type = int(numeric_value is not None)
                 code = replace_escape_chars(e["code"])
 
