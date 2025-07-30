@@ -43,6 +43,7 @@ CEHRGPT_COLUMNS = [
     "is_numeric_types",
     "concept_values",
     "units",
+    "epoch_times",
 ]
 
 
@@ -365,6 +366,10 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
         if record.get("age_at_index", None) is not None:
             cehrgpt_record["age_at_index"] = record["age_at_index"]
 
+        assert len(cehrgpt_record["epoch_times"]) == len(
+            cehrgpt_record["concept_ids"]
+        ), "The number of time stamps must match with the number of concepts in the sequence"
+
         return cehrgpt_record
 
 
@@ -472,6 +477,12 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
             record["values"] = self._concept_tokenizer.encode_value(
                 [NONE_BIN for _ in range(len(record["concept_value_masks"]))]
             )
+
+        # This assertion must pass
+        assert len(record["epoch_times"]) == len(
+            record["concept_ids"]
+        ), "The number of time stamps must match with the number of concepts in the sequence"
+
         # Delete these features because they contain null values and pyarrow cannot concatenate multiple records
         del record["number_as_values"]
         del record["concept_as_values"]
@@ -532,7 +543,7 @@ class ExtractTokenizedSequenceDataMapping:
             for prediction_time_label_map in prediction_times
         ]
         observation_window_indices = np.zeros(
-            (len(prediction_times), len(record["epoch_times"])), dtype=np.int32
+            (len(prediction_times), len(record["epoch_times"])), dtype=bool
         )
         labels = [tup[-1] for tup in prediction_start_end_times]
         for i, epoch_time in enumerate(record["epoch_times"]):
@@ -540,7 +551,7 @@ class ExtractTokenizedSequenceDataMapping:
                 prediction_start_end_times
             ):
                 if prediction_time_start <= epoch_time <= prediction_time_end:
-                    observation_window_indices[sample_n][i] = 1
+                    observation_window_indices[sample_n][i] = True
 
         seq_length = len(record["epoch_times"])
         time_series_columns = ["concept_ids", "input_ids"]
