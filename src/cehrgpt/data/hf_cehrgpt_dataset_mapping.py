@@ -514,7 +514,7 @@ class ExtractTokenizedSequenceDataMapping:
         self.observation_window = observation_window
 
     def _calculate_prediction_start_time(self, prediction_time: float):
-        if self.observation_window > 0:
+        if self.observation_window and self.observation_window > 0:
             return max(prediction_time - self.observation_window * 24 * 3600, 0)
         return 0
 
