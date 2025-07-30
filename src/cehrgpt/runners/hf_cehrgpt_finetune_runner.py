@@ -12,9 +12,6 @@ import pandas as pd
 import polars as pl
 import torch
 import torch.distributed as dist
-from cehrbert.data_generators.hf_data_generator.hf_dataset import (
-    apply_cehrbert_dataset_mapping,
-)
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
 from cehrbert.runners.hf_cehrbert_finetune_runner import compute_metrics
 from cehrbert.runners.hf_runner_argument_dataclass import (
@@ -28,6 +25,7 @@ from cehrbert.runners.runner_util import (
 from datasets import DatasetDict, concatenate_datasets, load_from_disk
 from peft import LoraConfig, PeftModel, get_peft_model
 from scipy.special import expit as sigmoid
+from sklearn.metrics import average_precision_score, roc_auc_score
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (
@@ -124,6 +122,23 @@ class UpdateNumEpochsBeforeEarlyStoppingCallback(TrainerCallback):
                 },
                 f,
             )
+
+
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    # Convert logits to probabilities
+    probs = 1 / (1 + np.exp(-logits))  # sigmoid
+
+    # For binary classification, flatten if needed
+    if probs.ndim > 1:
+        probs = probs[:, 0]
+    if labels.ndim > 1:
+        labels = labels[:, 0]
+
+    return {
+        "pr_auc": average_precision_score(labels, probs),
+        "roc_auc": roc_auc_score(labels, probs),
+    }
 
 
 def load_pretrained_tokenizer(
@@ -499,6 +514,7 @@ def main():
                     ),
                 ],
                 tokenizer=tokenizer,
+                compute_metrics=compute_metrics,
             )
             # Train the model on the combined train + val set
             checkpoint = get_last_hf_checkpoint(training_args)
