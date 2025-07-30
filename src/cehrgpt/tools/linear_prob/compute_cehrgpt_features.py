@@ -156,6 +156,7 @@ def main():
                         mapping={
                             "prediction_time": "index_date",
                             "subject_id": "person_id",
+                            "boolean_value": "label",
                         }
                     )
                 all_person_ids = cohort["person_id"].unique().to_list()
@@ -172,17 +173,19 @@ def main():
                     num_proc=data_args.preprocessing_num_workers,
                 )
                 person_index_date_agg = cohort.group_by("person_id").agg(
-                    pl.col("index_date").alias("index_dates")
+                    pl.struct("index_date", "label").alias("index_date_label")
                 )
                 # Convert to dictionary
                 person_index_date_map: Dict[int, List[datetime]] = dict(
                     zip(
                         person_index_date_agg["person_id"].to_list(),
-                        person_index_date_agg["index_dates"].to_list(),
+                        person_index_date_agg["index_date_label"].to_list(),
                     )
                 )
                 LOG.info(f"person_index_date_agg: {person_index_date_agg}")
-                tokenized_person_ids = filtered_tokenized_dataset["person_id"].to_list()
+                tokenized_person_ids = []
+                for _, dataset in filtered_tokenized_dataset.items():
+                    tokenized_person_ids.extend(dataset["person_id"])
                 missing_person_ids = [
                     person_id
                     for person_id in person_index_date_map.keys()
@@ -200,7 +203,7 @@ def main():
                     batched=True,
                     batch_size=data_args.preprocessing_batch_size,
                     num_proc=data_args.preprocessing_num_workers,
-                    remove_columns=filtered_tokenized_dataset.column_names,
+                    remove_columns=filtered_tokenized_dataset["train"].column_names,
                 )
                 cache_file_collector.add_cache_files(processed_dataset)
                 cache_file_collector.remove_cache_files()

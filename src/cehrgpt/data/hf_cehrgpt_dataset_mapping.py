@@ -1,6 +1,6 @@
 import copy
 import datetime
-from typing import Any, Dict, Generator, List, Optional, Union
+from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -507,7 +507,7 @@ class HFFineTuningMapping(HFCehrGptTokenizationMapping):
 class ExtractTokenizedSequenceDataMapping:
     def __init__(
         self,
-        person_index_date_map: Dict[int, List[datetime.datetime]],
+        person_index_date_map: Dict[int, List[Tuple[datetime.datetime, float]]],
         observation_window: int = 0,
     ):
         self.person_index_date_map = person_index_date_map
@@ -525,14 +525,16 @@ class ExtractTokenizedSequenceDataMapping:
             (
                 self._calculate_prediction_start_time(prediction_time.timestamp()),
                 prediction_time.timestamp(),
+                label,
             )
-            for prediction_time in prediction_times
+            for prediction_time, label in prediction_times
         ]
         observation_window_indices = np.zeros(
             (len(prediction_times), len(record["epoch_times"])), dtype=np.int32
         )
+        labels = [tup[-1] for tup in prediction_start_end_times]
         for i, epoch_time in enumerate(record["epoch_times"]):
-            for sample_n, (prediction_time_start, prediction_time_end) in enumerate(
+            for sample_n, (prediction_time_start, prediction_time_end, _) in enumerate(
                 prediction_start_end_times
             ):
                 if prediction_time_start <= epoch_time <= prediction_time_end:
@@ -550,8 +552,9 @@ class ExtractTokenizedSequenceDataMapping:
                 static_inputs[k] = v
 
         all_samples = []
-        for observation_window_index in observation_window_indices:
+        for observation_window_index, label in zip(observation_window_indices, labels):
             sample = copy.deepcopy(static_inputs)
+            sample["classifier_label"] = label
             for time_series_column in time_series_columns:
                 sample[time_series_column] = np.asarray(record[time_series_column])[
                     observation_window_index
