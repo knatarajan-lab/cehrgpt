@@ -126,8 +126,12 @@ class UpdateNumEpochsBeforeEarlyStoppingCallback(TrainerCallback):
 
 def compute_metrics(eval_pred):
     logits, labels = eval_pred
-    # Convert logits to probabilities
-    probs = 1 / (1 + np.exp(-logits))  # sigmoid
+    # If logits is a tuple, take the first element
+    if isinstance(logits, tuple):
+        logits = logits[0]
+
+    # Convert to probabilities
+    probs = 1 / (1 + np.exp(-logits))
 
     # For binary classification, flatten if needed
     if probs.ndim > 1:

@@ -2004,6 +2004,27 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         )
 
 
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0, reduction="mean"):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, logits, targets):
+        bce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        probs = torch.sigmoid(logits)
+        pt = torch.where(targets == 1, probs, 1 - probs)
+        focal_term = (1 - pt) ** self.gamma
+        loss = self.alpha * focal_term * bce_loss
+
+        if self.reduction == "mean":
+            return loss.mean()
+        elif self.reduction == "sum":
+            return loss.sum()
+        return loss
+
+
 class CehrGptForClassification(CEHRGPTPreTrainedModel):
     _keep_in_fp32_modules = ["age_batch_norm", "dense_layer", "classifier"]
 
