@@ -545,7 +545,6 @@ class ExtractTokenizedSequenceDataMapping:
         observation_window_indices = np.zeros(
             (len(prediction_times), len(record["epoch_times"])), dtype=bool
         )
-        labels = [tup[-1] for tup in prediction_start_end_times]
         for i, epoch_time in enumerate(record["epoch_times"]):
             for sample_n, (prediction_time_start, prediction_time_end, _) in enumerate(
                 prediction_start_end_times
@@ -565,10 +564,18 @@ class ExtractTokenizedSequenceDataMapping:
                 static_inputs[k] = v
 
         batched_samples = defaultdict(list)
-        for observation_window_index, label in zip(observation_window_indices, labels):
+        for (_, index_date, label), observation_window_index in zip(
+            prediction_start_end_times, observation_window_indices
+        ):
             for k, v in static_inputs.items():
                 batched_samples[k].append(v)
             batched_samples["classifier_label"].append(label)
+            batched_samples["index_date"].append(index_date)
+            try:
+                start_age = int(record["concept_ids"][1].split(":")[1])
+            except Exception:
+                start_age = -1
+            batched_samples["age_at_index"].append(start_age)
             for time_series_column in time_series_columns:
                 batched_samples[time_series_column].append(
                     np.asarray(record[time_series_column])[observation_window_index]
