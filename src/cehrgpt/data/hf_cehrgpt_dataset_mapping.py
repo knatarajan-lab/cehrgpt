@@ -573,5 +573,5 @@ class ExtractTokenizedSequenceDataMapping:
                 one_record[column] = record[column][i]
             new_batched_record = self.transform(one_record)
             for k, v in new_batched_record.items():
-                all_batched_record[k].append(v)
+                all_batched_record[k].extend(v)
         return all_batched_record
