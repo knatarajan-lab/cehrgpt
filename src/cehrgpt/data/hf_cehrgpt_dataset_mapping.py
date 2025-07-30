@@ -1,6 +1,6 @@
 import copy
 import datetime
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -507,7 +507,7 @@ class HFFineTuningMapping(HFCehrGptTokenizationMapping):
 class ExtractTokenizedSequenceDataMapping:
     def __init__(
         self,
-        person_index_date_map: Dict[int, List[Tuple[datetime.datetime, float]]],
+        person_index_date_map: Dict[int, List[Dict[str, Any]]],
         observation_window: int = 0,
     ):
         self.person_index_date_map = person_index_date_map
@@ -523,11 +523,13 @@ class ExtractTokenizedSequenceDataMapping:
         prediction_times = self.person_index_date_map[person_id]
         prediction_start_end_times = [
             (
-                self._calculate_prediction_start_time(prediction_time.timestamp()),
-                prediction_time.timestamp(),
-                label,
+                self._calculate_prediction_start_time(
+                    prediction_time_label_map["index_date"].timestamp()
+                ),
+                prediction_time_label_map["index_date"].timestamp(),
+                prediction_time_label_map["label"],
             )
-            for prediction_time, label in prediction_times
+            for prediction_time_label_map in prediction_times
         ]
         observation_window_indices = np.zeros(
             (len(prediction_times), len(record["epoch_times"])), dtype=np.int32

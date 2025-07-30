@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -176,7 +176,7 @@ def main():
                     pl.struct("index_date", "label").alias("index_date_label")
                 )
                 # Convert to dictionary
-                person_index_date_map: Dict[int, List[datetime]] = dict(
+                person_index_date_map: Dict[int, List[Dict[str, Any]]] = dict(
                     zip(
                         person_index_date_agg["person_id"].to_list(),
                         person_index_date_agg["index_date_label"].to_list(),
