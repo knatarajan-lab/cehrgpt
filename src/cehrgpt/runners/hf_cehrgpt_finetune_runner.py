@@ -124,27 +124,6 @@ class UpdateNumEpochsBeforeEarlyStoppingCallback(TrainerCallback):
             )
 
 
-def compute_metrics(eval_pred):
-    logits, labels = eval_pred
-    # If logits is a tuple, take the first element
-    if isinstance(logits, tuple):
-        logits = logits[0]
-
-    # Convert to probabilities
-    probs = 1 / (1 + np.exp(-logits))
-
-    # For binary classification, flatten if needed
-    if probs.ndim > 1:
-        probs = probs[:, 0]
-    if labels.ndim > 1:
-        labels = labels[:, 0]
-
-    return {
-        "pr_auc": average_precision_score(labels, probs),
-        "roc_auc": roc_auc_score(labels, probs),
-    }
-
-
 def load_pretrained_tokenizer(
     model_args,
 ) -> CehrGptTokenizer:
@@ -518,7 +497,6 @@ def main():
                     ),
                 ],
                 tokenizer=tokenizer,
-                compute_metrics=compute_metrics,
             )
             # Train the model on the combined train + val set
             checkpoint = get_last_hf_checkpoint(training_args)
