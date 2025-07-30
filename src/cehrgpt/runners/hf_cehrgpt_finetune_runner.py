@@ -429,6 +429,7 @@ def main():
             SamplePackingTrainer,
             max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
             max_position_embeddings=config.max_position_embeddings,
+            negative_sampling_probability=cehrgpt_args.negative_sampling_probability,
         )
         training_args.per_device_train_batch_size = 1
         training_args.per_device_eval_batch_size = 1

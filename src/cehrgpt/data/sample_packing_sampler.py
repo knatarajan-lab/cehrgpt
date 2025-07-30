@@ -1,5 +1,6 @@
 from typing import Iterator, List, Optional
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch.utils.data import Sampler
@@ -33,6 +34,8 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
         rank: Optional[int] = None,
         seed: int = 0,
         drop_last: bool = False,
+        negative_sampling_probability: Optional[float] = None,
+        labels: Optional[List[int]] = None,
     ):
         """
         Args:
@@ -73,6 +76,11 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
                 f"Invalid rank {rank}, rank should be in the interval [0, {num_replicas - 1}]"
             )
 
+        if negative_sampling_probability is not None and labels is None:
+            raise ValueError(
+                f"When the negative sampling probability is provide, the labels must be provided as well"
+            )
+
         self.lengths = lengths
         self.max_tokens_per_batch = max_tokens_per_batch
         self.max_position_embeddings = max_position_embeddings
@@ -80,6 +88,8 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
         self.rank = rank
         self.seed = seed
         self.drop_last = drop_last
+        self.negative_sampling_probability = negative_sampling_probability
+        self.labels = labels
         # Trainer https://github.com/huggingface/transformers/blame/main/src/transformers/trainer.py#L2470
         # http://github.com/huggingface/accelerate/blob/v0.31.0/src/accelerate/data_loader.py#L482
         # the huggingface trainer will call the accelerate.data_loader.DataLoaderShard.set_epoch,
@@ -100,6 +110,14 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
         current_batch_tokens = 0
 
         for idx in indices:
+            # There is a chance to skip the negative samples to account for the class imbalance
+            # in the fine-tuning dataset
+            if self.negative_sampling_probability:
+                if (
+                    np.random.random() > self.negative_sampling_probability
+                    and self.labels[idx] == 0
+                ):
+                    continue
             # We take the minimum of the two because each sequence will be truncated to fit
             # the context window of the model
             sample_length = min(self.lengths[idx], self.max_position_embeddings)
@@ -131,10 +149,22 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
         if len(self.lengths) == 0:
             return 0
 
-        # We need to truncate the lengths due to the context window limit imposed by the model
-        truncated_lengths = [
-            min(self.max_position_embeddings, length + 2) for length in self.lengths
-        ]
+        # There is a chance to skip the negative samples to account for the class imbalance
+        # in the fine-tuning dataset
+        if self.negative_sampling_probability:
+            truncated_lengths = []
+            for length, label in zip(self.lengths, self.labels):
+                if (
+                    np.random.random() > self.negative_sampling_probability
+                    and label == 0
+                ):
+                    continue
+                truncated_lengths.append(length)
+        else:
+            # We need to truncate the lengths due to the context window limit imposed by the model
+            truncated_lengths = [
+                min(self.max_position_embeddings, length + 2) for length in self.lengths
+            ]
 
         # Calculate average sequence length
         avg_seq_length = sum(truncated_lengths) // len(truncated_lengths)

@@ -546,10 +546,16 @@ class ExtractTokenizedSequenceDataMapping:
             (len(prediction_times), len(record["epoch_times"])), dtype=bool
         )
         for i, epoch_time in enumerate(record["epoch_times"]):
-            for sample_n, (prediction_time_start, prediction_time_end, _) in enumerate(
-                prediction_start_end_times
-            ):
-                if prediction_time_start <= epoch_time <= prediction_time_end:
+            for sample_n, (
+                feature_extraction_time_start,
+                feature_extraction_end_end,
+                _,
+            ) in enumerate(prediction_start_end_times):
+                if (
+                    feature_extraction_time_start
+                    <= epoch_time
+                    <= feature_extraction_end_end
+                ):
                     observation_window_indices[sample_n][i] = True
 
         seq_length = len(record["epoch_times"])

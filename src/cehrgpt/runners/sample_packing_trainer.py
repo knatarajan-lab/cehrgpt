@@ -35,6 +35,13 @@ class SamplePackingTrainer(Trainer):
                 self.max_tokens_per_batch,
             )
 
+        self.negative_sampling_probability = kwargs.pop(
+            "negative_sampling_probability", None
+        )
+        if self.negative_sampling_probability:
+            LOG.info(
+                "negative_sampling_probability: %s", self.negative_sampling_probability
+            )
         self.train_lengths = kwargs.pop("train_lengths", None)
         self.validation_lengths = kwargs.pop("validation_lengths", None)
         super().__init__(*args, **kwargs)
@@ -70,6 +77,14 @@ class SamplePackingTrainer(Trainer):
             data_collator = self._get_collator_with_removed_columns(
                 data_collator, description="training"
             )
+
+        labels = None
+        if (
+            self.negative_sampling_probability is not None
+            and "classifier_label" in train_dataset.column_names
+        ):
+            labels = train_dataset["classifier_label"]
+
         # Create our custom batch sampler
         batch_sampler = SamplePackingBatchSampler(
             lengths=lengths,
@@ -77,6 +92,8 @@ class SamplePackingTrainer(Trainer):
             max_position_embeddings=self.max_position_embeddings,
             drop_last=self.args.dataloader_drop_last,
             seed=self.args.seed,
+            negative_sampling_probability=self.negative_sampling_probability,
+            labels=labels,
         )
         dataloader_params = {
             "collate_fn": data_collator,

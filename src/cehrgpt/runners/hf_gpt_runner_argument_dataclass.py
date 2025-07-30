@@ -223,3 +223,9 @@ class CehrGPTArguments:
         default=None,
         metadata={"help": "The class weights for training"},
     )
+    negative_sampling_probability: Optional[float] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "The probability of negative samples will be included in the training data"
+        },
+    )
