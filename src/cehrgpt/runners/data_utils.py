@@ -244,7 +244,7 @@ def create_dataset_splits(data_args: DataTrainingArguments, seed: int):
             )
 
         # Generate splits
-        train_set = filter_by_patient_ids(train_patient_ids)
+        train_set = filter_by_patient_ids(train_patient_ids).shuffle(seed=seed)
         validation_set = filter_by_patient_ids(val_patient_ids)
         if test_set is None:
             test_set = filter_by_patient_ids(test_patient_ids)

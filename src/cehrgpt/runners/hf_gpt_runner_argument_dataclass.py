@@ -6,6 +6,12 @@ from typing import List, Optional
 class CehrGPTArguments:
     """Arguments pertaining to what data we are going to input our model for training and eval."""
 
+    tokenized_full_dataset_path: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "The path to the tokenized dataset created for the full population"
+        },
+    )
     include_inpatient_hour_token: Optional[bool] = dataclasses.field(
         default=True,
         metadata={"help": "Include inpatient hour token"},
