@@ -5,10 +5,11 @@ import uuid
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import Optional, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import torch
 import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
@@ -24,6 +25,7 @@ from cehrgpt.data.hf_cehrgpt_dataset_collator import (
     CehrGptDataCollator,
     SamplePackingCehrGptDataCollator,
 )
+from cehrgpt.data.hf_cehrgpt_dataset_mapping import ExtractTokenizedSequenceDataMapping
 from cehrgpt.data.sample_packing_sampler import SamplePackingBatchSampler
 from cehrgpt.models.hf_cehrgpt import (
     CEHRGPT2Model,
@@ -143,39 +145,101 @@ def main():
 
     if processed_dataset is None:
         if is_main_process(training_args.local_rank):
-            # Organize them into a single DatasetDict
-            final_splits = prepare_finetune_dataset(
-                data_args, training_args, cehrgpt_args, cache_file_collector
-            )
-            if cehrgpt_args.expand_tokenizer:
-                new_tokenizer_path = os.path.expanduser(training_args.output_dir)
-                if tokenizer_exists(new_tokenizer_path):
-                    cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
-                        new_tokenizer_path
+            # If the full dataset has been tokenized, we don't want to tokenize the cohort containing
+            # the subset of the data. We should slice out the portion of the tokenized sequences for each sample
+            if cehrgpt_args.tokenized_full_dataset_path is not None:
+                cohort = pl.read_parquet(
+                    os.path.join(data_args.cohort_folder, "*.parquet")
+                )
+                if data_args.is_data_in_meds:
+                    cohort = cohort.rename(
+                        mapping={
+                            "prediction_time": "index_date",
+                            "subject_id": "person_id",
+                        }
                     )
-                else:
-                    cehrgpt_tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
-                        cehrgpt_tokenizer=cehrgpt_tokenizer,
-                        dataset=final_splits["train"],
-                        data_args=data_args,
-                        concept_name_mapping={},
+                all_person_ids = cohort["person_id"].unique().to_list()
+                # data_args.observation_window
+                tokenized_dataset = load_from_disk(
+                    cehrgpt_args.tokenized_full_dataset_path
+                )
+                filtered_tokenized_dataset = tokenized_dataset.filter(
+                    lambda batch: [
+                        person_id in all_person_ids for person_id in batch["person_id"]
+                    ],
+                    batched=True,
+                    batch_size=data_args.preprocessing_batch_size,
+                    num_proc=data_args.preprocessing_num_workers,
+                )
+                person_index_date_agg = cohort.group_by("person_id").agg(
+                    pl.col("index_date").alias("index_dates")
+                )
+                # Convert to dictionary
+                person_index_date_map: Dict[int, List[datetime]] = dict(
+                    zip(
+                        person_index_date_agg["person_id"].to_list(),
+                        person_index_date_agg["index_dates"].to_list(),
                     )
-                    cehrgpt_tokenizer.save_pretrained(
-                        os.path.expanduser(training_args.output_dir)
+                )
+                LOG.info(f"person_index_date_agg: {person_index_date_agg}")
+                tokenized_person_ids = filtered_tokenized_dataset["person_id"].to_list()
+                missing_person_ids = [
+                    person_id
+                    for person_id in person_index_date_map.keys()
+                    if person_id not in tokenized_person_ids
+                ]
+                if missing_person_ids:
+                    raise RuntimeError(
+                        f"There are {len(missing_person_ids)} missing in the tokenized dataset. "
+                        f"The list contains: {missing_person_ids}"
                     )
+                processed_dataset = filtered_tokenized_dataset.map(
+                    ExtractTokenizedSequenceDataMapping(
+                        person_index_date_map, data_args.observation_window
+                    ).batch_transform,
+                    batched=True,
+                    batch_size=data_args.preprocessing_batch_size,
+                    num_proc=data_args.preprocessing_num_workers,
+                    remove_columns=filtered_tokenized_dataset.column_names,
+                )
+                cache_file_collector.add_cache_files(processed_dataset)
+                cache_file_collector.remove_cache_files()
+            else:
+                # Organize them into a single DatasetDict
+                final_splits = prepare_finetune_dataset(
+                    data_args, training_args, cehrgpt_args, cache_file_collector
+                )
+                if cehrgpt_args.expand_tokenizer:
+                    new_tokenizer_path = os.path.expanduser(training_args.output_dir)
+                    if tokenizer_exists(new_tokenizer_path):
+                        cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
+                            new_tokenizer_path
+                        )
+                    else:
+                        cehrgpt_tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
+                            cehrgpt_tokenizer=cehrgpt_tokenizer,
+                            dataset=final_splits["train"],
+                            data_args=data_args,
+                            concept_name_mapping={},
+                        )
+                        cehrgpt_tokenizer.save_pretrained(
+                            os.path.expanduser(training_args.output_dir)
+                        )
 
-                # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
-            if not data_args.streaming:
-                all_columns = final_splits["train"].column_names
-                if "visit_concept_ids" in all_columns:
-                    final_splits = final_splits.remove_columns(["visit_concept_ids"])
+                    # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
+                if not data_args.streaming:
+                    all_columns = final_splits["train"].column_names
+                    if "visit_concept_ids" in all_columns:
+                        final_splits = final_splits.remove_columns(
+                            ["visit_concept_ids"]
+                        )
 
-            processed_dataset = create_cehrgpt_finetuning_dataset(
-                dataset=final_splits,
-                cehrgpt_tokenizer=cehrgpt_tokenizer,
-                data_args=data_args,
-                cache_file_collector=cache_file_collector,
-            )
+                processed_dataset = create_cehrgpt_finetuning_dataset(
+                    dataset=final_splits,
+                    cehrgpt_tokenizer=cehrgpt_tokenizer,
+                    data_args=data_args,
+                    cache_file_collector=cache_file_collector,
+                )
             if not data_args.streaming:
                 processed_dataset.save_to_disk(prepared_ds_path)
                 processed_dataset.cleanup_cache_files()
