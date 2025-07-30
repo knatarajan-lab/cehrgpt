@@ -1,5 +1,5 @@
-import copy
 import datetime
+from collections import defaultdict
 from typing import Any, Dict, Generator, List, Optional, Union
 
 import numpy as np
@@ -518,7 +518,7 @@ class ExtractTokenizedSequenceDataMapping:
             return max(prediction_time - self.observation_window * 24 * 3600, 0)
         return 0
 
-    def transform(self, record: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
         person_id = record["person_id"]
         prediction_times = self.person_index_date_map[person_id]
         prediction_start_end_times = [
@@ -553,23 +553,25 @@ class ExtractTokenizedSequenceDataMapping:
             else:
                 static_inputs[k] = v
 
-        all_samples = []
+        batched_samples = defaultdict(list)
         for observation_window_index, label in zip(observation_window_indices, labels):
-            sample = copy.deepcopy(static_inputs)
-            sample["classifier_label"] = label
+            for k, v in static_inputs.items():
+                batched_samples[k].append(v)
+            batched_samples["classifier_label"].append(label)
             for time_series_column in time_series_columns:
-                sample[time_series_column] = np.asarray(record[time_series_column])[
-                    observation_window_index
-                ]
-            all_samples.append(sample)
-        return all_samples
+                batched_samples[time_series_column].append(
+                    np.asarray(record[time_series_column])[observation_window_index]
+                )
+        return batched_samples
 
-    def batch_transform(self, record: Dict[str, Any]) -> List[Dict[str, Any]]:
-        all_samples = []
+    def batch_transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        all_batched_record = defaultdict(list)
         all_columns = record.keys()
         for i in range(len(record["concept_ids"])):
             one_record = {}
             for column in all_columns:
                 one_record[column] = record[column][i]
-            all_samples.extend(self.transform(one_record))
-        return all_samples
+            new_batched_record = self.transform(one_record)
+            for k, v in new_batched_record.items():
+                all_batched_record[k].append(v)
+        return all_batched_record
