@@ -217,6 +217,18 @@ def is_visit_end(token: str) -> bool:
     return token in ["VE", "[VE]"]
 
 
+def is_inpatient_hour_token(token: str) -> bool:
+    return token.startswith("i-H")
+
+
+def extract_time_interval_in_hours(token: str) -> int:
+    try:
+        hour = int(token[3:])
+        return hour
+    except ValueError:
+        return 0
+
+
 def is_att_token(token: str):
     """
     Check if the token is an attention token.
@@ -256,6 +268,7 @@ def is_artificial_token(token: str) -> bool:
         return True
     if token == END_TOKEN:
         return True
+
     return False
 
 

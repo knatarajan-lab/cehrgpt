@@ -11,8 +11,10 @@ from cehrgpt.gpt_utils import (
     DEMOGRAPHIC_PROMPT_SIZE,
     collect_demographic_prompts_at_visits,
     extract_time_interval_in_days,
+    extract_time_interval_in_hours,
     is_att_token,
     is_inpatient_att_token,
+    is_inpatient_hour_token,
     is_visit_end,
     random_slice_gpt_sequence,
 )
@@ -105,6 +107,8 @@ class CehrGptDataCollator:
                     ):
                         return -100
                     return time_to_visit
+                elif is_inpatient_hour_token(c):
+                    return extract_time_interval_in_hours(c) / 24
                 return -100
             except ValueError:
                 return -100
