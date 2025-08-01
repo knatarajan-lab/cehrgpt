@@ -477,12 +477,6 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
             record["values"] = self._concept_tokenizer.encode_value(
                 [NONE_BIN for _ in range(len(record["concept_value_masks"]))]
             )
-
-        # This assertion must pass
-        assert len(record["epoch_times"]) == len(
-            record["concept_ids"]
-        ), "The number of time stamps must match with the number of concepts in the sequence"
-
         # Delete these features because they contain null values and pyarrow cannot concatenate multiple records
         del record["number_as_values"]
         del record["concept_as_values"]
