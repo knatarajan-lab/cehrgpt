@@ -9,7 +9,6 @@ from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
-import polars as pl
 import torch
 import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
@@ -25,7 +24,6 @@ from cehrgpt.data.hf_cehrgpt_dataset_collator import (
     CehrGptDataCollator,
     SamplePackingCehrGptDataCollator,
 )
-from cehrgpt.data.hf_cehrgpt_dataset_mapping import ExtractTokenizedSequenceDataMapping
 from cehrgpt.data.sample_packing_sampler import SamplePackingBatchSampler
 from cehrgpt.models.hf_cehrgpt import (
     CEHRGPT2Model,
@@ -33,10 +31,7 @@ from cehrgpt.models.hf_cehrgpt import (
 )
 from cehrgpt.models.special_tokens import LINEAR_PROB_TOKEN
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
-from cehrgpt.runners.data_utils import (
-    extract_cohort_sequences,
-    prepare_finetune_dataset,
-)
+from cehrgpt.runners.data_utils import prepare_finetune_dataset
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
 
@@ -148,48 +143,39 @@ def main():
 
     if processed_dataset is None:
         if is_main_process(training_args.local_rank):
-            # If the full dataset has been tokenized, we don't want to tokenize the cohort containing
-            # the subset of the data. We should slice out the portion of the tokenized sequences for each sample
-            if cehrgpt_args.tokenized_full_dataset_path is not None:
-                processed_dataset = extract_cohort_sequences(
-                    data_args, cehrgpt_args, cache_file_collector
-                )
-            else:
-                # Organize them into a single DatasetDict
-                final_splits = prepare_finetune_dataset(
-                    data_args, training_args, cehrgpt_args, cache_file_collector
-                )
-                if cehrgpt_args.expand_tokenizer:
-                    new_tokenizer_path = os.path.expanduser(training_args.output_dir)
-                    if tokenizer_exists(new_tokenizer_path):
-                        cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
-                            new_tokenizer_path
-                        )
-                    else:
-                        cehrgpt_tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
-                            cehrgpt_tokenizer=cehrgpt_tokenizer,
-                            dataset=final_splits["train"],
-                            data_args=data_args,
-                            concept_name_mapping={},
-                        )
-                        cehrgpt_tokenizer.save_pretrained(
-                            os.path.expanduser(training_args.output_dir)
-                        )
+            # Organize them into a single DatasetDict
+            final_splits = prepare_finetune_dataset(
+                data_args, training_args, cehrgpt_args, cache_file_collector
+            )
+            if cehrgpt_args.expand_tokenizer:
+                new_tokenizer_path = os.path.expanduser(training_args.output_dir)
+                if tokenizer_exists(new_tokenizer_path):
+                    cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
+                        new_tokenizer_path
+                    )
+                else:
+                    cehrgpt_tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
+                        cehrgpt_tokenizer=cehrgpt_tokenizer,
+                        dataset=final_splits["train"],
+                        data_args=data_args,
+                        concept_name_mapping={},
+                    )
+                    cehrgpt_tokenizer.save_pretrained(
+                        os.path.expanduser(training_args.output_dir)
+                    )
 
-                    # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
-                if not data_args.streaming:
-                    all_columns = final_splits["train"].column_names
-                    if "visit_concept_ids" in all_columns:
-                        final_splits = final_splits.remove_columns(
-                            ["visit_concept_ids"]
-                        )
+                # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
+            if not data_args.streaming:
+                all_columns = final_splits["train"].column_names
+                if "visit_concept_ids" in all_columns:
+                    final_splits = final_splits.remove_columns(["visit_concept_ids"])
 
-                processed_dataset = create_cehrgpt_finetuning_dataset(
-                    dataset=final_splits,
-                    cehrgpt_tokenizer=cehrgpt_tokenizer,
-                    data_args=data_args,
-                    cache_file_collector=cache_file_collector,
-                )
+            processed_dataset = create_cehrgpt_finetuning_dataset(
+                dataset=final_splits,
+                cehrgpt_tokenizer=cehrgpt_tokenizer,
+                data_args=data_args,
+                cache_file_collector=cache_file_collector,
+            )
             if not data_args.streaming:
                 processed_dataset.save_to_disk(prepared_ds_path)
                 processed_dataset.cleanup_cache_files()

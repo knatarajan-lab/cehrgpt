@@ -1,5 +1,4 @@
 import datetime
-from collections import defaultdict
 from typing import Any, Dict, Generator, List, Optional, Union
 
 import numpy as np
@@ -43,7 +42,6 @@ CEHRGPT_COLUMNS = [
     "is_numeric_types",
     "concept_values",
     "units",
-    "epoch_times",
 ]
 
 
@@ -115,7 +113,6 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
     def _update_cehrgpt_record(
         cehrgpt_record: Dict[str, Any],
         code: str,
-        time: datetime.datetime,
         concept_value_mask: int = 0,
         number_as_value: float = 0.0,
         concept_as_value: str = "0",
@@ -128,7 +125,6 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
         cehrgpt_record["concept_as_values"].append(concept_as_value)
         cehrgpt_record["units"].append(unit)
         cehrgpt_record["is_numeric_types"].append(is_numeric_type)
-        cehrgpt_record["epoch_times"].append(time.timestamp())
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
         cehrgpt_record = {
@@ -139,7 +135,6 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
             "concept_as_values": [],
             "units": [],
             "is_numeric_types": [],
-            "epoch_times": [],
         }
         # Extract the demographic information
         birth_datetime = record["birth_datetime"]
@@ -163,12 +158,10 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
         )
         year_str = f"year:{str(first_visit_start_datetime.year)}"
         age_str = f"age:{str(relativedelta(first_visit_start_datetime, birth_datetime).years)}"
-        self._update_cehrgpt_record(
-            cehrgpt_record, year_str, first_visit_start_datetime
-        )
-        self._update_cehrgpt_record(cehrgpt_record, age_str, first_visit_start_datetime)
-        self._update_cehrgpt_record(cehrgpt_record, gender, first_visit_start_datetime)
-        self._update_cehrgpt_record(cehrgpt_record, race, first_visit_start_datetime)
+        self._update_cehrgpt_record(cehrgpt_record, year_str)
+        self._update_cehrgpt_record(cehrgpt_record, age_str)
+        self._update_cehrgpt_record(cehrgpt_record, gender)
+        self._update_cehrgpt_record(cehrgpt_record, race)
 
         # Use a data cursor to keep track of time
         datetime_cursor: Optional[datetime.datetime] = None
@@ -203,7 +196,6 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                 self._update_cehrgpt_record(
                     cehrgpt_record,
                     code=self._time_token_function(time_delta),
-                    time=visit_start_datetime,
                 )
 
             datetime_cursor = visit_start_datetime
@@ -211,13 +203,11 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
             self._update_cehrgpt_record(
                 cehrgpt_record,
                 code="[VS]",
-                time=datetime_cursor,
             )
             # Add a visit type token
             self._update_cehrgpt_record(
                 cehrgpt_record,
                 code=visit_type,
-                time=datetime_cursor,
             )
             # We need to insert an inpatient hour token right after the visit type, we calculate the hour interval
             # with respect to the midnight of the day
@@ -227,7 +217,6 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                     self._update_cehrgpt_record(
                         cehrgpt_record,
                         code=f"i-H{datetime_cursor.hour}",
-                        time=datetime_cursor,
                     )
 
             # Keep track of the existing outpatient events, we don't want to add them again
@@ -273,7 +262,6 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                         self._update_cehrgpt_record(
                             cehrgpt_record,
                             code=f"i-{self._inpatient_time_token_function(time_diff_days)}",
-                            time=event_time,
                         )
 
                     if self._include_inpatient_hour_token:
@@ -292,7 +280,6 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                             self._update_cehrgpt_record(
                                 cehrgpt_record,
                                 code=f"i-H{time_diff_hours}",
-                                time=event_time,
                             )
 
                 if event_identity in existing_duplicate_events:
@@ -301,7 +288,6 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                 self._update_cehrgpt_record(
                     cehrgpt_record,
                     code=code,
-                    time=event_time,
                     concept_value_mask=concept_value_mask,
                     unit=unit,
                     number_as_value=numeric_value if numeric_value else 0.0,
@@ -340,14 +326,12 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                     self._update_cehrgpt_record(
                         cehrgpt_record,
                         code=discharge_facility,
-                        time=datetime_cursor,
                     )
 
             # Reuse the age and date calculated for the last event in the patient timeline
             self._update_cehrgpt_record(
                 cehrgpt_record,
                 code="[VE]",
-                time=datetime_cursor,
             )
 
         # Generate the orders of the concepts that the cehrbert dataset mapping function expects
@@ -365,10 +349,6 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
             cehrgpt_record["label"] = record["label"]
         if record.get("age_at_index", None) is not None:
             cehrgpt_record["age_at_index"] = record["age_at_index"]
-
-        assert len(cehrgpt_record["epoch_times"]) == len(
-            cehrgpt_record["concept_ids"]
-        ), "The number of time stamps must match with the number of concepts in the sequence"
 
         return cehrgpt_record
 
@@ -507,89 +487,3 @@ class HFFineTuningMapping(HFCehrGptTokenizationMapping):
         columns = super().remove_columns()
         columns.append("label")
         return columns
-
-
-class ExtractTokenizedSequenceDataMapping:
-    def __init__(
-        self,
-        person_index_date_map: Dict[int, List[Dict[str, Any]]],
-        observation_window: int = 0,
-    ):
-        self.person_index_date_map = person_index_date_map
-        self.observation_window = observation_window
-
-    def _calculate_prediction_start_time(self, prediction_time: float):
-        if self.observation_window and self.observation_window > 0:
-            return max(prediction_time - self.observation_window * 24 * 3600, 0)
-        return 0
-
-    def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        person_id = record["person_id"]
-        prediction_times = self.person_index_date_map[person_id]
-        prediction_start_end_times = [
-            (
-                self._calculate_prediction_start_time(
-                    prediction_time_label_map["index_date"].timestamp()
-                ),
-                prediction_time_label_map["index_date"].timestamp(),
-                prediction_time_label_map["label"],
-            )
-            for prediction_time_label_map in prediction_times
-        ]
-        observation_window_indices = np.zeros(
-            (len(prediction_times), len(record["epoch_times"])), dtype=bool
-        )
-        for i, epoch_time in enumerate(record["epoch_times"]):
-            for sample_n, (
-                feature_extraction_time_start,
-                feature_extraction_end_end,
-                _,
-            ) in enumerate(prediction_start_end_times):
-                if (
-                    feature_extraction_time_start
-                    <= epoch_time
-                    <= feature_extraction_end_end
-                ):
-                    observation_window_indices[sample_n][i] = True
-
-        seq_length = len(record["epoch_times"])
-        time_series_columns = ["concept_ids", "input_ids"]
-        static_inputs = dict()
-        for k, v in record.items():
-            if k in ["concept_ids", "input_ids"]:
-                continue
-            if isinstance(v, (list, np.ndarray)) and len(v) == seq_length:
-                time_series_columns.append(k)
-            else:
-                static_inputs[k] = v
-
-        batched_samples = defaultdict(list)
-        for (_, index_date, label), observation_window_index in zip(
-            prediction_start_end_times, observation_window_indices
-        ):
-            for k, v in static_inputs.items():
-                batched_samples[k].append(v)
-            batched_samples["classifier_label"].append(label)
-            batched_samples["index_date"].append(index_date)
-            try:
-                start_age = int(record["concept_ids"][1].split(":")[1])
-            except Exception:
-                start_age = -1
-            batched_samples["age_at_index"].append(start_age)
-            for time_series_column in time_series_columns:
-                batched_samples[time_series_column].append(
-                    np.asarray(record[time_series_column])[observation_window_index]
-                )
-        return batched_samples
-
-    def batch_transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        all_batched_record = defaultdict(list)
-        all_columns = record.keys()
-        for i in range(len(record["concept_ids"])):
-            one_record = {}
-            for column in all_columns:
-                one_record[column] = record[column][i]
-            new_batched_record = self.transform(one_record)
-            for k, v in new_batched_record.items():
-                all_batched_record[k].extend(v)
-        return all_batched_record

@@ -6,12 +6,6 @@ from typing import List, Optional
 class CehrGPTArguments:
     """Arguments pertaining to what data we are going to input our model for training and eval."""
 
-    tokenized_full_dataset_path: Optional[str] = dataclasses.field(
-        default=None,
-        metadata={
-            "help": "The path to the tokenized dataset created for the full population"
-        },
-    )
     include_inpatient_hour_token: Optional[bool] = dataclasses.field(
         default=True,
         metadata={"help": "Include inpatient hour token"},
@@ -222,10 +216,4 @@ class CehrGPTArguments:
     class_weights: Optional[List[int]] = dataclasses.field(
         default=None,
         metadata={"help": "The class weights for training"},
-    )
-    negative_sampling_probability: Optional[float] = dataclasses.field(
-        default=None,
-        metadata={
-            "help": "The probability of negative samples will be included in the training data"
-        },
     )

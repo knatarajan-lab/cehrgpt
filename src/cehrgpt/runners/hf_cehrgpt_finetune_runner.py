@@ -50,11 +50,7 @@ from cehrgpt.models.hf_cehrgpt import (
 )
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
-from cehrgpt.runners.data_utils import (
-    extract_cohort_sequences,
-    get_torch_dtype,
-    prepare_finetune_dataset,
-)
+from cehrgpt.runners.data_utils import get_torch_dtype, prepare_finetune_dataset
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
@@ -264,55 +260,46 @@ def main():
 
     if processed_dataset is None:
         if is_main_process(training_args.local_rank):
-            # If the full dataset has been tokenized, we don't want to tokenize the cohort containing
-            # the subset of the data. We should slice out the portion of the tokenized sequences for each sample
-            if cehrgpt_args.tokenized_full_dataset_path is not None:
-                processed_dataset = extract_cohort_sequences(
-                    data_args, cehrgpt_args, cache_file_collector
-                )
-            else:
-                final_splits = prepare_finetune_dataset(
-                    data_args, training_args, cehrgpt_args, cache_file_collector
-                )
-                if cehrgpt_args.expand_tokenizer:
-                    new_tokenizer_path = os.path.expanduser(training_args.output_dir)
-                    if tokenizer_exists(new_tokenizer_path):
-                        tokenizer = CehrGptTokenizer.from_pretrained(new_tokenizer_path)
-                    else:
-                        # Try to use the defined pretrained embeddings if exists, Otherwise we default to the pretrained model
-                        # embedded in the pretrained model
-                        pretrained_concept_embedding_model = PretrainedEmbeddings(
-                            cehrgpt_args.pretrained_embedding_path
+            final_splits = prepare_finetune_dataset(
+                data_args, training_args, cehrgpt_args, cache_file_collector
+            )
+            if cehrgpt_args.expand_tokenizer:
+                new_tokenizer_path = os.path.expanduser(training_args.output_dir)
+                if tokenizer_exists(new_tokenizer_path):
+                    tokenizer = CehrGptTokenizer.from_pretrained(new_tokenizer_path)
+                else:
+                    # Try to use the defined pretrained embeddings if exists, Otherwise we default to the pretrained model
+                    # embedded in the pretrained model
+                    pretrained_concept_embedding_model = PretrainedEmbeddings(
+                        cehrgpt_args.pretrained_embedding_path
+                    )
+                    if not pretrained_concept_embedding_model.exists:
+                        pretrained_concept_embedding_model = (
+                            tokenizer.pretrained_concept_embedding_model
                         )
-                        if not pretrained_concept_embedding_model.exists:
-                            pretrained_concept_embedding_model = (
-                                tokenizer.pretrained_concept_embedding_model
-                            )
-                        tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
-                            cehrgpt_tokenizer=tokenizer,
-                            dataset=final_splits["train"],
-                            data_args=data_args,
-                            concept_name_mapping={},
-                            pretrained_concept_embedding_model=pretrained_concept_embedding_model,
-                        )
-                        tokenizer.save_pretrained(
-                            os.path.expanduser(training_args.output_dir)
-                        )
+                    tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
+                        cehrgpt_tokenizer=tokenizer,
+                        dataset=final_splits["train"],
+                        data_args=data_args,
+                        concept_name_mapping={},
+                        pretrained_concept_embedding_model=pretrained_concept_embedding_model,
+                    )
+                    tokenizer.save_pretrained(
+                        os.path.expanduser(training_args.output_dir)
+                    )
 
-                # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
-                if not data_args.streaming:
-                    all_columns = final_splits["train"].column_names
-                    if "visit_concept_ids" in all_columns:
-                        final_splits = final_splits.remove_columns(
-                            ["visit_concept_ids"]
-                        )
+            # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
+            if not data_args.streaming:
+                all_columns = final_splits["train"].column_names
+                if "visit_concept_ids" in all_columns:
+                    final_splits = final_splits.remove_columns(["visit_concept_ids"])
 
-                processed_dataset = create_cehrgpt_finetuning_dataset(
-                    dataset=final_splits,
-                    cehrgpt_tokenizer=tokenizer,
-                    data_args=data_args,
-                    cache_file_collector=cache_file_collector,
-                )
+            processed_dataset = create_cehrgpt_finetuning_dataset(
+                dataset=final_splits,
+                cehrgpt_tokenizer=tokenizer,
+                data_args=data_args,
+                cache_file_collector=cache_file_collector,
+            )
             if not data_args.streaming:
                 processed_dataset.save_to_disk(str(prepared_ds_path))
                 stats = processed_dataset.cleanup_cache_files()
@@ -371,7 +358,6 @@ def main():
             SamplePackingTrainer,
             max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
             max_position_embeddings=config.max_position_embeddings,
-            negative_sampling_probability=cehrgpt_args.negative_sampling_probability,
         )
         training_args.per_device_train_batch_size = 1
         training_args.per_device_eval_batch_size = 1
@@ -402,7 +388,6 @@ def main():
         include_ttv_prediction=False,
         use_sub_time_tokenization=False,
         include_demographics=cehrgpt_args.include_demographics,
-        add_linear_prob_token=True,
     )
 
     if training_args.do_train:

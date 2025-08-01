@@ -23,7 +23,6 @@ CEHRGPT_COLUMNS = [
     "num_of_visits",
     "values",
     "value_indicators",
-    "epoch_times",
 ]
 
 TRANSFORMER_COLUMNS = ["input_ids"]
