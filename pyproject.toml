@@ -36,6 +36,7 @@ dependencies = [
     "tokenizers==0.19.0",
     "peft==0.10.0",
     "lightgbm",
+    "polars",
 ]
 
 [tool.setuptools_scm]
