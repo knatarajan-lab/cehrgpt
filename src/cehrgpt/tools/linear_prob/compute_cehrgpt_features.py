@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -33,7 +33,10 @@ from cehrgpt.models.hf_cehrgpt import (
 )
 from cehrgpt.models.special_tokens import LINEAR_PROB_TOKEN
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
-from cehrgpt.runners.data_utils import prepare_finetune_dataset
+from cehrgpt.runners.data_utils import (
+    extract_cohort_sequences,
+    prepare_finetune_dataset,
+)
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
 
@@ -148,65 +151,9 @@ def main():
             # If the full dataset has been tokenized, we don't want to tokenize the cohort containing
             # the subset of the data. We should slice out the portion of the tokenized sequences for each sample
             if cehrgpt_args.tokenized_full_dataset_path is not None:
-                cohort = pl.read_parquet(
-                    os.path.join(data_args.cohort_folder, "*.parquet")
+                processed_dataset = extract_cohort_sequences(
+                    data_args, cehrgpt_args, cache_file_collector
                 )
-                if data_args.is_data_in_meds:
-                    cohort = cohort.rename(
-                        mapping={
-                            "prediction_time": "index_date",
-                            "subject_id": "person_id",
-                            "boolean_value": "label",
-                        }
-                    )
-                all_person_ids = cohort["person_id"].unique().to_list()
-                # data_args.observation_window
-                tokenized_dataset = load_from_disk(
-                    cehrgpt_args.tokenized_full_dataset_path
-                )
-                filtered_tokenized_dataset = tokenized_dataset.filter(
-                    lambda batch: [
-                        person_id in all_person_ids for person_id in batch["person_id"]
-                    ],
-                    batched=True,
-                    batch_size=data_args.preprocessing_batch_size,
-                    num_proc=data_args.preprocessing_num_workers,
-                )
-                person_index_date_agg = cohort.group_by("person_id").agg(
-                    pl.struct("index_date", "label").alias("index_date_label")
-                )
-                # Convert to dictionary
-                person_index_date_map: Dict[int, List[Dict[str, Any]]] = dict(
-                    zip(
-                        person_index_date_agg["person_id"].to_list(),
-                        person_index_date_agg["index_date_label"].to_list(),
-                    )
-                )
-                LOG.info(f"person_index_date_agg: {person_index_date_agg}")
-                tokenized_person_ids = []
-                for _, dataset in filtered_tokenized_dataset.items():
-                    tokenized_person_ids.extend(dataset["person_id"])
-                missing_person_ids = [
-                    person_id
-                    for person_id in person_index_date_map.keys()
-                    if person_id not in tokenized_person_ids
-                ]
-                if missing_person_ids:
-                    raise RuntimeError(
-                        f"There are {len(missing_person_ids)} missing in the tokenized dataset. "
-                        f"The list contains: {missing_person_ids}"
-                    )
-                processed_dataset = filtered_tokenized_dataset.map(
-                    ExtractTokenizedSequenceDataMapping(
-                        person_index_date_map, data_args.observation_window
-                    ).batch_transform,
-                    batched=True,
-                    batch_size=data_args.preprocessing_batch_size,
-                    num_proc=data_args.preprocessing_num_workers,
-                    remove_columns=filtered_tokenized_dataset["train"].column_names,
-                )
-                cache_file_collector.add_cache_files(processed_dataset)
-                cache_file_collector.remove_cache_files()
             else:
                 # Organize them into a single DatasetDict
                 final_splits = prepare_finetune_dataset(
