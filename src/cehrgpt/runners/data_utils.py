@@ -14,13 +14,7 @@ from cehrbert.runners.runner_util import (
     get_meds_extension_path,
     load_parquet_as_dataset,
 )
-from datasets import (
-    Dataset,
-    DatasetDict,
-    IterableDataset,
-    concatenate_datasets,
-    load_from_disk,
-)
+from datasets import DatasetDict, concatenate_datasets, load_from_disk
 from transformers import TrainingArguments
 from transformers.utils import logging
 
@@ -29,7 +23,6 @@ from cehrgpt.data.hf_cehrgpt_dataset_mapping import (
     MedToCehrGPTDatasetMapping,
 )
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
-from src.cehrgpt.runners.hf_cehrgpt_finetune_runner import LOG
 
 LOG = logging.get_logger("transformers")
 
