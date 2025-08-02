@@ -15,8 +15,10 @@ import scipy.stats as stats
 import transformers
 from cehrbert.models.hf_models.tokenization_utils import agg_helper, load_json_file
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
+from cehrbert_data.const.artificial_tokens import DEATH_TOKEN
 from datasets import Dataset, DatasetDict, IterableDataset
 from femr.stat_utils import OnlineStatistics, ReservoirSampler
+from meds import death_code
 from scipy.interpolate import UnivariateSpline
 from tokenizers import AddedToken, Tokenizer
 from tokenizers.models import WordLevel
@@ -88,6 +90,23 @@ def get_dataset_len(dataset: Union[Dataset, IterableDataset]) -> int:
     raise RuntimeError(
         "The dataset must be one of the two types (Dataset, IterableDataset)"
     )
+
+
+def get_allowed_motor_codes(
+    original_concept_codes: List[str], ontology: Optional[Ontology]
+) -> List[str]:
+    filtered_original_concept_codes = filter(is_clinical_event, original_concept_codes)
+    if ontology:
+        allowed_motor_codes = []
+        for concept in filtered_original_concept_codes:
+            domain = ontology.get_domain(concept)
+            if domain and domain in ["Condition", "Procedure", "Drug", "Visit"]:
+                allowed_motor_codes.append(concept)
+            elif concept in [DEATH_TOKEN, death_code]:
+                allowed_motor_codes.append(concept)
+        return allowed_motor_codes
+    else:
+        return list(filtered_original_concept_codes)
 
 
 def create_sample_from_bins(bins, sample_size: int = 10_000) -> List[float]:
@@ -295,6 +314,7 @@ def compute_motor_tte_statistics(
                 current["task_tte_stats"][k] += v
             for k, v in fixed_stat["task_censor_stats"].items():
                 current["task_censor_stats"][k] += v
+
     # Aggregate the counts for the parent concepts
     if ontology is not None:
         for k in list(current["task_tte_stats"].keys()):
@@ -494,14 +514,6 @@ def compute_statistics(
                 weight * math.log(weight) + (1 - weight) * math.log(1 - weight)
             )
             all_concept_code_entropies[concept_id] = weight
-    # code_weights = np.asarray(list(concept_code_stats.values())).clip(1e-8, 1 - 1e-8)
-    # # Clip the values so we don't get errors when applying np.log
-    # code_entropies = np.log(code_weights) * code_weights + (1 - code_weights) * np.log(
-    #     1 - code_weights
-    # )
-    # concept_code_entropies = {
-    #     k: v for k, v in zip(concept_code_stats.keys(), code_entropies)
-    # }
 
     return {
         "numeric_lab_stats": numeric_lab_stats,
@@ -1393,7 +1405,6 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         concept_name_mapping: Dict[str, str],
         data_args: DataTrainingArguments,
         pretrained_concept_embedding_model: PretrainedEmbeddings = None,
-        allowed_motor_codes: Optional[List[str]] = None,
         num_motor_tasks: Optional[int] = None,
         apply_entropy_filter: bool = False,
         min_prevalence: float = 1 / 1000,
@@ -1509,8 +1520,11 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         }
 
         motor_task_info = None
-        if num_motor_tasks and allowed_motor_codes:
+        if num_motor_tasks:
             LOG.info("Computing the MOTOR TTE statistics")
+            allowed_motor_codes = get_allowed_motor_codes(
+                original_concept_codes, ontology
+            )
             motor_tte_statistics = compute_motor_tte_statistics(
                 dataset, data_args, allowed_motor_codes, ontology
             )
@@ -1520,7 +1534,6 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             ):
                 if concept_id not in allowed_motor_codes:
                     continue
-
                 tte_stats = motor_tte_statistics["task_tte_stats"][concept_id]
                 censor_stats = motor_tte_statistics["task_censor_stats"][concept_id]
                 frac_events = tte_stats / (tte_stats + censor_stats)

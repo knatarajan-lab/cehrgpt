@@ -77,46 +77,25 @@ def load_and_create_tokenizer(
 
     ontology: Optional[Ontology] = None
     concept_name_mapping = {}
-    allowed_motor_codes = list()
 
-    if cehrgpt_args.include_motor_time_to_event and not cehrgpt_args.motor_vocab_dir:
+    if cehrgpt_args.include_motor_time_to_event and not cehrgpt_args.vocab_dir:
         raise RuntimeError(
             "motor_vocab_dir must be specified if include_motor_time_to_event is True"
         )
 
-    if cehrgpt_args.motor_vocab_dir:
+    if cehrgpt_args.vocab_dir:
         import pandas as pd
-        from cehrbert_data.const.artificial_tokens import DEATH_TOKEN
-        from meds.schema import death_code
 
-        LOG.info("Loading concept data from disk at %s", cehrgpt_args.motor_vocab_dir)
-        concept_pd = pd.read_parquet(
-            os.path.join(cehrgpt_args.motor_vocab_dir, "concept")
-        )
-        LOG.info(
-            "Creating concept name mapping and motor_time_to_event_codes from disk at %s",
-            cehrgpt_args.motor_vocab_dir,
-        )
+        LOG.info("Loading concept data from disk at %s", cehrgpt_args.vocab_dir)
+        concept_pd = pd.read_parquet(os.path.join(cehrgpt_args.vocab_dir, "concept"))
         for row in concept_pd.itertuples():
             concept_name_mapping[str(getattr(row, "concept_id"))] = getattr(
                 row, "concept_name"
             )
-            if (
-                cehrgpt_args.include_motor_time_to_event
-                and getattr(row, "domain_id")
-                in ["Condition", "Procedure", "Drug", "Visit"]
-                and getattr(row, "standard_concept") == "S"
-            ):
-                allowed_motor_codes.append(str(getattr(row, "concept_id")))
-        LOG.info(
-            "Adding death codes for MOTOR TTE predictions: %s",
-            [DEATH_TOKEN, death_code],
-        )
-        allowed_motor_codes.extend([DEATH_TOKEN, death_code])
 
         if cehrgpt_args.motor_use_ontology:
             LOG.info("Creating ontology for MOTOR TTE predictions")
-            ontology = Ontology(cehrgpt_args.motor_vocab_dir)
+            ontology = Ontology(cehrgpt_args.vocab_dir)
             train_val_dataset = datasets.concatenate_datasets(
                 [dataset["train"], dataset["validation"]]
             )
@@ -146,8 +125,7 @@ def load_and_create_tokenizer(
             concept_name_mapping,
             data_args,
             PretrainedEmbeddings(cehrgpt_args.pretrained_embedding_path),
-            allowed_motor_codes if cehrgpt_args.include_motor_time_to_event else None,
-            (
+            num_motor_tasks=(
                 cehrgpt_args.num_motor_tasks
                 if cehrgpt_args.include_motor_time_to_event
                 else None

@@ -228,7 +228,7 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether we want to use motor_use_ontology"
         },
     )
-    motor_vocab_dir: Optional[str] = dataclasses.field(
+    vocab_dir: Optional[str] = dataclasses.field(
         default=None,
         metadata={"help": "The directory where the concept data is stored."},
     )

@@ -63,7 +63,7 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             self.model_folder_path,
             "--output_dir",
             self.model_folder_path,
-            "--motor_vocab_dir",
+            "--vocab_dir",
             self.motor_vocab_dir,
             "--data_folder",
             self.data_folder,

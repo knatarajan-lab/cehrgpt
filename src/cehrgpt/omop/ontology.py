@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import collections
 import os
-from typing import Any, Dict, Iterable, Set
+from typing import Any, Dict, Iterable, Optional, Set, Union
 
 import polars as pl
 from datasets import Dataset
@@ -28,15 +28,20 @@ class Ontology:
         # Load from code metadata
         self.parents_map: Dict[str, Set[str]] = collections.defaultdict(set)
         self.concept_vocabulary_map: Dict[str, str] = collections.defaultdict(str)
+        self.concept_domain_map: Dict[str, str] = collections.defaultdict(str)
 
         # Load from the athena path ...
         concept = pl.scan_parquet(os.path.join(vocab_path, "concept/*parquet"))
         vocabulary_id_col = pl.col("vocabulary_id")
         concept_id_col = pl.col("concept_id").cast(pl.String)
+        domain_id_col = pl.col("domain_id").cast(pl.String)
 
         processed_concepts = (
             concept.select(
-                concept_id_col, vocabulary_id_col, pl.col("standard_concept").is_null()
+                concept_id_col,
+                domain_id_col,
+                vocabulary_id_col,
+                pl.col("standard_concept").is_null(),
             )
             .collect()
             .rows()
@@ -44,10 +49,13 @@ class Ontology:
 
         non_standard_concepts = set()
 
-        for concept_id, vocabulary_id, is_non_standard in processed_concepts:
+        for concept_id, domain_id, vocabulary_id, is_non_standard in processed_concepts:
             # We don't want to override code metadata
             if concept_id not in self.concept_vocabulary_map:
                 self.concept_vocabulary_map[concept_id] = vocabulary_id
+
+            if concept_id not in self.concept_domain_map:
+                self.concept_domain_map[concept_id] = domain_id
             # We don't want to override code metadata
             if is_non_standard:
                 non_standard_concepts.add(concept_id)
@@ -85,6 +93,9 @@ class Ontology:
         ):
             self.parents_map[concept_id].add(parent_concept_id)
         self.all_parents_map: Dict[str, Set[str]] = {}
+
+    def get_domain(self, concept_id: Union[str, int]) -> Optional[str]:
+        return self.concept_domain_map.get(str(concept_id), None)
 
     def prune_to_dataset(
         self,
