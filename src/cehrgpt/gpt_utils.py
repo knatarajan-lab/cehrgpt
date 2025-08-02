@@ -4,6 +4,8 @@ from datetime import date, timedelta
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
+from cehrbert_data.const.artificial_tokens import DEATH_TOKEN
+from meds import death_code
 from transformers.utils import logging
 
 from cehrgpt.cehrgpt_args import SamplingStrategy
@@ -240,6 +242,8 @@ def get_cehrgpt_output_folder(args, cehrgpt_tokenizer) -> str:
 
 def is_clinical_event(token: str, meds: bool = False) -> bool:
     if token.isnumeric():
+        return True
+    if token in [DEATH_TOKEN, death_code]:
         return True
     if meds:
         return bool(MEDS_CODE_PATTERN.match(token))
