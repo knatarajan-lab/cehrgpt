@@ -249,11 +249,11 @@ def map_motor_tte_statistics(
             else:
                 next_future_visit_concepts.add(concept_id)
 
-        return {
-            "motor_event_times": motor_event_times,
-            "task_tte_stats": task_tte_stats,
-            "task_censor_stats": task_censor_stats,
-        }
+    return {
+        "motor_event_times": motor_event_times,
+        "task_tte_stats": task_tte_stats,
+        "task_censor_stats": task_censor_stats,
+    }
 
 
 def compute_motor_tte_statistics(
