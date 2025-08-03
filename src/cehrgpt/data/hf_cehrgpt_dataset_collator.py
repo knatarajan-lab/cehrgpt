@@ -37,6 +37,7 @@ class CehrGptDataCollator:
         include_motor_time_to_event: bool = False,
         motor_tte_vocab_size: int = 0,
         motor_num_time_pieces: int = 8,
+        motor_sampling_probability: float = 0.5,
         pretraining: bool = True,
         include_demographics: bool = False,
         add_linear_prob_token: bool = False,
@@ -67,6 +68,7 @@ class CehrGptDataCollator:
         self.include_motor_time_to_event = include_motor_time_to_event
         self.motor_tte_vocab_size = motor_tte_vocab_size
         self.motor_num_time_pieces = motor_num_time_pieces
+        self.motor_sampling_probability = motor_sampling_probability
         self.motor_time_bins = (
             self.tokenizer.get_motor_time_bins(motor_num_time_pieces)
             if self.include_motor_time_to_event
@@ -512,16 +514,29 @@ class CehrGptDataCollator:
             ):
                 event_times[start:end] = time_token_event_times[i]
 
+            before_valid_time_tokens = np.roll(valid_time_tokens, -1)
+
+            # We randomly make predictions at 50% of the sequence positions
+            prediction_positions = (
+                np.random.rand(n_concepts) > self.motor_sampling_probability
+            )
+            # We don't predict at the att time tokens
+            prediction_positions &= ~is_att_tokens
+            # We disable TTE predictions using the demographics alone
+            prediction_positions[:4] = False
+            # We take the union of the random prediction positions and the positions right before time token
+            prediction_positions = prediction_positions | before_valid_time_tokens
+            # We exclude the events that occur at the last time stamp
+            prediction_positions &= event_times != event_times[-1]
+
             # Compute the vectorized censor times
             censor_times = (
-                event_times[-1] - event_times[np.roll(valid_time_tokens, -1)]
+                event_times[-1] - event_times[prediction_positions]
             ).tolist()
 
             time_to_event_dict: Dict[int, Any] = defaultdict(int)
             time_to_event_data: List[Dict[int, Any]] = []
-            before_time_token_indices = np.where(np.roll(valid_time_tokens, -1))[
-                0
-            ].tolist()
+            before_time_token_indices = np.where(prediction_positions)[0].tolist()
 
             for start_index, end_index in zip(
                 reversed(before_time_token_indices),

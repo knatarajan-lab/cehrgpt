@@ -228,6 +228,10 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether we want to use motor_use_ontology"
         },
     )
+    motor_sampling_probability: Optional[float] = dataclasses.field(
+        default=0.0,
+        metadata={"help": "A flag to indicate whether we want to use sample packing"},
+    )
     vocab_dir: Optional[str] = dataclasses.field(
         default=None,
         metadata={"help": "The directory where the concept data is stored."},
