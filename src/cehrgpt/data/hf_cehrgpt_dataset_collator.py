@@ -578,6 +578,7 @@ class CehrGptDataCollator:
                     {
                         motor_token_id: time - current_event_time
                         for motor_token_id, time in time_to_event_dict.items()
+                        if time - current_event_time > 0
                     }
                 )
 

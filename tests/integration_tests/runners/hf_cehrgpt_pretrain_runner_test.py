@@ -100,6 +100,8 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "none",
             "--include_motor_time_to_event",
             "true",
+            "--motor_sampling_probability",
+            "0.5",
             "--exclude_position_ids",
             "true",
             "--apply_rotary",
