@@ -25,6 +25,7 @@ from transformers import EarlyStoppingCallback, Trainer, set_seed
 from transformers.trainer_utils import is_main_process
 from transformers.utils import is_flash_attn_2_available, logging
 
+from cehrgpt.data.cehrgpt_pretraining_label_mapping import CehrGptLabelTransformation
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import (
     CehrGptDataCollator,
@@ -549,6 +550,28 @@ def main():
     else:
         trainer_class = Trainer
         data_collator_fn = CehrGptDataCollator
+
+    cehrgpt_label_transformation = CehrGptLabelTransformation(
+        tokenizer=cehrgpt_tokenizer,
+        max_length=model_args.max_position_embeddings,
+        include_ttv_prediction=model_args.include_ttv_prediction,
+        include_values=model_args.include_values,
+        include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
+        motor_tte_vocab_size=model.config.motor_tte_vocab_size,
+        motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
+        pretraining=True,
+    )
+    if data_args.streaming:
+        for split in processed_dataset.keys():
+            processed_dataset[split] = processed_dataset[split].map(
+                cehrgpt_label_transformation.batch_transform,
+                batched=True,
+                batch_size=data_args.preprocessing_batch_size,
+            )
+    else:
+        processed_dataset.set_transform(
+            cehrgpt_label_transformation.batch_transform, output_all_columns=True
+        )
 
     trainer = trainer_class(
         model=model,
