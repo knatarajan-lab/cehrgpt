@@ -63,7 +63,10 @@ class SamplePackingTrainer(Trainer):
             if "num_of_concepts" in train_dataset.column_names:
                 lengths = train_dataset["num_of_concepts"]
             else:
-                lengths = [len(sample["input_ids"]) for sample in train_dataset]
+                lengths = [
+                    len(sample["input_ids"])
+                    for sample in train_dataset.select_columns("input_ids")
+                ]
 
             LOG.info("Finished computing lengths for the train dataset")
         else:

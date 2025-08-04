@@ -35,7 +35,7 @@ from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
-from cehrgpt.models.tokenization_hf_cehrgpt import ONTOLOGY_FILE_NAME, CehrGptTokenizer
+from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.omop.ontology import Ontology
 from cehrgpt.runners.data_utils import get_torch_dtype
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
@@ -249,7 +249,14 @@ def main():
 
     # MOTOR label requires additional inputs from the dataset
     if cehrgpt_args.include_motor_time_to_event:
-        training_args.label_names = ["labels"]
+        training_args.label_names = [
+            "labels",
+            "motor_tte_label_offsets",
+            "motor_censor_times",
+            "motor_tte_tasks",
+            "motor_tte_times",
+            "motor_tte_task_indicators",
+        ]
 
     if cehrgpt_args.sample_packing and data_args.streaming:
         raise RuntimeError(
@@ -545,7 +552,6 @@ def main():
             SamplePackingCehrGptDataCollator,
             cehrgpt_args.max_tokens_per_batch,
             model_args.max_position_embeddings,
-            add_end_token_in_sample_packing=cehrgpt_args.add_end_token_in_sample_packing,
         )
     else:
         trainer_class = Trainer
@@ -554,11 +560,11 @@ def main():
     cehrgpt_label_transformation = CehrGptLabelTransformation(
         tokenizer=cehrgpt_tokenizer,
         max_length=model_args.max_position_embeddings,
+        shuffle_records=data_args.shuffle_records,
         include_ttv_prediction=model_args.include_ttv_prediction,
         include_values=model_args.include_values,
         include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
-        motor_tte_vocab_size=model.config.motor_tte_vocab_size,
-        motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
+        motor_sampling_probability=cehrgpt_args.motor_sampling_probability,
         pretraining=True,
     )
     if data_args.streaming:
@@ -582,14 +588,12 @@ def main():
                 if cehrgpt_args.sample_packing
                 else model_args.max_position_embeddings
             ),
-            shuffle_records=data_args.shuffle_records,
             include_ttv_prediction=model_args.include_ttv_prediction,
             use_sub_time_tokenization=model_args.use_sub_time_tokenization,
             include_values=model_args.include_values,
             include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
             motor_tte_vocab_size=model.config.motor_tte_vocab_size,
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
-            motor_sampling_probability=cehrgpt_args.motor_sampling_probability,
         ),
         train_dataset=processed_dataset["train"],
         eval_dataset=(
