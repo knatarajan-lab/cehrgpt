@@ -3,6 +3,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+import pandas as pd
 import torch
 from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import DatasetMapping
 from transformers.utils import logging
@@ -153,22 +154,9 @@ class CehrGptLabelTransformation(DatasetMapping):
                 input_ids, skip_special_tokens=False
             )
 
-        # There might be nan position_ids in-between
-        prev_position_id = example["position_ids"][0]
-        for i in range(len(example["position_ids"])):
-            next_position_id = example["position_ids"][i]
-            if next_position_id is not None:
-                prev_position_id = next_position_id
-            else:
-                example["position_ids"][i] = prev_position_id
-
+        # There might be nan position_ids in-between, let's use the forward fill method to fill the nan values
+        example["position_ids"] = pd.Series(example["position_ids"]).ffill().tolist()
         example = self.slice_out_input_sequence(example)
-        assert example["input_ids"].shape[0] <= self.max_length
-        assert example["input_ids"].max() < self.tokenizer.vocab_size, (
-            f"batch['input_ids'].max(): {example['input_ids'].max()} must be smaller than "
-            f"self.tokenizer.vocab_size: {self.tokenizer.vocab_size}. "
-            f"batch['input_ids']: {example['input_ids']} "
-        )
 
         # Add the motor labels
         if self.include_motor_time_to_event:
@@ -408,12 +396,7 @@ class CehrGptLabelTransformation(DatasetMapping):
 
         """Highly optimized vectorized version using pre-computed token type arrays."""
         concept_ids = record["concept_ids"]
-        # Convert concept_ids to indices for vectorized operations
-        for cid in concept_ids:
-            if cid not in self.vocab_to_idx:
-                print(cid)
         concept_indices = np.array([self.vocab_to_idx[cid] for cid in concept_ids])
-
         # Vectorized token type detection
         is_att_tokens = self.is_att_token_array[concept_indices]
         is_clinical_events = self.is_clinical_event_array[concept_indices]
@@ -533,12 +516,6 @@ class CehrGptLabelTransformation(DatasetMapping):
         motor_tte_label_offsets = np.cumsum(motor_tte_label_offsets).tolist()
         motor_tte_label_offsets = [0] + motor_tte_label_offsets
         motor_censor_times = motor_censor_times + [-100]
-
-        assert sum(motor_tte_task_indicators) == len(motor_censor_times[:-1]), (
-            f"sum(motor_tte_task_indicators) == len(motor_censor_times) must be true. "
-            f"sum(motor_tte_task_indicators): {sum(motor_tte_task_indicators)}, "
-            f"len(motor_censor_times[:-1]): {len(motor_censor_times[:-1])}"
-        )
 
         return {
             "motor_censor_times": motor_censor_times,
