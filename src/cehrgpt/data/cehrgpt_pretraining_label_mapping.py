@@ -537,6 +537,12 @@ class CehrGptLabelTransformation(DatasetMapping):
         motor_tte_label_offsets = [0] + motor_tte_label_offsets
         motor_censor_times = motor_censor_times + [-100]
 
+        assert sum(motor_tte_task_indicators) == len(motor_censor_times[:-1]), (
+            f"sum(motor_tte_task_indicators) == len(motor_censor_times) must be true. "
+            f"sum(motor_tte_task_indicators): {sum(motor_tte_task_indicators)}, "
+            f"len(motor_censor_times[:-1]): {len(motor_censor_times[:-1])}"
+        )
+
         return {
             "motor_censor_times": motor_censor_times,
             "motor_tte_tasks": motor_tte_tasks,
