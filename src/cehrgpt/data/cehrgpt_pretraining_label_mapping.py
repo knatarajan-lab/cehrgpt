@@ -461,13 +461,9 @@ class CehrGptLabelTransformation(DatasetMapping):
         # We exclude the events that occur at the last time stamp
         prediction_positions &= event_times != event_times[-1]
 
-        # Compute the vectorized censor times
-        motor_censor_times = (
-            event_times[-1] - event_times[prediction_positions]
-        ).tolist()
-
         motor_tte_tasks = []
         motor_tte_times = []
+        motor_censor_times = []
         motor_tte_label_offsets = []
 
         time_to_event_dict: Dict[str, Any] = defaultdict(float)
@@ -515,6 +511,7 @@ class CehrGptLabelTransformation(DatasetMapping):
 
                 motor_tte_tasks.extend(current_tasks)
                 motor_tte_times.extend(current_times)
+                motor_censor_times.append(event_times[-1] - current_event_time)
                 motor_tte_label_offsets.append(len(time_to_event_dict))
                 motor_tte_task_indicators[start_index] = True
 
