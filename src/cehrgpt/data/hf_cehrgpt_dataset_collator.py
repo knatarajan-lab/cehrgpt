@@ -5,6 +5,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 from transformers.utils import logging
 
+from cehrgpt.data.cehrgpt_pretraining_label_mapping import CehrGptLabelTransformation
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 LOG = logging.get_logger("transformers")
@@ -16,11 +17,13 @@ class CehrGptDataCollator:
         tokenizer: CehrGptTokenizer,
         max_length: int,
         include_values: bool = False,
+        shuffle_records: bool = False,
         include_ttv_prediction: bool = False,
         use_sub_time_tokenization: bool = False,
         include_motor_time_to_event: bool = False,
         motor_tte_vocab_size: int = 0,
         motor_num_time_pieces: int = 8,
+        motor_sampling_probability: float = 0.5,
         pretraining: bool = True,
         include_demographics: bool = False,
         add_linear_prob_token: bool = False,
@@ -71,6 +74,17 @@ class CehrGptDataCollator:
                 list(token_to_time_token_mapping.values()), dtype=torch.int64
             )
 
+        self.pretraining_label_generator = CehrGptLabelTransformation(
+            tokenizer=tokenizer,
+            max_length=self.max_length,
+            shuffle_records=shuffle_records,
+            include_ttv_prediction=include_ttv_prediction,
+            include_values=include_values,
+            include_motor_time_to_event=include_motor_time_to_event,
+            motor_sampling_probability=motor_sampling_probability,
+            pretraining=pretraining,
+        )
+
     def _try_reverse_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         if not self.pretraining:
             return torch.flip(tensor, dims=[-1])
@@ -84,6 +98,10 @@ class CehrGptDataCollator:
             return torch.tensor(features)
 
     def __call__(self, examples):
+
+        if not getattr(self, "sample_packing", False):
+            examples = [self.pretraining_label_generator.transform(_) for _ in examples]
+
         batch = {}
 
         # Assume that each example in the batch is a dictionary with 'input_ids' and 'attention_mask'
@@ -500,6 +518,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         self.max_position_embeddings = max_position_embeddings
         self.sample_packing = True
         super(SamplePackingCehrGptDataCollator, self).__init__(*args, **kwargs)
+        self.pretraining_label_generator.max_length = self.max_position_embeddings
 
     def __call__(self, examples):
         current_input_ids = []
@@ -524,6 +543,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         current_labels = []
 
         for idx, example in enumerate(examples):
+            example = self.pretraining_label_generator.transform(example)
             input_ids = example["input_ids"]
             # We add [END] [PAD], we want to attend to [END], adding [END] is important for sequence generation.
             # If the sequence length of the sequence is less than the context window, we add both [END][PAD], otherwise

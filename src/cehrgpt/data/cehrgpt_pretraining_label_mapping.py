@@ -139,10 +139,6 @@ class CehrGptLabelTransformation(DatasetMapping):
 
     def transform(self, example: Dict[str, Any]) -> Dict[str, Any]:
 
-        # When we calculate the length of this dataset, this is how we prevent the transformation from being applied
-        if len(example.keys()) == 1:
-            return example
-
         if self.shuffle_records:
             example = self.random_sort(example)
 
