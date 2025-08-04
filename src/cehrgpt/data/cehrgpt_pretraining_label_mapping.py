@@ -153,6 +153,15 @@ class CehrGptLabelTransformation(DatasetMapping):
                 input_ids, skip_special_tokens=False
             )
 
+        # There might be nan position_ids in-between
+        prev_position_id = example["position_ids"][0]
+        for i in range(len(example["position_ids"])):
+            next_position_id = example["position_ids"][i]
+            if next_position_id is not None:
+                prev_position_id = next_position_id
+            else:
+                example["position_ids"][i] = prev_position_id
+
         example = self.slice_out_input_sequence(example)
         assert example["input_ids"].shape[0] <= self.max_length
         assert example["input_ids"].max() < self.tokenizer.vocab_size, (
