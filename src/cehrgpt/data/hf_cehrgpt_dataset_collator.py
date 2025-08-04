@@ -5,17 +5,8 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 from transformers.utils import logging
 
-from cehrgpt.gpt_utils import (
-    extract_time_interval_in_days,
-    extract_time_interval_in_hours,
-    is_att_token,
-    is_clinical_event,
-    is_inpatient_att_token,
-    is_inpatient_hour_token,
-)
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
-INPATIENT_STAY_DURATION_LIMIT = 30
 LOG = logging.get_logger("transformers")
 
 
@@ -80,33 +71,6 @@ class CehrGptDataCollator:
                 list(token_to_time_token_mapping.values()), dtype=torch.int64
             )
 
-        self._precompute_motor_token_mappings()
-
-    def _precompute_motor_token_mappings(self):
-        if self.include_motor_time_to_event:
-            LOG.info("Pre-computing vocabulary-wide token mappings...")
-            vocab = self.tokenizer.get_vocab()
-            self.vocab_to_idx = {token: idx for idx, token in enumerate(vocab.keys())}
-            self.vocab_tokens = list(vocab.keys())
-
-            # Pre-compute boolean arrays for token types
-            n_vocab = len(self.vocab_tokens)
-            self.is_att_token_array = np.zeros(n_vocab, dtype=bool)
-            self.is_clinical_event_array = np.zeros(n_vocab, dtype=bool)
-            self.time_intervals_array = np.full(n_vocab, -1, dtype=int)
-            for i, token in enumerate(self.vocab_tokens):
-                if is_att_token(token):
-                    self.is_att_token_array[i] = True
-                    try:
-                        self.time_intervals_array[i] = extract_time_interval_in_days(
-                            token
-                        )
-                    except (ValueError, AttributeError):
-                        self.time_intervals_array[i] = -1
-                if is_clinical_event(token):
-                    self.is_clinical_event_array[i] = True
-            LOG.info(f"Processed {n_vocab} vocabulary tokens")
-
     def _try_reverse_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         if not self.pretraining:
             return torch.flip(tensor, dims=[-1])
@@ -118,26 +82,6 @@ class CehrGptDataCollator:
             return features
         else:
             return torch.tensor(features)
-
-    @staticmethod
-    def _convert_time_to_event(concept_ids):
-        def default_value(c):
-            try:
-                if is_att_token(c):
-                    time_to_visit = extract_time_interval_in_days(c)
-                    if (
-                        is_inpatient_att_token(c)
-                        and time_to_visit > INPATIENT_STAY_DURATION_LIMIT
-                    ):
-                        return -100
-                    return time_to_visit
-                elif is_inpatient_hour_token(c):
-                    return extract_time_interval_in_hours(c) / 24
-                return -100
-            except ValueError:
-                return -100
-
-        return [float(default_value(_)) for _ in concept_ids]
 
     def __call__(self, examples):
         batch = {}
