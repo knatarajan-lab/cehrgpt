@@ -6,8 +6,10 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 from transformers.utils import logging
 
-from cehrgpt.data.cehrgpt_pretraining_label_mapping import CehrGptLabelTransformation
-from cehrgpt.data.numba_motor_time_to_event_label import SafeNumbaTransformation
+from cehrgpt.data.cehrgpt_pretraining_label_generator import CehrGptLabelTransformation
+from cehrgpt.data.numba_motor_time_to_event_label_generator import (
+    SafeNumbaTransformation,
+)
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 LOG = logging.get_logger("transformers")
