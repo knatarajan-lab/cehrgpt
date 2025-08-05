@@ -8,7 +8,7 @@ from transformers.utils import logging
 
 from cehrgpt.data.cehrgpt_pretraining_label_generator import CehrGptLabelTransformation
 from cehrgpt.data.numba_motor_time_to_event_label_generator import (
-    SafeNumbaTransformation,
+    ExtremelyOptimizedTransformation,
 )
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
@@ -88,7 +88,7 @@ class CehrGptDataCollator:
             motor_sampling_probability=motor_sampling_probability,
             pretraining=pretraining,
         )
-        self.motor_label_generator = SafeNumbaTransformation(
+        self.motor_label_generator = ExtremelyOptimizedTransformation(
             tokenizer=tokenizer, motor_num_time_pieces=motor_num_time_pieces
         )
 
@@ -206,7 +206,7 @@ class CehrGptDataCollator:
 
             start = time.time()
             examples_with_motor_tte = [
-                self.motor_label_generator.create_time_to_event_labels_safe(_)
+                self.motor_label_generator.create_time_to_event_labels_extreme(_)
                 for _ in examples
             ]
             motor_tte_times = [
