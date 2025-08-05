@@ -1,4 +1,3 @@
-import time
 from typing import Any, Dict, List
 
 import numpy as np
@@ -203,12 +202,10 @@ class CehrGptDataCollator:
             )
 
         if self.include_motor_time_to_event:
-            start = time.time()
             examples_with_motor_tte = [
                 self.motor_label_generator.create_time_to_event_labels_safe(_)
                 for _ in examples
             ]
-            print(f"create_time_to_event_labels_safe.call: {time.time() - start:.4f}s")
             motor_tte_times = [
                 self._try_reverse_tensor(
                     self._convert_to_tensor(example["motor_tte_times"])
@@ -547,9 +544,6 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         current_prediction_ages = []
         current_labels = []
 
-        # One-liner timing
-        start = time.time()
-
         for idx, example in enumerate(examples):
             example = self.pretraining_label_generator.transform(example)
             input_ids = example["input_ids"]
@@ -678,6 +672,4 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                     "classifier_label": current_labels,
                 }
             )
-
-        print(f"SamplePackingCehrGptDataCollator.call: {time.time() - start:.4f}s")
         return super().__call__([packed_example])
