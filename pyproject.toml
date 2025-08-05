@@ -37,6 +37,7 @@ dependencies = [
     "peft==0.10.0",
     "lightgbm",
     "polars",
+    "numba",
 ]
 
 [tool.setuptools_scm]
