@@ -1,3 +1,4 @@
+import time
 from typing import Any, Dict, List
 
 import numpy as np
@@ -202,6 +203,8 @@ class CehrGptDataCollator:
             )
 
         if self.include_motor_time_to_event:
+
+            start = time.time()
             examples_with_motor_tte = [
                 self.motor_label_generator.create_time_to_event_labels_safe(_)
                 for _ in examples
@@ -306,6 +309,10 @@ class CehrGptDataCollator:
                     ]
                 ).reshape((batch_size, -1))
 
+                print(
+                    f"motor_label_generator.create_time_to_event_labels_safe: {time.time() - start}"
+                )
+
         if self.include_values:
             batch_value_indicators = [
                 self._try_reverse_tensor(
@@ -393,126 +400,6 @@ class CehrGptDataCollator:
 
         return batch
 
-    def create_time_to_event_labels(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Generates time-to-event (TTE) labels and censoring indicators for each visit in a patient's timeline.
-
-        Processes the input sequence in reverse to compute the number of days from each visit (marked by [VE])
-        to the occurrence of future motor-related events.
-
-        Args:
-            record (Dict[str, Any]): A dictionary containing the encoded patient sequence with the key "input_ids".
-                This sequence includes [VS], [VE], time delta tokens, and motor TTE concept codes.
-
-        Returns:
-            Dict[str, Any]: The updated input record with added keys:
-                - "time_to_event_vectors": np.ndarray of shape [num_visits, motor_vocab_size], containing time-to-event values
-                - "event_indicators": np.ndarray of shape [num_visits, motor_vocab_size], where 0 = event occurred, 1 = censored
-        """
-
-        time_vectors = []
-        global_event_indicators = []
-
-        motor_tte_event_indicators = []
-        motor_tte_masks = []
-        motor_tte_times = []
-
-        motor_tte_label_offsets = record["motor_tte_label_offsets"]
-        motor_censor_times = record["motor_censor_times"]
-
-        for i, (start_index, end_index) in enumerate(
-            zip(motor_tte_label_offsets, motor_tte_label_offsets[1:])
-        ):
-            censor_time = motor_censor_times[i]
-            # This represents a pad between two samples
-            if censor_time == -100:
-                continue
-
-            tte_tasks = record["motor_tte_tasks"][start_index:end_index]
-            tte_times = record["motor_tte_times"][start_index:end_index]
-
-            time_vector = np.full(
-                self.tokenizer.motor_tte_vocab_size,
-                fill_value=censor_time,
-                dtype=np.int32,
-            )
-            event_indicator = np.zeros(
-                self.tokenizer.motor_tte_vocab_size,
-                dtype=np.int32,
-            )
-
-            time_vector[tte_tasks] = tte_times
-            event_indicator[tte_tasks] = 1  # not censored (event occurred)
-
-            time_vectors.append(time_vector)
-            global_event_indicators.append(event_indicator)
-
-        time_vectors = np.asarray(time_vectors, dtype=np.float32)
-        global_event_indicators = np.asarray(global_event_indicators).astype(bool)
-        n_tte_predictions = len(time_vectors)
-
-        motor_tte_time = np.full(
-            (
-                self.motor_num_time_pieces,
-                n_tte_predictions,
-                self.tokenizer.motor_tte_vocab_size,
-            ),
-            fill_value=0.0,
-            dtype=np.float32,
-        )
-        motor_tte_event_indicator = np.zeros(
-            (
-                self.motor_num_time_pieces,
-                n_tte_predictions,
-                self.tokenizer.motor_tte_vocab_size,
-            ),
-            dtype=bool,
-        )
-        motor_tte_mask = np.zeros(
-            (
-                self.motor_num_time_pieces,
-                n_tte_predictions,
-                self.tokenizer.motor_tte_vocab_size,
-            ),
-            dtype=bool,
-        )
-
-        if n_tte_predictions > 0:
-            # Putting the event time and censor time into the corresponding time bins
-            for bin_num, (start, end) in enumerate(
-                zip(self.motor_time_bins, self.motor_time_bins[1:])
-            ):
-                time_in_bin = np.clip(time_vectors - start, 0, end - start)
-                mask = time_in_bin != 0
-                time_in_bin[mask] = np.log2(time_in_bin[mask])
-                time_in_bin[~mask] = -torch.inf
-
-                motor_tte_time[bin_num] = time_in_bin
-                event_indicator = (
-                    global_event_indicators
-                    & (start <= time_vectors)
-                    & (time_vectors < end)
-                )
-                motor_tte_event_indicator[bin_num] = event_indicator
-                motor_tte_mask[bin_num] = mask | event_indicator
-
-        motor_tte_times.append(motor_tte_time.swapaxes(0, 1))
-        motor_tte_event_indicators.append(motor_tte_event_indicator.swapaxes(0, 1))
-        motor_tte_masks.append(motor_tte_mask.swapaxes(0, 1))
-        record["motor_tte_times"] = np.concatenate(motor_tte_times, axis=0)
-        record["motor_tte_event_indicators"] = np.concatenate(
-            motor_tte_event_indicators, axis=0
-        )
-        record["motor_tte_masks"] = np.concatenate(motor_tte_masks, axis=0)
-        assert (
-            sum(record["motor_tte_task_indicators"]) == n_tte_predictions
-        ), f'sum(record["motor_tte_task_indicators"]) == n_tte_predictions must be true'
-        # Delete the additional inputs that are not required by the model
-        del record["motor_tte_tasks"]
-        del record["motor_censor_times"]
-        del record["motor_tte_label_offsets"]
-        return record
-
 
 class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
     def __init__(self, max_tokens, max_position_embeddings, *args, **kwargs):
@@ -523,6 +410,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         self.pretraining_label_generator.max_length = self.max_position_embeddings
 
     def __call__(self, examples):
+        start = time.time()
         current_input_ids = []
         current_attention_mask = []
         current_position_ids = []
@@ -672,4 +560,5 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                     "classifier_label": current_labels,
                 }
             )
+        print(f"SamplePackingCehrGptDataCollator.call: {time.time() - start}")
         return super().__call__([packed_example])

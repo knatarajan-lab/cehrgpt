@@ -7,7 +7,6 @@ import torch
 from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import DatasetMapping
 from numba import jit, types
 from numba.typed import Dict as NumbaDict
-from numba.typed import List as NumbaList
 from transformers.utils import logging
 
 from cehrgpt.gpt_utils import (
@@ -325,12 +324,16 @@ class CehrGptLabelTransformation(DatasetMapping):
 
         # There might be nan position_ids in-between, let's use the forward fill method to fill the nan values
         example["position_ids"] = pd.Series(example["position_ids"]).ffill().tolist()
+        # start = time.time()
         example = self.slice_out_input_sequence(example)
+        # print(f"slice_out_input_sequence.call: {time.time() - start}")
 
         # Add the motor labels
         if self.include_motor_time_to_event:
+            # start = time.time()
             motor_inputs = self.create_time_to_event_labels(example)
             example.update(motor_inputs)
+            # print(f"create_time_to_event_labels.call: {time.time() - start}")
 
         del example["concept_ids"]
         return example
