@@ -25,7 +25,6 @@ from transformers import EarlyStoppingCallback, Trainer, set_seed
 from transformers.trainer_utils import is_main_process
 from transformers.utils import is_flash_attn_2_available, logging
 
-from cehrgpt.data.cehrgpt_pretraining_label_mapping import CehrGptLabelTransformation
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import (
     CehrGptDataCollator,
@@ -251,6 +250,7 @@ def main():
     if cehrgpt_args.include_motor_time_to_event:
         training_args.label_names = [
             "labels",
+            "concept_ids",
             "motor_tte_label_offsets",
             "motor_censor_times",
             "motor_tte_tasks",

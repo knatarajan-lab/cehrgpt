@@ -197,7 +197,7 @@ class CehrGptDataCollator:
 
         if self.include_motor_time_to_event:
             examples_with_motor_tte = [
-                self.create_time_to_event_labels(_) for _ in examples
+                self.create_time_to_event_labels_ultra_optimized(_) for _ in examples
             ]
             motor_tte_times = [
                 self._try_reverse_tensor(
@@ -472,14 +472,9 @@ class CehrGptDataCollator:
 
         if n_tte_predictions > 0:
             # Putting the event time and censor time into the corresponding time bins
-            motor_time_bins = [
-                float("inf") if time_bin == float("inf") else time_bin // 3600
-                for time_bin in self.motor_time_bins
-            ]
             for bin_num, (start, end) in enumerate(
-                zip(motor_time_bins, motor_time_bins[1:])
+                zip(self.motor_time_bins, self.motor_time_bins[1:])
             ):
-                time_vectors = time_vectors // 3600
                 time_in_bin = np.clip(time_vectors - start, 0, end - start)
                 mask = time_in_bin != 0
                 time_in_bin[mask] = np.log2(time_in_bin[mask])
@@ -509,6 +504,140 @@ class CehrGptDataCollator:
         del record["motor_tte_tasks"]
         del record["motor_censor_times"]
         del record["motor_tte_label_offsets"]
+        return record
+
+    def create_time_to_event_labels_ultra_optimized(
+        self, record: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Ultra-optimized version using advanced vectorization techniques."""
+        motor_tte_label_offsets = record["motor_tte_label_offsets"]
+        motor_censor_times = np.array(record["motor_censor_times"])
+
+        # Vectorized filtering of valid entries
+        valid_mask = motor_censor_times != -100
+        if not np.any(valid_mask):
+            # Handle empty case
+            empty_shape = (
+                0,
+                self.motor_num_time_pieces,
+                self.tokenizer.motor_tte_vocab_size,
+            )
+            record["motor_tte_times"] = np.zeros(empty_shape, dtype=np.float32)
+            record["motor_tte_event_indicators"] = np.zeros(empty_shape, dtype=bool)
+            record["motor_tte_masks"] = np.zeros(empty_shape, dtype=bool)
+            return record
+
+        valid_indices = np.where(valid_mask)[0]
+        valid_censor_times = motor_censor_times[valid_mask]
+        n_tte_predictions = len(valid_indices)
+        vocab_size = self.tokenizer.motor_tte_vocab_size
+
+        # Pre-allocate with broadcasting
+        time_vectors = (
+            np.broadcast_to(
+                valid_censor_times[:, np.newaxis], (n_tte_predictions, vocab_size)
+            )
+            .copy()
+            .astype(np.float32)
+        )
+
+        event_indicators = np.zeros((n_tte_predictions, vocab_size), dtype=bool)
+
+        # Ultra-efficient task processing using advanced indexing
+        all_tte_tasks = np.array(record["motor_tte_tasks"])
+        all_tte_times = np.array(record["motor_tte_times"])
+
+        # Build index arrays for vectorized assignment
+        row_indices = []
+        col_indices = []
+        values = []
+
+        for local_idx, global_idx in enumerate(valid_indices):
+            start_idx = motor_tte_label_offsets[global_idx]
+            end_idx = motor_tte_label_offsets[global_idx + 1]
+
+            if start_idx < end_idx:
+                tasks = all_tte_tasks[start_idx:end_idx]
+                times = all_tte_times[start_idx:end_idx]
+
+                # Collect indices for vectorized assignment
+                row_indices.extend([local_idx] * len(tasks))
+                col_indices.extend(tasks)
+                values.extend(times)
+
+        if row_indices:
+            # Single vectorized assignment
+            row_indices = np.array(row_indices)
+            col_indices = np.array(col_indices)
+            values = np.array(values)
+
+            time_vectors[row_indices, col_indices] = values
+            event_indicators[row_indices, col_indices] = True
+
+        # Pre-allocate final arrays
+        motor_tte_time = np.zeros(
+            (n_tte_predictions, self.motor_num_time_pieces, vocab_size),
+            dtype=np.float32,
+        )
+        motor_tte_event_indicator = np.zeros(
+            (n_tte_predictions, self.motor_num_time_pieces, vocab_size), dtype=bool
+        )
+        motor_tte_mask = np.zeros(
+            (n_tte_predictions, self.motor_num_time_pieces, vocab_size), dtype=bool
+        )
+
+        if n_tte_predictions > 0:
+            # Ultra-vectorized time bin processing
+            motor_time_bins = np.array(self.motor_time_bins)
+            start_times = motor_time_bins[:-1]
+            end_times = motor_time_bins[1:]
+
+            # Process all bins simultaneously using broadcasting
+            # Shape: (n_predictions, vocab_size, n_bins)
+            time_vectors_expanded = time_vectors[:, :, np.newaxis]
+            start_times_expanded = start_times[np.newaxis, np.newaxis, :]
+            end_times_expanded = end_times[np.newaxis, np.newaxis, :]
+
+            # Vectorized computations for all bins at once
+            time_in_bin = np.clip(
+                time_vectors_expanded - start_times_expanded,
+                0,
+                end_times_expanded - start_times_expanded,
+            )
+
+            mask = time_in_bin != 0
+
+            # Vectorized log transformation with proper handling of zeros
+            time_in_bin_log = np.where(mask, np.log2(time_in_bin), -np.inf)
+
+            # Vectorized event indicator computation
+            event_indicators_expanded = event_indicators[:, :, np.newaxis]
+            event_in_bin = (
+                event_indicators_expanded
+                & (start_times_expanded <= time_vectors_expanded)
+                & (time_vectors_expanded < end_times_expanded)
+            )
+
+            # Transpose to match expected output shape and assign
+            motor_tte_time = time_in_bin_log.transpose(0, 2, 1)
+            motor_tte_event_indicator = event_in_bin.transpose(0, 2, 1)
+            motor_tte_mask = (mask | event_in_bin).transpose(0, 2, 1)
+
+        # Assign results
+        record["motor_tte_times"] = motor_tte_time
+        record["motor_tte_event_indicators"] = motor_tte_event_indicator
+        record["motor_tte_masks"] = motor_tte_mask
+
+        # Validation
+        assert (
+            sum(record["motor_tte_task_indicators"]) == n_tte_predictions
+        ), f'sum(record["motor_tte_task_indicators"]) == n_tte_predictions must be true'
+
+        # Clean up
+        del record["motor_tte_tasks"]
+        del record["motor_censor_times"]
+        del record["motor_tte_label_offsets"]
+
         return record
 
 
