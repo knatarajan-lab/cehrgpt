@@ -205,7 +205,9 @@ class CehrGptDataCollator:
             mask = time_in_bin != 0
 
             # Vectorized log transformation with proper handling of zeros
-            time_in_bin_log = np.where(mask, np.log2(time_in_bin), -np.inf)
+            time_in_bin_log = np.where(
+                mask, np.log2(np.clip(time_in_bin, 1e-10, np.inf)), -np.inf
+            )
 
             # Vectorized event indicator computation
             event_indicators_expanded = event_indicators[:, :, np.newaxis]
