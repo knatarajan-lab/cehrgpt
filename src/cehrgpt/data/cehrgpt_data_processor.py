@@ -162,6 +162,7 @@ class CehrGptDataProcessor(DatasetMapping):
             example.update(motor_inputs)
 
         del example["concept_ids"]
+        del example["epoch_times"]
         return example
 
     def update_inputs_based_on_indexes(
@@ -420,6 +421,8 @@ class CehrGptDataProcessor(DatasetMapping):
                 else:
                     previous_time_stamp = time_stamp
                 event_times[i] = time_stamp
+            # Convert the epoch time to the corresponding day
+            event_times = event_times / 86400
         else:
             event_times = np.zeros(n_concepts, dtype=int)
             time_token_indices = np.where(valid_time_tokens)[0].tolist()

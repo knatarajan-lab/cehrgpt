@@ -250,6 +250,7 @@ def main():
     if cehrgpt_args.include_motor_time_to_event:
         training_args.label_names = [
             "labels",
+            "epoch_times",
             "concept_ids",
             "motor_tte_label_offsets",
             "motor_censor_times",
