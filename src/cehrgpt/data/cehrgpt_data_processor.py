@@ -1,12 +1,11 @@
 import random
-from typing import Any, Dict, List, Optional, Tuple
+from collections import defaultdict
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 import torch
 from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import DatasetMapping
-from numba import jit, types
-from numba.typed import Dict as NumbaDict
 from transformers.utils import logging
 
 from cehrgpt.gpt_utils import (
@@ -27,136 +26,7 @@ INPATIENT_STAY_DURATION_LIMIT = 30
 LOG = logging.get_logger("transformers")
 
 
-@jit(nopython=True, cache=True)
-def _process_time_intervals_jit(
-    concept_indices: np.ndarray,
-    is_att_tokens: np.ndarray,
-    is_clinical_events: np.ndarray,
-    time_intervals: np.ndarray,
-    event_times: np.ndarray,
-    motor_sampling_probability: float,
-    motor_concept_to_parents: NumbaDict,
-    motor_parent_to_token_id: NumbaDict,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    JIT-compiled core logic for processing time-to-event labels.
-
-    Returns:
-        - motor_tte_tasks: motor token IDs
-        - motor_tte_times: time to event values
-        - motor_censor_times: censoring times
-        - motor_tte_label_offsets: cumulative offsets for grouping
-        - motor_tte_task_indicators: boolean array indicating prediction positions
-    """
-    n_concepts = len(concept_indices)
-
-    # Find valid time tokens (att tokens with positive intervals)
-    valid_time_tokens = is_att_tokens & (time_intervals > 0)
-    before_valid_time_tokens = np.zeros(n_concepts, dtype=types.boolean)
-    before_valid_time_tokens[:-1] = valid_time_tokens[1:]
-
-    # Random prediction positions
-    prediction_positions = np.random.random(n_concepts) < motor_sampling_probability
-    # Don't predict at att time tokens
-    prediction_positions &= ~is_att_tokens
-    # Disable TTE predictions using demographics alone (first 4 positions)
-    prediction_positions[:4] = False
-    # Take union with positions right before time tokens
-    prediction_positions |= before_valid_time_tokens
-    # Exclude events at last timestamp
-    prediction_positions &= event_times != event_times[-1]
-
-    # Get prediction indices
-    prediction_indices = np.where(prediction_positions)[0]
-    n_predictions = len(prediction_indices)
-
-    # Pre-allocate result arrays (we'll trim them later)
-    max_possible_tasks = n_predictions * 50  # Conservative estimate
-    motor_tte_tasks = np.full(max_possible_tasks, -1, dtype=np.int32)
-    motor_tte_times = np.full(max_possible_tasks, -1.0, dtype=np.float32)
-    motor_censor_times = np.full(n_predictions + 1, -100.0, dtype=np.float32)
-    motor_tte_label_offsets = np.zeros(n_predictions + 1, dtype=np.int32)
-    motor_tte_task_indicators = np.zeros(n_concepts, dtype=types.boolean)
-
-    task_count = 0
-
-    # Process in reverse order
-    for pred_idx in range(n_predictions - 1, -1, -1):
-        start_index = prediction_indices[pred_idx]
-        if pred_idx == n_predictions - 1:
-            end_index = n_concepts - 1
-        else:
-            end_index = prediction_indices[pred_idx + 1]
-
-        current_event_time = event_times[start_index]
-
-        # Track unique motor codes and their earliest event times
-        motor_code_times = NumbaDict.empty(
-            key_type=types.int32, value_type=types.float32
-        )
-
-        # Process section from start_index+1 to end_index (inclusive)
-        for i in range(end_index, start_index, -1):  # Reverse order
-            if i >= n_concepts:
-                continue
-
-            concept_index = concept_indices[i]
-            concept_event_time = event_times[i]
-
-            # Only process clinical events
-            if not is_clinical_events[i]:
-                continue
-
-            # Get motor parents for this concept
-            if concept_index in motor_concept_to_parents:
-                motor_parents = motor_concept_to_parents[concept_index]
-
-                for motor_parent in motor_parents:
-                    if motor_parent in motor_parent_to_token_id:
-                        motor_token_id = motor_parent_to_token_id[motor_parent]
-
-                        # Only update if this is the earliest occurrence (we're going in reverse)
-                        if motor_token_id not in motor_code_times:
-                            motor_code_times[motor_token_id] = concept_event_time
-
-        # Add tasks for this prediction position
-        if len(motor_code_times) > 0:
-            start_task_idx = task_count
-
-            for motor_token_id, motor_time in motor_code_times.items():
-                if task_count < max_possible_tasks:
-                    motor_tte_tasks[task_count] = motor_token_id
-                    motor_tte_times[task_count] = motor_time - current_event_time
-                    task_count += 1
-
-            motor_censor_times[pred_idx] = event_times[-1] - current_event_time
-            motor_tte_label_offsets[pred_idx] = task_count - start_task_idx
-            motor_tte_task_indicators[start_index] = True
-
-    # Trim arrays to actual size
-    motor_tte_tasks = motor_tte_tasks[:task_count]
-    motor_tte_times = motor_tte_times[:task_count]
-
-    # Convert offsets to cumulative
-    cumsum = 0
-    for i in range(len(motor_tte_label_offsets)):
-        temp = motor_tte_label_offsets[i]
-        motor_tte_label_offsets[i] = cumsum
-        cumsum += temp
-
-    # Add final censor time
-    motor_censor_times[-1] = -100.0
-
-    return (
-        motor_tte_tasks,
-        motor_tte_times,
-        motor_censor_times,
-        motor_tte_label_offsets,
-        motor_tte_task_indicators,
-    )
-
-
-class CehrGptLabelTransformation(DatasetMapping):
+class CehrGptDataProcessor(DatasetMapping):
     def __init__(
         self,
         tokenizer: CehrGptTokenizer,
@@ -191,10 +61,6 @@ class CehrGptLabelTransformation(DatasetMapping):
         # Pre-compute vocab-wide token type mappings
         self._precompute_vocab_mappings()
 
-        # Pre-compute motor code mappings for JIT
-        if self.include_motor_time_to_event:
-            self._precompute_motor_mappings()
-
     def _precompute_vocab_mappings(self):
         """Pre-compute token type mappings for entire vocabulary."""
         LOG.info("Pre-computing vocabulary-wide token mappings...")
@@ -221,44 +87,6 @@ class CehrGptLabelTransformation(DatasetMapping):
                 self.is_clinical_event_array[i] = True
 
         LOG.info(f"Processed {n_vocab} vocabulary tokens")
-
-    def _precompute_motor_mappings(self):
-        """Pre-compute motor code mappings for JIT compatibility."""
-        LOG.info("Pre-computing motor code mappings for JIT...")
-
-        # Create numba-compatible dictionaries
-        self.motor_concept_to_parents = NumbaDict.empty(
-            key_type=types.int32, value_type=types.int32[:]
-        )
-        self.motor_parent_to_token_id = NumbaDict.empty(
-            key_type=types.int32, value_type=types.int32
-        )
-
-        # Build mapping from concept indices to motor parent indices
-        motor_parent_to_idx = {}
-        next_motor_idx = 0
-
-        for concept_idx, token in enumerate(self.vocab_tokens):
-            if is_clinical_event(token):
-                motor_codes = self.tokenizer.get_motor_parents(token)
-                if motor_codes:
-                    motor_parent_indices = []
-                    for motor_code in motor_codes:
-                        if motor_code not in motor_parent_to_idx:
-                            motor_parent_to_idx[motor_code] = next_motor_idx
-                            next_motor_idx += 1
-                        motor_parent_indices.append(motor_parent_to_idx[motor_code])
-
-                    self.motor_concept_to_parents[concept_idx] = np.array(
-                        motor_parent_indices, dtype=np.int32
-                    )
-
-        # Build mapping from motor parent indices to token IDs
-        for motor_code, motor_idx in motor_parent_to_idx.items():
-            motor_token_id = self.tokenizer.get_motor_token_id(motor_code)
-            self.motor_parent_to_token_id[motor_idx] = motor_token_id
-
-        LOG.info(f"Pre-computed {len(motor_parent_to_idx)} motor code mappings")
 
     @staticmethod
     def _convert_time_to_event(concept_ids):
@@ -326,14 +154,12 @@ class CehrGptLabelTransformation(DatasetMapping):
         example["position_ids"] = pd.Series(example["position_ids"]).ffill().tolist()
         # start = time.time()
         example = self.slice_out_input_sequence(example)
-        # print(f"slice_out_input_sequence.call: {time.time() - start}")
 
         # Add the motor labels
         if self.include_motor_time_to_event:
             # start = time.time()
             motor_inputs = self.create_time_to_event_labels(example)
             example.update(motor_inputs)
-            # print(f"create_time_to_event_labels.call: {time.time() - start}")
 
         del example["concept_ids"]
         return example
@@ -553,59 +379,126 @@ class CehrGptLabelTransformation(DatasetMapping):
         """
         Generates time-to-event (TTE) labels and censoring indicators for each visit in a patient's timeline.
 
-        Optimized version using Numba JIT compilation.
-        """
-        concept_ids = record["concept_ids"]
-        concept_indices = np.array([self.vocab_to_idx[cid] for cid in concept_ids])
+        Processes the input sequence in reverse to compute the number of days from each visit (marked by [VE])
+        to the occurrence of future motor-related events.
 
-        # Vectorized token type detection using pre-computed arrays
+        Args:
+            record (Dict[str, Any]): A dictionary containing the encoded patient sequence with the key "input_ids".
+                This sequence includes [VS], [VE], time delta tokens, and motor TTE concept codes.
+
+        Returns:
+            Dict[str, Any]: The updated input record with added keys:
+                - "time_to_event_vectors": np.ndarray of shape [num_visits, motor_vocab_size], containing time-to-event values
+                - "event_indicators": np.ndarray of shape [num_visits, motor_vocab_size], where 0 = event occurred, 1 = censored
+        """
+
+        """Highly optimized vectorized version using pre-computed token type arrays."""
+        concept_ids = record["concept_ids"]
+        # Convert concept_ids to indices for vectorized operations
+        concept_indices = np.array([self.vocab_to_idx[cid] for cid in concept_ids])
+        # Vectorized token type detection
         is_att_tokens = self.is_att_token_array[concept_indices]
         is_clinical_events = self.is_clinical_event_array[concept_indices]
         time_intervals = self.time_intervals_array[concept_indices]
 
-        # Compute event times
-        n_concepts = len(concept_ids)
-        if "epoch_times" in record:
-            event_times = np.array(record["epoch_times"], dtype=np.float32)
-            # Ensure monotonicity
-            for i in range(1, len(event_times)):
-                if event_times[i] < event_times[i - 1]:
-                    event_times[i] = event_times[i - 1]
-        else:
-            event_times = np.zeros(n_concepts, dtype=np.float32)
-            valid_time_tokens = is_att_tokens & (time_intervals > 0)
-            time_token_indices = np.where(valid_time_tokens)[0]
-            time_token_event_times = np.cumsum(
-                np.concatenate([np.zeros(1), time_intervals[valid_time_tokens]])
-            )
+        # Find valid time tokens (att tokens with positive intervals)
+        valid_time_tokens = is_att_tokens & (time_intervals > 0)
 
+        # Process in reverse order but use vectorized operations where possible
+        n_concepts = len(concept_ids)
+        motor_tte_task_indicators = np.zeros(n_concepts, dtype=bool)
+        time_token_event_times = np.cumsum(
+            np.concatenate([np.zeros(1), time_intervals[valid_time_tokens]], axis=0)
+        )
+
+        if "epoch_times" in record:
+            event_times = np.zeros(n_concepts, dtype=float)
+            previous_time_stamp = record["epoch_times"][0]
+            for i, time_stamp in enumerate(record["epoch_times"]):
+                if time_stamp < previous_time_stamp:
+                    time_stamp = previous_time_stamp
+                else:
+                    previous_time_stamp = time_stamp
+                event_times[i] = time_stamp
+        else:
+            event_times = np.zeros(n_concepts, dtype=int)
+            time_token_indices = np.where(valid_time_tokens)[0].tolist()
             for i, (start, end) in enumerate(
-                zip(
-                    [0] + time_token_indices.tolist(),
-                    time_token_indices.tolist() + [n_concepts],
-                )
+                zip([0] + time_token_indices, time_token_indices + [n_concepts])
             ):
                 event_times[start:end] = time_token_event_times[i]
 
-        # Call JIT-compiled function
-        (
-            motor_tte_tasks,
-            motor_tte_times,
-            motor_censor_times,
-            motor_tte_label_offsets,
-            motor_tte_task_indicators,
-        ) = _process_time_intervals_jit(
-            concept_indices.astype(np.int32),
-            is_att_tokens,
-            is_clinical_events,
-            time_intervals.astype(np.int32),
-            event_times,
-            self.motor_sampling_probability,
-            self.motor_concept_to_parents,
-            self.motor_parent_to_token_id,
-        )
+        before_valid_time_tokens = np.roll(valid_time_tokens, -1)
 
-        if len(motor_tte_times) == 0:
+        # We randomly make predictions at 50% of the sequence positions
+        prediction_positions = (
+            np.random.rand(n_concepts) < self.motor_sampling_probability
+        )
+        # We don't predict at the att time tokens
+        prediction_positions &= ~is_att_tokens
+        # We disable TTE predictions using the demographics alone
+        prediction_positions[:4] = False
+        # We take the union of the random prediction positions and the positions right before time token
+        prediction_positions = prediction_positions | before_valid_time_tokens
+        # We exclude the events that occur at the last time stamp
+        prediction_positions &= event_times != event_times[-1]
+
+        # Compute the vectorized censor times
+        motor_tte_tasks = []
+        motor_tte_times = []
+        motor_censor_times = []
+        motor_tte_label_offsets = []
+
+        time_to_event_dict: Dict[str, Any] = defaultdict(float)
+        before_time_token_indices = np.where(prediction_positions)[0].tolist()
+
+        for start_index, end_index in zip(
+            reversed(before_time_token_indices),
+            reversed(before_time_token_indices[1:] + [n_concepts]),
+        ):
+            current_event_time = event_times[start_index]
+            # Slice out all the tokens between two time intervals
+            # start_index + 1 excludes the prediction token
+            # end_index + 1 includes the last token right before the time token due to exclusive right indexing
+            section_concept_indices = concept_indices[start_index + 1 : end_index + 1]
+            section_event_times = event_times[start_index + 1 : end_index + 1]
+            section_is_clinical_events = is_clinical_events[
+                start_index + 1 : end_index + 1
+            ]
+            section_clinical_concept_indices = section_concept_indices[
+                section_is_clinical_events
+            ]
+            section_event_times = section_event_times[section_is_clinical_events]
+
+            for i in range(len(section_clinical_concept_indices) - 1, -1, -1):
+                concept_index = section_clinical_concept_indices[i]
+                concept_event_time = section_event_times[i]
+                concept_id = self.vocab_tokens[concept_index]
+                # Use cached motor codes
+                if concept_id in self.motor_code_cache:
+                    motor_codes = self.motor_code_cache[concept_id]
+                else:
+                    motor_codes = self.tokenizer.get_motor_parents(concept_id)
+                    self.motor_code_cache[concept_id] = motor_codes
+
+                for motor_code in motor_codes:
+                    time_to_event_dict[motor_code] = concept_event_time
+
+            if len(time_to_event_dict) > 0:
+                current_tasks = []
+                current_times = []
+                for motor_code, motor_time in time_to_event_dict.items():
+                    motor_token_id = self.tokenizer.get_motor_token_id(motor_code)
+                    current_tasks.append(motor_token_id)
+                    current_times.append(motor_time - current_event_time)
+                motor_tte_tasks.extend(current_tasks)
+                motor_tte_times.extend(current_times)
+                motor_tte_label_offsets.append(len(time_to_event_dict))
+                motor_tte_task_indicators[start_index] = True
+                motor_censor_times.append(event_times[-1] - current_event_time)
+
+            # Early return if no motor tasks found
+        if not motor_tte_times:
             LOG.debug(
                 "No MOTOR tasks detected for this sample. "
                 "Length: %s, last 10 concepts: %s",
@@ -613,10 +506,20 @@ class CehrGptLabelTransformation(DatasetMapping):
                 concept_ids[-10:] if len(concept_ids) >= 10 else concept_ids,
             )
 
+            # Reverse and finalize
+        motor_tte_times.reverse()
+        motor_tte_tasks.reverse()
+        motor_tte_label_offsets.reverse()
+        motor_censor_times.reverse()
+
+        motor_tte_label_offsets = np.cumsum(motor_tte_label_offsets).tolist()
+        motor_tte_label_offsets = [0] + motor_tte_label_offsets
+        motor_censor_times = motor_censor_times + [-100]
+
         return {
-            "motor_censor_times": motor_censor_times.tolist(),
-            "motor_tte_tasks": motor_tte_tasks.tolist(),
-            "motor_tte_times": motor_tte_times.tolist(),
-            "motor_tte_label_offsets": motor_tte_label_offsets.tolist(),
+            "motor_censor_times": motor_censor_times,
+            "motor_tte_tasks": motor_tte_tasks,
+            "motor_tte_times": motor_tte_times,
+            "motor_tte_label_offsets": motor_tte_label_offsets,
             "motor_tte_task_indicators": motor_tte_task_indicators.tolist(),
         }
