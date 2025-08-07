@@ -273,7 +273,7 @@ class CehrGptDataProcessor(DatasetMapping):
 
         # For the new datasets, they contain the column "epoch_times"
         if "epoch_times" in record:
-            epoch_times = record["epoch_times"][start_index:end_index]
+            epoch_times = record["epoch_times"]
             record["epoch_times"] = np.concatenate(
                 [
                     (
