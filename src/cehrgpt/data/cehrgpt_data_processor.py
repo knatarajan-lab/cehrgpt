@@ -501,8 +501,12 @@ class CehrGptDataProcessor(DatasetMapping):
             for pos in reversed(section_clinical_positions):
                 if pos in motor_codes_cache:
                     concept_time = event_times[pos]
-                    for motor_code, motor_token_id in motor_codes_cache[pos]:
-                        global_motor_events[motor_code] = (concept_time, motor_token_id)
+                    if concept_time > current_event_time:
+                        for motor_code, motor_token_id in motor_codes_cache[pos]:
+                            global_motor_events[motor_code] = (
+                                concept_time,
+                                motor_token_id,
+                            )
 
             # Store sparse matrix data for current prediction position
             # Even if global_motor_events is empty, we still need to record this position
