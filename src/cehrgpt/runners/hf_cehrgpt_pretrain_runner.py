@@ -558,28 +558,6 @@ def main():
         trainer_class = Trainer
         data_collator_fn = CehrGptDataCollator
 
-    # cehrgpt_label_transformation = CehrGptLabelTransformation(
-    #     tokenizer=cehrgpt_tokenizer,
-    #     max_length=model_args.max_position_embeddings,
-    #     shuffle_records=data_args.shuffle_records,
-    #     include_ttv_prediction=model_args.include_ttv_prediction,
-    #     include_values=model_args.include_values,
-    #     include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
-    #     motor_sampling_probability=cehrgpt_args.motor_sampling_probability,
-    #     pretraining=True,
-    # )
-    # if data_args.streaming:
-    #     for split in processed_dataset.keys():
-    #         processed_dataset[split] = processed_dataset[split].map(
-    #             cehrgpt_label_transformation.batch_transform,
-    #             batched=True,
-    #             batch_size=data_args.preprocessing_batch_size,
-    #         )
-    # else:
-    #     processed_dataset.set_transform(
-    #         cehrgpt_label_transformation.batch_transform, output_all_columns=True
-    #     )
-
     trainer = trainer_class(
         model=model,
         data_collator=data_collator_fn(
