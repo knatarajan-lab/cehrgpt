@@ -6,9 +6,6 @@ from torch.nn.utils.rnn import pad_sequence
 from transformers.utils import logging
 
 from cehrgpt.data.cehrgpt_data_processor import CehrGptDataProcessor
-from cehrgpt.data.numba_motor_time_to_event_label_generator import (
-    ExtremelyOptimizedTransformation,
-)
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 LOG = logging.get_logger("transformers")
@@ -61,7 +58,7 @@ class CehrGptDataCollator:
             if self.include_motor_time_to_event
             else []
         )
-
+        LOG.info("self.motor_time_bins: %s", self.motor_time_bins)
         if self.use_sub_time_tokenization:
             token_to_time_token_mapping = tokenizer.token_to_time_token_mapping
             if not token_to_time_token_mapping:
@@ -87,9 +84,6 @@ class CehrGptDataCollator:
             motor_sampling_probability=motor_sampling_probability,
             pretraining=pretraining,
         )
-        self.motor_label_generator = ExtremelyOptimizedTransformation(
-            tokenizer=tokenizer, motor_num_time_pieces=motor_num_time_pieces
-        )
 
     def _try_reverse_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         if not self.pretraining:
@@ -107,12 +101,12 @@ class CehrGptDataCollator:
         self, record: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Ultra-optimized version using advanced vectorization techniques."""
-        motor_tte_label_offsets = record["motor_tte_label_offsets"]
+        motor_row_indices = record["motor_row_indices"]
+        motor_col_indices = record["motor_col_indices"]
+        motor_values = record["motor_values"]
         motor_censor_times = np.array(record["motor_censor_times"])
 
-        # Vectorized filtering of valid entries
-        valid_mask = motor_censor_times != -100
-        if not np.any(valid_mask):
+        if len(motor_row_indices) == 0:
             # Handle empty case
             empty_shape = (
                 0,
@@ -124,52 +118,26 @@ class CehrGptDataCollator:
             record["motor_tte_masks"] = np.zeros(empty_shape, dtype=bool)
             return record
 
-        valid_indices = np.where(valid_mask)[0]
-        valid_censor_times = motor_censor_times[valid_mask]
-        n_tte_predictions = len(valid_indices)
+        n_tte_predictions = len(np.unique(motor_row_indices))
         vocab_size = self.tokenizer.motor_tte_vocab_size
 
         # Pre-allocate with broadcasting
         time_vectors = (
             np.broadcast_to(
-                valid_censor_times[:, np.newaxis], (n_tte_predictions, vocab_size)
+                motor_censor_times[:, np.newaxis], (n_tte_predictions, vocab_size)
             )
             .copy()
             .astype(np.float32)
         )
-
         event_indicators = np.zeros((n_tte_predictions, vocab_size), dtype=bool)
 
-        # Ultra-efficient task processing using advanced indexing
-        all_tte_tasks = np.array(record["motor_tte_tasks"])
-        all_tte_times = np.array(record["motor_tte_times"])
+        # Single vectorized assignment
+        motor_row_indices = np.array(motor_row_indices)
+        motor_col_indices = np.array(motor_col_indices)
+        motor_values = np.array(motor_values)
 
-        # Build index arrays for vectorized assignment
-        row_indices = []
-        col_indices = []
-        values = []
-
-        for local_idx, global_idx in enumerate(valid_indices):
-            start_idx = motor_tte_label_offsets[global_idx]
-            end_idx = motor_tte_label_offsets[global_idx + 1]
-
-            if start_idx < end_idx:
-                tasks = all_tte_tasks[start_idx:end_idx]
-                times = all_tte_times[start_idx:end_idx]
-
-                # Collect indices for vectorized assignment
-                row_indices.extend([local_idx] * len(tasks))
-                col_indices.extend(tasks)
-                values.extend(times)
-
-        if row_indices:
-            # Single vectorized assignment
-            row_indices = np.array(row_indices)
-            col_indices = np.array(col_indices)
-            values = np.array(values)
-
-            time_vectors[row_indices, col_indices] = values
-            event_indicators[row_indices, col_indices] = True
+        time_vectors[motor_row_indices, motor_col_indices] = motor_values
+        event_indicators[motor_row_indices, motor_col_indices] = True
 
         # Pre-allocate final arrays
         motor_tte_time = np.zeros(
@@ -233,9 +201,9 @@ class CehrGptDataCollator:
         ), f'sum(record["motor_tte_task_indicators"]) == n_tte_predictions must be true'
 
         # Clean up
-        del record["motor_tte_tasks"]
-        del record["motor_censor_times"]
-        del record["motor_tte_label_offsets"]
+        del record["motor_row_indices"]
+        del record["motor_col_indices"]
+        del record["motor_values"]
 
         return record
 
@@ -547,9 +515,9 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
 
         # MOTOR inputs
         current_motor_censor_times = []
-        current_motor_tte_tasks = []
-        current_motor_tte_times = []
-        current_motor_tte_label_offsets = []
+        current_motor_row_indices = []
+        current_motor_col_indices = []
+        current_motor_values = []
         current_motor_tte_task_indicators = []
 
         # Demographics
@@ -603,34 +571,34 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 )
 
             if self.include_motor_time_to_event:
-                existing_sample_length = len(current_motor_tte_times)
-                current_motor_tte_tasks.extend(
-                    example["motor_tte_tasks"].tolist()
-                    if isinstance(example["motor_tte_tasks"], torch.Tensor)
-                    else list(example["motor_tte_tasks"])
+                current_max_motor_row_index = len(np.unique(current_motor_row_indices))
+                motor_row_indices = (
+                    example["motor_row_indices"].tolist()
+                    if isinstance(example["motor_row_indices"], torch.Tensor)
+                    else list(example["motor_row_indices"])
                 )
-                current_motor_tte_times.extend(
-                    example["motor_tte_times"].tolist()
-                    if isinstance(example["motor_tte_times"], torch.Tensor)
-                    else list(example["motor_tte_times"])
+                current_motor_row_indices.extend(
+                    list(
+                        map(
+                            lambda offset: offset + current_max_motor_row_index,
+                            motor_row_indices,
+                        )
+                    )
+                )
+                current_motor_col_indices.extend(
+                    example["motor_col_indices"].tolist()
+                    if isinstance(example["motor_col_indices"], torch.Tensor)
+                    else list(example["motor_col_indices"])
+                )
+                current_motor_values.extend(
+                    example["motor_values"].tolist()
+                    if isinstance(example["motor_values"], torch.Tensor)
+                    else list(example["motor_values"])
                 )
                 current_motor_censor_times.extend(
                     example["motor_censor_times"].tolist()
                     if isinstance(example["motor_censor_times"], torch.Tensor)
                     else list(example["motor_censor_times"])
-                )
-                motor_tte_label_offsets = (
-                    example["motor_tte_label_offsets"].tolist()
-                    if isinstance(example["motor_tte_label_offsets"], torch.Tensor)
-                    else list(example["motor_tte_label_offsets"])
-                )
-                current_motor_tte_label_offsets.extend(
-                    list(
-                        map(
-                            lambda offset: offset + existing_sample_length,
-                            motor_tte_label_offsets,
-                        )
-                    )
                 )
                 current_motor_tte_task_indicators.extend(
                     (
@@ -672,9 +640,9 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
             packed_example.update(
                 {
                     "motor_censor_times": current_motor_censor_times,
-                    "motor_tte_times": current_motor_tte_times,
-                    "motor_tte_tasks": current_motor_tte_tasks,
-                    "motor_tte_label_offsets": current_motor_tte_label_offsets,
+                    "motor_row_indices": current_motor_row_indices,
+                    "motor_col_indices": current_motor_col_indices,
+                    "motor_values": current_motor_values,
                     "motor_tte_task_indicators": current_motor_tte_task_indicators,
                 }
             )

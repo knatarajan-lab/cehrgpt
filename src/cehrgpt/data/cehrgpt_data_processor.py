@@ -446,11 +446,11 @@ class CehrGptDataProcessor(DatasetMapping):
         # We exclude the events that occur at the last time stamp
         prediction_positions &= event_times != event_times[-1]
 
-        # Compute the vectorized censor times
-        motor_tte_tasks = []
-        motor_tte_times = []
+        # Store the time to event labels using a sparse matrix
+        motor_row_indices = []
+        motor_col_indices = []
+        motor_values = []
         motor_censor_times = []
-        motor_tte_label_offsets = []
 
         time_to_event_dict: Dict[str, Any] = defaultdict(float)
         before_time_token_indices = np.where(prediction_positions)[0].tolist()
@@ -488,20 +488,33 @@ class CehrGptDataProcessor(DatasetMapping):
                     time_to_event_dict[motor_code] = concept_event_time
 
             if len(time_to_event_dict) > 0:
-                current_tasks = []
-                current_times = []
+                last_row_index = (
+                    motor_row_indices[-1] + 1 if len(motor_row_indices) > 0 else 0
+                )
                 for motor_code, motor_time in time_to_event_dict.items():
-                    motor_token_id = self.tokenizer.get_motor_token_id(motor_code)
-                    current_tasks.append(motor_token_id)
-                    current_times.append(motor_time - current_event_time)
-                motor_tte_tasks.extend(current_tasks)
-                motor_tte_times.extend(current_times)
-                motor_tte_label_offsets.append(len(time_to_event_dict))
+                    motor_row_indices.append(last_row_index)
+                    motor_col_indices.append(
+                        self.tokenizer.get_motor_token_id(motor_code)
+                    )
+                    motor_values.append(motor_time - current_event_time)
+
                 motor_tte_task_indicators[start_index] = True
                 motor_censor_times.append(event_times[-1] - current_event_time)
 
             # Early return if no motor tasks found
-        if not motor_tte_times:
+        if len(motor_row_indices) > 0:
+            # Reverse and finalize
+            motor_row_indices.reverse()
+            motor_col_indices.reverse()
+            motor_values.reverse()
+            motor_censor_times.reverse()
+            max_motor_row_index = max(motor_row_indices)
+            motor_row_indices = list(
+                map(
+                    lambda row_index: max_motor_row_index - row_index, motor_row_indices
+                )
+            )
+        else:
             LOG.debug(
                 "No MOTOR tasks detected for this sample. "
                 "Length: %s, last 10 concepts: %s",
@@ -509,20 +522,10 @@ class CehrGptDataProcessor(DatasetMapping):
                 concept_ids[-10:] if len(concept_ids) >= 10 else concept_ids,
             )
 
-            # Reverse and finalize
-        motor_tte_times.reverse()
-        motor_tte_tasks.reverse()
-        motor_tte_label_offsets.reverse()
-        motor_censor_times.reverse()
-
-        motor_tte_label_offsets = np.cumsum(motor_tte_label_offsets).tolist()
-        motor_tte_label_offsets = [0] + motor_tte_label_offsets
-        motor_censor_times = motor_censor_times + [-100]
-
         return {
             "motor_censor_times": motor_censor_times,
-            "motor_tte_tasks": motor_tte_tasks,
-            "motor_tte_times": motor_tte_times,
-            "motor_tte_label_offsets": motor_tte_label_offsets,
+            "motor_row_indices": motor_row_indices,
+            "motor_col_indices": motor_col_indices,
+            "motor_values": motor_values,
             "motor_tte_task_indicators": motor_tte_task_indicators.tolist(),
         }
