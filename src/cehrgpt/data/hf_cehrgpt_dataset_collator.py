@@ -308,11 +308,11 @@ class CehrGptDataCollator:
 
         if self.include_motor_time_to_event:
 
-            start = time.time()
+            time.time()
             examples_with_motor_tte = [
                 self.create_time_to_event_tensors_ultra_optimized(_) for _ in examples
             ]
-            print(f"Creating MOTOR TTE tensors took {time.time() - start} seconds")
+            # print(f"Creating MOTOR TTE tensors took {time.time() - start} seconds")
             motor_tte_times = [
                 self._try_reverse_tensor(
                     self._convert_to_tensor(example["motor_tte_times"])
@@ -530,7 +530,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         # Binary classification inputs
         current_prediction_ages = []
         current_labels = []
-        start = time.time()
+        time.time()
         for idx, example in enumerate(examples):
             example = self.cehrgpt_data_processor.transform(example)
             input_ids = example["input_ids"]
@@ -659,5 +659,5 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                     "classifier_label": current_labels,
                 }
             )
-        print(f"Packing examples took {time.time() - start} seconds")
+        # print(f"Packing examples took {time.time() - start} seconds")
         return super().__call__([packed_example])

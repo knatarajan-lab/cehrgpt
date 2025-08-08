@@ -528,6 +528,11 @@ class CehrGptDataProcessor(DatasetMapping):
                 motor_col_indices.append(col_idx)
                 motor_values.append(value)
 
+        # Filter out unused positions from motor_censor_times
+        motor_censor_times = [
+            motor_censor_times[i] for i in sorted(sparse_data_by_row.keys())
+        ]
+
         if len(motor_row_indices) == 0:
             LOG.debug(
                 "No MOTOR tasks detected for this sample. "
@@ -537,7 +542,7 @@ class CehrGptDataProcessor(DatasetMapping):
             )
 
         return {
-            "motor_censor_times": motor_censor_times.tolist(),
+            "motor_censor_times": motor_censor_times,
             "motor_row_indices": motor_row_indices,
             "motor_col_indices": motor_col_indices,
             "motor_values": motor_values,
