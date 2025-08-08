@@ -252,10 +252,10 @@ def main():
             "labels",
             "epoch_times",
             "concept_ids",
-            "motor_tte_label_offsets",
             "motor_censor_times",
-            "motor_tte_tasks",
-            "motor_tte_times",
+            "motor_row_indices",
+            "motor_col_indices",
+            "motor_values",
             "motor_tte_task_indicators",
         ]
 
