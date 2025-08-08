@@ -352,7 +352,7 @@ def main():
 
     data_loaders = [("train", train_loader), ("test", test_dataloader)]
 
-    ve_token_id = cehrgpt_tokenizer._convert_token_to_id("[VE]")
+    ve_token_id = cehrgpt_tokenizer.ve_token_id
     for split, data_loader in data_loaders:
         # Ensure prediction folder exists
         feature_output_folder = (
