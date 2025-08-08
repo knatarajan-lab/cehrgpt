@@ -1,5 +1,4 @@
 import random
-from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -401,13 +400,7 @@ class CehrGptDataProcessor(DatasetMapping):
 
         # Find valid time tokens (att tokens with positive intervals)
         valid_time_tokens = is_att_tokens & (time_intervals > 0)
-
-        # Process in reverse order but use vectorized operations where possible
         n_concepts = len(concept_ids)
-        motor_tte_task_indicators = np.zeros(n_concepts, dtype=bool)
-        time_token_event_times = np.cumsum(
-            np.concatenate([np.zeros(1), time_intervals[valid_time_tokens]], axis=0)
-        )
 
         if "epoch_times" in record:
             event_times = np.zeros(n_concepts, dtype=float)
@@ -421,6 +414,9 @@ class CehrGptDataProcessor(DatasetMapping):
             # Convert the epoch time to the corresponding day
             event_times = event_times / 86400
         else:
+            time_token_event_times = np.cumsum(
+                np.concatenate([np.zeros(1), time_intervals[valid_time_tokens]], axis=0)
+            )
             event_times = np.zeros(n_concepts, dtype=int)
             time_token_indices = np.where(valid_time_tokens)[0].tolist()
             for i, (start, end) in enumerate(
@@ -428,8 +424,8 @@ class CehrGptDataProcessor(DatasetMapping):
             ):
                 event_times[start:end] = time_token_event_times[i]
 
+        # Determine prediction positions
         before_valid_time_tokens = np.roll(valid_time_tokens, -1)
-
         # We randomly make predictions at 50% of the sequence positions
         prediction_positions = (
             np.random.rand(n_concepts) < self.motor_sampling_probability
@@ -443,75 +439,96 @@ class CehrGptDataProcessor(DatasetMapping):
         # We exclude the events that occur at the last time stamp
         prediction_positions &= event_times != event_times[-1]
 
-        # Store the time to event labels using a sparse matrix
+        prediction_indices = np.where(prediction_positions)[0]
+        if len(prediction_indices) == 0:
+            return {
+                "motor_censor_times": [],
+                "motor_row_indices": [],
+                "motor_col_indices": [],
+                "motor_values": [],
+                "motor_tte_task_indicators": [False] * n_concepts,
+            }
+
+        # Pre-compute all motor codes for clinical events to avoid repeated lookups
+        clinical_positions = np.where(is_clinical_events)[0]
+        motor_codes_cache = {}  # position -> list of (motor_code, motor_token_id)
+
+        for pos in clinical_positions:
+            concept_id = concept_ids[pos]
+            if concept_id in self.motor_code_cache:
+                motor_codes = self.motor_code_cache[concept_id]
+            else:
+                motor_codes = self.tokenizer.get_motor_parents(concept_id)
+                self.motor_code_cache[concept_id] = motor_codes
+
+            if motor_codes:
+                motor_codes_cache[pos] = [
+                    (motor_code, self.tokenizer.get_motor_token_id(motor_code))
+                    for motor_code in motor_codes
+                ]
+
+        # Process sections in REVERSE order but build results in FORWARD order
+        section_boundaries = np.concatenate([prediction_indices, [n_concepts]])
+        last_event_time = event_times[-1]
+
+        # Pre-allocate arrays with exact size needed
+        num_prediction_positions = len(prediction_indices)
+        motor_censor_times = np.zeros(num_prediction_positions, dtype=float)
+        motor_tte_task_indicators = np.zeros(n_concepts, dtype=bool)
+
+        # Store sparse matrix data grouped by row for efficient construction
+        sparse_data_by_row = {}  # row_idx -> [(col_idx, value), ...]
+
+        # Global motor event state that accumulates as we go backwards
+        global_motor_events = {}  # motor_code -> earliest_future_time
+
+        # Process in reverse order but assign to forward row indices
+        for i in range(len(prediction_indices) - 1, -1, -1):
+            start_index = prediction_indices[i]
+            end_index = section_boundaries[i + 1]
+            current_event_time = event_times[start_index]
+
+            # Add new motor events from this section to global state
+            section_start = start_index + 1
+            section_end = end_index + 1 if end_index < n_concepts else n_concepts
+
+            # Process clinical events in this section (in reverse order within section)
+            section_clinical_positions = clinical_positions[
+                (clinical_positions >= section_start)
+                & (clinical_positions < section_end)
+            ]
+
+            for pos in reversed(section_clinical_positions):
+                if pos in motor_codes_cache:
+                    concept_time = event_times[pos]
+                    for motor_code, motor_token_id in motor_codes_cache[pos]:
+                        global_motor_events[motor_code] = (concept_time, motor_token_id)
+
+            # Store sparse matrix data for current prediction position
+            # Even if global_motor_events is empty, we still need to record this position
+            # because it indicates all motor tasks are censored at this time point
+            sparse_data_by_row[i] = [
+                (motor_token_id, motor_time - current_event_time)
+                for motor_code, (
+                    motor_time,
+                    motor_token_id,
+                ) in global_motor_events.items()
+            ]
+            motor_tte_task_indicators[start_index] = True
+            motor_censor_times[i] = last_event_time - current_event_time
+
+        # Build final sparse matrix lists in forward order (no reversals needed)
         motor_row_indices = []
         motor_col_indices = []
         motor_values = []
-        motor_censor_times = []
 
-        time_to_event_dict: Dict[str, Any] = defaultdict(float)
-        before_time_token_indices = np.where(prediction_positions)[0].tolist()
+        for row_idx in sorted(sparse_data_by_row.keys()):
+            for col_idx, value in sparse_data_by_row[row_idx]:
+                motor_row_indices.append(row_idx)
+                motor_col_indices.append(col_idx)
+                motor_values.append(value)
 
-        for start_index, end_index in zip(
-            reversed(before_time_token_indices),
-            reversed(before_time_token_indices[1:] + [n_concepts]),
-        ):
-            current_event_time = event_times[start_index]
-            # Slice out all the tokens between two time intervals
-            # start_index + 1 excludes the prediction token
-            # end_index + 1 includes the last token right before the time token due to exclusive right indexing
-            section_concept_indices = concept_indices[start_index + 1 : end_index + 1]
-            section_event_times = event_times[start_index + 1 : end_index + 1]
-            section_is_clinical_events = is_clinical_events[
-                start_index + 1 : end_index + 1
-            ]
-            section_clinical_concept_indices = section_concept_indices[
-                section_is_clinical_events
-            ]
-            section_event_times = section_event_times[section_is_clinical_events]
-
-            for i in range(len(section_clinical_concept_indices) - 1, -1, -1):
-                concept_index = section_clinical_concept_indices[i]
-                concept_event_time = section_event_times[i]
-                concept_id = self.vocab_tokens[concept_index]
-                # Use cached motor codes
-                if concept_id in self.motor_code_cache:
-                    motor_codes = self.motor_code_cache[concept_id]
-                else:
-                    motor_codes = self.tokenizer.get_motor_parents(concept_id)
-                    self.motor_code_cache[concept_id] = motor_codes
-
-                for motor_code in motor_codes:
-                    time_to_event_dict[motor_code] = concept_event_time
-
-            if len(time_to_event_dict) > 0:
-                last_row_index = (
-                    motor_row_indices[-1] + 1 if len(motor_row_indices) > 0 else 0
-                )
-                for motor_code, motor_time in time_to_event_dict.items():
-                    motor_row_indices.append(last_row_index)
-                    motor_col_indices.append(
-                        self.tokenizer.get_motor_token_id(motor_code)
-                    )
-                    motor_values.append(motor_time - current_event_time)
-
-                motor_tte_task_indicators[start_index] = True
-                motor_censor_times.append(event_times[-1] - current_event_time)
-
-            # Early return if no motor tasks found
-        if len(motor_row_indices) > 0:
-            # Reverse and finalize
-            motor_row_indices.reverse()
-            motor_col_indices.reverse()
-            motor_values.reverse()
-            motor_censor_times.reverse()
-            max_motor_row_index = max(motor_row_indices)
-            motor_row_indices = list(
-                map(
-                    lambda row_index: max_motor_row_index - row_index, motor_row_indices
-                )
-            )
-        else:
+        if len(motor_row_indices) == 0:
             LOG.debug(
                 "No MOTOR tasks detected for this sample. "
                 "Length: %s, last 10 concepts: %s",
@@ -520,7 +537,7 @@ class CehrGptDataProcessor(DatasetMapping):
             )
 
         return {
-            "motor_censor_times": motor_censor_times,
+            "motor_censor_times": motor_censor_times.tolist(),
             "motor_row_indices": motor_row_indices,
             "motor_col_indices": motor_col_indices,
             "motor_values": motor_values,
