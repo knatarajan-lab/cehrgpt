@@ -59,6 +59,8 @@ class CehrGptDataCollator:
             if self.include_motor_time_to_event
             else []
         )
+        # Convert the time bins to seconds
+        self.motor_time_bins = [time_bin * 86400 for time_bin in self.motor_time_bins]
         LOG.info("self.motor_time_bins: %s", self.motor_time_bins)
         if self.use_sub_time_tokenization:
             token_to_time_token_mapping = tokenizer.token_to_time_token_mapping

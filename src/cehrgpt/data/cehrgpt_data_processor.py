@@ -412,7 +412,7 @@ class CehrGptDataProcessor(DatasetMapping):
                     previous_time_stamp = time_stamp
                 event_times[i] = time_stamp
             # Convert the epoch time to the corresponding day
-            event_times = event_times / 86400
+            event_times = event_times
         else:
             time_token_event_times = np.cumsum(
                 np.concatenate([np.zeros(1), time_intervals[valid_time_tokens]], axis=0)
@@ -422,7 +422,8 @@ class CehrGptDataProcessor(DatasetMapping):
             for i, (start, end) in enumerate(
                 zip([0] + time_token_indices, time_token_indices + [n_concepts])
             ):
-                event_times[start:end] = time_token_event_times[i]
+                # Convert this to seconds
+                event_times[start:end] = time_token_event_times[i] * 86400
 
         # Determine prediction positions
         before_valid_time_tokens = np.roll(valid_time_tokens, -1)
