@@ -105,10 +105,10 @@ class CehrGptDataCollator:
         motor_row_indices = record["motor_row_indices"]
         motor_col_indices = record["motor_col_indices"]
         motor_values = record["motor_values"]
-        motor_censor_times = np.array(record["motor_censor_times"])
+        motor_censor_times = record["motor_censor_times"]
 
         if len(motor_row_indices) == 0:
-            # Handle empty case
+            # Handle empty case - use tuples for better performance
             empty_shape = (
                 0,
                 self.motor_num_time_pieces,
@@ -119,89 +119,88 @@ class CehrGptDataCollator:
             record["motor_tte_masks"] = np.zeros(empty_shape, dtype=bool)
             return record
 
-        n_tte_predictions = len(np.unique(motor_row_indices))
-        vocab_size = self.tokenizer.motor_tte_vocab_size
+        # Convert to numpy arrays once and get dimensions
+        motor_row_indices = np.asarray(motor_row_indices, dtype=np.int32)
+        motor_col_indices = np.asarray(motor_col_indices, dtype=np.int32)
+        motor_values = np.asarray(motor_values, dtype=np.float32)
+        motor_censor_times = np.asarray(motor_censor_times, dtype=np.float32)
 
-        # Pre-allocate with broadcasting
-        time_vectors = (
-            np.broadcast_to(
-                motor_censor_times[:, np.newaxis], (n_tte_predictions, vocab_size)
-            )
-            .copy()
-            .astype(np.float32)
-        )
+        n_tte_predictions = len(motor_censor_times)  # More direct than unique()
+        vocab_size = self.tokenizer.motor_tte_vocab_size
+        n_time_pieces = self.motor_num_time_pieces
+
+        # Create time_vectors more efficiently without broadcasting copy
+        time_vectors = np.tile(
+            motor_censor_times[:, np.newaxis], (1, vocab_size)
+        ).astype(np.float32)
         event_indicators = np.zeros((n_tte_predictions, vocab_size), dtype=bool)
 
-        # Single vectorized assignment
-        motor_row_indices = np.array(motor_row_indices)
-        motor_col_indices = np.array(motor_col_indices)
-        motor_values = np.array(motor_values)
-
+        # Vectorized assignment (already optimal)
         time_vectors[motor_row_indices, motor_col_indices] = motor_values
         event_indicators[motor_row_indices, motor_col_indices] = True
 
-        # Pre-allocate final arrays
-        motor_tte_time = np.zeros(
-            (n_tte_predictions, self.motor_num_time_pieces, vocab_size),
-            dtype=np.float32,
-        )
-        motor_tte_event_indicator = np.zeros(
-            (n_tte_predictions, self.motor_num_time_pieces, vocab_size), dtype=bool
-        )
-        motor_tte_mask = np.zeros(
-            (n_tte_predictions, self.motor_num_time_pieces, vocab_size), dtype=bool
-        )
+        # Early return if no predictions
+        if n_tte_predictions == 0:
+            empty_shape = (0, n_time_pieces, vocab_size)
+            record["motor_tte_times"] = np.zeros(empty_shape, dtype=np.float32)
+            record["motor_tte_event_indicators"] = np.zeros(empty_shape, dtype=bool)
+            record["motor_tte_masks"] = np.zeros(empty_shape, dtype=bool)
+            return record
 
-        if n_tte_predictions > 0:
-            # Ultra-vectorized time bin processing
-            motor_time_bins = np.array(self.motor_time_bins)
-            start_times = motor_time_bins[:-1]
-            end_times = motor_time_bins[1:]
-
-            # Process all bins simultaneously using broadcasting
-            # Shape: (n_predictions, vocab_size, n_bins)
-            time_vectors_expanded = time_vectors[:, :, np.newaxis]
-            start_times_expanded = start_times[np.newaxis, np.newaxis, :]
-            end_times_expanded = end_times[np.newaxis, np.newaxis, :]
-
-            # Vectorized computations for all bins at once
-            time_in_bin = np.clip(
-                time_vectors_expanded - start_times_expanded,
-                0,
-                end_times_expanded - start_times_expanded,
+        # Cache motor_time_bins as numpy array to avoid repeated conversion
+        if not hasattr(self, "_motor_time_bins_array"):
+            self._motor_time_bins_array = np.asarray(
+                self.motor_time_bins, dtype=np.float32
             )
 
-            mask = time_in_bin != 0
+        motor_time_bins = self._motor_time_bins_array
+        start_times = motor_time_bins[:-1]
+        end_times = motor_time_bins[1:]
+        bin_widths = end_times - start_times  # Pre-compute bin widths
 
-            # Vectorized log transformation with proper handling of zeros
-            time_in_bin_log = np.where(
-                mask, np.log2(np.clip(time_in_bin, 1e-10, np.inf)), -np.inf
-            )
+        # ELIMINATED TRANSPOSE: Compute directly in target shape (n_pred, n_bins, vocab)
+        # Reshape for broadcasting in target order
+        time_vectors_3d = time_vectors[:, np.newaxis, :]  # (n_pred, 1, vocab)
+        event_indicators_3d = event_indicators[:, np.newaxis, :]  # (n_pred, 1, vocab)
 
-            # Vectorized event indicator computation
-            event_indicators_expanded = event_indicators[:, :, np.newaxis]
-            event_in_bin = (
-                event_indicators_expanded
-                & (start_times_expanded <= time_vectors_expanded)
-                & (time_vectors_expanded < end_times_expanded)
-            )
+        # Broadcast time bins to match target shape
+        start_times_broadcast = start_times[np.newaxis, :, np.newaxis]  # (1, n_bins, 1)
+        bin_widths_broadcast = bin_widths[np.newaxis, :, np.newaxis]  # (1, n_bins, 1)
 
-            # Transpose to match expected output shape and assign
-            motor_tte_time = time_in_bin_log.transpose(0, 2, 1)
-            motor_tte_event_indicator = event_in_bin.transpose(0, 2, 1)
-            motor_tte_mask = (mask | event_in_bin).transpose(0, 2, 1)
+        # Compute directly in target shape (n_pred, n_bins, vocab)
+        time_diff = time_vectors_3d - start_times_broadcast
+        time_in_bin = np.clip(time_diff, 0, bin_widths_broadcast)
 
-        # Assign results
-        record["motor_tte_times"] = motor_tte_time
-        record["motor_tte_event_indicators"] = motor_tte_event_indicator
-        record["motor_tte_masks"] = motor_tte_mask
+        # Optimized mask computation
+        mask = time_in_bin > 0
 
-        # Validation
+        # More efficient log computation with better constant
+        log_constant = 1e-8  # Better numerical stability than 1e-10
+        time_in_bin_log = np.where(
+            mask, np.log2(np.maximum(time_in_bin, log_constant)), -np.inf
+        )
+
+        # Event indicator computation in target shape
+        end_times_broadcast = motor_time_bins[1:][np.newaxis, :, np.newaxis]
+        time_in_range = (time_vectors_3d >= start_times_broadcast) & (
+            time_vectors_3d < end_times_broadcast
+        )
+        event_in_bin = event_indicators_3d & time_in_range
+
+        # Combined mask computation
+        final_mask = mask | event_in_bin
+
+        # Direct assignment - NO TRANSPOSE NEEDED!
+        record["motor_tte_times"] = time_in_bin_log
+        record["motor_tte_event_indicators"] = event_in_bin
+        record["motor_tte_masks"] = final_mask
+
+        # Validation (keep as is - important for correctness)
         assert (
             sum(record["motor_tte_task_indicators"]) == n_tte_predictions
         ), f'sum(record["motor_tte_task_indicators"]) == n_tte_predictions must be true'
 
-        # Clean up
+        # Clean up input data
         del record["motor_row_indices"]
         del record["motor_col_indices"]
         del record["motor_values"]
