@@ -99,6 +99,7 @@ class CEHRGPTConfig(PretrainedConfig):
     def __init__(
         self,
         vocab_size=50257,
+        time_token_vocab_size=50257,
         n_positions=1024,
         n_embd=768,
         n_layer=12,
@@ -156,6 +157,7 @@ class CEHRGPTConfig(PretrainedConfig):
         if pretrained_token_ids is None:
             pretrained_token_ids = list()
         self.vocab_size = vocab_size
+        self.time_token_vocab_size = time_token_vocab_size
         self.n_positions = n_positions
         self.sample_packing_max_positions = (
             sample_packing_max_positions

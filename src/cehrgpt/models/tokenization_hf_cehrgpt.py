@@ -4,7 +4,7 @@ import json
 import os
 import pickle
 from functools import partial
-from itertools import chain, islice
+from itertools import islice
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -47,6 +47,7 @@ UNKNOWN_BIN = "BIN:unknown"
 NONE_BIN = "BIN:NONE"
 TOKENIZER_FILE_NAME = "cehrgpt_tokenizer.json"
 VALUE_TOKENIZER_FILE_NAME = "cehrgpt_value_tokenizer.json"
+TIME_TOKENIZER_FILE_NAME = "cehrgpt_time_tokenizer.json"
 TOKEN_TO_SUB_TIME_TOKEN_MAPPING_FILE_NAME = "token_to_sub_time_token_mapping.json"
 LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.pickle"
 LEGACY_LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.json"
@@ -457,6 +458,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         self,
         tokenizer: Tokenizer,
         value_tokenizer: Tokenizer,
+        att_tokenizer: Tokenizer,
         token_to_sub_time_token_mapping: Dict[str, List[str]],
         concept_code_stats: Dict[str, Any],
         numeric_lab_stats: List[Dict[str, Any]],
@@ -467,6 +469,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     ):
         self._tokenizer = tokenizer
         self._value_tokenizer = value_tokenizer
+        self._att_tokenizer = att_tokenizer
         self._token_to_sub_time_token_mapping = token_to_sub_time_token_mapping
         self._concept_code_stats = concept_code_stats
         self._numeric_lab_stats = numeric_lab_stats
@@ -537,6 +540,10 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     @property
     def value_vocab_size(self) -> int:
         return self._value_tokenizer.get_vocab_size()
+
+    @property
+    def time_token_vocab_size(self) -> int:
+        return self._att_tokenizer.get_vocab_size()
 
     @property
     def pad_value_token_id(self):
@@ -640,7 +647,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         default_mapping.update(
             {
                 self._tokenizer.token_to_id(time_token): list(
-                    map(self._tokenizer.token_to_id, sub_time_tokens)
+                    map(self._att_tokenizer.token_to_id, sub_time_tokens)
                 )
                 for time_token, sub_time_tokens in self._token_to_sub_time_token_mapping.items()
             }
@@ -758,6 +765,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             os.path.join(save_directory, VALUE_TOKENIZER_FILE_NAME)
         )
 
+        self._att_tokenizer.save(os.path.join(save_directory, TIME_TOKENIZER_FILE_NAME))
+
         with open(
             os.path.join(save_directory, TOKEN_TO_SUB_TIME_TOKEN_MAPPING_FILE_NAME), "w"
         ) as f:
@@ -840,6 +849,14 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                 return None
             value_tokenizer = Tokenizer.from_file(value_tokenizer_file)
 
+        # Load the ttt tokenizer
+        att_tokenizer_file = transformers.utils.hub.cached_file(
+            pretrained_model_name_or_path, TIME_TOKENIZER_FILE_NAME, **kwargs
+        )
+        if not att_tokenizer_file:
+            return None
+        att_tokenizer = Tokenizer.from_file(att_tokenizer_file)
+
         # Load the sub time token json file
         token_to_sub_time_token_mapping_file = transformers.utils.hub.cached_file(
             pretrained_model_name_or_path,
@@ -903,6 +920,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         return CehrGptTokenizer(
             tokenizer,
             value_tokenizer,
+            att_tokenizer,
             token_to_sub_time_token_mapping,
             concept_code_stats,
             lab_stats["numeric_lab_stats"],
@@ -958,6 +976,9 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         new_value_tokens = set(new_tokenizer.get_value_vocab().keys()) - set(
             cehrgpt_tokenizer_copy.get_value_vocab().keys()
         )
+        new_att_tokens = set(new_tokenizer._att_tokenizer.get_vocab().keys()) - set(
+            cehrgpt_tokenizer_copy._att_tokenizer.get_vocab().keys()
+        )
         new_token_to_sub_time_token_mapping = (
             new_tokenizer._token_to_sub_time_token_mapping
         )
@@ -981,6 +1002,12 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             ]
         )
         # Add new time tokens to the existing att tokenizer
+        cehrgpt_tokenizer_copy._att_tokenizer.add_tokens(
+            [
+                AddedToken(token, single_word=True, normalized=False)
+                for token in new_att_tokens
+            ]
+        )
         # Merge the time_token -> List[sub_time_tokens] mapping
         for time_token, sub_time_tokens in new_token_to_sub_time_token_mapping.items():
             if (
@@ -1024,6 +1051,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         return CehrGptTokenizer(
             tokenizer=cehrgpt_tokenizer_copy._tokenizer,
             value_tokenizer=cehrgpt_tokenizer_copy._value_tokenizer,
+            att_tokenizer=cehrgpt_tokenizer_copy._att_tokenizer,
             token_to_sub_time_token_mapping=cehrgpt_tokenizer_copy._token_to_sub_time_token_mapping,
             concept_code_stats=cehrgpt_tokenizer_copy._concept_code_stats,
             numeric_lab_stats=cehrgpt_tokenizer_copy._numeric_lab_stats,
@@ -1159,24 +1187,6 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             data_args=data_args,
             qualified_codes=qualified_codes,
         )
-        # Expand the tokenizer for year/month/day tokens
-        token_to_sub_time_token_mapping = collections.defaultdict(list)
-        vocab = concept_tokenizer.get_vocab()
-        for vocab_token, token_id in vocab.items():
-            if is_att_token(vocab_token):
-                time_interval = extract_time_interval_in_days(vocab_token)
-                time_tuple = convert_time_interval_to_time_tuple(
-                    time_interval, is_inpatient_att_token(vocab_token)
-                )
-                token_to_sub_time_token_mapping[vocab_token] = list(time_tuple)
-
-        concept_tokenizer.add_tokens(
-            [
-                AddedToken(_, single_word=True, normalized=False)
-                for _ in set(chain(*token_to_sub_time_token_mapping.values()))
-            ]
-        )
-
         concept_value_column = "concept_as_values"
         for row in dataset:
             if concept_value_column not in row:
@@ -1197,6 +1207,31 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                 + [UNKNOWN_BIN, NONE_BIN]
             ]
         )
+
+        # We will train a tokenizer specifically for time intervals
+        sub_time_token_data = []
+        token_to_sub_time_token_mapping = collections.defaultdict(list)
+        vocab = concept_tokenizer.get_vocab()
+        for token, token_id in vocab.items():
+            if is_att_token(token):
+                time_interval = extract_time_interval_in_days(token)
+                time_tuple = convert_time_interval_to_time_tuple(
+                    time_interval, is_inpatient_att_token(token)
+                )
+                token_to_sub_time_token_mapping[token] = list(time_tuple)
+                sub_time_token_data.append(" ".join(time_tuple))
+
+        att_tokenizer = Tokenizer(
+            WordLevel(unk_token=OUT_OF_VOCABULARY_TOKEN, vocab=dict())
+        )
+        att_tokenizer.pre_tokenizer = WhitespaceSplit()
+        att_trainer = WordLevelTrainer(
+            special_tokens=[OUT_OF_VOCABULARY_TOKEN],
+            vocab_size=data_args.vocab_size,
+            min_frequency=0,
+            show_progress=True,
+        )
+        att_tokenizer.train_from_iterator(sub_time_token_data, trainer=att_trainer)
 
         # Prune concept_name_mapping
         concept_name_mapping = {
@@ -1227,6 +1262,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         return CehrGptTokenizer(
             concept_tokenizer,
             value_tokenizer,
+            att_tokenizer,
             token_to_sub_time_token_mapping,
             concept_code_stats,
             numeric_lab_stats,

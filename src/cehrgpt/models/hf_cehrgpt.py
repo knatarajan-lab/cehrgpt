@@ -397,12 +397,16 @@ class CustomEmbeddingLayer(nn.Module):
         self,
         vocab_size: int,
         embed_dim: int,
+        time_token_vocab_size: int,
         token_to_time_token_mapping: Dict[int, List[int]],
     ):
         super(CustomEmbeddingLayer, self).__init__()
         self.vocab_size = vocab_size
+        self.time_component_vocab_size = time_token_vocab_size
         self.embed_dim = embed_dim
         self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.time_component_embedding = nn.Embedding(time_token_vocab_size, embed_dim)
+        self.proj = nn.Linear(3 * embed_dim, embed_dim)
 
         self.token_to_time_token_mapping = token_to_time_token_mapping
         # Build an ATT map of shape [vocab_size, 3]; -1 means "not ATT"
@@ -435,11 +439,12 @@ class CustomEmbeddingLayer(nn.Module):
         # For ATT positions, fetch (year, month, day) component IDs
         comp_ids = self.att_map[input_ids]  # [B, S, 3], -1 for non-ATT
         safe_comp_ids = comp_ids.clamp(min=0)
-        comp_emb = self.embedding(safe_comp_ids)  # [B, S, 3, E]
-        summed = comp_emb.sum(dim=2)  # [B, S, E]
+        comp_emb = self.time_component_embedding(safe_comp_ids)  # [B, S, 3, E]
+        flattened_comp_emb = torch.flatten(comp_emb, start_dim=2)
+        att_embeddings = self.proj(flattened_comp_emb) + base
 
         # Select summed for ATT positions, base otherwise
-        out = torch.where(att_mask.unsqueeze(-1), summed, base)
+        out = torch.where(att_mask.unsqueeze(-1), att_embeddings, base)
         return out
 
 
@@ -788,7 +793,10 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
 
         if self.config.use_sub_time_tokenization:
             self.wte = CustomEmbeddingLayer(
-                config.vocab_size, self.embed_dim, config.token_to_time_token_mapping
+                config.vocab_size,
+                self.embed_dim,
+                config.time_token_vocab_size,
+                config.token_to_time_token_mapping,
             )
         else:
             self.wte = nn.Embedding(config.vocab_size, self.embed_dim)
@@ -1245,10 +1253,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         if self.config.include_ttv_prediction:
             self.tte_head = VisitTimeToEventHead(config.n_embd)
 
-        # if self.config.use_sub_time_tokenization:
-        #     self.time_token_lm_head = nn.Linear(
-        #         config.n_embd // 3, config.time_token_vocab_size, bias=False
-        #     )
+        if self.config.use_sub_time_tokenization:
+            self.time_token_lm_head = nn.Linear(
+                config.n_embd // 3, config.time_token_vocab_size, bias=False
+            )
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         if self.config.include_values:
@@ -1691,38 +1699,38 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             # We add another loss term when use_sub_time_tokenization is enabled, we need to recover the sub time token
             # predictions for year/month/token
-            # if (
-            #     self.config.use_sub_time_tokenization
-            #     and sub_time_tokens is not None
-            #     and time_token_indicators is not None
-            # ):
-            #     # Split the last dimensions into three parts
-            #     time_loss_fct = CrossEntropyLoss(reduction="none")
-            #     time_token_logits = self.time_token_lm_head(
-            #         torch.unflatten(hidden_states, 2, (3, -1))
-            #     )
-            #     shifted_time_token_logits = time_token_logits[
-            #         ..., :-1, :, :
-            #     ].contiguous()
-            #     shifted_time_token_indicators = (
-            #         time_token_indicators[..., 1:].contiguous().to(lm_logits.device)
-            #     )
-            #     shifted_time_token_labels = (
-            #         sub_time_tokens[:, 1:, ...].contiguous().to(lm_logits.device)
-            #     )
-            #     time_token_loss = time_loss_fct(
-            #         shifted_time_token_logits.view(
-            #             -1, self.config.time_token_vocab_size
-            #         ),
-            #         shifted_time_token_labels.view(-1),
-            #     )
-            #     time_token_loss = torch.where(
-            #         shifted_time_token_indicators.view(-1, 1).to(torch.bool),
-            #         time_token_loss.view(-1, 3),
-            #         0,
-            #     )
-            #     time_token_loss = time_token_loss.sum() / total_num_tokens
-            #     loss += time_token_loss * self.config.time_token_loss_weight
+            if (
+                self.config.use_sub_time_tokenization
+                and sub_time_tokens is not None
+                and time_token_indicators is not None
+            ):
+                # Split the last dimensions into three parts
+                time_loss_fct = CrossEntropyLoss(reduction="none")
+                time_token_logits = self.time_token_lm_head(
+                    torch.unflatten(hidden_states, 2, (3, -1))
+                )
+                shifted_time_token_logits = time_token_logits[
+                    ..., :-1, :, :
+                ].contiguous()
+                shifted_time_token_indicators = (
+                    time_token_indicators[..., 1:].contiguous().to(lm_logits.device)
+                )
+                shifted_time_token_labels = (
+                    sub_time_tokens[:, 1:, ...].contiguous().to(lm_logits.device)
+                )
+                time_token_loss = time_loss_fct(
+                    shifted_time_token_logits.view(
+                        -1, self.config.time_token_vocab_size
+                    ),
+                    shifted_time_token_labels.view(-1),
+                )
+                time_token_loss = torch.where(
+                    shifted_time_token_indicators.view(-1, 1).to(torch.bool),
+                    time_token_loss.view(-1, 3),
+                    0,
+                )
+                time_token_loss = time_token_loss.sum() / total_num_tokens
+                loss += time_token_loss * self.config.time_token_loss_weight
 
             if time_to_visits is not None and time_to_visits is not None:
                 # Get lambda and k parameters
