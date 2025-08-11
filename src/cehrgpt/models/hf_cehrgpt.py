@@ -406,7 +406,8 @@ class CustomEmbeddingLayer(nn.Module):
         self.embed_dim = embed_dim
         self.embedding = nn.Embedding(vocab_size, embed_dim)
         self.time_component_embedding = nn.Embedding(time_token_vocab_size, embed_dim)
-        self.proj = nn.Linear(3 * embed_dim, embed_dim)
+        self.gate_layer = nn.Linear(embed_dim, embed_dim)
+        self.proj_layer = nn.Linear(3 * embed_dim, embed_dim)
 
         self.token_to_time_token_mapping = token_to_time_token_mapping
         # Build an ATT map of shape [vocab_size, 3]; -1 means "not ATT"
@@ -441,7 +442,10 @@ class CustomEmbeddingLayer(nn.Module):
         safe_comp_ids = comp_ids.clamp(min=0)
         comp_emb = self.time_component_embedding(safe_comp_ids)  # [B, S, 3, E]
         flattened_comp_emb = torch.flatten(comp_emb, start_dim=2)
-        att_embeddings = self.proj(flattened_comp_emb) + base
+        gate_value = f.sigmoid(self.gate_layer(base))
+        att_embeddings = (
+            self.proj_layer(flattened_comp_emb) * (1 - gate_value) + base * gate_value
+        )
 
         # Select summed for ATT positions, base otherwise
         out = torch.where(att_mask.unsqueeze(-1), att_embeddings, base)
