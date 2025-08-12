@@ -9,6 +9,7 @@ import polars as pl
 import torch
 import torch.distributed as dist
 from cehrbert.runners.runner_util import generate_prepared_ds_path
+from meds import held_out_split, train_split, tuning_split
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers.trainer_utils import is_main_process
@@ -23,7 +24,6 @@ from cehrgpt.generation.generate_batch_hf_gpt_sequence import (
 from cehrgpt.gpt_utils import (
     extract_time_interval_in_days,
     extract_time_interval_in_hours,
-    is_artificial_token,
     is_att_token,
     is_inpatient_hour_token,
     is_visit_end,
@@ -38,6 +38,16 @@ from cehrgpt.runners.data_utils import (
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 
 LOG = logging.get_logger("transformers")
+
+
+def map_data_split_name(split: str) -> str:
+    if split == "train":
+        return train_split
+    elif split == "validation":
+        return tuning_split
+    elif split == "test":
+        return held_out_split
+    raise ValueError(f"Unknown split: {split}")
 
 
 def seed_all(seed: int = 42):
@@ -58,7 +68,7 @@ def generate_trajectories_per_batch(
     cehrgpt_model: CEHRGPT2LMHeadModel,
     device,
     data_output_path: Path,
-    max_new_tokens: int,
+    max_length: int,
 ):
     subject_ids = batch["person_id"].squeeze().detach().cpu().tolist()
     prediction_times = batch["index_date"].squeeze().detach().cpu().tolist()
@@ -69,7 +79,7 @@ def generate_trajectories_per_batch(
         cehrgpt_model,
         cehrgpt_tokenizer,
         batched_input_ids,
-        max_new_tokens=max_new_tokens,
+        max_length=max_length,
         top_p=1.0,
         top_k=cehrgpt_tokenizer.vocab_size,
         device=device,
@@ -112,7 +122,9 @@ def generate_trajectories_per_batch(
                 continue
             else:
                 valid_indices.append(i)
-                generated_epoch_times.append(current_cursor)
+                generated_epoch_times.append(
+                    datetime.datetime.fromtimestamp(current_cursor)
+                )
 
         trajectories.append(
             {
@@ -227,38 +239,43 @@ def main():
         include_demographics=False,
         add_linear_prob_token=False,
     )
-    test_dataloader = DataLoader(
-        dataset=processed_dataset["test"],
-        batch_size=training_args.per_device_eval_batch_size,
-        num_workers=training_args.dataloader_num_workers,
-        collate_fn=data_collator,
-        pin_memory=training_args.dataloader_pin_memory,
-    )
 
     LOG.info(
         "Generating %s trajectories per sample",
         cehrgpt_args.num_of_trajectories_per_sample,
     )
-
     for sample_i in range(cehrgpt_args.num_of_trajectories_per_sample):
-        sample_output_dir = Path(training_args.output_dir) / f"{sample_i}"
-        sample_output_dir.mkdir(exist_ok=True, parents=True)
-        for batch_i, batch in tqdm(
-            enumerate(test_dataloader), desc="Generating features"
-        ):
-            output_parquet_file = sample_output_dir / f"{batch_i}.parquet"
-            if output_parquet_file.exists():
-                LOG.info("%s already exists, skip...", output_parquet_file)
-                continue
-
-            generate_trajectories_per_batch(
-                batch,
-                cehrgpt_tokenizer,
-                cehrgpt_model,
-                device,
-                sample_output_dir / f"{batch_i}.parquet",
-                cehrgpt_args.generation_max_new_tokens,
+        for split, dataset in processed_dataset.items():
+            meds_split = map_data_split_name(split)
+            dataloader = DataLoader(
+                dataset=dataset,
+                batch_size=training_args.per_device_eval_batch_size,
+                num_workers=training_args.dataloader_num_workers,
+                collate_fn=data_collator,
+                pin_memory=training_args.dataloader_pin_memory,
             )
+            sample_output_dir = (
+                Path(training_args.output_dir) / meds_split / f"{sample_i}"
+            )
+            sample_output_dir.mkdir(exist_ok=True, parents=True)
+            for batch_i, batch in tqdm(
+                enumerate(dataloader),
+                desc=f"Generating Trajectories for split {meds_split} with trajectory {sample_i + 1}",
+            ):
+                output_parquet_file = sample_output_dir / f"{batch_i}.parquet"
+                if output_parquet_file.exists():
+                    LOG.info("%s already exists, skip...", output_parquet_file)
+                    continue
+
+                generate_trajectories_per_batch(
+                    batch,
+                    cehrgpt_tokenizer,
+                    cehrgpt_model,
+                    device,
+                    sample_output_dir / f"{batch_i}.parquet",
+                    cehrgpt_args.generation_max_new_tokens
+                    + cehrgpt_args.generation_input_length,
+                )
 
 
 if __name__ == "__main__":

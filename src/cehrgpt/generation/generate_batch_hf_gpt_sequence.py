@@ -74,7 +74,8 @@ def generate_single_batch(
     model: CEHRGPT2LMHeadModel,
     tokenizer: CehrGptTokenizer,
     prompts: List[List[int]],
-    max_new_tokens=512,
+    max_length: int,
+    max_new_tokens: Optional[int] = None,
     mini_num_of_concepts=1,
     top_p=0.95,
     top_k=50,
@@ -88,7 +89,8 @@ def generate_single_batch(
     with torch.no_grad():
         generation_config = GenerationConfig(
             repetition_penalty=repetition_penalty,
-            max_length=max_new_tokens,
+            max_new_tokens=max_new_tokens,
+            max_length=max_length,
             min_length=mini_num_of_concepts,
             temperature=temperature,
             top_p=top_p,
@@ -226,7 +228,7 @@ def main(args):
             cehrgpt_model,
             cehrgpt_tokenizer,
             random_prompts[: args.batch_size],
-            max_new_tokens=args.context_window,
+            max_length=args.context_window,
             mini_num_of_concepts=args.min_num_of_concepts,
             top_p=args.top_p,
             top_k=args.top_k,
