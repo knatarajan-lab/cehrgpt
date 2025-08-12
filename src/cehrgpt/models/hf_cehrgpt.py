@@ -102,7 +102,9 @@ def is_sample_pack(attention_mask: torch.Tensor) -> bool:
         attention_mask = attention_mask.flip(dims=[1])
 
     nonzero_counts = attention_mask.sum(dim=1)
-    max_token_positions = torch.argmax(attention_mask.flip(dims=[1]), dim=1)
+    max_token_positions = torch.argmax(
+        attention_mask.to(torch.int32).flip(dims=[1]), dim=1
+    )
     max_indices = attention_mask.shape[1] - 1 - max_token_positions
     return torch.any(nonzero_counts < (max_indices + 1)).item()
 
@@ -1848,6 +1850,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         # keep track of which sequences are already finished
         batch_size, cur_len = input_ids.shape
+        model_kwargs["attention_mask"] = input_ids != pad_token_id
         if "inputs_embeds" in model_kwargs:
             cur_len = model_kwargs["inputs_embeds"].shape[1]
         this_peer_finished = False

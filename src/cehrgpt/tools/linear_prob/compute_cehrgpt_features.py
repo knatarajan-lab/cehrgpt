@@ -9,7 +9,6 @@ from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
-import polars as pl
 import torch
 import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector

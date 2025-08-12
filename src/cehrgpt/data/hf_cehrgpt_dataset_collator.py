@@ -162,6 +162,22 @@ class CehrGptDataCollator:
             f"batch['input_ids']: {batch['input_ids']} "
         )
 
+        if "epoch_times" in examples[0]:
+            batch_epoch_times = [
+                self._try_reverse_tensor(
+                    self._convert_to_tensor(example["epoch_times"])
+                )
+                for example in examples
+            ]
+            # Pad sequences to the max length in the batch
+            batch["epoch_times"] = self._try_reverse_tensor(
+                pad_sequence(
+                    batch_epoch_times,
+                    batch_first=True,
+                    padding_value=0,
+                ).to(torch.float32)
+            )
+
         if "position_ids" in examples[0]:
             batch_position_ids = [
                 self._try_reverse_tensor(
@@ -663,7 +679,9 @@ class CehrGptDataCollator:
 
         # Subtract one for the [END] token when sample_packing is not enabled
         new_max_length = (
-            max_length_allowed if sample_packing else max_length_allowed - 1
+            max_length_allowed - 1
+            if not sample_packing and self.pretraining
+            else max_length_allowed
         )
 
         if self.include_ttv_prediction:
@@ -685,13 +703,20 @@ class CehrGptDataCollator:
 
         # Return the record directly if the actual sequence length is less than the max sequence
         if seq_length <= new_max_length:
-            if not sample_packing:
+            if not sample_packing and self.pretraining:
                 record["input_ids"] = torch.concat(
                     [
                         self._convert_to_tensor(record["input_ids"]),
                         self._convert_to_tensor([eos_token]),
                     ]
                 )
+                if "epoch_times" in record:
+                    record["epoch_times"] = torch.concat(
+                        [
+                            self._convert_to_tensor(record["epoch_times"]),
+                            self._convert_to_tensor([record["epoch_times"][-1]]),
+                        ]
+                    )
                 if self.include_values:
                     record["value_indicators"] = torch.concat(
                         [
@@ -727,6 +752,10 @@ class CehrGptDataCollator:
                     record["input_ids"] = self._convert_to_tensor(
                         record["input_ids"][start_index : end_index + 1]
                     )
+                    if "epoch_times" in record:
+                        record["epoch_times"] = self._convert_to_tensor(
+                            record["epoch_times"][start_index : end_index + 1]
+                        )
                     if self.include_values:
                         record["value_indicators"] = self._convert_to_tensor(
                             record["value_indicators"][start_index : end_index + 1]
@@ -760,6 +789,11 @@ class CehrGptDataCollator:
             if sample_packing and "position_ids" in record:
                 record["position_ids"] = record["position_ids"][0:end_index]
 
+            if "epoch_times" in record:
+                record["epoch_times"] = self._convert_to_tensor(
+                    record["epoch_times"][0:end_index]
+                )
+
             if self.include_values:
                 record["value_indicators"] = self._convert_to_tensor(
                     record["value_indicators"][0:end_index]
@@ -792,6 +826,17 @@ class CehrGptDataCollator:
                                 ),
                             ]
                         )
+                        if "epoch_times" in record:
+                            record["epoch_times"] = torch.concat(
+                                [
+                                    torch.zeros(
+                                        [record["epoch_times"][0]], dtype=torch.float32
+                                    ),
+                                    self._convert_to_tensor(
+                                        record["epoch_times"][token_index:seq_length]
+                                    ),
+                                ]
+                            )
                         if self.include_values:
                             record["value_indicators"] = torch.concat(
                                 [
@@ -830,7 +875,7 @@ class CehrGptDataCollator:
                             )
                         break
             else:
-                start_index = seq_length - new_max_length
+                start_index = max(seq_length - new_max_length, 0)
                 end_index = seq_length
                 for i in range(start_index, end_index):
                     current_token = record["input_ids"][i]
@@ -842,6 +887,11 @@ class CehrGptDataCollator:
                             ]
                         if sample_packing and "position_ids" in record:
                             record["position_ids"] = record["position_ids"][i:end_index]
+
+                        if "epoch_times" in record:
+                            record["epoch_times"] = self._convert_to_tensor(
+                                record["epoch_times"][i:end_index]
+                            )
                         if self.include_values:
                             record["value_indicators"] = record["value_indicators"][
                                 i:end_index
@@ -863,6 +913,10 @@ class CehrGptDataCollator:
                     ]
                 if sample_packing and "position_ids" in record:
                     record["position_ids"] = record["position_ids"][-new_max_length:]
+                if "epoch_times" in record:
+                    record["epoch_times"] = self._convert_to_tensor(
+                        record["epoch_times"][-new_max_length:]
+                    )
                 if self.include_values:
                     record["value_indicators"] = record["value_indicators"][
                         -new_max_length:
@@ -873,36 +927,6 @@ class CehrGptDataCollator:
                         -new_max_length:
                     ]
 
-            if not sample_packing:
-                # Finally we add the end token to the end of the sequence
-                record["input_ids"] = torch.concat(
-                    [
-                        self._convert_to_tensor(record["input_ids"]),
-                        self._convert_to_tensor([eos_token]),
-                    ]
-                )
-                if self.include_values:
-                    record["value_indicators"] = torch.concat(
-                        [
-                            self._convert_to_tensor(record["value_indicators"]),
-                            self._convert_to_tensor([False]),
-                        ]
-                    ).to(torch.bool)
-                    record["values"] = torch.concat(
-                        [
-                            self._convert_to_tensor(record["values"]),
-                            self._convert_to_tensor(
-                                [self.tokenizer.pad_value_token_id]
-                            ),
-                        ]
-                    )
-                if self.include_ttv_prediction:
-                    record["time_to_visits"] = torch.concat(
-                        [
-                            record["time_to_visits"],
-                            self._convert_to_tensor([-100.0]),
-                        ]
-                    )
             return record
 
 

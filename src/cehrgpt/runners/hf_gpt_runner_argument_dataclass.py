@@ -229,3 +229,15 @@ class CehrGPTArguments:
             "help": "The probability of negative samples will be included in the training data"
         },
     )
+    num_of_trajectories_per_sample: Optional[int] = dataclasses.field(
+        default=1,
+        metadata={"help": "The number of trajectories per sample"},
+    )
+    generation_input_length: Optional[int] = dataclasses.field(
+        default=1024,
+        metadata={"help": "The length of the input sequence"},
+    )
+    generation_max_new_tokens: Optional[int] = dataclasses.field(
+        default=1024,
+        metadata={"help": "The maximum number of tokens in the generation sequence"},
+    )

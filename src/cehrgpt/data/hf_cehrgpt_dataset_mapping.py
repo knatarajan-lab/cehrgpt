@@ -21,7 +21,6 @@ from cehrbert_data.const.artificial_tokens import (
     DISCHARGE_UNKNOWN_TOKEN,
     GENDER_UNKNOWN_TOKEN,
     RACE_UNKNOWN_TOKEN,
-    VISIT_UNKNOWN_TOKEN,
 )
 from cehrbert_data.const.common import NA
 from cehrbert_data.decorators.patient_event_decorator_base import get_att_function

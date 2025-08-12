@@ -1,19 +1,159 @@
+import datetime
 import os
+import random
+from pathlib import Path
+from typing import Any, Dict
 
+import numpy as np
 import polars as pl
 import torch
+import torch.distributed as dist
+from cehrbert.runners.runner_util import generate_prepared_ds_path
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from transformers.trainer_utils import is_main_process
 from transformers.utils import is_flash_attn_2_available, logging
 
+from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
+from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
 from cehrgpt.generation.generate_batch_hf_gpt_sequence import (
     generate_single_batch,
     normalize_value,
 )
+from cehrgpt.gpt_utils import (
+    extract_time_interval_in_days,
+    extract_time_interval_in_hours,
+    is_artificial_token,
+    is_att_token,
+    is_inpatient_hour_token,
+    is_visit_end,
+    is_visit_start,
+)
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
-from cehrgpt.runners.data_utils import prepare_finetune_dataset
+from cehrgpt.runners.data_utils import (
+    extract_cohort_sequences,
+    prepare_finetune_dataset,
+)
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 
 LOG = logging.get_logger("transformers")
+
+
+def seed_all(seed: int = 42):
+    """Set seed for Python, NumPy, and PyTorch (CPU & CUDA)."""
+    random.seed(seed)  # Python random
+    np.random.seed(seed)  # NumPy
+    torch.manual_seed(seed)  # PyTorch CPU
+    torch.cuda.manual_seed(seed)  # Current GPU
+    torch.cuda.manual_seed_all(seed)  # All GPUs
+
+    # For reproducibility in dataloader workers
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+
+def generate_trajectories_per_batch(
+    batch: Dict[str, Any],
+    cehrgpt_tokenizer: CehrGptTokenizer,
+    cehrgpt_model: CEHRGPT2LMHeadModel,
+    device,
+    data_output_path: Path,
+    max_new_tokens: int,
+):
+    subject_ids = batch["person_id"].squeeze().detach().cpu().tolist()
+    prediction_times = batch["index_date"].squeeze().detach().cpu().tolist()
+    batched_epoch_times = batch["epoch_times"].detach().cpu().tolist()
+    batched_input_ids = batch["input_ids"]
+    # Make sure the batch does not exceed batch_size
+    batch_sequences = generate_single_batch(
+        cehrgpt_model,
+        cehrgpt_tokenizer,
+        batched_input_ids,
+        max_new_tokens=max_new_tokens,
+        top_p=1.0,
+        top_k=cehrgpt_tokenizer.vocab_size,
+        device=device,
+    )
+    # Clear the cache
+    torch.cuda.empty_cache()
+
+    trajectories = []
+    for sample_i, (concept_ids, value_indicators, values) in enumerate(
+        zip(
+            batch_sequences["sequences"],
+            batch_sequences["value_indicators"],
+            batch_sequences["values"],
+        )
+    ):
+        (
+            concept_ids,
+            is_numeric_types,
+            number_as_values,
+            concept_as_values,
+            units,
+        ) = normalize_value(concept_ids, values, cehrgpt_tokenizer)
+        epoch_times = batched_epoch_times[sample_i]
+        input_length = len(epoch_times)
+        window_last_observed = batched_epoch_times[sample_i][-1]
+        current_cursor = epoch_times[-1]
+        generated_epoch_times = []
+        valid_indices = []
+        for i in range(input_length, len(concept_ids)):
+            concept_id = concept_ids[i]
+            # We use the left padding strategy in the data collator
+            if concept_id == cehrgpt_tokenizer.pad_token:
+                continue
+            # We need to construct the time stamp
+            if is_att_token(concept_id):
+                current_cursor += extract_time_interval_in_days(concept_id) * 24 * 3600
+            elif is_inpatient_hour_token(concept_id):
+                current_cursor += extract_time_interval_in_hours(concept_id) * 3600
+            elif is_visit_start(concept_id) or is_visit_end(concept_id):
+                continue
+            else:
+                valid_indices.append(i)
+                generated_epoch_times.append(current_cursor)
+
+        trajectories.append(
+            {
+                "subject_id": subject_ids[sample_i],
+                "prediction_time": datetime.datetime.fromtimestamp(
+                    prediction_times[sample_i]
+                ),
+                "window_last_observed_time": datetime.datetime.fromtimestamp(
+                    window_last_observed
+                ),
+                "times": generated_epoch_times,
+                "concept_ids": np.asarray(concept_ids)[valid_indices].tolist(),
+                "numeric_values": np.asarray(number_as_values)[valid_indices].tolist(),
+                "text_value": np.asarray(concept_as_values)[valid_indices].tolist(),
+                "units": np.asarray(units)[valid_indices].tolist(),
+            }
+        )
+
+    trajectories = (
+        pl.DataFrame(trajectories)
+        .explode(["times", "concept_ids", "numeric_values", "text_value", "units"])
+        .rename(
+            {
+                "times": "time",
+                "concept_ids": "code",
+                "numeric_values": "numeric_value",
+                "units": "unit",
+            }
+        )
+        .select(
+            "subject_id",
+            "prediction_time",
+            "window_last_observed_time",
+            "time",
+            "code",
+            "numeric_value",
+            "text_value",
+            "unit",
+        )
+    )
+    trajectories.write_parquet(data_output_path)
 
 
 def main():
@@ -38,89 +178,90 @@ def main():
     cehrgpt_model.generation_config.pad_token_id = cehrgpt_tokenizer.pad_token_id
     cehrgpt_model.generation_config.eos_token_id = cehrgpt_tokenizer.end_token_id
     cehrgpt_model.generation_config.bos_token_id = cehrgpt_tokenizer.end_token_id
-    max_new_tokens = cehrgpt_model.config.n_positions
 
     if not os.path.exists(training_args.output_dir):
         os.makedirs(training_args.output_dir)
 
-    # Organize them into a single DatasetDict
-    final_splits = prepare_finetune_dataset(data_args, training_args, cehrgpt_args)
-    batch_size = training_args.per_device_eval_batch_size
-    dataset = final_splits["test"]
+    prepared_ds_path = generate_prepared_ds_path(
+        data_args, model_args, data_folder=data_args.cohort_folder
+    )
 
-    for row_index, row in enumerate(dataset):
-        current_person_id = row["person_id"]
-        prediction_time = row["index_date"]
-        prompts = [cehrgpt_tokenizer.encode(row["concept_ids"]) * batch_size]
-        # Make sure the batch does not exceed batch_size
-        batch_sequences = generate_single_batch(
-            cehrgpt_model,
-            cehrgpt_tokenizer,
-            prompts,
-            max_new_tokens=max_new_tokens,
-            top_p=1.0,
-            top_k=cehrgpt_tokenizer.vocab_size,
-            device=device,
-        )
-        # Clear the cache
-        torch.cuda.empty_cache()
-
-        trajectories = []
-        for i, (concept_ids, value_indicators, values) in enumerate(
-            zip(
-                batch_sequences["sequences"],
-                batch_sequences["value_indicators"],
-                batch_sequences["values"],
+    processed_dataset = None
+    if is_main_process(training_args.local_rank):
+        # If the full dataset has been tokenized, we don't want to tokenize the cohort containing
+        # the subset of the data. We should slice out the portion of the tokenized sequences for each sample
+        if cehrgpt_args.tokenized_full_dataset_path is not None:
+            processed_dataset = extract_cohort_sequences(data_args, cehrgpt_args)
+        else:
+            # Organize them into a single DatasetDict
+            final_splits = prepare_finetune_dataset(
+                data_args, training_args, cehrgpt_args
             )
+            # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
+            if not data_args.streaming:
+                all_columns = final_splits["train"].column_names
+                if "visit_concept_ids" in all_columns:
+                    final_splits = final_splits.remove_columns(["visit_concept_ids"])
+
+            processed_dataset = create_cehrgpt_finetuning_dataset(
+                dataset=final_splits,
+                cehrgpt_tokenizer=cehrgpt_tokenizer,
+                data_args=data_args,
+            )
+        if not data_args.streaming:
+            processed_dataset.save_to_disk(prepared_ds_path)
+            processed_dataset.cleanup_cache_files()
+
+    # After main-process-only operations, synchronize all processes to ensure consistency
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+
+    # We suppress the additional learning objectives in fine-tuning
+    data_collator = CehrGptDataCollator(
+        tokenizer=cehrgpt_tokenizer,
+        max_length=cehrgpt_args.generation_input_length,
+        include_values=cehrgpt_model.config.include_values,
+        pretraining=False,
+        include_ttv_prediction=False,
+        use_sub_time_tokenization=False,
+        include_demographics=False,
+        add_linear_prob_token=False,
+    )
+    test_dataloader = DataLoader(
+        dataset=processed_dataset["test"],
+        batch_size=training_args.per_device_eval_batch_size,
+        num_workers=training_args.dataloader_num_workers,
+        collate_fn=data_collator,
+        pin_memory=training_args.dataloader_pin_memory,
+    )
+
+    LOG.info(
+        "Generating %s trajectories per sample",
+        cehrgpt_args.num_of_trajectories_per_sample,
+    )
+
+    for sample_i in range(cehrgpt_args.num_of_trajectories_per_sample):
+        sample_output_dir = Path(training_args.output_dir) / f"{sample_i}"
+        sample_output_dir.mkdir(exist_ok=True, parents=True)
+        for batch_i, batch in tqdm(
+            enumerate(test_dataloader), desc="Generating features"
         ):
-            (
-                concept_ids,
-                is_numeric_types,
-                number_as_values,
-                concept_as_values,
-                units,
-            ) = normalize_value(concept_ids, values, cehrgpt_tokenizer)
+            output_parquet_file = sample_output_dir / f"{batch_i}.parquet"
+            if output_parquet_file.exists():
+                LOG.info("%s already exists, skip...", output_parquet_file)
+                continue
 
-            trajectories.append(
-                {
-                    "subject_id": current_person_id,
-                    "prediction_time": prediction_time,
-                    "concept_ids": concept_ids,
-                    "numeric_values": number_as_values,
-                    "text_value": concept_as_values,
-                    "units": units,
-                    "trajectory_id": i + 1,
-                }
+            generate_trajectories_per_batch(
+                batch,
+                cehrgpt_tokenizer,
+                cehrgpt_model,
+                device,
+                sample_output_dir / f"{batch_i}.parquet",
+                cehrgpt_args.generation_max_new_tokens,
             )
-
-        trajectories = (
-            pl.DataFrame(trajectories)
-            .with_columns(
-                pl.struct(
-                    [
-                        pl.col("concept_ids").alias("code"),
-                        pl.col("numeric_values").alias("numeric_value"),
-                        pl.col("text_value").alias("text_value"),
-                        pl.col("units").alias("unit"),
-                    ]
-                ).alias("event")
-            )
-            .explode("event")
-            .unnest("event")
-            .select(
-                "subject_id",
-                "prediction_time",
-                "trajectory_id",
-                "code",
-                "numeric_value",
-                "text_value",
-                "unit",
-            )
-        )
-        trajectories.write_parquet(
-            os.path.join(training_args.output_dir, f"{row_index}.parquet")
-        )
 
 
 if __name__ == "__main__":
+    # ✅ Call first thing inside main()
+    seed_all(42)
     main()
