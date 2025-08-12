@@ -47,7 +47,7 @@ def prepare_finetune_dataset(
     data_args: DataTrainingArguments,
     training_args: TrainingArguments,
     cehrgpt_args: CehrGPTArguments,
-    cache_file_collector: CacheFileCollector,
+    cache_file_collector: Optional[CacheFileCollector] = None,
 ) -> DatasetDict:
     # If the data is in the MEDS format, we need to convert it to the CEHR-BERT format
     if data_args.is_data_in_meds:
@@ -91,8 +91,9 @@ def prepare_finetune_dataset(
                     "Clean up the cached files for the cehrgpt dataset transformed from the MEDS: %s",
                     stats,
                 )
-                # Clean up the files created from the data generator
-                cache_file_collector.remove_cache_files()
+                if cache_file_collector:
+                    # Clean up the files created from the data generator
+                    cache_file_collector.remove_cache_files()
                 dataset = load_from_disk(str(meds_extension_path))
 
         train_set = dataset["train"]
