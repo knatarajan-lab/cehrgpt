@@ -1,8 +1,8 @@
+import datetime
 import glob
 import os
 import shutil
 import uuid
-from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Optional, Union
@@ -316,9 +316,12 @@ def main():
                 for data_dir in [data_args.data_folder, data_args.test_data_folder]
             ]
         )
+
         demographics_df["index_date"] = (
-            demographics_df["index_date"] - datetime(1970, 1, 1)
+            demographics_df["index_date"].dt.tz_localize("UTC")
+            - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
         ).dt.total_seconds()
+
         demographics_dict = {
             (row["person_id"], row["index_date"]): {
                 "gender_concept_id": row["gender_concept_id"],
@@ -358,7 +361,7 @@ def main():
 
                 prediction_time = list(
                     map(
-                        lambda posix_time: datetime.utcfromtimestamp(
+                        lambda posix_time: datetime.datetime.utcfromtimestamp(
                             posix_time
                         ).replace(tzinfo=None),
                         prediction_time_posix,

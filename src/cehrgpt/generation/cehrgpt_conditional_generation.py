@@ -117,7 +117,7 @@ def generate_trajectories_per_batch(
         for i in range(input_length, len(concept_ids)):
             concept_id = concept_ids[i]
             # We use the left padding strategy in the data collator
-            if concept_id == cehrgpt_tokenizer.pad_token:
+            if concept_id in [cehrgpt_tokenizer.pad_token, cehrgpt_tokenizer.end_token]:
                 continue
             # We need to construct the time stamp
             if is_att_token(concept_id):
