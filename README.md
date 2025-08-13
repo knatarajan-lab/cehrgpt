@@ -78,6 +78,9 @@ export CEHR_GPT_MODEL_DIR=""
 export MEDS_DIR=""
 export MEDS_READER_DIR=""
 ```
+### Create the MIMIC MEDS data
+Follow the MEDS transformation instruction in [MEDS_transforms](https://github.com/mmcdermott/MEDS_transforms/) to create the MEDS data from the MIMIC files.
+
 ### Create the meds reader
 ```bash
 meds_reader_convert $MEDS_DIR $MEDS_READER_DIR --num_threads 10
@@ -90,7 +93,7 @@ python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner \
   --tokenizer_name_or_path $CEHR_GPT_MODEL_DIR \
   --output_dir $CEHR_GPT_MODEL_DIR \
   --data_folder $MEDS_READER_DIR \
-  --dataset_prepared_path "$CEHR_GPT_DATA_DIR/dataset_prepared" \
+  --dataset_prepared_path "$CEHR_GPT_MODEL_DIR/dataset_prepared" \
   --do_train true --seed 42 \
   --dataloader_num_workers 16 --dataloader_prefetch_factor 8 \
   --hidden_size 768 --num_hidden_layers 14 --max_position_embeddings 8192 \
@@ -120,7 +123,7 @@ Generate MEDS trajectories
 python -u -m cehrgpt.generation.cehrgpt_conditional_generation \
   --cohort_folder $MEDS_LABEL_COHORT_DIR \
   --data_folder $MEDS_READER_DIR \
-  --dataset_prepared_path "$CEHR_GPT_DATA_DIR/dataset_prepared" \
+  --dataset_prepared_path "$CEHR_GPT_MODEL_DIR/dataset_prepared" \
   --model_name_or_path $CEHR_GPT_MODEL_DIR \
   --tokenizer_name_or_path $CEHR_GPT_MODEL_DIR \
   --output_dir $MEDS_TRAJECTORY_DIR \
