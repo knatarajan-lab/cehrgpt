@@ -70,23 +70,36 @@ sh scripts/omop_pipeline.sh \
   $OMOP_VOCAB_DIR
 ```
 
-## MEDS Support
-Below is an example of pretraining CEHR-GPT using the MIMIC IV data in the MEDS format
-### Set up environment variables
-```bash
-export CEHR_GPT_MODEL_DIR=""
-export MEDS_DIR=""
-export MEDS_READER_DIR=""
-```
-### Create the MIMIC MEDS data
-Follow the MEDS transformation instruction in [MEDS_transforms](https://github.com/mmcdermott/MEDS_transforms/) to create the MEDS data from the MIMIC files.
+# MEDS Support
 
-### Create the meds reader
+This section demonstrates how to pretrain CEHR-GPT using MIMIC-IV data in the MEDS (Medical Event Data Standard) format.
+
+## Prerequisites
+
+Set up the required environment variables before beginning:
+
+```bash
+export CEHR_GPT_MODEL_DIR=""    # Path to CEHR-GPT model directory
+export MEDS_DIR=""              # Path to MEDS data directory
+export MEDS_READER_DIR=""       # Path to MEDS reader output directory
+```
+
+## Step 1: Create MIMIC MEDS Data
+
+Transform your MIMIC files into MEDS format by following the instructions in the [MEDS_transforms](https://github.com/mmcdermott/MEDS_transforms/) repository.
+
+## Step 2: Create the MEDS Reader
+
+Convert the MEDS data for use with CEHR-GPT:
+
 ```bash
 meds_reader_convert $MEDS_DIR $MEDS_READER_DIR --num_threads 10
 ```
 
-### Pretrain CEHR-GPT using the MIMIC MEDS data
+## Step 3: Pretrain CEHR-GPT
+
+Run the pretraining process using the prepared MEDS data:
+
 ```bash
 python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner \
   --model_name_or_path $CEHR_GPT_MODEL_DIR \
@@ -108,18 +121,25 @@ python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner \
   --meds_to_cehrbert_conversion_type "MedsToBertMimic4"
 ```
 
-### Generate MEDS trajectories
+## Step 4: Generate MEDS Trajectories
 
-Set the environment variables for generating MEDS trajectories for the task labels [`subject_id`, `prediction_time`, `boolean_value` (optional)]
+### Environment Setup for Trajectory Generation
+
+Configure additional environment variables for trajectory generation with task labels (`subject_id`, `prediction_time`, `boolean_value` [optional]):
+
 ```bash
-# MEDS_LABEL_COHORT_DIR must be a folder containing a set of parquet files
-export MEDS_LABEL_COHORT_DIR=""
-export MEDS_TRAJECTORY_DIR=""
+# MEDS_LABEL_COHORT_DIR must contain a set of parquet files
+export MEDS_LABEL_COHORT_DIR=""     # Path to cohort labels directory
+export MEDS_TRAJECTORY_DIR=""       # Path for trajectory output
 ```
-Generate MEDS trajectories
+
+### Generate Trajectories
+
+Create synthetic patient trajectories using the trained model:
+
+> **Important:** The total sequence length (`generation_input_length` + `generation_max_new_tokens`) cannot exceed the `max_position_embeddings` value (8192) defined during pretraining.
+
 ```bash
-# `generation_input_length` will determine the input length
-# `generation_max_new_tokens` will determine the max number of new tokens
 python -u -m cehrgpt.generation.cehrgpt_conditional_generation \
   --cohort_folder $MEDS_LABEL_COHORT_DIR \
   --data_folder $MEDS_READER_DIR \
@@ -137,6 +157,12 @@ python -u -m cehrgpt.generation.cehrgpt_conditional_generation \
   --include_auxiliary_token --include_demographic_prompt \
   --include_inpatient_hour_token
 ```
+
+### Parameters Explanation
+
+- `generation_input_length`: Controls the length of input context for generation
+- `generation_max_new_tokens`: Maximum number of new tokens to generate
+- `num_of_trajectories_per_sample`: Number of trajectories to generate per patient sample
 
 ## Citation
 ```
