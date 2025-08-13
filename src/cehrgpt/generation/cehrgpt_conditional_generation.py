@@ -105,13 +105,15 @@ def generate_trajectories_per_batch(
             concept_as_values,
             units,
         ) = normalize_value(concept_ids, values, cehrgpt_tokenizer)
+
         epoch_times = batched_epoch_times[sample_i]
         input_length = len(epoch_times)
         # Getting the last observed event time from the token before the prediction time
-        window_last_observed = batched_epoch_times[sample_i][input_length - 1]
+        window_last_observed = epoch_times[input_length - 1]
         current_cursor = epoch_times[-1]
         generated_epoch_times = []
         valid_indices = []
+
         for i in range(input_length, len(concept_ids)):
             concept_id = concept_ids[i]
             # We use the left padding strategy in the data collator
@@ -127,18 +129,20 @@ def generate_trajectories_per_batch(
             else:
                 valid_indices.append(i)
                 generated_epoch_times.append(
-                    datetime.datetime.fromtimestamp(current_cursor)
+                    datetime.datetime.utcfromtimestamp(current_cursor).replace(
+                        tzinfo=None
+                    )
                 )
 
         trajectories.append(
             {
                 "subject_id": subject_ids[sample_i],
-                "prediction_time": datetime.datetime.fromtimestamp(
+                "prediction_time": datetime.datetime.utcfromtimestamp(
                     prediction_times[sample_i]
-                ),
-                "window_last_observed_time": datetime.datetime.fromtimestamp(
+                ).replace(tzinfo=None),
+                "window_last_observed_time": datetime.datetime.utcfromtimestamp(
                     window_last_observed
-                ),
+                ).replace(tzinfo=None),
                 "times": generated_epoch_times,
                 "concept_ids": np.asarray(concept_ids)[valid_indices].tolist(),
                 "numeric_values": np.asarray(number_as_values)[valid_indices].tolist(),

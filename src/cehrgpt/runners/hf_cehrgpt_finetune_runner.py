@@ -580,7 +580,15 @@ def do_predict(
             index_dates = batch.pop("index_date").numpy().squeeze()
             if index_dates.ndim == 0:
                 index_dates = np.asarray([index_dates])
-            index_dates = list(map(datetime.fromtimestamp, index_dates.tolist()))
+
+            index_dates = list(
+                map(
+                    lambda posix_time: datetime.utcfromtimestamp(posix_time).replace(
+                        tzinfo=None
+                    ),
+                    index_dates.tolist(),
+                )
+            )
 
             batch = {k: v.to(device) for k, v in batch.items()}
             # Forward pass

@@ -48,11 +48,13 @@ CEHRGPT_COLUMNS = [
 
 def convert_date_to_posix_time(index_date: Union[datetime.date, int, float]) -> float:
     if isinstance(index_date, datetime.date):
-        return datetime.datetime.combine(
-            index_date, datetime.datetime.min.time()
-        ).timestamp()
+        return (
+            datetime.datetime.combine(index_date, datetime.datetime.min.time())
+            .replace(tzinfo=datetime.timezone.utc)
+            .timestamp()
+        )
     elif isinstance(index_date, datetime.datetime):
-        return index_date.timestamp()
+        return index_date.replace(tzinfo=datetime.timezone.utc).timestamp()
     return index_date
 
 
@@ -131,7 +133,9 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
         cehrgpt_record["concept_as_values"].append(concept_as_value)
         cehrgpt_record["units"].append(unit)
         cehrgpt_record["is_numeric_types"].append(is_numeric_type)
-        cehrgpt_record["epoch_times"].append(time.timestamp())
+        cehrgpt_record["epoch_times"].append(
+            time.replace(tzinfo=datetime.timezone.utc).timestamp()
+        )
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
         cehrgpt_record = {
@@ -363,7 +367,9 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
         cehrgpt_record["num_of_visits"] = len(visits)
 
         if record.get("index_date", None) is not None:
-            cehrgpt_record["index_date"] = record["index_date"].timestamp()
+            cehrgpt_record["index_date"] = (
+                record["index_date"].replace(tzinfo=datetime.timezone.utc).timestamp()
+            )
         if record.get("label", None) is not None:
             cehrgpt_record["label"] = record["label"]
         if record.get("age_at_index", None) is not None:
@@ -532,9 +538,13 @@ class ExtractTokenizedSequenceDataMapping:
         prediction_start_end_times = [
             (
                 self._calculate_prediction_start_time(
-                    prediction_time_label_map["index_date"].timestamp()
+                    prediction_time_label_map["index_date"]
+                    .replace(tzinfo=datetime.timezone.utc)
+                    .timestamp()
                 ),
-                prediction_time_label_map["index_date"].timestamp(),
+                prediction_time_label_map["index_date"]
+                .replace(tzinfo=datetime.timezone.utc)
+                .timestamp(),
                 prediction_time_label_map["label"],
             )
             for prediction_time_label_map in prediction_times
