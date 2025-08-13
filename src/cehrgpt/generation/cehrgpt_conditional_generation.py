@@ -1,6 +1,7 @@
 import datetime
 import os
 import random
+import shutil
 from pathlib import Path
 from typing import Any, Dict
 
@@ -9,6 +10,7 @@ import polars as pl
 import torch
 import torch.distributed as dist
 from cehrbert.runners.runner_util import generate_prepared_ds_path
+from datasets import load_from_disk
 from meds import held_out_split, train_split, tuning_split
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -36,6 +38,7 @@ from cehrgpt.runners.data_utils import (
     prepare_finetune_dataset,
 )
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
+from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
 
 LOG = logging.get_logger("transformers")
 
@@ -199,6 +202,24 @@ def main():
     )
 
     processed_dataset = None
+    if any(prepared_ds_path.glob("*")):
+        LOG.info(f"Loading prepared dataset from disk at {prepared_ds_path}...")
+        processed_dataset = load_from_disk(str(prepared_ds_path))
+        LOG.info("Prepared dataset loaded from disk...")
+        if cehrgpt_args.expand_tokenizer:
+            if tokenizer_exists(training_args.output_dir):
+                cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
+                    training_args.output_dir
+                )
+            else:
+                LOG.warning(
+                    f"CehrGptTokenizer must exist in {training_args.output_dir} "
+                    f"when the dataset has been processed and expand_tokenizer is set to True. "
+                    f"Please delete the processed dataset at {prepared_ds_path}."
+                )
+                processed_dataset = None
+                shutil.rmtree(prepared_ds_path)
+
     if is_main_process(training_args.local_rank):
         # If the full dataset has been tokenized, we don't want to tokenize the cohort containing
         # the subset of the data. We should slice out the portion of the tokenized sequences for each sample
