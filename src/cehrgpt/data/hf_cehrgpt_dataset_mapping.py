@@ -46,10 +46,14 @@ CEHRGPT_COLUMNS = [
 ]
 
 
-def convert_date_to_posix_time(index_date: datetime.date) -> float:
-    return datetime.datetime.combine(
-        index_date, datetime.datetime.min.time()
-    ).timestamp()
+def convert_date_to_posix_time(index_date: Union[datetime.date, int, float]) -> float:
+    if isinstance(index_date, datetime.date):
+        return datetime.datetime.combine(
+            index_date, datetime.datetime.min.time()
+        ).timestamp()
+    elif isinstance(index_date, datetime.datetime):
+        return index_date.timestamp()
+    return index_date
 
 
 class DatasetMappingDecorator(DatasetMapping):
@@ -359,7 +363,7 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
         cehrgpt_record["num_of_visits"] = len(visits)
 
         if record.get("index_date", None) is not None:
-            cehrgpt_record["index_date"] = record["index_date"]
+            cehrgpt_record["index_date"] = record["index_date"].timestamp()
         if record.get("label", None) is not None:
             cehrgpt_record["label"] = record["label"]
         if record.get("age_at_index", None) is not None:

@@ -219,10 +219,6 @@ def main():
             len(processed_dataset["test"]),
         )
 
-    LOG.info(f"cehrgpt_model.config.vocab_size: {cehrgpt_model.config.vocab_size}")
-    LOG.info(f"cehrgpt_tokenizer.vocab_size: {cehrgpt_tokenizer.vocab_size}")
-    if cehrgpt_model.config.vocab_size < cehrgpt_tokenizer.vocab_size:
-        cehrgpt_model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)
     if (
         cehrgpt_model.config.max_position_embeddings
         < model_args.max_position_embeddings
@@ -320,10 +316,9 @@ def main():
                 for data_dir in [data_args.data_folder, data_args.test_data_folder]
             ]
         )
-        # This is a pre-caution in case the index_date is not a datetime type
-        demographics_df["index_date"] = pd.to_datetime(
-            demographics_df["index_date"]
-        ).dt.date
+        demographics_df["index_date"] = (
+            demographics_df["index_date"] - datetime(1970, 1, 1)
+        ).dt.total_seconds()
         demographics_dict = {
             (row["person_id"], row["index_date"]): {
                 "gender_concept_id": row["gender_concept_id"],
