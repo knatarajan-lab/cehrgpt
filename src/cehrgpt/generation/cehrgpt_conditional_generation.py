@@ -107,7 +107,8 @@ def generate_trajectories_per_batch(
         ) = normalize_value(concept_ids, values, cehrgpt_tokenizer)
         epoch_times = batched_epoch_times[sample_i]
         input_length = len(epoch_times)
-        window_last_observed = batched_epoch_times[sample_i][-1]
+        # Getting the last observed event time from the token before the prediction time
+        window_last_observed = batched_epoch_times[sample_i][input_length - 1]
         current_cursor = epoch_times[-1]
         generated_epoch_times = []
         valid_indices = []
@@ -220,7 +221,7 @@ def main():
                 processed_dataset = None
                 shutil.rmtree(prepared_ds_path)
 
-    if is_main_process(training_args.local_rank):
+    if processed_dataset is None and is_main_process(training_args.local_rank):
         # If the full dataset has been tokenized, we don't want to tokenize the cohort containing
         # the subset of the data. We should slice out the portion of the tokenized sequences for each sample
         if cehrgpt_args.tokenized_full_dataset_path is not None:
