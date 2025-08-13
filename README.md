@@ -70,6 +70,71 @@ sh scripts/omop_pipeline.sh \
   $OMOP_VOCAB_DIR
 ```
 
+## MEDS Support
+Below is an example of pretraining CEHR-GPT using the MIMIC IV data in the MEDS format
+### Set up environment variables
+```bash
+export CEHR_GPT_MODEL_DIR=""
+export MEDS_DIR=""
+export MEDS_READER_DIR=""
+```
+### Create the meds reader
+```bash
+meds_reader_convert $MEDS_DIR $MEDS_READER_DIR --num_threads 10
+```
+
+### Pretrain CEHR-GPT using the MIMIC MEDS data
+```bash
+python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner \
+  --model_name_or_path $CEHR_GPT_MODEL_DIR \
+  --tokenizer_name_or_path $CEHR_GPT_MODEL_DIR \
+  --output_dir $CEHR_GPT_MODEL_DIR \
+  --data_folder $MEDS_READER_DIR \
+  --dataset_prepared_path "$CEHR_GPT_DATA_DIR/dataset_prepared" \
+  --do_train true --seed 42 \
+  --dataloader_num_workers 16 --dataloader_prefetch_factor 8 \
+  --hidden_size 768 --num_hidden_layers 14 --max_position_embeddings 8192 \
+  --evaluation_strategy epoch --save_strategy epoch \
+  --sample_packing --max_tokens_per_batch 16384 \
+  --warmup_steps 500 --weight_decay 0.01 \
+  --num_train_epochs 50 --learning_rate 0.0002 \
+  --use_early_stopping --early_stopping_threshold 0.001 \
+  --is_data_in_meds --inpatient_att_function_type day \
+  --att_function_type day --include_inpatient_hour_token \
+  --include_auxiliary_token --include_demographic_prompt \
+  --meds_to_cehrbert_conversion_type "MedsToBertMimic4"
+```
+
+### Generate MEDS trajectories
+
+Set the environment variables for generating MEDS trajectories for the task labels [`subject_id`, `prediction_time`, `boolean_value` (optional)]
+```bash
+# MEDS_LABEL_COHORT_DIR must be a folder containing a set of parquet files
+export MEDS_LABEL_COHORT_DIR=""
+export MEDS_TRAJECTORY_DIR=""
+```
+Generate MEDS trajectories
+```bash
+# `generation_input_length` will determine the input length
+# `generation_max_new_tokens` will determine the max number of new tokens
+python -u -m cehrgpt.generation.cehrgpt_conditional_generation \
+  --cohort_folder $MEDS_LABEL_COHORT_DIR \
+  --data_folder $MEDS_READER_DIR \
+  --dataset_prepared_path "$CEHR_GPT_DATA_DIR/dataset_prepared" \
+  --model_name_or_path $CEHR_GPT_MODEL_DIR \
+  --tokenizer_name_or_path $CEHR_GPT_MODEL_DIR \
+  --output_dir $MEDS_TRAJECTORY_DIR \
+  --per_device_eval_batch_size 16 \
+  --num_of_trajectories_per_sample 2 \
+  --generation_input_length 4096 \
+  --generation_max_new_tokens 4096 \
+  --is_data_in_meds \
+  --att_function_type day --inpatient_att_function_type day \
+  --meds_to_cehrbert_conversion_type MedsToBertMimic4 \
+  --include_auxiliary_token --include_demographic_prompt \
+  --include_inpatient_hour_token
+```
+
 ## Citation
 ```
 @article{cehrgpt2024,
