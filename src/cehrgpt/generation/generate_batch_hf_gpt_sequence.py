@@ -75,6 +75,8 @@ def generate_single_batch(
     tokenizer: CehrGptTokenizer,
     prompts: List[List[int]],
     max_length: int,
+    values: Optional[torch.Tensor] = None,
+    value_indicators: Optional[torch.Tensor] = None,
     max_new_tokens: Optional[int] = None,
     mini_num_of_concepts=1,
     top_p=0.95,
@@ -109,9 +111,17 @@ def generate_single_batch(
             num_beam_groups=num_beam_groups,
             epsilon_cutoff=epsilon_cutoff,
         )
+
         batched_prompts = torch.tensor(prompts).to(device)
+        if values is not None:
+            values = values.to(device)
+        if value_indicators is not None:
+            value_indicators = value_indicators.to(device)
+
         results = model.generate(
             inputs=batched_prompts,
+            values=values,
+            value_indicators=value_indicators,
             generation_config=generation_config,
             lab_token_ids=tokenizer.lab_token_ids,
         )

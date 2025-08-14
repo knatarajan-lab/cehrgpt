@@ -379,6 +379,10 @@ def main():
                 if labels.ndim == 0:
                     labels = np.asarray([labels])
 
+                # Right now the model does not support this column, we need to pop it
+                if "epoch_times" in batch:
+                    batch.pop("epoch_times")
+
                 batch = {k: v.to(device) for k, v in batch.items()}
                 # Forward pass
                 cehrgpt_output = cehrgpt_model(

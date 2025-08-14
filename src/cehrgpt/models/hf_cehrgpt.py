@@ -1869,11 +1869,19 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 [] if self.config.lab_token_ids is None else self.config.lab_token_ids,
                 dtype=torch.int32,
             )
-        value_indicators = torch.zeros_like(input_ids).to(torch.bool)
-        values = torch.zeros_like(
-            input_ids,
-            dtype=torch.int32,
-        )
+
+        if model_kwargs.get("value_indicators", None) is not None:
+            value_indicators = model_kwargs.get("value_indicators")
+        else:
+            value_indicators = torch.zeros_like(input_ids).to(torch.bool)
+
+        if model_kwargs.get("values", None) is not None:
+            values = model_kwargs.get("values")
+        else:
+            values = torch.zeros_like(
+                input_ids,
+                dtype=torch.int32,
+            )
         # Generate initial random_vectors
         if self.cehrgpt.config.causal_sfm:
             model_kwargs["random_vectors"] = torch.rand(
