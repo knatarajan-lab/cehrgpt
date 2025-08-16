@@ -469,19 +469,19 @@ class GPT2Block(nn.Module):
             if getattr(config, "_attn_implementation", "eager") == "flash_attention_2"
             else GPT2AttentionRoPE
         )
-        self.input_layernorm = RMSNorm(hidden_size, eps=config.layer_norm_epsilon)
+        self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.attn = attention_class(
             config=config, layer_idx=layer_idx, apply_rotary=config.apply_rotary
         )
-        self.post_attention_layernorm = RMSNorm(
-            hidden_size, eps=config.layer_norm_epsilon
-        )
+        self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
 
         if config.add_cross_attention:
             self.crossattention = attention_class(
                 config=config, is_cross_attention=True, layer_idx=layer_idx
             )
-            self.ln_cross_attn = RMSNorm(hidden_size, eps=config.layer_norm_epsilon)
+            self.ln_cross_attn = nn.LayerNorm(
+                hidden_size, eps=config.layer_norm_epsilon
+            )
 
         decoder_mlp_function = getattr(config, "decoder_mlp", "GPT2MLP")
         if decoder_mlp_function == "GPT2MLP":
@@ -507,7 +507,7 @@ class GPT2Block(nn.Module):
         Optional[Tuple[torch.Tensor, Tuple[torch.FloatTensor, ...]]],
     ]:
         residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.ln_1(hidden_states)
         attn_outputs = self.attn(
             hidden_states,
             position_ids=position_ids,
@@ -547,7 +547,7 @@ class GPT2Block(nn.Module):
             )  # add cross attentions if we output attention weights
 
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.ln_2(hidden_states)
         feed_forward_hidden_states = self.mlp(hidden_states)
         # residual connection
         hidden_states = residual + feed_forward_hidden_states
