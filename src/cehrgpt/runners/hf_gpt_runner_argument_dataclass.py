@@ -231,10 +231,6 @@ class CehrGPTArguments:
         default=None,
         metadata={"help": "The directory where the concept data is stored."},
     )
-    concept_dir: Optional[str] = dataclasses.field(
-        default=None,
-        metadata={"help": "The directory where the concept data is stored."},
-    )
     average_over_sequence: bool = dataclasses.field(
         default=False,
         metadata={"help": "Whether or not to average tokens per sequence"},

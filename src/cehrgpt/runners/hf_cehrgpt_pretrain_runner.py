@@ -4,6 +4,7 @@ from typing import Optional, Union
 
 import datasets
 import numpy as np
+import pandas as pd
 import torch
 import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import (
@@ -72,50 +73,40 @@ def load_and_create_tokenizer(
     data_args: DataTrainingArguments,
     model_args: ModelArguments,
     cehrgpt_args: CehrGPTArguments,
-    dataset: Optional[Union[Dataset, DatasetDict]] = None,
+    dataset: Union[Dataset, DatasetDict],
 ) -> CehrGptTokenizer:
-
-    ontology: Optional[Ontology] = None
-    concept_name_mapping = {}
-
-    if cehrgpt_args.include_motor_time_to_event and not cehrgpt_args.vocab_dir:
-        raise RuntimeError(
-            "motor_vocab_dir must be specified if include_motor_time_to_event is True"
-        )
-
-    if cehrgpt_args.vocab_dir:
-        import pandas as pd
-
-        LOG.info("Loading concept data from disk at %s", cehrgpt_args.vocab_dir)
-        concept_pd = pd.read_parquet(os.path.join(cehrgpt_args.vocab_dir, "concept"))
-        for row in concept_pd.itertuples():
-            concept_name_mapping[str(getattr(row, "concept_id"))] = getattr(
-                row, "concept_name"
-            )
-
-        if cehrgpt_args.motor_use_ontology:
-            LOG.info("Creating ontology for MOTOR TTE predictions")
-            ontology = Ontology(cehrgpt_args.vocab_dir)
-            train_val_dataset = datasets.concatenate_datasets(
-                [dataset["train"], dataset["validation"]]
-            )
-            ontology.prune_to_dataset(
-                train_val_dataset,
-                num_proc=data_args.preprocessing_num_workers,
-                remove_ontologies={"SPL", "HemOnc", "LOINC"},
-            )
 
     # Try to load the pretrained tokenizer
     tokenizer_abspath = os.path.expanduser(model_args.tokenizer_name_or_path)
-    try:
-        tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_abspath)
-    except Exception as e:
-        LOG.warning(e)
-        if dataset is None:
+    if not tokenizer_exists(tokenizer_abspath):
+        if cehrgpt_args.include_motor_time_to_event and not cehrgpt_args.vocab_dir:
             raise RuntimeError(
-                f"Failed to load the tokenizer from {tokenizer_abspath} with the error \n{e}\n"
-                f"Tried to create the tokenizer, however the dataset is not provided."
+                "motor_vocab_dir must be specified if include_motor_time_to_event is True"
             )
+        ontology: Optional[Ontology] = None
+        concept_name_mapping = {}
+        if cehrgpt_args.vocab_dir:
+            LOG.info("Loading concept data from disk at %s", cehrgpt_args.vocab_dir)
+            concept_pd = pd.read_parquet(
+                os.path.join(cehrgpt_args.vocab_dir, "concept")
+            )
+            for row in concept_pd.itertuples():
+                concept_name_mapping[str(getattr(row, "concept_id"))] = getattr(
+                    row, "concept_name"
+                )
+
+            if cehrgpt_args.motor_use_ontology:
+                LOG.info("Creating ontology for MOTOR TTE predictions")
+                ontology = Ontology(cehrgpt_args.vocab_dir)
+                train_val_dataset = datasets.concatenate_datasets(
+                    [dataset["train"], dataset["validation"]]
+                )
+                ontology.prune_to_dataset(
+                    train_val_dataset,
+                    num_proc=data_args.preprocessing_num_workers,
+                    remove_ontologies={"SPL", "HemOnc", "LOINC"},
+                )
+
         LOG.info("Started training the tokenizer ...")
         train_val_dataset = datasets.concatenate_datasets(
             [dataset["train"], dataset["validation"]]
@@ -137,7 +128,9 @@ def load_and_create_tokenizer(
         LOG.info("Finished training the tokenizer ...")
         tokenizer.save_pretrained(tokenizer_abspath)
         LOG.info("Saved the tokenizer to %s", tokenizer_abspath)
-
+    else:
+        LOG.info("The tokenizer exists and will be loaded from %s", tokenizer_abspath)
+        tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_abspath)
     return tokenizer
 
 
