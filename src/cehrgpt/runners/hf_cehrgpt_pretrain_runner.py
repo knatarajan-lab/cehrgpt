@@ -186,6 +186,8 @@ def load_and_create_model(
 
         model_args_cehrgpt = model_args.as_dict()
         model_args_cehrgpt.pop("attn_implementation")
+        # CEHR-GPT does not support this anymore
+        model_args_cehrgpt.pop("exclude_position_ids")
         model_config = CEHRGPTConfig(
             activation_function=cehrgpt_args.activation_function,
             vocab_size=tokenizer.vocab_size,

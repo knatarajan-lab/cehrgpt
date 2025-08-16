@@ -175,11 +175,6 @@ def model_init(
         model.config.class_weights = cehrgpt_args.class_weights
         LOG.info(f"Setting class_weights to {model.config.class_weights}")
 
-    # Enable position embeddings when position embeddings are disabled in pre-training
-    if not model_args.exclude_position_ids and model.cehrgpt.exclude_position_ids:
-        LOG.info(f"Enable the position_embeddings")
-        model.cehrgpt.enable_position_embeddings()
-
     if model.config.max_position_embeddings < model_args.max_position_embeddings:
         LOG.info(
             f"Increase model.config.max_position_embeddings to {model_args.max_position_embeddings}"
@@ -652,9 +647,6 @@ def load_lora_model(
     # Enable include_values when include_values is set to be False during pre-training
     if model_args.include_values and not model.cehrgpt.include_values:
         model.cehrgpt.include_values = True
-    # Enable position embeddings when position embeddings are disabled in pre-training
-    if not model_args.exclude_position_ids and model.cehrgpt.exclude_position_ids:
-        model.cehrgpt.exclude_position_ids = False
     if cehrgpt_args.expand_tokenizer:
         tokenizer = CehrGptTokenizer.from_pretrained(training_args.output_dir)
         # Expand tokenizer to adapt to the finetuning dataset

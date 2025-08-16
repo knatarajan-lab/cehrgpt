@@ -127,7 +127,6 @@ class CEHRGPTConfig(PretrainedConfig):
         scale_attn_by_inverse_layer_idx=False,
         reorder_and_upcast_attn=False,
         apply_rotary=False,
-        exclude_position_ids=False,
         include_values=False,
         value_vocab_size=None,
         include_ttv_prediction=False,
@@ -194,7 +193,6 @@ class CEHRGPTConfig(PretrainedConfig):
         self.lab_token_ids = lab_token_ids
 
         self.apply_rotary = apply_rotary
-        self.exclude_position_ids = exclude_position_ids
         self.include_values = include_values
         self.value_vocab_size = value_vocab_size
 
