@@ -1121,17 +1121,23 @@ class CehrGptTokenizer(PreTrainedTokenizer):
 
             with open(lab_stats_file, "rb") as file:
                 lab_stats = pickle.load(file)
-
-        # Load the demographics stats json file
-        demographics_stats_file = transformers.utils.hub.cached_file(
-            pretrained_model_name_or_path, DEMOGRAPHICS_STATS_FILE_NAME, **kwargs
-        )
-
-        if not demographics_stats_file:
-            return None
-
-        with open(demographics_stats_file, "rb") as file:
-            demographics_stats = pickle.load(file)
+        try:
+            # Load the demographics stats json file
+            demographics_stats_file = transformers.utils.hub.cached_file(
+                pretrained_model_name_or_path, DEMOGRAPHICS_STATS_FILE_NAME, **kwargs
+            )
+            if demographics_stats_file:
+                with open(demographics_stats_file, "rb") as file:
+                    demographics_stats = pickle.load(file)
+            else:
+                demographics_stats = None
+        except EnvironmentError:
+            LOG.warning(
+                f"The %s files does not exist in %s, setting demographics_stats to None",
+                DEMOGRAPHICS_STATS_FILE_NAME,
+                pretrained_model_name_or_path,
+            )
+            demographics_stats = None
 
         # Load the concept_name json file
         concept_name_mapping_file = transformers.utils.hub.cached_file(
@@ -1149,16 +1155,25 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             return None
         concept_code_stats = load_json_file(concept_code_stats_mapping_file)
 
-        # Load the MOTOR time to event codes file
-        motor_tte_task_info_file = transformers.utils.hub.cached_file(
-            pretrained_model_name_or_path,
-            MOTOR_TIME_TO_EVENT_TASK_INFO_FILE_NAME,
-            **kwargs,
-        )
-        if not motor_tte_task_info_file:
-            return None
-        with open(motor_tte_task_info_file, "rb") as file:
-            motor_task_info = pickle.load(file)
+        try:
+            # Load the MOTOR time to event codes file
+            motor_tte_task_info_file = transformers.utils.hub.cached_file(
+                pretrained_model_name_or_path,
+                MOTOR_TIME_TO_EVENT_TASK_INFO_FILE_NAME,
+                **kwargs,
+            )
+            if motor_tte_task_info_file:
+                with open(motor_tte_task_info_file, "rb") as file:
+                    motor_task_info = pickle.load(file)
+            else:
+                motor_task_info = None
+        except EnvironmentError:
+            LOG.warning(
+                f"The %s files does not exist in %s, setting motor_task_info to None",
+                MOTOR_TIME_TO_EVENT_TASK_INFO_FILE_NAME,
+                pretrained_model_name_or_path,
+            )
+            motor_task_info = None
 
         ontology = None
         try:
@@ -1190,8 +1205,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             concept_name_mapping,
             pretrained_embedding_model,
             motor_task_info,
-            demographics_stats["gender_map"],
-            demographics_stats["race_map"],
+            demographics_stats["gender_map"] if demographics_stats else None,
+            demographics_stats["race_map"] if demographics_stats else None,
             ontology=ontology,
         )
 
@@ -1335,9 +1350,10 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             categorical_lab_stats=cehrgpt_tokenizer_copy._categorical_lab_stats,
             concept_name_mapping=cehrgpt_tokenizer_copy._concept_name_mapping,
             pretrained_concept_embedding_model=pretrained_concept_embedding_model,
-            motor_time_to_event_codes=cehrgpt_tokenizer_copy._motor_time_to_event_codes,
+            motor_task_info=cehrgpt_tokenizer_copy._motor_task_info,
             gender_map=cehrgpt_tokenizer_copy._gender_map,
             race_map=cehrgpt_tokenizer_copy._race_map,
+            ontology=cehrgpt_tokenizer_copy._ontology,
         )
 
     @classmethod
