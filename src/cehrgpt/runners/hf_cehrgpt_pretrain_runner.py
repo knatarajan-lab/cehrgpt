@@ -2,6 +2,7 @@ import os
 from functools import partial
 from typing import Optional, Union
 
+import datasets
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -20,7 +21,7 @@ from cehrbert.runners.runner_util import (
     load_parquet_as_dataset,
 )
 from datasets import Dataset, DatasetDict, IterableDatasetDict, load_from_disk
-from transformers import EarlyStoppingCallback, Trainer, TrainingArguments, set_seed
+from transformers import EarlyStoppingCallback, Trainer, set_seed
 from transformers.trainer_utils import is_main_process
 from transformers.utils import is_flash_attn_2_available, logging
 
@@ -34,6 +35,7 @@ from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.omop.ontology import Ontology
 from cehrgpt.runners.data_utils import get_torch_dtype
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
@@ -73,35 +75,36 @@ def load_and_create_tokenizer(
     dataset: Optional[Union[Dataset, DatasetDict]] = None,
 ) -> CehrGptTokenizer:
 
+    ontology: Optional[Ontology] = None
     concept_name_mapping = {}
-    allowed_motor_codes = list()
-    if cehrgpt_args.concept_dir:
-        import pandas as pd
-        from cehrbert_data.const.artificial_tokens import DEATH_TOKEN
-        from meds.schema import death_code
 
-        LOG.info("Loading concept data from disk at %s", cehrgpt_args.concept_dir)
-        concept_pd = pd.read_parquet(cehrgpt_args.concept_dir)
-        LOG.info(
-            "Creating concept name mapping and motor_time_to_event_codes from disk at %s",
-            cehrgpt_args.concept_dir,
+    if cehrgpt_args.include_motor_time_to_event and not cehrgpt_args.vocab_dir:
+        raise RuntimeError(
+            "motor_vocab_dir must be specified if include_motor_time_to_event is True"
         )
+
+    if cehrgpt_args.vocab_dir:
+        import pandas as pd
+
+        LOG.info("Loading concept data from disk at %s", cehrgpt_args.vocab_dir)
+        concept_pd = pd.read_parquet(os.path.join(cehrgpt_args.vocab_dir, "concept"))
         for row in concept_pd.itertuples():
             concept_name_mapping[str(getattr(row, "concept_id"))] = getattr(
                 row, "concept_name"
             )
-            if (
-                cehrgpt_args.include_motor_time_to_event
-                and getattr(row, "domain_id")
-                in ["Condition", "Procedure", "Drug", "Visit"]
-                and getattr(row, "standard_concept") == "S"
-            ):
-                allowed_motor_codes.append(str(getattr(row, "concept_id")))
-        LOG.info(
-            "Adding death codes for MOTOR TTE predictions: %s",
-            [DEATH_TOKEN, death_code],
-        )
-        allowed_motor_codes.extend([DEATH_TOKEN, death_code])
+
+        if cehrgpt_args.motor_use_ontology:
+            LOG.info("Creating ontology for MOTOR TTE predictions")
+            ontology = Ontology(cehrgpt_args.vocab_dir)
+            train_val_dataset = datasets.concatenate_datasets(
+                [dataset["train"], dataset["validation"]]
+            )
+            ontology.prune_to_dataset(
+                train_val_dataset,
+                num_proc=data_args.preprocessing_num_workers,
+                remove_ontologies={"SPL", "HemOnc", "LOINC"},
+            )
+
     # Try to load the pretrained tokenizer
     tokenizer_abspath = os.path.expanduser(model_args.tokenizer_name_or_path)
     try:
@@ -114,19 +117,22 @@ def load_and_create_tokenizer(
                 f"Tried to create the tokenizer, however the dataset is not provided."
             )
         LOG.info("Started training the tokenizer ...")
+        train_val_dataset = datasets.concatenate_datasets(
+            [dataset["train"], dataset["validation"]]
+        )
         tokenizer = CehrGptTokenizer.train_tokenizer(
-            dataset,
+            train_val_dataset,
             concept_name_mapping,
             data_args,
             PretrainedEmbeddings(cehrgpt_args.pretrained_embedding_path),
-            allowed_motor_codes if cehrgpt_args.include_motor_time_to_event else None,
-            (
+            num_motor_tasks=(
                 cehrgpt_args.num_motor_tasks
                 if cehrgpt_args.include_motor_time_to_event
                 else None
             ),
             apply_entropy_filter=cehrgpt_args.apply_entropy_filter,
             min_prevalence=cehrgpt_args.min_prevalence,
+            ontology=ontology,
         )
         LOG.info("Finished training the tokenizer ...")
         tokenizer.save_pretrained(tokenizer_abspath)
@@ -188,6 +194,7 @@ def load_and_create_model(
         model_args_cehrgpt = model_args.as_dict()
         model_args_cehrgpt.pop("attn_implementation")
         model_config = CEHRGPTConfig(
+            activation_function=cehrgpt_args.activation_function,
             vocab_size=tokenizer.vocab_size,
             value_vocab_size=tokenizer.value_vocab_size,
             time_token_vocab_size=tokenizer.time_token_vocab_size,
@@ -207,6 +214,7 @@ def load_and_create_model(
             n_pretrained_embeddings_layers=cehrgpt_args.n_pretrained_embeddings_layers,
             use_pretrained_embeddings=len(tokenizer.pretrained_token_ids) > 0,
             pretrained_embedding_dim=pretrained_embedding_dim,
+            apply_rotary=cehrgpt_args.apply_rotary,
             sample_packing_max_positions=(
                 cehrgpt_args.max_tokens_per_batch
                 if cehrgpt_args.sample_packing
@@ -217,6 +225,8 @@ def load_and_create_model(
             motor_time_to_event_weight=cehrgpt_args.motor_time_to_event_weight,
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
             ve_token_id=tokenizer.ve_token_id,
+            n_inner=cehrgpt_args.inner_dim,
+            decoder_mlp=cehrgpt_args.decoder_mlp,
             **model_args_cehrgpt,
         )
 
@@ -235,7 +245,6 @@ def load_and_create_model(
 
 def main():
     cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
-
     if cehrgpt_args.sample_packing and data_args.streaming:
         raise RuntimeError(
             f"sample_packing is not supported when streaming is enabled, please set streaming to False"
@@ -530,7 +539,6 @@ def main():
             SamplePackingCehrGptDataCollator,
             cehrgpt_args.max_tokens_per_batch,
             model_args.max_position_embeddings,
-            add_end_token_in_sample_packing=cehrgpt_args.add_end_token_in_sample_packing,
         )
     else:
         trainer_class = Trainer
@@ -552,6 +560,7 @@ def main():
             include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
             motor_tte_vocab_size=model.config.motor_tte_vocab_size,
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
+            motor_sampling_probability=cehrgpt_args.motor_sampling_probability,
         ),
         train_dataset=processed_dataset["train"],
         eval_dataset=(

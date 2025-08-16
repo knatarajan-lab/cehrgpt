@@ -72,7 +72,7 @@ def normalize_value(
 
 def generate_single_batch(
     model: CEHRGPT2LMHeadModel,
-    tokenizer: CehrGptTokenizer,
+    cehrgpt_tokenizer: CehrGptTokenizer,
     prompts: List[List[int]],
     max_length: int,
     values: Optional[torch.Tensor] = None,
@@ -123,16 +123,18 @@ def generate_single_batch(
             values=values,
             value_indicators=value_indicators,
             generation_config=generation_config,
-            lab_token_ids=tokenizer.lab_token_ids,
+            cehrgpt_tokenizer=cehrgpt_tokenizer,
         )
 
     sequences = [
-        tokenizer.decode(seq.cpu().numpy(), skip_special_tokens=False)
+        cehrgpt_tokenizer.decode(seq.cpu().numpy(), skip_special_tokens=False)
         for seq in results.sequences
     ]
     if results.sequence_vals is not None:
         values = [
-            tokenizer.decode_value(values.cpu().numpy(), skip_special_tokens=False)
+            cehrgpt_tokenizer.decode_value(
+                values.cpu().numpy(), skip_special_tokens=False
+            )
             for values in results.sequence_vals
         ]
     else:

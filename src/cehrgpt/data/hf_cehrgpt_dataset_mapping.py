@@ -21,6 +21,7 @@ from cehrbert_data.const.artificial_tokens import (
     DISCHARGE_UNKNOWN_TOKEN,
     GENDER_UNKNOWN_TOKEN,
     RACE_UNKNOWN_TOKEN,
+    VISIT_UNKNOWN_TOKEN,
 )
 from cehrbert_data.const.common import NA
 from cehrbert_data.decorators.patient_event_decorator_base import get_att_function
@@ -28,6 +29,11 @@ from datasets.formatting.formatting import LazyBatch
 from dateutil.relativedelta import relativedelta
 from pandas import Series
 
+from cehrgpt.gpt_utils import (
+    construct_age_sequence,
+    encode_demographics,
+    multiple_of_10,
+)
 from cehrgpt.models.tokenization_hf_cehrgpt import (
     NONE_BIN,
     UNKNOWN_BIN,
@@ -43,6 +49,8 @@ CEHRGPT_COLUMNS = [
     "concept_values",
     "units",
     "epoch_times",
+    "ages",
+    "position_ids",
 ]
 
 
@@ -428,10 +436,33 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         return record
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
+
+        # Getting gender and race to the record
+        gender, race = record["concept_ids"][2:4]
+        # Reconstruct the ages input before the filter is applied
+        record["ages"] = construct_age_sequence(
+            record["concept_ids"], record.get("ages", None)
+        )
         # Remove the tokens from patient sequences that do not exist in the tokenizer
         record = self.filter_out_invalid_tokens(record)
         # If any concept has a value associated with it, we normalize the value
         record["input_ids"] = self._concept_tokenizer.encode(record["concept_ids"])
+        gender_id = self._concept_tokenizer.encode_gender(gender)
+        record["gender"] = gender_id
+        race_id = self._concept_tokenizer.encode_race(race)
+        record["racer"] = race_id
+        record["position_ids"] = np.clip(record["ages"], a_min=0, a_max=120)
+        # record["position_ids"] = [
+        #     encode_demographics(
+        #         age=age,
+        #         race=race_id,
+        #         gender=gender_id,
+        #         max_age=200,
+        #         max_race=multiple_of_10(self._concept_tokenizer.race_size),
+        #         max_gender=multiple_of_10(self._concept_tokenizer.gender_size),
+        #     )
+        #     for age in np.clip(record["ages"], a_min=0, a_max=120)
+        # ]
         assert len(record["input_ids"]) == len(record["concept_ids"]), (
             "The number of tokens must equal to the number of concepts\n"
             f"decoded concept_ids: {self._concept_tokenizer.decode(record['input_ids'], skip_special_tokens=False)}"

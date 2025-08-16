@@ -1,27 +1,13 @@
-import copy
-import random
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from transformers.utils import logging
 
-from cehrgpt.gpt_utils import (
-    DEMOGRAPHIC_PROMPT_SIZE,
-    collect_demographic_prompts_at_visits,
-    extract_time_interval_in_days,
-    extract_time_interval_in_hours,
-    is_att_token,
-    is_inpatient_att_token,
-    is_inpatient_hour_token,
-    is_visit_end,
-    random_slice_gpt_sequence,
-)
+from cehrgpt.data.cehrgpt_data_processor import CehrGptDataProcessor
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
-TIME_TO_EVENT_MAX_TIME = 3650
-INPATIENT_STAY_DURATION_LIMIT = 30
 LOG = logging.get_logger("transformers")
 
 
@@ -30,13 +16,14 @@ class CehrGptDataCollator:
         self,
         tokenizer: CehrGptTokenizer,
         max_length: int,
-        shuffle_records: bool = False,
         include_values: bool = False,
+        shuffle_records: bool = False,
         include_ttv_prediction: bool = False,
         use_sub_time_tokenization: bool = False,
         include_motor_time_to_event: bool = False,
         motor_tte_vocab_size: int = 0,
         motor_num_time_pieces: int = 8,
+        motor_sampling_probability: float = 0.5,
         pretraining: bool = True,
         include_demographics: bool = False,
         add_linear_prob_token: bool = False,
@@ -47,13 +34,12 @@ class CehrGptDataCollator:
         self.vs_token_id = tokenizer.vs_token_id
         self.ve_token_id = tokenizer.ve_token_id
 
-        self.shuffle_records = shuffle_records
         self.include_values = include_values
         self.include_ttv_prediction = include_ttv_prediction
         self.use_sub_time_tokenization = use_sub_time_tokenization
         self.pretraining = pretraining
         self.include_demographics = include_demographics
-        self.add_linear_prob_token = add_linear_prob_token
+        self.motor_code_cache: Dict[str, List[str]] = dict()
 
         # MOTOR TTE configuration
         if include_motor_time_to_event:
@@ -66,8 +52,14 @@ class CehrGptDataCollator:
         self.include_motor_time_to_event = include_motor_time_to_event
         self.motor_tte_vocab_size = motor_tte_vocab_size
         self.motor_num_time_pieces = motor_num_time_pieces
-        self.motor_time_interval = TIME_TO_EVENT_MAX_TIME // motor_num_time_pieces
-
+        self.motor_time_bins = (
+            self.tokenizer.get_motor_time_bins(motor_num_time_pieces)
+            if self.include_motor_time_to_event
+            else []
+        )
+        # Convert the time bins to seconds
+        self.motor_time_bins = [time_bin * 86400 for time_bin in self.motor_time_bins]
+        LOG.info("self.motor_time_bins: %s", self.motor_time_bins)
         if self.use_sub_time_tokenization:
             token_to_time_token_mapping = tokenizer.token_to_time_token_mapping
             if not token_to_time_token_mapping:
@@ -83,6 +75,18 @@ class CehrGptDataCollator:
                 list(token_to_time_token_mapping.values()), dtype=torch.int64
             )
 
+        self.cehrgpt_data_processor = CehrGptDataProcessor(
+            tokenizer=tokenizer,
+            max_length=self.max_length,
+            shuffle_records=shuffle_records,
+            include_ttv_prediction=include_ttv_prediction,
+            include_values=include_values,
+            include_motor_time_to_event=include_motor_time_to_event,
+            motor_sampling_probability=motor_sampling_probability,
+            pretraining=pretraining,
+            add_linear_prob_token=add_linear_prob_token,
+        )
+
     def _try_reverse_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         if not self.pretraining:
             return torch.flip(tensor, dims=[-1])
@@ -95,30 +99,120 @@ class CehrGptDataCollator:
         else:
             return torch.tensor(features)
 
-    @staticmethod
-    def _convert_time_to_event(concept_ids):
-        def default_value(c):
-            try:
-                if is_att_token(c):
-                    time_to_visit = extract_time_interval_in_days(c)
-                    if (
-                        is_inpatient_att_token(c)
-                        and time_to_visit > INPATIENT_STAY_DURATION_LIMIT
-                    ):
-                        return -100
-                    return time_to_visit
-                elif is_inpatient_hour_token(c):
-                    return extract_time_interval_in_hours(c) / 24
-                return -100
-            except ValueError:
-                return -100
+    def create_time_to_event_tensors_ultra_optimized(
+        self, record: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Ultra-optimized version using advanced vectorization techniques."""
+        motor_row_indices = record["motor_row_indices"]
+        motor_col_indices = record["motor_col_indices"]
+        motor_values = record["motor_values"]
+        motor_censor_times = record["motor_censor_times"]
 
-        return [float(default_value(_)) for _ in concept_ids]
+        if len(motor_row_indices) == 0:
+            # Handle empty case - use tuples for better performance
+            empty_shape = (
+                0,
+                self.motor_num_time_pieces,
+                self.tokenizer.motor_tte_vocab_size,
+            )
+            record["motor_tte_times"] = np.zeros(empty_shape, dtype=np.float32)
+            record["motor_tte_event_indicators"] = np.zeros(empty_shape, dtype=bool)
+            record["motor_tte_masks"] = np.zeros(empty_shape, dtype=bool)
+            return record
+
+        # Convert to numpy arrays once and get dimensions
+        motor_row_indices = np.asarray(motor_row_indices, dtype=np.int32)
+        motor_col_indices = np.asarray(motor_col_indices, dtype=np.int32)
+        motor_values = np.asarray(motor_values, dtype=np.float32)
+        motor_censor_times = np.asarray(motor_censor_times, dtype=np.float32)
+
+        n_tte_predictions = len(motor_censor_times)  # More direct than unique()
+        vocab_size = self.tokenizer.motor_tte_vocab_size
+        n_time_pieces = self.motor_num_time_pieces
+
+        # Create time_vectors more efficiently without broadcasting copy
+        time_vectors = np.tile(
+            motor_censor_times[:, np.newaxis], (1, vocab_size)
+        ).astype(np.float32)
+        event_indicators = np.zeros((n_tte_predictions, vocab_size), dtype=bool)
+
+        # Vectorized assignment (already optimal)
+        time_vectors[motor_row_indices, motor_col_indices] = motor_values
+        event_indicators[motor_row_indices, motor_col_indices] = True
+
+        # Early return if no predictions
+        if n_tte_predictions == 0:
+            empty_shape = (0, n_time_pieces, vocab_size)
+            record["motor_tte_times"] = np.zeros(empty_shape, dtype=np.float32)
+            record["motor_tte_event_indicators"] = np.zeros(empty_shape, dtype=bool)
+            record["motor_tte_masks"] = np.zeros(empty_shape, dtype=bool)
+            return record
+
+        # Cache motor_time_bins as numpy array to avoid repeated conversion
+        if not hasattr(self, "_motor_time_bins_array"):
+            self._motor_time_bins_array = np.asarray(
+                self.motor_time_bins, dtype=np.float32
+            )
+
+        motor_time_bins = self._motor_time_bins_array
+        start_times = motor_time_bins[:-1]
+        end_times = motor_time_bins[1:]
+        bin_widths = end_times - start_times  # Pre-compute bin widths
+
+        # ELIMINATED TRANSPOSE: Compute directly in target shape (n_pred, n_bins, vocab)
+        # Reshape for broadcasting in target order
+        time_vectors_3d = time_vectors[:, np.newaxis, :]  # (n_pred, 1, vocab)
+        event_indicators_3d = event_indicators[:, np.newaxis, :]  # (n_pred, 1, vocab)
+
+        # Broadcast time bins to match target shape
+        start_times_broadcast = start_times[np.newaxis, :, np.newaxis]  # (1, n_bins, 1)
+        bin_widths_broadcast = bin_widths[np.newaxis, :, np.newaxis]  # (1, n_bins, 1)
+
+        # Compute directly in target shape (n_pred, n_bins, vocab)
+        time_diff = time_vectors_3d - start_times_broadcast
+        time_in_bin = np.clip(time_diff, 0, bin_widths_broadcast)
+
+        # Optimized mask computation
+        mask = time_in_bin > 0
+
+        # More efficient log computation with better constant
+        log_constant = 1e-8  # Better numerical stability than 1e-10
+        time_in_bin_log = np.where(
+            mask, np.log2(np.maximum(time_in_bin, log_constant)), -np.inf
+        )
+
+        # Event indicator computation in target shape
+        end_times_broadcast = motor_time_bins[1:][np.newaxis, :, np.newaxis]
+        time_in_range = (time_vectors_3d >= start_times_broadcast) & (
+            time_vectors_3d < end_times_broadcast
+        )
+        event_in_bin = event_indicators_3d & time_in_range
+
+        # Combined mask computation
+        final_mask = mask | event_in_bin
+
+        # Direct assignment - NO TRANSPOSE NEEDED!
+        record["motor_tte_times"] = time_in_bin_log
+        record["motor_tte_event_indicators"] = event_in_bin
+        record["motor_tte_masks"] = final_mask
+
+        # Validation (keep as is - important for correctness)
+        assert (
+            sum(record["motor_tte_task_indicators"]) == n_tte_predictions
+        ), f'sum(record["motor_tte_task_indicators"]) == n_tte_predictions must be true'
+
+        # Clean up input data
+        del record["motor_row_indices"]
+        del record["motor_col_indices"]
+        del record["motor_values"]
+
+        return record
 
     def __call__(self, examples):
-        sample_packing = getattr(self, "sample_packing", False)
-        examples = [self.generate_start_end_index(_, sample_packing) for _ in examples]
-        examples = [self.random_sort(_) for _ in examples]
+
+        if not getattr(self, "sample_packing", False):
+            examples = [self.cehrgpt_data_processor.transform(_) for _ in examples]
+
         batch = {}
 
         # Assume that each example in the batch is a dictionary with 'input_ids' and 'attention_mask'
@@ -162,6 +256,19 @@ class CehrGptDataCollator:
             f"batch['input_ids']: {batch['input_ids']} "
         )
 
+        batch_position_ids = [
+            self._try_reverse_tensor(self._convert_to_tensor(example["position_ids"]))
+            for example in examples
+        ]
+        # Pad sequences to the max length in the batch
+        batch["position_ids"] = self._try_reverse_tensor(
+            pad_sequence(
+                batch_position_ids,
+                batch_first=True,
+                padding_value=0,
+            ).to(torch.int64)
+        )
+
         if "epoch_times" in examples[0]:
             batch_epoch_times = [
                 self._try_reverse_tensor(
@@ -176,22 +283,6 @@ class CehrGptDataCollator:
                     batch_first=True,
                     padding_value=0,
                 ).to(torch.float32)
-            )
-
-        if "position_ids" in examples[0]:
-            batch_position_ids = [
-                self._try_reverse_tensor(
-                    self._convert_to_tensor(example["position_ids"])
-                )
-                for example in examples
-            ]
-            # Pad sequences to the max length in the batch
-            batch["position_ids"] = self._try_reverse_tensor(
-                pad_sequence(
-                    batch_position_ids,
-                    batch_first=True,
-                    padding_value=0,
-                ).to(torch.int64)
             )
 
         if self.pretraining:
@@ -233,54 +324,51 @@ class CehrGptDataCollator:
 
         if self.include_motor_time_to_event:
             examples_with_motor_tte = [
-                self.create_time_to_event_labels(_) for _ in examples
+                self.create_time_to_event_tensors_ultra_optimized(_) for _ in examples
             ]
-            batch_motor_time_to_event_vectors = [
+            # print(f"Creating MOTOR TTE tensors took {time.time() - start} seconds")
+            motor_tte_times = [
                 self._try_reverse_tensor(
-                    self._convert_to_tensor(example["time_to_event_vectors"])
+                    self._convert_to_tensor(example["motor_tte_times"])
                 )
                 for example in examples_with_motor_tte
             ]
-            batch_motor_event_indicators = [
+            motor_tte_event_indicators = [
                 self._try_reverse_tensor(
-                    self._convert_to_tensor(example["event_indicators"])
+                    self._convert_to_tensor(example["motor_tte_event_indicators"])
                 )
                 for example in examples_with_motor_tte
             ]
-            batch_motor_time_to_event_to_include = [
+            motor_tte_task_indicators = [
                 self._try_reverse_tensor(
-                    self._convert_to_tensor(example["time_to_event_to_include"])
+                    self._convert_to_tensor(example["motor_tte_task_indicators"])
                 )
                 for example in examples_with_motor_tte
             ]
-            batch_motor_time_indicators = [
+            motor_tte_masks = [
                 self._try_reverse_tensor(
-                    self._convert_to_tensor(example["time_indicators"])
+                    self._convert_to_tensor(example["motor_tte_masks"])
                 )
                 for example in examples_with_motor_tte
             ]
 
-            batch_motor_time_to_event_vectors = torch.concat(
-                batch_motor_time_to_event_vectors, dim=0
-            ).to(torch.float32)
+            motor_tte_times = torch.concat(motor_tte_times, dim=0).to(torch.float32)
 
             # If every example in the batch only contains one visit, there would be no labels generated for MOTOR TTE
             # we only create the labels when any example has more than one visit
-            if batch_motor_time_to_event_vectors.dim() <= 1:
+            if motor_tte_times.dim() <= 1:
                 LOG.warning(
                     "There are no MOTOR TTE labels generated for this batch "
                     "because every example in this batch only contains one visit."
                 )
             else:
                 batch_size = len(examples)
-                length, num_time_pieces, motor_tte_vocab_size = (
-                    batch_motor_time_to_event_vectors.shape
-                )
+                length, num_time_pieces, motor_tte_vocab_size = motor_tte_times.shape
                 padded_length = batch_size - length % batch_size
-                batch["motor_time_to_event_vectors"] = (
+                batch["motor_tte_times"] = (
                     torch.concat(
                         [
-                            batch_motor_time_to_event_vectors,
+                            motor_tte_times,
                             torch.full(
                                 (padded_length, num_time_pieces, motor_tte_vocab_size),
                                 0.0,
@@ -293,13 +381,12 @@ class CehrGptDataCollator:
                 )
 
                 # Motor event indicators that indicate there is an event occurred in this time interval
-                batch_motor_event_indicators = torch.concat(
-                    batch_motor_event_indicators, dim=0
-                ).to(torch.bool)
-                batch["motor_event_indicators"] = (
+                batch["motor_tte_event_indicators"] = (
                     torch.concat(
                         [
-                            batch_motor_event_indicators,
+                            torch.concat(motor_tte_event_indicators, dim=0).to(
+                                torch.bool
+                            ),
                             torch.full(
                                 (padded_length, num_time_pieces, motor_tte_vocab_size),
                                 False,
@@ -312,27 +399,17 @@ class CehrGptDataCollator:
                 )
 
                 # Input to indicate whether the visit should be included for TTE predictions
-                batch_motor_time_to_event_to_include = torch.concat(
-                    batch_motor_time_to_event_to_include, dim=0
+                batch["motor_tte_task_indicators"] = pad_sequence(
+                    motor_tte_task_indicators,
+                    batch_first=True,
+                    padding_value=False,
                 ).to(torch.bool)
-                batch["motor_time_to_event_to_include"] = (
-                    torch.concat(
-                        [
-                            batch_motor_time_to_event_to_include,
-                            torch.full((padded_length,), False),
-                        ],
-                        dim=0,
-                    ).to(torch.bool)
-                ).reshape((batch_size, -1))
 
                 # Motor time indicators that indicate whether there are neither clinical events nor censor events
-                batch_motor_time_indicators = torch.concat(
-                    batch_motor_time_indicators, dim=0
-                ).to(torch.bool)
-                batch["motor_time_indicators"] = (
+                batch["motor_tte_masks"] = (
                     torch.concat(
                         [
-                            batch_motor_time_indicators,
+                            torch.concat(motor_tte_masks, dim=0).to(torch.bool),
                             torch.full(
                                 (padded_length, num_time_pieces, motor_tte_vocab_size),
                                 False,
@@ -438,507 +515,14 @@ class CehrGptDataCollator:
 
         return batch
 
-    def create_time_to_event_labels(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Generates time-to-event (TTE) labels and censoring indicators for each visit in a patient's timeline.
-
-        Processes the input sequence in reverse to compute the number of days from each visit (marked by [VE])
-        to the occurrence of future motor-related events.
-
-        Args:
-            record (Dict[str, Any]): A dictionary containing the encoded patient sequence with the key "input_ids".
-                This sequence includes [VS], [VE], time delta tokens, and motor TTE concept codes.
-
-        Returns:
-            Dict[str, Any]: The updated input record with added keys:
-                - "time_to_event_vectors": np.ndarray of shape [num_visits, motor_vocab_size], containing time-to-event values
-                - "event_indicators": np.ndarray of shape [num_visits, motor_vocab_size], where 0 = event occurred, 1 = censored
-        """
-        input_ids = record["input_ids"]
-        sample_packing = getattr(self, "sample_packing", False)
-
-        if isinstance(input_ids, torch.Tensor):
-            input_ids = input_ids.detach().tolist()
-
-        # This potentially contains packed samples, we need to handle that
-        packed_concept_ids = self.tokenizer.decode(input_ids, skip_special_tokens=False)
-        pad_indices = []
-        if sample_packing:
-            # We start from the first index
-            for i in range(len(packed_concept_ids)):
-                if packed_concept_ids[i] == self.tokenizer.pad_token:
-                    # If we encounter consecutive pads, we should break out of the loop
-                    if pad_indices and pad_indices[-1] == self.tokenizer.pad_token:
-                        break
-                    pad_indices.append(i)
-
-        # If we did not find a pad, that means the whole sequence belongs to one sample
-        if len(pad_indices) == 0:
-            pad_indices.append(len(packed_concept_ids))
-
-        timepiece_time_to_event_vectors = []
-        timepiece_event_indicators = []
-        timepiece_indicators = []
-        time_to_event_to_includes = []
-
-        for start_index, end_index in zip([0] + pad_indices[:-1], pad_indices):
-            concept_ids = packed_concept_ids[start_index:end_index]
-            if concept_ids[0] == self.tokenizer.pad_token:
-                concept_ids.pop(0)
-            time_to_event_vectors = []
-            global_event_indicators = []
-
-            # First collect TTE data in reverse chronological order
-            censor_times = []
-            time_to_event_data: List[Dict[str, int]] = []
-            time_to_event_dict: Dict[str, int] = {}
-            time_to_event_to_include: List[bool] = []
-            next_future_visit_concepts = set()
-            time_interval = 0
-
-            # Reverse walk through concept_ids to calculate TTE from each [VE] point
-            for concept_id in reversed(concept_ids):
-                if is_visit_end(concept_id):
-                    # Update TTE for existing concepts, or add new ones seen in this visit
-                    for existing_concept_id in list(time_to_event_dict.keys()):
-                        if existing_concept_id in next_future_visit_concepts:
-                            time_to_event_dict[existing_concept_id] = time_interval
-                        else:
-                            time_to_event_dict[existing_concept_id] += time_interval
-
-                    for next_concept_id in next_future_visit_concepts:
-                        if next_concept_id not in time_to_event_dict:
-                            time_to_event_dict[next_concept_id] = time_interval
-
-                    # If the next visit occurs on the same day as the previous one, we don't want to do TTE for the
-                    # previous visit
-                    time_to_event_to_include.append(time_interval > 0)
-                    time_to_event_data.append(copy.deepcopy(time_to_event_dict))
-                    # Record the censor time at the end of the visit
-                    if censor_times:
-                        censor_times.append(censor_times[-1] + time_interval)
-                    else:
-                        censor_times.append(time_interval)
-                    time_interval = 0
-                    next_future_visit_concepts.clear()
-
-                elif is_att_token(concept_id):
-                    time_interval += extract_time_interval_in_days(concept_id)
-
-                elif self.tokenizer.is_motor_time_to_event_code(concept_id):
-                    next_future_visit_concepts.add(concept_id)
-
-            if len(time_to_event_data) == 0:
-                LOG.info(
-                    "Vist end event is not detected for this sample, and is skipped for MOTOR tasks."
-                    "It's likely this sample contains a long admission. length: %s, concept_ids[-10:] %s",
-                    len(concept_ids),
-                    concept_ids[-10:],
-                )
-                continue
-
-            # Reverse back to chronological order for final labels
-            time_to_event_data.reverse()
-            censor_times.reverse()
-            time_to_event_to_include.reverse()
-
-            for censor_time, visit_tte_data in zip(censor_times, time_to_event_data):
-                time_to_event_vector = np.full(
-                    self.tokenizer.motor_tte_vocab_size,
-                    fill_value=censor_time,
-                    dtype=np.int32,
-                )
-                event_indicator = np.zeros(
-                    self.tokenizer.motor_tte_vocab_size,
-                    dtype=np.int32,
-                )
-                visit_token_ids = [
-                    self.tokenizer.get_motor_token_id(concept_id)
-                    for concept_id in visit_tte_data.keys()
-                ]
-                visit_tte_values = list(visit_tte_data.values())
-
-                time_to_event_vector[visit_token_ids] = visit_tte_values
-                event_indicator[visit_token_ids] = 1  # not censored (event occurred)
-
-                time_to_event_vectors.append(time_to_event_vector)
-                global_event_indicators.append(event_indicator)
-
-            time_to_event_vectors = np.asarray(time_to_event_vectors)
-            global_event_indicators = np.asarray(global_event_indicators).astype(bool)
-            n_visits = len(time_to_event_vectors)
-
-            timepiece_time_to_event_vector = np.full(
-                (
-                    self.motor_num_time_pieces,
-                    n_visits,
-                    self.tokenizer.motor_tte_vocab_size,
-                ),
-                fill_value=0,
-                dtype=np.int32,
-            )
-            timepiece_event_indicator = np.zeros(
-                (
-                    self.motor_num_time_pieces,
-                    n_visits,
-                    self.tokenizer.motor_tte_vocab_size,
-                ),
-                dtype=bool,
-            )
-            timepiece_indicator = np.zeros(
-                (
-                    self.motor_num_time_pieces,
-                    n_visits,
-                    self.tokenizer.motor_tte_vocab_size,
-                ),
-                dtype=bool,
-            )
-
-            # Putting the event time and censor time into the corresponding time bins
-            for bin_num in range(self.motor_num_time_pieces):
-                start = self.motor_time_interval * bin_num
-                end = self.motor_time_interval * (bin_num + 1)
-                time_in_bin = np.clip(time_to_event_vectors - start, 0, end - start)
-                timepiece_time_to_event_vector[bin_num] = time_in_bin
-                event_indicator = (
-                    global_event_indicators
-                    & (start <= time_to_event_vectors)
-                    & (time_to_event_vectors < end)
-                )
-                timepiece_event_indicator[bin_num] = event_indicator
-                timepiece_indicator[bin_num] = time_in_bin > 0 | event_indicator
-
-            timepiece_time_to_event_vectors.append(
-                timepiece_time_to_event_vector.swapaxes(0, 1)
-            )
-            timepiece_event_indicators.append(timepiece_event_indicator.swapaxes(0, 1))
-            timepiece_indicators.append(timepiece_indicator.swapaxes(0, 1))
-            time_to_event_to_includes.append(np.asarray(time_to_event_to_include))
-
-        record["time_to_event_vectors"] = np.concatenate(
-            timepiece_time_to_event_vectors, axis=0
-        )
-        record["event_indicators"] = np.concatenate(timepiece_event_indicators, axis=0)
-        record["time_indicators"] = np.concatenate(timepiece_indicators, axis=0)
-        record["time_to_event_to_include"] = np.concatenate(
-            time_to_event_to_includes, axis=0
-        )
-        return record
-
-    def random_sort(self, record: Dict[str, Any]) -> Dict[str, Any]:
-
-        if not self.shuffle_records:
-            return record
-
-        if "record_ranks" not in record:
-            return record
-
-        sorting_column = record["record_ranks"]
-        random_order = np.random.rand(len(sorting_column))
-
-        if self.include_values:
-            iterator = zip(
-                sorting_column,
-                random_order,
-                record["input_ids"],
-                record["value_indicators"],
-                record["values"],
-            )
-            sorted_list = sorted(iterator, key=lambda tup2: (tup2[0], tup2[1], tup2[2]))
-            _, _, sorted_input_ids, sorted_value_indicators, sorted_values = zip(
-                *list(sorted_list)
-            )
-            record["input_ids"] = self._convert_to_tensor(sorted_input_ids)
-            record["value_indicators"] = self._convert_to_tensor(
-                sorted_value_indicators
-            )
-            record["values"] = self._convert_to_tensor(sorted_values)
-        else:
-            iterator = zip(sorting_column, random_order, record["input_ids"])
-            sorted_list = sorted(iterator, key=lambda tup2: (tup2[0], tup2[1], tup2[2]))
-            _, _, sorted_input_ids = zip(*list(sorted_list))
-            record["input_ids"] = self._convert_to_tensor(sorted_input_ids)
-        return record
-
-    def generate_start_end_index(
-        self,
-        record: Dict[str, Any],
-        sample_packing: bool,
-        max_length_allowed: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """Adding the start and end indices to extract a portion of the patient sequence."""
-        # concept_ids will be used to for time to event predictions and identifying the visit starts
-        max_length_allowed = (
-            self.max_length if max_length_allowed is None else max_length_allowed
-        )
-        input_ids = record["input_ids"]
-        if isinstance(input_ids, torch.Tensor):
-            input_ids = input_ids.detach().tolist()
-        concept_ids = self.tokenizer.decode(input_ids, skip_special_tokens=False)
-        seq_length = len(record["input_ids"])
-
-        # Subtract one for the [END] token when sample_packing is not enabled
-        new_max_length = (
-            max_length_allowed - 1
-            if not sample_packing and self.pretraining
-            else max_length_allowed
-        )
-
-        if self.include_ttv_prediction:
-            record["time_to_visits"] = torch.concat(
-                [self._convert_to_tensor(self._convert_time_to_event(concept_ids))]
-            )
-
-        # If linear token exists, we will use it, otherwise we default to the OOV token
-        linear_token_id = (
-            self.tokenizer.linear_token_id
-            if self.tokenizer.linear_token_id
-            else self.tokenizer.oov_token_id
-        )
-        eos_token = (
-            linear_token_id
-            if self.add_linear_prob_token
-            else self.tokenizer.end_token_id
-        )
-
-        # Return the record directly if the actual sequence length is less than the max sequence
-        if seq_length <= new_max_length:
-            if not sample_packing and self.pretraining:
-                record["input_ids"] = torch.concat(
-                    [
-                        self._convert_to_tensor(record["input_ids"]),
-                        self._convert_to_tensor([eos_token]),
-                    ]
-                )
-                if "epoch_times" in record:
-                    record["epoch_times"] = torch.concat(
-                        [
-                            self._convert_to_tensor(record["epoch_times"]),
-                            self._convert_to_tensor([record["epoch_times"][-1]]),
-                        ]
-                    )
-                if self.include_values:
-                    record["value_indicators"] = torch.concat(
-                        [
-                            self._convert_to_tensor(record["value_indicators"]),
-                            self._convert_to_tensor([False]),
-                        ]
-                    ).to(torch.bool)
-                    record["values"] = torch.concat(
-                        [
-                            self._convert_to_tensor(record["values"]),
-                            self._convert_to_tensor(
-                                [self.tokenizer.pad_value_token_id]
-                            ),
-                        ]
-                    )
-                if self.include_ttv_prediction:
-                    record["time_to_visits"] = torch.concat(
-                        [
-                            record["time_to_visits"],
-                            self._convert_to_tensor([-100.0]),
-                        ]
-                    )
-            return record
-
-        if self.pretraining:
-            # There is a 50% chance we randomly slice out a portion of the patient history and update the demographic
-            # prompt depending on the new starting point
-            if random.random() < 0.5 and not sample_packing:
-                start_index, end_index, demographic_tokens = random_slice_gpt_sequence(
-                    concept_ids, new_max_length
-                )
-                if start_index != end_index:
-                    record["input_ids"] = self._convert_to_tensor(
-                        record["input_ids"][start_index : end_index + 1]
-                    )
-                    if "epoch_times" in record:
-                        record["epoch_times"] = self._convert_to_tensor(
-                            record["epoch_times"][start_index : end_index + 1]
-                        )
-                    if self.include_values:
-                        record["value_indicators"] = self._convert_to_tensor(
-                            record["value_indicators"][start_index : end_index + 1]
-                        ).to(torch.bool)
-                        record["values"] = self._convert_to_tensor(
-                            record["values"][start_index : end_index + 1]
-                        )
-                    if self.include_ttv_prediction:
-                        record["time_to_visits"] = self._convert_to_tensor(
-                            self._convert_time_to_event(
-                                concept_ids[start_index : end_index + 1]
-                            )
-                        )
-                    return record
-
-            # The default employs a right truncation strategy, where the demographic prompt is reserved
-            end_index = new_max_length
-            for i in reversed(list(range(0, end_index))):
-                current_token = record["input_ids"][i]
-                if current_token == self.ve_token_id:
-                    # Plus one because slicing is right exclusive
-                    end_index = i + 1
-                    break
-
-            record["input_ids"] = record["input_ids"][0:end_index]
-
-            # We want to make sure we take the subset of attention_mask in sample packing if this field is available
-            if sample_packing and "attention_mask" in record:
-                record["attention_mask"] = record["attention_mask"][0:end_index]
-
-            if sample_packing and "position_ids" in record:
-                record["position_ids"] = record["position_ids"][0:end_index]
-
-            if "epoch_times" in record:
-                record["epoch_times"] = self._convert_to_tensor(
-                    record["epoch_times"][0:end_index]
-                )
-
-            if self.include_values:
-                record["value_indicators"] = self._convert_to_tensor(
-                    record["value_indicators"][0:end_index]
-                ).to(torch.bool)
-                record["values"] = self._convert_to_tensor(
-                    record["values"][0:end_index]
-                )
-            if self.include_ttv_prediction:
-                record["time_to_visits"] = self._convert_to_tensor(
-                    self._convert_time_to_event(concept_ids[0:end_index])
-                )
-            return record
-        else:
-            if self.include_demographics and not sample_packing:
-                # We employ a left truncation strategy, where the most recent patient history is reserved for fine-tuning
-                demographic_prompts_at_visits = collect_demographic_prompts_at_visits(
-                    concept_ids
-                )
-                for token_index, demographic_prompt in demographic_prompts_at_visits:
-                    if (
-                        seq_length - token_index
-                        <= new_max_length - DEMOGRAPHIC_PROMPT_SIZE
-                    ):
-                        demographic_tokens = self.tokenizer.encode(demographic_prompt)
-                        record["input_ids"] = torch.concat(
-                            [
-                                self._convert_to_tensor(demographic_tokens),
-                                self._convert_to_tensor(
-                                    record["input_ids"][token_index:seq_length]
-                                ),
-                            ]
-                        )
-                        if "epoch_times" in record:
-                            record["epoch_times"] = torch.concat(
-                                [
-                                    torch.zeros(
-                                        [record["epoch_times"][0]], dtype=torch.float32
-                                    ),
-                                    self._convert_to_tensor(
-                                        record["epoch_times"][token_index:seq_length]
-                                    ),
-                                ]
-                            )
-                        if self.include_values:
-                            record["value_indicators"] = torch.concat(
-                                [
-                                    torch.zeros(
-                                        [DEMOGRAPHIC_PROMPT_SIZE], dtype=torch.int32
-                                    ).to(torch.bool),
-                                    self._convert_to_tensor(
-                                        record["value_indicators"][
-                                            token_index:seq_length
-                                        ]
-                                    ),
-                                ]
-                            )
-                            record["values"] = torch.concat(
-                                [
-                                    torch.zeros(
-                                        [DEMOGRAPHIC_PROMPT_SIZE], dtype=torch.int32
-                                    )
-                                    .to(torch.int32)
-                                    .fill_(self.tokenizer.pad_value_token_id),
-                                    self._convert_to_tensor(
-                                        record["values"][token_index:seq_length]
-                                    ),
-                                ]
-                            )
-                        if self.include_ttv_prediction:
-                            record["time_to_visits"] = torch.concat(
-                                [
-                                    torch.zeros(
-                                        [DEMOGRAPHIC_PROMPT_SIZE], dtype=torch.int32
-                                    )
-                                    .to(torch.float32)
-                                    .fill_(-100.0),
-                                    record["time_to_visits"][token_index:seq_length],
-                                ]
-                            )
-                        break
-            else:
-                start_index = max(seq_length - new_max_length, 0)
-                end_index = seq_length
-                for i in range(start_index, end_index):
-                    current_token = record["input_ids"][i]
-                    if current_token == self.vs_token_id:
-                        record["input_ids"] = record["input_ids"][i:end_index]
-                        if sample_packing and "attention_mask" in record:
-                            record["attention_mask"] = record["attention_mask"][
-                                i:end_index
-                            ]
-                        if sample_packing and "position_ids" in record:
-                            record["position_ids"] = record["position_ids"][i:end_index]
-
-                        if "epoch_times" in record:
-                            record["epoch_times"] = self._convert_to_tensor(
-                                record["epoch_times"][i:end_index]
-                            )
-                        if self.include_values:
-                            record["value_indicators"] = record["value_indicators"][
-                                i:end_index
-                            ]
-                            record["values"] = record["values"][i:end_index]
-                        if self.include_ttv_prediction:
-                            record["time_to_visits"] = record["time_to_visits"][
-                                i:end_index
-                            ]
-                        break
-
-            # This could happen when the last visit contains more than new_max_length number of tokens
-            # We simply take the last new_max_length number of tokens from the patient sequence
-            if len(record["input_ids"]) > new_max_length:
-                record["input_ids"] = record["input_ids"][-new_max_length:]
-                if sample_packing and "attention_mask" in record:
-                    record["attention_mask"] = record["attention_mask"][
-                        -new_max_length:
-                    ]
-                if sample_packing and "position_ids" in record:
-                    record["position_ids"] = record["position_ids"][-new_max_length:]
-                if "epoch_times" in record:
-                    record["epoch_times"] = self._convert_to_tensor(
-                        record["epoch_times"][-new_max_length:]
-                    )
-                if self.include_values:
-                    record["value_indicators"] = record["value_indicators"][
-                        -new_max_length:
-                    ]
-                    record["values"] = record["values"][-new_max_length:]
-                if self.include_ttv_prediction:
-                    record["time_to_visits"] = record["time_to_visits"][
-                        -new_max_length:
-                    ]
-
-            return record
-
 
 class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
     def __init__(self, max_tokens, max_position_embeddings, *args, **kwargs):
         self.max_tokens_per_batch = max_tokens
         self.max_position_embeddings = max_position_embeddings
         self.sample_packing = True
-        self.add_end_token_in_sample_packing = kwargs.pop(
-            "add_end_token_in_sample_packing", False
-        )
         super(SamplePackingCehrGptDataCollator, self).__init__(*args, **kwargs)
+        self.cehrgpt_data_processor.max_length = self.max_position_embeddings
 
     def __call__(self, examples):
         current_input_ids = []
@@ -947,63 +531,102 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         current_value_indicators = []
         current_values = []
 
+        # MOTOR inputs
+        current_motor_censor_times = []
+        current_motor_row_indices = []
+        current_motor_col_indices = []
+        current_motor_values = []
+        current_motor_tte_task_indicators = []
+
         # Demographics
         current_person_ids = []
         current_index_dates = []
 
         # Binary classification inputs
-        current_ages = []
+        current_prediction_ages = []
         current_labels = []
 
         for idx, example in enumerate(examples):
-
-            # We only add an end token if the patient sequence could fit in the entire context window
-            add_end_token = (
-                len(example["input_ids"]) <= self.max_position_embeddings
-                and self.add_end_token_in_sample_packing
-            )
-            # If the sample length exceeds the model's capacity, truncate this example
-            if len(example["input_ids"]) > self.max_position_embeddings:
-                example = self.generate_start_end_index(
-                    example, False, self.max_position_embeddings
-                )
-
-            add_eos_token = add_end_token | self.add_linear_prob_token
-            additional_tokens = []
-            if add_end_token:
-                additional_tokens.append(self.tokenizer.end_token_id)
-            elif self.add_linear_prob_token:
-                # Backward compatible
-                linear_prob_token_id = (
-                    self.tokenizer.linear_token_id
-                    if self.tokenizer.linear_token_id is not None
-                    else self.tokenizer.oov_token_id
-                )
-                additional_tokens.append(linear_prob_token_id)
-            additional_tokens.append(self.tokenizer.pad_token_id)
+            example = self.cehrgpt_data_processor.transform(example)
             input_ids = example["input_ids"]
             # We add [END] [PAD], we want to attend to [END], adding [END] is important for sequence generation.
             # If the sequence length of the sequence is less than the context window, we add both [END][PAD], otherwise
             # we only add [PAD] token to the end of the sequence because it's not finished
-            current_input_ids.extend(list(input_ids) + additional_tokens)
-            current_attention_mask.extend(
-                np.ones_like(input_ids).tolist() + ([1, 0] if add_eos_token else [0])
-            )
-            num_tokens_to_pad = 1 + int(add_eos_token)
-            current_position_ids.extend(
-                np.clip(
-                    list(range(len(input_ids) + num_tokens_to_pad)),
-                    0,
-                    self.max_position_embeddings - 1,
+            current_input_ids.extend(list(input_ids) + [self.tokenizer.pad_token_id])
+            current_attention_mask.extend(np.ones_like(input_ids).tolist() + [0])
+            if "position_ids" in example:
+                position_ids = (
+                    example["position_ids"].tolist()
+                    if isinstance(example["position_ids"], torch.Tensor)
+                    else list(example["position_ids"])
                 )
-            )
+                current_position_ids.extend(position_ids + [max(position_ids)])
+            else:
+                current_position_ids.extend(
+                    np.clip(
+                        list(range(len(input_ids) + 1)),
+                        0,
+                        self.max_position_embeddings - 1,
+                    )
+                )
+
             if self.include_values:
                 current_value_indicators.extend(
-                    list(example["value_indicators"]) + [False] * num_tokens_to_pad
+                    (
+                        example["value_indicators"].tolist()
+                        if isinstance(example["value_indicators"], torch.Tensor)
+                        else list(example["value_indicators"])
+                    )
+                    + [False]
                 )
                 current_values.extend(
-                    list(example["values"])
-                    + [self.tokenizer.pad_value_token_id] * num_tokens_to_pad
+                    (
+                        example["values"].tolist()
+                        if isinstance(example["values"], torch.Tensor)
+                        else list(example["values"])
+                    )
+                    + [self.tokenizer.pad_value_token_id]
+                )
+
+            if self.include_motor_time_to_event:
+                current_max_motor_row_index = len(np.unique(current_motor_row_indices))
+                motor_row_indices = (
+                    example["motor_row_indices"].tolist()
+                    if isinstance(example["motor_row_indices"], torch.Tensor)
+                    else list(example["motor_row_indices"])
+                )
+                current_motor_row_indices.extend(
+                    list(
+                        map(
+                            lambda offset: offset + current_max_motor_row_index,
+                            motor_row_indices,
+                        )
+                    )
+                )
+                current_motor_col_indices.extend(
+                    example["motor_col_indices"].tolist()
+                    if isinstance(example["motor_col_indices"], torch.Tensor)
+                    else list(example["motor_col_indices"])
+                )
+                current_motor_values.extend(
+                    example["motor_values"].tolist()
+                    if isinstance(example["motor_values"], torch.Tensor)
+                    else list(example["motor_values"])
+                )
+                current_motor_censor_times.extend(
+                    example["motor_censor_times"].tolist()
+                    if isinstance(example["motor_censor_times"], torch.Tensor)
+                    else list(example["motor_censor_times"])
+                )
+                current_motor_tte_task_indicators.extend(
+                    (
+                        example["motor_tte_task_indicators"].tolist()
+                        if isinstance(
+                            example["motor_tte_task_indicators"], torch.Tensor
+                        )
+                        else list(example["motor_tte_task_indicators"])
+                    )
+                    + [False]
                 )
 
             if "person_id" in example:
@@ -1013,7 +636,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 current_index_dates.append(example["index_date"])
 
             if "age_at_index" in example:
-                current_ages.append(example["age_at_index"])
+                current_prediction_ages.append(example["age_at_index"])
 
             if "classifier_label" in example:
                 current_labels.append(example["classifier_label"])
@@ -1028,17 +651,28 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
             "position_ids": current_position_ids,
         }
         if self.include_values:
-            packed_example.update({"value_indicators": current_value_indicators})
-            packed_example.update({"values": current_values})
+            packed_example.update(
+                {"value_indicators": current_value_indicators, "values": current_values}
+            )
+        if self.include_motor_time_to_event:
+            packed_example.update(
+                {
+                    "motor_censor_times": current_motor_censor_times,
+                    "motor_row_indices": current_motor_row_indices,
+                    "motor_col_indices": current_motor_col_indices,
+                    "motor_values": current_motor_values,
+                    "motor_tte_task_indicators": current_motor_tte_task_indicators,
+                }
+            )
 
         if current_labels:
             packed_example.update(
                 {
                     "person_id": current_person_ids,
                     "index_date": current_index_dates,
-                    "age_at_index": current_ages,
+                    "age_at_index": current_prediction_ages,
                     "classifier_label": current_labels,
                 }
             )
-
+        # print(f"Packing examples took {time.time() - start} seconds")
         return super().__call__([packed_example])

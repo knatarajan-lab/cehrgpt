@@ -1,9 +1,10 @@
 from typing import Optional, Union
 
+import torch
 from datasets import Dataset
 from torch.utils.data import DataLoader
 from transformers import Trainer
-from transformers.trainer_utils import has_length
+from transformers.trainer_utils import has_length, seed_worker
 from transformers.utils import import_utils, logging
 
 from cehrgpt.data.sample_packing_sampler import SamplePackingBatchSampler
@@ -62,7 +63,10 @@ class SamplePackingTrainer(Trainer):
             if "num_of_concepts" in train_dataset.column_names:
                 lengths = train_dataset["num_of_concepts"]
             else:
-                lengths = [len(sample["input_ids"]) for sample in train_dataset]
+                lengths = [
+                    len(sample["input_ids"])
+                    for sample in train_dataset.select_columns("input_ids")
+                ]
 
             LOG.info("Finished computing lengths for the train dataset")
         else:
@@ -102,6 +106,11 @@ class SamplePackingTrainer(Trainer):
             "persistent_workers": self.args.dataloader_persistent_workers,
             "batch_sampler": batch_sampler,
         }
+        if not isinstance(train_dataset, torch.utils.data.IterableDataset):
+            dataloader_params["drop_last"] = self.args.dataloader_drop_last
+            dataloader_params["worker_init_fn"] = seed_worker
+            dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
+
         return self.accelerator.prepare(DataLoader(train_dataset, **dataloader_params))
 
     def get_eval_dataloader(

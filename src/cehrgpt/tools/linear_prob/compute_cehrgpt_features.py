@@ -9,6 +9,7 @@ from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import torch
 import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
@@ -241,7 +242,6 @@ def main():
             SamplePackingCehrGptDataCollator,
             cehrgpt_args.max_tokens_per_batch,
             cehrgpt_model.config.max_position_embeddings,
-            add_end_token_in_sample_packing=cehrgpt_args.add_end_token_in_sample_packing,
         )
         train_batch_sampler = SamplePackingBatchSampler(
             lengths=train_set["num_of_concepts"],
@@ -332,7 +332,7 @@ def main():
 
     data_loaders = [("train", train_loader), ("test", test_dataloader)]
 
-    ve_token_id = cehrgpt_tokenizer._convert_token_to_id("[VE]")
+    ve_token_id = cehrgpt_tokenizer.ve_token_id
     for split, data_loader in data_loaders:
         # Ensure prediction folder exists
         feature_output_folder = (
