@@ -15,6 +15,9 @@ import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
 from cehrbert.runners.runner_util import generate_prepared_ds_path
 from datasets import concatenate_datasets, load_from_disk
+from torch.distributed.algorithms.ddp_comm_hooks.powerSGD_hook import (
+    batched_powerSGD_hook,
+)
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers.trainer_utils import is_main_process
@@ -382,6 +385,9 @@ def main():
                 # Right now the model does not support this column, we need to pop it
                 if "epoch_times" in batch:
                     batch.pop("epoch_times")
+
+                if "ages" in batch:
+                    batch.pop("ages")
 
                 batch = {k: v.to(device) for k, v in batch.items()}
                 # Forward pass

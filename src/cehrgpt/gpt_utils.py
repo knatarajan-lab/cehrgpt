@@ -1,7 +1,7 @@
 import random
 import re
 from datetime import date, datetime, timedelta, timezone
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from cehrbert_data.const.artificial_tokens import DEATH_TOKEN
@@ -69,7 +69,7 @@ class RandomSampleCache:
 
 
 def construct_time_sequence(
-    concept_ids: List[str], epoch_times: Optional[List[int]] = None
+    concept_ids: List[str], epoch_times: Optional[List[Union[int, float]]] = None
 ) -> List[float]:
     if epoch_times is not None:
         return epoch_times

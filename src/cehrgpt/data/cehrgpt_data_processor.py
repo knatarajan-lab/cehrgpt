@@ -10,6 +10,8 @@ from transformers.utils import logging
 from cehrgpt.gpt_utils import (
     DEMOGRAPHIC_PROMPT_SIZE,
     collect_demographic_prompts_at_visits,
+    construct_age_sequence,
+    construct_time_sequence,
     extract_time_interval_in_days,
     extract_time_interval_in_hours,
     is_att_token,
@@ -294,6 +296,13 @@ class CehrGptDataProcessor(DatasetMapping):
         )
         concept_ids = record["concept_ids"]
         seq_length = len(record["input_ids"])
+
+        # For backward compatibility, in case these two columns do not already exist
+        record["ages"] = construct_age_sequence(record["concept_ids"], record["ages"])
+        record["epoch_times"] = construct_time_sequence(
+            record["concept_ids"], record["epoch_times"]
+        )
+
         # Return the record directly if the actual sequence length is less than the max sequence
         if seq_length <= new_max_length:
             # We only add [END] to the end of the sequence in pre-training
