@@ -2,7 +2,7 @@ import datetime
 import os
 import random
 import uuid
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -13,7 +13,7 @@ from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.cehrgpt_args import create_inference_base_arg_parser
 from cehrgpt.generation.omop_converter_batch import START_TOKEN_SIZE
-from cehrgpt.gpt_utils import get_cehrgpt_output_folder
+from cehrgpt.gpt_utils import construct_age_sequence, get_cehrgpt_output_folder
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.special_tokens import END_TOKEN
 from cehrgpt.models.tokenization_hf_cehrgpt import (
@@ -73,8 +73,9 @@ def normalize_value(
 def generate_single_batch(
     model: CEHRGPT2LMHeadModel,
     cehrgpt_tokenizer: CehrGptTokenizer,
-    prompts: List[List[int]],
+    prompts: torch.Tensor,
     max_length: int,
+    ages: Optional[torch.Tensor] = None,
     values: Optional[torch.Tensor] = None,
     value_indicators: Optional[torch.Tensor] = None,
     max_new_tokens: Optional[int] = None,
@@ -112,7 +113,9 @@ def generate_single_batch(
             epsilon_cutoff=epsilon_cutoff,
         )
 
-        batched_prompts = torch.tensor(prompts).to(device)
+        batched_prompts = prompts.to(device)
+        if ages is not None:
+            ages = ages.to(device)
         if values is not None:
             values = values.to(device)
         if value_indicators is not None:
@@ -120,6 +123,7 @@ def generate_single_batch(
 
         results = model.generate(
             inputs=batched_prompts,
+            ages=ages,
             values=values,
             value_indicators=value_indicators,
             generation_config=generation_config,
@@ -216,6 +220,7 @@ def main(args):
 
         # Randomly pick demographics from the existing population
         random_prompts = []
+        random_prompt_ages = []
         iter = 0
         while len(random_prompts) < args.batch_size:
             for row in dataset.select(
@@ -226,9 +231,9 @@ def main(args):
                     <= len(row["concept_ids"])
                     <= max_seq_allowed
                 ):
-                    random_prompts.append(
-                        cehrgpt_tokenizer.encode(row["concept_ids"][:prompt_size])
-                    )
+                    prompt = row["concept_ids"][:prompt_size]
+                    random_prompts.append(cehrgpt_tokenizer.encode(prompt))
+                    random_prompt_ages.append(construct_age_sequence(prompt))
                 iter += 1
                 if not random_prompts and iter > 10:
                     raise RuntimeError(
@@ -239,7 +244,8 @@ def main(args):
         batch_sequences = generate_single_batch(
             cehrgpt_model,
             cehrgpt_tokenizer,
-            random_prompts[: args.batch_size],
+            torch.tensor(random_prompts[: args.batch_size]),
+            ages=torch.tensor(random_prompt_ages[: args.batch_size]),
             max_length=args.context_window,
             mini_num_of_concepts=args.min_num_of_concepts,
             top_p=args.top_p,

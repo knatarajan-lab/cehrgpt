@@ -153,15 +153,7 @@ class CehrGptDataProcessor(DatasetMapping):
             example["concept_ids"] = self.tokenizer.decode(
                 input_ids, skip_special_tokens=False
             )
-
-        if "position_ids" not in example:
-            # TODO: this is a default strategy
-            example["position_ids"] = list(range(1, len(example["input_ids"]) + 1))
-        else:
-            # There might be nan position_ids in-between, let's use the forward fill method to fill the nan values
-            example["position_ids"] = (
-                pd.Series(example["position_ids"]).ffill().tolist()
-            )
+        example["ages"] = pd.Series(example["ages"]).ffill().tolist()
         example = self.slice_out_input_sequence(example)
         # Add the motor labels
         if self.include_motor_time_to_event:
@@ -210,16 +202,16 @@ class CehrGptDataProcessor(DatasetMapping):
             ]
         ).astype(np.int32)
 
-        record["position_ids"] = np.concatenate(
+        record["ages"] = np.concatenate(
             [
                 (
-                    np.full([DEMOGRAPHIC_PROMPT_SIZE], record["position_ids"][0])
+                    np.full([DEMOGRAPHIC_PROMPT_SIZE], record["ages"][0])
                     if demographic_tokens is not None
                     else self.empty_array
                 ),
-                np.asarray(record["position_ids"][start_index:end_index]),
+                np.asarray(record["ages"][start_index:end_index]),
                 (
-                    np.asarray([record["position_ids"][-1]])
+                    np.asarray([record["ages"][-1]])
                     if add_last_token
                     else self.empty_array
                 ),

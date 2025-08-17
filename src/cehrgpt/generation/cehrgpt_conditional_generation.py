@@ -77,6 +77,7 @@ def generate_trajectories_per_batch(
     prediction_times = batch["index_date"].squeeze().detach().cpu().tolist()
     batched_epoch_times = batch["epoch_times"].detach().cpu().tolist()
     batched_input_ids = batch["input_ids"]
+    batched_ages = batch["ages"]
     batched_value_indicators = batch["value_indicators"]
     batched_values = batch["values"]
     # Make sure the batch does not exceed batch_size
@@ -84,6 +85,7 @@ def generate_trajectories_per_batch(
         cehrgpt_model,
         cehrgpt_tokenizer,
         batched_input_ids,
+        ages=batched_ages,
         values=batched_values,
         value_indicators=batched_value_indicators,
         max_length=max_length,

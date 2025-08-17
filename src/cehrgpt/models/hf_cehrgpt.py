@@ -1002,39 +1002,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 self.config.motor_num_time_pieces,
             )
 
-    @staticmethod
-    def create_position_ids(
-        tokenizer,
-        **kwargs,
-    ):
-        batched_gender: Optional[List[int]] = kwargs.get("batched_gender", None)
-        batched_race: Optional[List[int]] = kwargs.get("batched_race", None)
-        batched_ages: Optional[List[List[int]]] = kwargs.get("batched_ages", None)
-        if (
-            batched_gender is not None
-            and batched_race is not None
-            and batched_ages is not None
-        ):
-            batched_position_ids = []
-            for ages, race_id, gender_id in zip(
-                batched_ages, batched_race, batched_gender
-            ):
-                batched_position_ids.append(np.clip(ages, a_min=0, a_max=120).tolist())
-                # position_ids = [
-                #     encode_demographics(
-                #         age=age,
-                #         race=race_id,
-                #         gender=gender_id,
-                #         max_age=200,
-                #         max_race=multiple_of_10(tokenizer.race_size),
-                #         max_gender=multiple_of_10(tokenizer.gender_size),
-                #     )
-                #     for age in np.clip(ages, a_min=0, a_max=120)
-                # ]
-                # batched_position_ids.append(position_ids)
-            return torch.tensor(batched_position_ids)
-        return None
-
     def prepare_inputs_for_generation(
         self,
         input_ids,
@@ -1043,7 +1010,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         inputs_embeds=None,
         **kwargs,
     ):
-        position_ids = self.create_position_ids(cehrgpt_tokenizer, **kwargs)
+        ages = kwargs.get("ages")
         # Omit tokens covered by past_key_values
         if past_key_values:
             past_length = past_key_values[0][0].shape[2]
@@ -1058,7 +1025,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 remove_prefix_length = input_ids.shape[1] - 1
 
             input_ids = input_ids[:, remove_prefix_length:]
-            position_ids = position_ids[:, remove_prefix_length:]
+            ages = ages[:, remove_prefix_length:]
 
         attention_mask = kwargs.get("attention_mask", None)
         random_vectors = kwargs.get("random_vectors", None)
@@ -1099,7 +1066,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             {
                 "past_key_values": past_key_values,
                 "use_cache": kwargs.get("use_cache"),
-                "position_ids": position_ids,
+                "ages": ages,
                 "attention_mask": attention_mask,
                 "random_vectors": random_vectors,
             }
@@ -1186,7 +1153,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         values: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
         random_vectors: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
@@ -1204,6 +1170,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        ages: Optional[torch.FloatTensor] = None,
         epoch_times: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple, CehrGptCausalLMOutput]:
         r"""
@@ -1222,7 +1189,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             values=values,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
-            position_ids=position_ids,
+            position_ids=ages,
             random_vectors=random_vectors,
             head_mask=head_mask,
             use_cache=use_cache,
@@ -1612,35 +1579,23 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         model_kwargs["value_indicators"] = value_indicators
         model_kwargs["values"] = values
 
-        # Additional input to construct position_ids
-        batched_gender = []
-        batched_race = []
-        batched_ages = []
         # A variable to keep track of time and initialize it to zero
         batched_time_delta = np.zeros((batch_size,), dtype=np.float32)
-
-        for token_ids in input_ids.detach().cpu():
-            concept_ids = cehrgpt_tokenizer.decode(
-                token_ids.numpy(), skip_special_tokens=False
-            )
-            gender, race = concept_ids[2:4]
-            batched_gender.append(cehrgpt_tokenizer.encode_gender(gender))
-            batched_race.append(cehrgpt_tokenizer.encode_race(race))
-            batched_ages.append(construct_age_sequence(concept_ids))
+        batched_ages = model_kwargs.get("ages", None)
+        if batched_ages is None:
+            batched_ages = []
+            for token_ids in input_ids.detach().cpu():
+                concept_ids = cehrgpt_tokenizer.decode(
+                    token_ids.numpy(), skip_special_tokens=False
+                )
+                batched_ages.append(construct_age_sequence(concept_ids))
 
         # Turn this to a numpy array for easy manipulation
         batched_ages = np.asarray(batched_ages)
         # This is the base to which we will add the time delta
         base_ages = np.asarray([ages[-1] for ages in batched_ages])
-
         # Update the keyword arguments for the prepare_inputs_for_generation
-        model_kwargs.update(
-            {
-                "batched_gender": batched_gender,
-                "batched_race": batched_race,
-                "batched_ages": batched_ages,
-            }
-        )
+        model_kwargs["ages"] = torch.tensor(batched_ages).to(input_ids.device)
 
         while self._has_unfinished_sequences(
             this_peer_finished, synced_gpus, device=input_ids.device
@@ -1707,7 +1662,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             next_age = (base_ages + batched_time_delta // 365).astype(int)[..., None]
             batched_ages = np.concatenate([batched_ages, next_age], axis=-1)
-            model_kwargs["batched_ages"] = batched_ages
+            model_kwargs["ages"] = torch.tensor(batched_ages).to(input_ids.device)
 
             # finished sentences should have their next token be a padding token
             if eos_token_id is not None:

@@ -256,14 +256,14 @@ class CehrGptDataCollator:
             f"batch['input_ids']: {batch['input_ids']} "
         )
 
-        batch_position_ids = [
-            self._try_reverse_tensor(self._convert_to_tensor(example["position_ids"]))
+        batch_ages = [
+            self._try_reverse_tensor(self._convert_to_tensor(example["ages"]))
             for example in examples
         ]
         # Pad sequences to the max length in the batch
-        batch["position_ids"] = self._try_reverse_tensor(
+        batch["ages"] = self._try_reverse_tensor(
             pad_sequence(
-                batch_position_ids,
+                batch_ages,
                 batch_first=True,
                 padding_value=0,
             ).to(torch.int64)
@@ -527,7 +527,8 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
     def __call__(self, examples):
         current_input_ids = []
         current_attention_mask = []
-        current_position_ids = []
+        current_ages = []
+        current_epoch_times = []
         current_value_indicators = []
         current_values = []
 
@@ -554,21 +555,21 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
             # we only add [PAD] token to the end of the sequence because it's not finished
             current_input_ids.extend(list(input_ids) + [self.tokenizer.pad_token_id])
             current_attention_mask.extend(np.ones_like(input_ids).tolist() + [0])
-            if "position_ids" in example:
-                position_ids = (
-                    example["position_ids"].tolist()
-                    if isinstance(example["position_ids"], torch.Tensor)
-                    else list(example["position_ids"])
+
+            ages = (
+                example["ages"].tolist()
+                if isinstance(example["ages"], torch.Tensor)
+                else list(example["ages"])
+            )
+            current_ages.extend(ages + [max(ages)])
+
+            if "epoch_times" in example:
+                epoch_times = (
+                    example["epoch_times"].tolist()
+                    if isinstance(example["epoch_times"], torch.Tensor)
+                    else list(example["epoch_times"])
                 )
-                current_position_ids.extend(position_ids + [max(position_ids)])
-            else:
-                current_position_ids.extend(
-                    np.clip(
-                        list(range(len(input_ids) + 1)),
-                        0,
-                        self.max_position_embeddings - 1,
-                    )
-                )
+                current_epoch_times.extend(epoch_times + [max(epoch_times)])
 
             if self.include_values:
                 current_value_indicators.extend(
@@ -648,8 +649,9 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         packed_example = {
             "input_ids": current_input_ids,
             "attention_mask": current_attention_mask,
-            "position_ids": current_position_ids,
+            "ages": current_ages,
         }
+
         if self.include_values:
             packed_example.update(
                 {"value_indicators": current_value_indicators, "values": current_values}
@@ -664,6 +666,9 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                     "motor_tte_task_indicators": current_motor_tte_task_indicators,
                 }
             )
+
+        if current_epoch_times:
+            packed_example["epoch_times"] = current_epoch_times
 
         if current_labels:
             packed_example.update(
