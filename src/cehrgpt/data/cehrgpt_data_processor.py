@@ -154,8 +154,14 @@ class CehrGptDataProcessor(DatasetMapping):
                 input_ids, skip_special_tokens=False
             )
 
-        # There might be nan position_ids in-between, let's use the forward fill method to fill the nan values
-        example["position_ids"] = pd.Series(example["position_ids"]).ffill().tolist()
+        if "position_ids" not in example:
+            # TODO: this is a default strategy
+            example["position_ids"] = list(range(1, len(example["input_ids"]) + 1))
+        else:
+            # There might be nan position_ids in-between, let's use the forward fill method to fill the nan values
+            example["position_ids"] = (
+                pd.Series(example["position_ids"]).ffill().tolist()
+            )
         example = self.slice_out_input_sequence(example)
         # Add the motor labels
         if self.include_motor_time_to_event:
