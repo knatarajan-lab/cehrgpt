@@ -21,17 +21,16 @@ from cehrbert_data.const.artificial_tokens import (
     DISCHARGE_UNKNOWN_TOKEN,
     GENDER_UNKNOWN_TOKEN,
     RACE_UNKNOWN_TOKEN,
-    VISIT_UNKNOWN_TOKEN,
 )
 from cehrbert_data.const.common import NA
 from cehrbert_data.decorators.patient_event_decorator_base import get_att_function
 from datasets.formatting.formatting import LazyBatch
 from dateutil.relativedelta import relativedelta
 from pandas import Series
-from polars.polars import cum_reduce
 
 from cehrgpt.gpt_utils import (
     construct_age_sequence,
+    construct_time_sequence,
     encode_demographics,
     multiple_of_10,
 )
@@ -455,21 +454,17 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         return record
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
-
-        # Getting gender and race to the record
-        gender, race = record["concept_ids"][2:4]
         # Reconstruct the ages input before the filter is applied
         record["ages"] = construct_age_sequence(
             record["concept_ids"], record.get("ages", None)
+        )
+        record["epoch_times"] = construct_time_sequence(
+            record["concept_ids"], record.get("epoch_times", None)
         )
         # Remove the tokens from patient sequences that do not exist in the tokenizer
         record = self.filter_out_invalid_tokens(record)
         # If any concept has a value associated with it, we normalize the value
         record["input_ids"] = self._concept_tokenizer.encode(record["concept_ids"])
-        gender_id = self._concept_tokenizer.encode_gender(gender)
-        record["gender"] = gender_id
-        race_id = self._concept_tokenizer.encode_race(race)
-        record["racer"] = race_id
         assert len(record["input_ids"]) == len(record["concept_ids"]), (
             "The number of tokens must equal to the number of concepts\n"
             f"decoded concept_ids: {self._concept_tokenizer.decode(record['input_ids'], skip_special_tokens=False)}"

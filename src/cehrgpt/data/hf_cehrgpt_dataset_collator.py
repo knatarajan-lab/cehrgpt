@@ -269,21 +269,18 @@ class CehrGptDataCollator:
             ).to(torch.int64)
         )
 
-        if "epoch_times" in examples[0]:
-            batch_epoch_times = [
-                self._try_reverse_tensor(
-                    self._convert_to_tensor(example["epoch_times"])
-                )
-                for example in examples
-            ]
-            # Pad sequences to the max length in the batch
-            batch["epoch_times"] = self._try_reverse_tensor(
-                pad_sequence(
-                    batch_epoch_times,
-                    batch_first=True,
-                    padding_value=0,
-                ).to(torch.float32)
-            )
+        batch_epoch_times = [
+            self._try_reverse_tensor(self._convert_to_tensor(example["epoch_times"]))
+            for example in examples
+        ]
+        # Pad sequences to the max length in the batch
+        batch["epoch_times"] = self._try_reverse_tensor(
+            pad_sequence(
+                batch_epoch_times,
+                batch_first=True,
+                padding_value=0,
+            ).to(torch.float32)
+        )
 
         if self.pretraining:
             batch["labels"] = torch.where(
@@ -563,13 +560,12 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
             )
             current_ages.extend(ages + [max(ages)])
 
-            if "epoch_times" in example:
-                epoch_times = (
-                    example["epoch_times"].tolist()
-                    if isinstance(example["epoch_times"], torch.Tensor)
-                    else list(example["epoch_times"])
-                )
-                current_epoch_times.extend(epoch_times + [max(epoch_times)])
+            epoch_times = (
+                example["epoch_times"].tolist()
+                if isinstance(example["epoch_times"], torch.Tensor)
+                else list(example["epoch_times"])
+            )
+            current_epoch_times.extend(epoch_times + [max(epoch_times)])
 
             if self.include_values:
                 current_value_indicators.extend(
@@ -650,6 +646,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
             "input_ids": current_input_ids,
             "attention_mask": current_attention_mask,
             "ages": current_ages,
+            "epoch_times": current_epoch_times,
         }
 
         if self.include_values:
@@ -666,9 +663,6 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                     "motor_tte_task_indicators": current_motor_tte_task_indicators,
                 }
             )
-
-        if current_epoch_times:
-            packed_example["epoch_times"] = current_epoch_times
 
         if current_labels:
             packed_example.update(

@@ -1,6 +1,6 @@
 import random
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -66,6 +66,29 @@ class RandomSampleCache:
                     random.choices(self._data_indices, k=self._cache_size)
                 )
         return self._cache.pop()
+
+
+def construct_time_sequence(
+    concept_ids: List[str], epoch_times: Optional[List[int]] = None
+) -> List[float]:
+    if epoch_times is not None:
+        return epoch_times
+
+    if concept_ids[0].lower().startswith("year"):
+        year_str = concept_ids[0].split(":")[1]
+    else:
+        year_str = "1985"
+
+    datetime_cursor = datetime(
+        int(year_str), month=1, day=1, hour=0, minute=0, second=0
+    ).replace(tzinfo=timezone.utc)
+    epoch_times = []
+    for concept_id in concept_ids:
+        if is_att_token(concept_id):
+            att_days = extract_time_interval_in_days(concept_id)
+            datetime_cursor += timedelta(days=att_days)
+        epoch_times.append(datetime_cursor.timestamp())
+    return epoch_times
 
 
 def construct_age_sequence(

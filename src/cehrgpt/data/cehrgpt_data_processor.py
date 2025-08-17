@@ -218,6 +218,23 @@ class CehrGptDataProcessor(DatasetMapping):
             ]
         ).astype(np.int32)
 
+        # For the new datasets, they contain the column "epoch_times"
+        record["epoch_times"] = np.concatenate(
+            [
+                (
+                    np.zeros([DEMOGRAPHIC_PROMPT_SIZE])
+                    if demographic_tokens is not None
+                    else self.empty_array
+                ),
+                np.asarray(record["epoch_times"][start_index:end_index]),
+                (
+                    np.asarray([record["epoch_times"][-1]])
+                    if add_last_token
+                    else self.empty_array
+                ),
+            ]
+        ).astype(np.float32)
+
         if self.include_values:
             record["value_indicators"] = np.concatenate(
                 [
@@ -262,25 +279,6 @@ class CehrGptDataProcessor(DatasetMapping):
                         )
                     ),
                     np.asarray([-100.0]) if add_last_token else self.empty_array,
-                ]
-            ).astype(np.float32)
-
-        # For the new datasets, they contain the column "epoch_times"
-        if "epoch_times" in record:
-            epoch_times = record["epoch_times"]
-            record["epoch_times"] = np.concatenate(
-                [
-                    (
-                        np.zeros([DEMOGRAPHIC_PROMPT_SIZE])
-                        if demographic_tokens is not None
-                        else self.empty_array
-                    ),
-                    np.asarray(epoch_times[start_index:end_index]),
-                    (
-                        np.asarray([epoch_times[-1]])
-                        if add_last_token
-                        else self.empty_array
-                    ),
                 ]
             ).astype(np.float32)
 
@@ -402,28 +400,15 @@ class CehrGptDataProcessor(DatasetMapping):
         valid_time_tokens = is_att_tokens & (time_intervals > 0)
         n_concepts = len(concept_ids)
 
-        if "epoch_times" in record:
-            event_times = np.zeros(n_concepts, dtype=float)
-            previous_time_stamp = record["epoch_times"][0]
-            for i, time_stamp in enumerate(record["epoch_times"]):
-                if time_stamp < previous_time_stamp:
-                    time_stamp = previous_time_stamp
-                else:
-                    previous_time_stamp = time_stamp
-                event_times[i] = time_stamp
-            # Convert the epoch time to the corresponding day
-            event_times = event_times
-        else:
-            time_token_event_times = np.cumsum(
-                np.concatenate([np.zeros(1), time_intervals[valid_time_tokens]], axis=0)
-            )
-            event_times = np.zeros(n_concepts, dtype=int)
-            time_token_indices = np.where(valid_time_tokens)[0].tolist()
-            for i, (start, end) in enumerate(
-                zip([0] + time_token_indices, time_token_indices + [n_concepts])
-            ):
-                # Convert this to seconds
-                event_times[start:end] = time_token_event_times[i] * 86400
+        # We need to make sure event_times is monotonic
+        event_times = np.zeros(n_concepts, dtype=float)
+        previous_time_stamp = record["epoch_times"][0]
+        for i, time_stamp in enumerate(record["epoch_times"]):
+            if time_stamp < previous_time_stamp:
+                time_stamp = previous_time_stamp
+            else:
+                previous_time_stamp = time_stamp
+            event_times[i] = time_stamp
 
         # Determine prediction positions
         before_valid_time_tokens = np.roll(valid_time_tokens, -1)
