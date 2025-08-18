@@ -9,15 +9,11 @@ from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
-import polars as pl
 import torch
 import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
 from cehrbert.runners.runner_util import generate_prepared_ds_path
 from datasets import concatenate_datasets, load_from_disk
-from torch.distributed.algorithms.ddp_comm_hooks.powerSGD_hook import (
-    batched_powerSGD_hook,
-)
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers.trainer_utils import is_main_process
@@ -29,10 +25,8 @@ from cehrgpt.data.hf_cehrgpt_dataset_collator import (
     SamplePackingCehrGptDataCollator,
 )
 from cehrgpt.data.sample_packing_sampler import SamplePackingBatchSampler
-from cehrgpt.models.hf_cehrgpt import (
-    CEHRGPT2Model,
-    extract_features_from_packed_sequence,
-)
+from cehrgpt.models.hf_cehrgpt import CEHRGPT2Model
+from cehrgpt.models.modelling_utils import extract_features_from_packed_sequence
 from cehrgpt.models.special_tokens import LINEAR_PROB_TOKEN
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.data_utils import (

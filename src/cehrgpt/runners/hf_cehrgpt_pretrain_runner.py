@@ -75,7 +75,6 @@ def load_and_create_tokenizer(
     cehrgpt_args: CehrGPTArguments,
     dataset: Union[Dataset, DatasetDict],
 ) -> CehrGptTokenizer:
-
     # Try to load the pretrained tokenizer
     tokenizer_abspath = os.path.expanduser(model_args.tokenizer_name_or_path)
     if not tokenizer_exists(tokenizer_abspath):
@@ -222,6 +221,8 @@ def load_and_create_model(
             ve_token_id=tokenizer.ve_token_id,
             n_inner=cehrgpt_args.inner_dim,
             decoder_mlp=cehrgpt_args.decoder_mlp,
+            include_patient_summary=cehrgpt_args.include_patient_summary,
+            patient_summary_since_layer=cehrgpt_args.patient_summary_since_layer,
             **model_args_cehrgpt,
         )
 
@@ -556,6 +557,7 @@ def main():
             motor_tte_vocab_size=model.config.motor_tte_vocab_size,
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
             motor_sampling_probability=cehrgpt_args.motor_sampling_probability,
+            include_patient_summary=cehrgpt_args.include_patient_summary,
         ),
         train_dataset=processed_dataset["train"],
         eval_dataset=(

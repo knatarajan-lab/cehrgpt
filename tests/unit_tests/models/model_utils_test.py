@@ -2,11 +2,8 @@ import unittest
 
 import torch
 
-from cehrgpt.models.gpt2 import _get_unpad_data
-from cehrgpt.models.hf_cehrgpt import (
-    create_sample_packing_attention_mask,
-    is_sample_pack,
-)
+from cehrgpt.models.gpt2 import _get_unpad_data, is_sample_pack
+from cehrgpt.models.modelling_utils import create_sample_packing_attention_mask
 
 
 class TestSamplePackingFunctions(unittest.TestCase):

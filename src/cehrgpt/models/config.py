@@ -143,6 +143,8 @@ class CEHRGPTConfig(PretrainedConfig):
         next_token_prediction_loss_weight=1.0,
         time_token_loss_weight=1.0,
         time_to_visit_loss_weight=1.0,
+        include_patient_summary=False,
+        patient_summary_since_layer=6,
         causal_sfm=False,
         demographics_size=4,
         lab_token_penalty=False,
@@ -202,6 +204,9 @@ class CEHRGPTConfig(PretrainedConfig):
         self._token_to_time_token_mapping = token_to_time_token_mapping
         self.time_token_loss_weight = time_token_loss_weight
         self.time_to_visit_loss_weight = time_to_visit_loss_weight
+
+        self.include_patient_summary = include_patient_summary
+        self.patient_summary_since_layer = patient_summary_since_layer
 
         # MOTOR TTE configuration
         self.motor_tte_vocab_size = motor_tte_vocab_size

@@ -1,3 +1,4 @@
+import copy
 import math
 import warnings
 from typing import List, Optional, Tuple, Union
@@ -6,7 +7,7 @@ import numpy as np
 import torch
 import torch.nn.functional as f
 from torch import nn
-from torch.distributions import Gamma
+from torch.distributions import Gamma, LogNormal
 from torch.nn import CrossEntropyLoss
 from transformers import PreTrainedModel
 from transformers.activations import gelu_new
@@ -23,10 +24,8 @@ from transformers.utils.model_parallel_utils import assert_device_map, get_devic
 
 from cehrgpt.gpt_utils import (
     construct_age_sequence,
-    encode_demographics,
     extract_time_interval_in_days,
     is_att_token,
-    multiple_of_10,
 )
 from cehrgpt.models.activations import RMSNorm
 from cehrgpt.models.config import CEHRGPTConfig
@@ -37,44 +36,12 @@ from cehrgpt.models.hf_modeling_outputs import (
     CehrGptOutputWithPast,
     CehrGptSequenceClassifierOutput,
 )
+from cehrgpt.models.modelling_utils import (
+    create_sample_packing_attention_mask,
+    extract_features_from_packed_sequence,
+)
 
 logger = logging.get_logger(__name__)
-
-
-def extract_features_from_packed_sequence(
-    hidden_state: torch.Tensor,
-    attention_mask: torch.Tensor,
-) -> torch.Tensor:
-    max_index = attention_mask.nonzero(as_tuple=False).flatten()[-1]
-    padded_attention_mask = f.pad(attention_mask[:, : max_index + 1], (0, 1))
-    feature_indices = torch.nonzero(padded_attention_mask == 0)[:, 1] - 1
-    return hidden_state[:, feature_indices]
-
-
-def create_sample_packing_attention_mask(attention_mask: torch.Tensor) -> torch.Tensor:
-    """
-    Create a block-diagonal attention mask for packed sequences within a batch.
-
-    Args:
-        attention_mask (torch.Tensor): (batch_size, seq_len) binary mask where 1 = token, 0 = padding
-
-    Returns:
-        torch.Tensor: (batch_size, seq_len, seq_len) attention mask where entries are 1 if tokens
-                      can attend to each other (within same packed segment), 0 otherwise.
-    """
-    # Step 1: Identify segments within each sample
-    cumsum_mask = (attention_mask == 0).cumsum(dim=-1)
-    segment_ids = cumsum_mask * attention_mask  # zeros remain zero
-
-    # Step 2: Compare segment IDs pairwise per batch element
-    # Shape: (batch_size, seq_len, seq_len)
-    attn_matrix = (segment_ids.unsqueeze(2) == segment_ids.unsqueeze(1)).int()
-
-    # Step 3: Mask out padding tokens
-    mask = attention_mask.unsqueeze(1) * attention_mask.unsqueeze(2)
-    attn_matrix = attn_matrix * mask
-
-    return attn_matrix
 
 
 class MotorTaskHead(nn.Module):
@@ -611,6 +578,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
     def forward(
         self,
         input_ids: Optional[torch.LongTensor],
+        input_embeddings: Optional[torch.FloatTensor] = None,
         value_indicators: Optional[torch.BoolTensor] = None,
         values: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
@@ -654,8 +622,6 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             shape_list[-1] += 1
             # Convert list back to torch.Size if needed
             input_shape = torch.Size(shape_list)
-
-        input_ids.device
 
         if past_key_values is None:
             past_key_values = tuple([None] * len(self.h))
@@ -721,65 +687,70 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         # head_mask has shape n_layer x batch x n_heads x N x N
         head_mask = self.get_head_mask(head_mask, self.config.n_layer)
 
-        if self.config.use_pretrained_embeddings:
-            pretrained_token_id_indicators = torch.isin(
-                input_ids,
-                torch.tensor(self.config.pretrained_token_ids).to(input_ids.device),
-            )
-            input_embeddings = torch.where(
-                pretrained_token_id_indicators.unsqueeze(-1),
-                self.pretrained_wte(input_ids),
-                self.wte(input_ids),
-            )
-        else:
-            input_embeddings = self.wte(input_ids)
+        # If the input embeddings are None, we will generate input embeddings
+        if input_embeddings is None:
+            if self.config.use_pretrained_embeddings:
+                pretrained_token_id_indicators = torch.isin(
+                    input_ids,
+                    torch.tensor(self.config.pretrained_token_ids).to(input_ids.device),
+                )
+                input_embeddings = torch.where(
+                    pretrained_token_id_indicators.unsqueeze(-1),
+                    self.pretrained_wte(input_ids),
+                    self.wte(input_ids),
+                )
+            else:
+                input_embeddings = self.wte(input_ids)
 
-        if self.config.causal_sfm and input_shape[1] >= self.config.demographics_size:
-            demographic_embeddings = input_embeddings[
-                :, : self.config.demographics_size
-            ]
-            medical_event_embeddings = input_embeddings[
-                :, self.config.demographics_size :
-            ]
-            if random_vectors is None:
-                random_vectors = torch.rand_like(input_embeddings[:, :1])
-
-            input_embeddings = torch.concat(
-                [demographic_embeddings, random_vectors, medical_event_embeddings],
-                dim=1,
-            )
-            position_ids = torch.concat(
-                [
-                    position_ids[:, : self.config.demographics_size],
-                    position_ids[:, :1],
-                    position_ids[:, self.config.demographics_size :],
-                ],
-                dim=1,
-            )
-
-        if self.include_values:
             if (
                 self.config.causal_sfm
                 and input_shape[1] >= self.config.demographics_size
             ):
-                values = torch.concat(
-                    [torch.zeros_like(values[:, :1], dtype=torch.int32), values],
+                demographic_embeddings = input_embeddings[
+                    :, : self.config.demographics_size
+                ]
+                medical_event_embeddings = input_embeddings[
+                    :, self.config.demographics_size :
+                ]
+                if random_vectors is None:
+                    random_vectors = torch.rand_like(input_embeddings[:, :1])
+
+                input_embeddings = torch.concat(
+                    [demographic_embeddings, random_vectors, medical_event_embeddings],
                     dim=1,
                 )
-                value_indicators = torch.concat(
+                position_ids = torch.concat(
                     [
-                        torch.zeros_like(value_indicators[:, :1]).to(torch.bool),
-                        value_indicators,
+                        position_ids[:, : self.config.demographics_size],
+                        position_ids[:, :1],
+                        position_ids[:, self.config.demographics_size :],
                     ],
                     dim=1,
                 )
-            value_embeddings = self.vte(values)
-            # Combine the value and concept embeddings together
-            input_embeddings = self.concept_value_transformation_layer(
-                concept_embeddings=input_embeddings,
-                value_indicators=value_indicators,
-                value_embeddings=value_embeddings,
-            )
+
+            if self.include_values:
+                if (
+                    self.config.causal_sfm
+                    and input_shape[1] >= self.config.demographics_size
+                ):
+                    values = torch.concat(
+                        [torch.zeros_like(values[:, :1], dtype=torch.int32), values],
+                        dim=1,
+                    )
+                    value_indicators = torch.concat(
+                        [
+                            torch.zeros_like(value_indicators[:, :1]).to(torch.bool),
+                            value_indicators,
+                        ],
+                        dim=1,
+                    )
+                value_embeddings = self.vte(values)
+                # Combine the value and concept embeddings together
+                input_embeddings = self.concept_value_transformation_layer(
+                    concept_embeddings=input_embeddings,
+                    value_indicators=value_indicators,
+                    value_embeddings=value_embeddings,
+                )
 
         hidden_states = self.drop(input_embeddings)
 
@@ -887,6 +858,28 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
     def __init__(self, config: CEHRGPTConfig):
         super().__init__(config)
         self.cehrgpt = CEHRGPT2Model(config)
+        if config.include_patient_summary:
+            patient_summary_config = copy.deepcopy(config)
+            patient_summary_config.apply_rotary = False
+            patient_summary_config.include_values = False
+            patient_summary_config.include_motor_time_to_event = False
+            patient_summary_config.include_ttv_prediction = False
+            patient_summary_config.use_sub_time_tokenization = False
+            patient_summary_config.use_pretrained_embeddings = False
+            patient_summary_config.causal_sfm = False
+            patient_summary_config._token_to_time_token_mapping = dict()
+            patient_summary_config.n_layer = max(
+                patient_summary_config.n_layer
+                - patient_summary_config.patient_summary_since_layer,
+                0,
+            )
+            self.patient_summary = CEHRGPT2Model(patient_summary_config)
+            self.ps_code_distribution_head = nn.Linear(
+                config.n_embd, config.vocab_size, bias=False
+            )
+            self.ps_so_far_duration_head = nn.Linear(config.n_embd, 2, bias=False)
+            self.ps_age_head = nn.Linear(config.n_embd, 2, bias=False)
+
         if self.config.include_ttv_prediction:
             self.tte_head = VisitTimeToEventHead(config.n_embd)
 
@@ -1074,6 +1067,65 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         return model_inputs
 
+    def patient_summary_loss(
+        self,
+        patient_summary_hidden_states,
+        patient_summary_row_indices,
+        patient_summary_col_indices,
+        patient_summary_values,
+        patient_summary_indicators,
+        patient_summary_ages,
+        patient_summary_durations,
+        patient_summary_end_index,
+    ):
+        patient_summary_end_index = patient_summary_end_index.sum().item()
+        patient_summary_row_indices = patient_summary_row_indices.view((-1, 1))[
+            :patient_summary_end_index
+        ]
+        patient_summary_col_indices = patient_summary_col_indices.view((-1, 1))[
+            :patient_summary_end_index
+        ]
+        patient_summary_values = patient_summary_values.view((-1, 1))[
+            :patient_summary_end_index
+        ]
+        patient_summary_hidden_states = patient_summary_hidden_states[
+            patient_summary_indicators
+        ].view((-1, self.config.n_embd))
+        patient_summary_ages = patient_summary_ages[
+            patient_summary_indicators
+        ].flatten()
+        patient_summary_durations = patient_summary_durations[
+            patient_summary_indicators
+        ].flatten()
+        code_distribution = torch.zeros(
+            (patient_summary_hidden_states.shape[0], self.config.vocab_size),
+            device=patient_summary_hidden_states.device,
+        )
+        code_distribution[patient_summary_row_indices, patient_summary_col_indices] = (
+            patient_summary_values
+        )
+        code_distribution = code_distribution.softmax(dim=-1)
+
+        ps_code_logits = self.ps_code_distribution_head(patient_summary_hidden_states)
+        ps_code_log_probs = f.log_softmax(ps_code_logits, dim=-1)  # [B,K]
+        # patient_summary_code_distribution to 1
+        code_loss = f.kl_div(
+            ps_code_log_probs, code_distribution, reduction="batchmean"
+        )
+        so_far_duration_states = self.ps_so_far_duration_head(
+            patient_summary_hidden_states
+        )
+        so_far_loss = self.sofar_duration_nll_lognormal(
+            so_far_duration_states[:, 0],
+            so_far_duration_states[:, 1],
+            patient_summary_durations,
+        )
+        ps_age_states = self.ps_age_head(patient_summary_hidden_states)
+        age_loss = self.sofar_duration_nll_lognormal(
+            ps_age_states[:, 0], ps_age_states[:, 1], patient_summary_ages
+        )
+        return code_loss + age_loss + so_far_loss
+
     def motor_nll_loss(
         self,
         hidden_states,
@@ -1133,18 +1185,29 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             -math.log(2)
             * torch.where(motor_tte_event_indicators, time_dependent_logits, 0).mean()
         )
-
-        # survival_loss = (
-        #     torch.where(motor_tte_masks, lambda_p * motor_tte_times, 0)
-        #     .sum(dim=1)
-        #     .mean()
-        # )
-        # event_loss = (
-        #     -torch.where(motor_tte_event_indicators, torch.log(lambda_p), 0)
-        #     .sum(dim=1)
-        #     .mean()
-        # )
         return survival_loss + event_loss
+
+    def sofar_duration_nll_lognormal(
+        self,
+        mu,  # (B, N)
+        log_sigma,  # (B, N)
+        duration_days,  # (B, N, values >= 0
+        shift: float = 1.0,
+        reduction: str = "mean",  # "mean" | "sum" | "none"
+    ):
+        sigma = log_sigma.exp().clamp_min(1e-6)
+        x = (duration_days + shift).clamp_min(1e-8)  # support strictly > 0
+        dist = LogNormal(loc=mu, scale=sigma)
+        nll = -dist.log_prob(x)  # (B, N)
+
+        if reduction == "mean":
+            return nll.mean()
+        elif reduction == "sum":
+            return nll.sum()
+        elif reduction == "none":
+            return nll
+        else:
+            raise ValueError("reduction must be 'mean', 'sum', or 'none'")
 
     def forward(
         self,
@@ -1166,6 +1229,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         motor_tte_task_indicators: Optional[torch.BoolTensor] = None,
         motor_tte_masks: Optional[torch.BoolTensor] = None,
         motor_end_index: Optional[torch.LongTensor] = None,
+        patient_summary_indicators: Optional[torch.BoolTensor] = None,
+        patient_summary_col_indices: Optional[torch.IntTensor] = None,
+        patient_summary_row_indices: Optional[torch.IntTensor] = None,
+        patient_summary_values: Optional[torch.FloatTensor] = None,
+        patient_summary_durations: Optional[torch.FloatTensor] = None,
+        patient_summary_end_index: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -1183,6 +1252,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             return_dict if return_dict is not None else self.config.use_return_dict
         )
 
+        if self.config.include_patient_summary:
+            output_hidden_states = True
+
         transformer_outputs = self.cehrgpt(
             input_ids,
             value_indicators=value_indicators,
@@ -1198,6 +1270,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             return_dict=return_dict,
         )
         hidden_states = transformer_outputs[0]
+
         # get rid of the random vector:
         if (
             self.config.causal_sfm
@@ -1396,6 +1469,34 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                         token_value_loss * self.config.lab_token_loss_weight
                     )
                 loss += token_value_loss * self.config.value_prediction_loss_weight
+
+            if self.config.include_patient_summary:
+                all_hidden_stats = transformer_outputs[2]
+                layer_idx = max(
+                    min(self.config.patient_summary_since_layer, self.config.n_layer)
+                    - 1,
+                    0,
+                )
+                patient_summary_input_embeddings = all_hidden_stats[layer_idx]
+                patient_summary_outputs = self.patient_summary(
+                    input_ids,
+                    input_embeddings=patient_summary_input_embeddings,
+                    attention_mask=attention_mask,
+                    output_attentions=False,
+                    output_hidden_states=False,
+                    return_dict=False,
+                )
+                patient_summary_hidden_states = patient_summary_outputs[0]
+                loss += self.patient_summary_loss(
+                    patient_summary_hidden_states,
+                    patient_summary_row_indices,
+                    patient_summary_col_indices,
+                    patient_summary_values,
+                    patient_summary_indicators,
+                    ages,
+                    patient_summary_durations,
+                    patient_summary_end_index,
+                )
 
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]

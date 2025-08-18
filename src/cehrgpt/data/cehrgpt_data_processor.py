@@ -1,4 +1,5 @@
 import random
+from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -18,6 +19,7 @@ from cehrgpt.gpt_utils import (
     is_clinical_event,
     is_inpatient_att_token,
     is_inpatient_hour_token,
+    is_visit_end,
     random_slice_gpt_sequence,
 )
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
@@ -40,6 +42,7 @@ class CehrGptDataProcessor(DatasetMapping):
         pretraining: bool = True,
         include_demographics: bool = False,
         add_linear_prob_token: bool = False,
+        include_patient_summary: bool = False,
     ):
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -53,6 +56,7 @@ class CehrGptDataProcessor(DatasetMapping):
         self.pretraining = pretraining
         self.include_demographics = include_demographics
         self.add_linear_prob_token = add_linear_prob_token
+        self.include_patient_summary = include_patient_summary
         self.empty_array = np.asarray([])
 
         if self.pretraining and self.add_linear_prob_token:
@@ -157,6 +161,34 @@ class CehrGptDataProcessor(DatasetMapping):
             )
         example["ages"] = pd.Series(example["ages"]).ffill().tolist()
         example = self.slice_out_input_sequence(example)
+
+        if self.include_patient_summary:
+            patient_summary_indicators = np.zeros(
+                len(example["concept_ids"]), dtype=bool
+            )
+            row_indices = []
+            col_indices = []
+            values = []
+            codes = defaultdict(float)
+            for i in range(len(example["concept_ids"])):
+                concept_id = example["concept_ids"][i]
+                token_id = example["input_ids"][i]
+                if is_visit_end(concept_id):
+                    row_index = row_indices[-1] + 1 if row_indices else 0
+                    for k, v in codes.items():
+                        row_indices.append(row_index)
+                        col_indices.append(k)
+                        values.append(v)
+                    patient_summary_indicators[i] = True
+                else:
+                    if is_clinical_event(concept_id):
+                        codes[token_id] += 1
+                    patient_summary_indicators[i] = False
+            example["patient_summary_indicators"] = patient_summary_indicators
+            example["patient_summary_row_indices"] = row_indices
+            example["patient_summary_col_indices"] = col_indices
+            example["patient_summary_values"] = values
+
         # Add the motor labels
         if self.include_motor_time_to_event:
             motor_inputs = self.create_time_to_event_labels(example)

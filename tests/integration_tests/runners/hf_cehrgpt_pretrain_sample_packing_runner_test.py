@@ -110,10 +110,10 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "--report_to",
             "none",
             "--include_motor_time_to_event",
-            "true",
-            "--exclude_position_ids",
-            "true",
+            "false",
             "--apply_rotary",
+            "true",
+            "--include_patient_summary",
             "true",
         ]
         train_main()

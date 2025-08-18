@@ -27,6 +27,7 @@ class CehrGptDataCollator:
         pretraining: bool = True,
         include_demographics: bool = False,
         add_linear_prob_token: bool = False,
+        include_patient_summary: bool = False,
     ):
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -50,6 +51,7 @@ class CehrGptDataCollator:
             )
 
         self.include_motor_time_to_event = include_motor_time_to_event
+        self.include_patient_summary = include_patient_summary
         self.motor_tte_vocab_size = motor_tte_vocab_size
         self.motor_num_time_pieces = motor_num_time_pieces
         self.motor_time_bins = (
@@ -85,6 +87,7 @@ class CehrGptDataCollator:
             motor_sampling_probability=motor_sampling_probability,
             pretraining=pretraining,
             add_linear_prob_token=add_linear_prob_token,
+            include_patient_summary=include_patient_summary,
         )
 
     def _try_reverse_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
@@ -319,6 +322,103 @@ class CehrGptDataCollator:
                 )
             )
 
+        if self.include_patient_summary:
+            patient_summary_row_indices = [
+                self._try_reverse_tensor(
+                    self._convert_to_tensor(example["patient_summary_row_indices"])
+                )
+                for example in examples
+            ]
+            patient_summary_col_indices = [
+                self._try_reverse_tensor(
+                    self._convert_to_tensor(example["patient_summary_col_indices"])
+                )
+                for example in examples
+            ]
+            patient_summary_values = [
+                self._try_reverse_tensor(
+                    self._convert_to_tensor(example["patient_summary_values"])
+                )
+                for example in examples
+            ]
+            patient_summary_indicators = [
+                self._try_reverse_tensor(
+                    self._convert_to_tensor(example["patient_summary_indicators"])
+                )
+                for example in examples
+            ]
+            patient_summary_durations = [
+                self._try_reverse_tensor(
+                    self._convert_to_tensor(example["patient_summary_durations"])
+                )
+                for example in examples
+            ]
+            patient_summary_row_indices = torch.concat(
+                patient_summary_row_indices, dim=0
+            )
+            batch_size = len(examples)
+            length = patient_summary_row_indices.shape[0]
+            padded_length = batch_size - length % batch_size
+            batch["patient_summary_row_indices"] = (
+                torch.concat(
+                    [
+                        patient_summary_row_indices,
+                        torch.full(
+                            (padded_length,),
+                            0,
+                        ),
+                    ],
+                    dim=0,
+                )
+                .reshape((batch_size, -1))
+                .to(torch.int32)
+            )
+            batch["patient_summary_col_indices"] = (
+                torch.concat(
+                    [
+                        torch.concat(patient_summary_col_indices, dim=0),
+                        torch.full(
+                            (padded_length,),
+                            0,
+                        ),
+                    ],
+                    dim=0,
+                )
+                .reshape((batch_size, -1))
+                .to(torch.int32)
+            )
+            batch["patient_summary_values"] = (
+                torch.concat(
+                    [
+                        torch.concat(patient_summary_values, dim=0),
+                        torch.full(
+                            (padded_length,),
+                            0.0,
+                        ),
+                    ],
+                    dim=0,
+                )
+                .reshape((batch_size, -1))
+                .to(torch.float32)
+            )
+            # Input to indicate whether the visit should be included for TTE predictions
+            batch["patient_summary_indicators"] = pad_sequence(
+                patient_summary_indicators,
+                batch_first=True,
+                padding_value=False,
+            ).to(torch.bool)
+            batch["patient_summary_durations"] = pad_sequence(
+                patient_summary_durations,
+                batch_first=True,
+                padding_value=0,
+            ).to(torch.float32)
+            batch["patient_summary_end_index"] = torch.concat(
+                [
+                    torch.full((length, 1), 1, dtype=torch.int32),
+                    torch.full((padded_length, 1), 0, dtype=torch.int32),
+                ]
+            ).reshape((batch_size, -1))
+
         if self.include_motor_time_to_event:
             examples_with_motor_tte = [
                 self.create_time_to_event_tensors_ultra_optimized(_) for _ in examples
@@ -536,6 +636,13 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         current_motor_values = []
         current_motor_tte_task_indicators = []
 
+        # Patient Summary
+        current_patient_summary_row_indices = []
+        current_patient_summary_col_indices = []
+        current_patient_summary_values = []
+        current_patient_summary_indicators = []
+        current_patient_summary_durations = []
+
         # Demographics
         current_person_ids = []
         current_index_dates = []
@@ -626,6 +733,53 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                     + [False]
                 )
 
+            if self.include_patient_summary:
+                current_max_patient_summary_row_index = len(
+                    np.unique(current_patient_summary_row_indices)
+                )
+                patient_summary_row_indices = (
+                    example["patient_summary_row_indices"].tolist()
+                    if isinstance(example["patient_summary_row_indices"], torch.Tensor)
+                    else list(example["patient_summary_row_indices"])
+                )
+                current_patient_summary_row_indices.extend(
+                    list(
+                        map(
+                            lambda offset: offset
+                            + current_max_patient_summary_row_index,
+                            patient_summary_row_indices,
+                        )
+                    )
+                )
+                current_patient_summary_col_indices.extend(
+                    example["patient_summary_col_indices"].tolist()
+                    if isinstance(example["patient_summary_col_indices"], torch.Tensor)
+                    else list(example["patient_summary_col_indices"])
+                )
+                current_patient_summary_values.extend(
+                    example["patient_summary_values"].tolist()
+                    if isinstance(example["patient_summary_values"], torch.Tensor)
+                    else list(example["patient_summary_values"])
+                )
+                current_patient_summary_indicators.extend(
+                    (
+                        example["patient_summary_indicators"].tolist()
+                        if isinstance(
+                            example["patient_summary_indicators"], torch.Tensor
+                        )
+                        else list(example["patient_summary_indicators"])
+                    )
+                    + [False]
+                )
+                epoch_times = (
+                    example["epoch_times"].tolist()
+                    if isinstance(example["epoch_times"], torch.Tensor)
+                    else list(example["epoch_times"])
+                )
+                current_patient_summary_durations.extend(
+                    [epoch_time - epoch_times[0] for epoch_time in epoch_times] + [0]
+                )
+
             if "person_id" in example:
                 current_person_ids.append(example["person_id"])
 
@@ -661,6 +815,17 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                     "motor_col_indices": current_motor_col_indices,
                     "motor_values": current_motor_values,
                     "motor_tte_task_indicators": current_motor_tte_task_indicators,
+                }
+            )
+
+        if self.include_patient_summary:
+            packed_example.update(
+                {
+                    "patient_summary_row_indices": current_patient_summary_row_indices,
+                    "patient_summary_col_indices": current_patient_summary_col_indices,
+                    "patient_summary_values": current_patient_summary_values,
+                    "patient_summary_indicators": current_patient_summary_indicators,
+                    "patient_summary_durations": current_patient_summary_durations,
                 }
             )
 

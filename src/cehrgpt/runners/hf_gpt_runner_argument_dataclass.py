@@ -265,3 +265,13 @@ class CehrGPTArguments:
         default=1024,
         metadata={"help": "The maximum number of tokens in the generation sequence"},
     )
+    include_patient_summary: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to include patient summary"
+        },
+    )
+    patient_summary_since_layer: Optional[int] = dataclasses.field(
+        default=6,
+        metadata={"help": "The layer based on which the patient summary is made"},
+    )
