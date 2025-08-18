@@ -1294,6 +1294,24 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         else:
             value_logits = None
 
+        patient_summary_hidden_states = None
+        if self.config.include_patient_summary:
+            all_hidden_stats = transformer_outputs[2]
+            layer_idx = max(
+                min(self.config.patient_summary_since_layer, self.config.n_layer) - 1,
+                0,
+            )
+            patient_summary_input_embeddings = all_hidden_stats[layer_idx]
+            patient_summary_outputs = self.patient_summary(
+                input_ids,
+                input_embeddings=patient_summary_input_embeddings,
+                attention_mask=attention_mask,
+                output_attentions=False,
+                output_hidden_states=False,
+                return_dict=False,
+            )
+            patient_summary_hidden_states = patient_summary_outputs[0]
+
         loss = None
         token_loss = None
         time_token_loss = None
@@ -1470,22 +1488,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 loss += token_value_loss * self.config.value_prediction_loss_weight
 
             if self.config.include_patient_summary:
-                all_hidden_stats = transformer_outputs[2]
-                layer_idx = max(
-                    min(self.config.patient_summary_since_layer, self.config.n_layer)
-                    - 1,
-                    0,
-                )
-                patient_summary_input_embeddings = all_hidden_stats[layer_idx]
-                patient_summary_outputs = self.patient_summary(
-                    input_ids,
-                    input_embeddings=patient_summary_input_embeddings,
-                    attention_mask=attention_mask,
-                    output_attentions=False,
-                    output_hidden_states=False,
-                    return_dict=False,
-                )
-                patient_summary_hidden_states = patient_summary_outputs[0]
                 loss += self.patient_summary_loss(
                     patient_summary_hidden_states,
                     patient_summary_row_indices,
@@ -1507,7 +1509,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             value_indicators=value_indicators,
             next_value_logits=value_logits,
             past_key_values=transformer_outputs.past_key_values,
-            hidden_states=transformer_outputs.hidden_states,
+            hidden_states=hidden_states,
+            patient_summary_hidden_states=patient_summary_hidden_states,
             attentions=transformer_outputs.attentions,
             token_loss=token_loss,
             time_token_loss=time_token_loss,
