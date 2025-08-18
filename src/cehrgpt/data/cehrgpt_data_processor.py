@@ -163,31 +163,8 @@ class CehrGptDataProcessor(DatasetMapping):
         example = self.slice_out_input_sequence(example)
 
         if self.include_patient_summary:
-            patient_summary_indicators = np.zeros(
-                len(example["concept_ids"]), dtype=bool
-            )
-            row_indices = []
-            col_indices = []
-            values = []
-            codes = defaultdict(float)
-            for i in range(len(example["concept_ids"])):
-                concept_id = example["concept_ids"][i]
-                token_id = example["input_ids"][i]
-                if is_visit_end(concept_id):
-                    row_index = row_indices[-1] + 1 if row_indices else 0
-                    for k, v in codes.items():
-                        row_indices.append(row_index)
-                        col_indices.append(k)
-                        values.append(v)
-                    patient_summary_indicators[i] = True
-                else:
-                    if is_clinical_event(concept_id):
-                        codes[token_id] += 1
-                    patient_summary_indicators[i] = False
-            example["patient_summary_indicators"] = patient_summary_indicators
-            example["patient_summary_row_indices"] = row_indices
-            example["patient_summary_col_indices"] = col_indices
-            example["patient_summary_values"] = values
+            patient_summary_labels = self.create_patient_summary_labels(example)
+            example.update(patient_summary_labels)
 
         # Add the motor labels
         if self.include_motor_time_to_event:
@@ -195,6 +172,41 @@ class CehrGptDataProcessor(DatasetMapping):
             example.update(motor_inputs)
         del example["concept_ids"]
         return example
+
+    def create_patient_summary_labels(self, example: Dict[str, Any]) -> Dict[str, Any]:
+        patient_summary_labels = {}
+        patient_summary_indicators = np.zeros(len(example["concept_ids"]), dtype=bool)
+        row_indices = []
+        col_indices = []
+        values = []
+        codes = defaultdict(float)
+        for i in range(len(example["concept_ids"])):
+            concept_id = example["concept_ids"][i]
+            token_id = example["input_ids"][i]
+            if is_visit_end(concept_id):
+                row_index = row_indices[-1] + 1 if row_indices else 0
+                for k, v in codes.items():
+                    row_indices.append(row_index)
+                    col_indices.append(k)
+                    values.append(v)
+                patient_summary_indicators[i] = True
+            else:
+                if is_clinical_event(concept_id):
+                    codes[token_id] += 1
+                patient_summary_indicators[i] = False
+
+        epoch_times = example["epoch_times"]
+        patient_summary_durations = [
+            (epoch_time - epoch_times[0]) // (3600 * 24) for epoch_time in epoch_times
+        ]
+        patient_summary_labels["patient_summary_durations"] = patient_summary_durations
+        patient_summary_labels["patient_summary_indicators"] = (
+            patient_summary_indicators
+        )
+        patient_summary_labels["patient_summary_row_indices"] = row_indices
+        patient_summary_labels["patient_summary_col_indices"] = col_indices
+        patient_summary_labels["patient_summary_values"] = values
+        return patient_summary_labels
 
     def update_inputs_based_on_indexes(
         self,

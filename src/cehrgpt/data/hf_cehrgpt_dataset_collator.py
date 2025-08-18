@@ -771,13 +771,15 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                     )
                     + [False]
                 )
-                epoch_times = (
-                    example["epoch_times"].tolist()
-                    if isinstance(example["epoch_times"], torch.Tensor)
-                    else list(example["epoch_times"])
-                )
                 current_patient_summary_durations.extend(
-                    [epoch_time - epoch_times[0] for epoch_time in epoch_times] + [0]
+                    (
+                        example["patient_summary_durations"].tolist()
+                        if isinstance(
+                            example["patient_summary_durations"], torch.Tensor
+                        )
+                        else list(example["patient_summary_durations"])
+                    )
+                    + [0]
                 )
 
             if "person_id" in example:
