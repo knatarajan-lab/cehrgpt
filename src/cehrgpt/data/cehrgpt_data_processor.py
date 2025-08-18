@@ -188,10 +188,11 @@ class CehrGptDataProcessor(DatasetMapping):
             token_id = example["input_ids"][i]
             if is_visit_end(concept_id):
                 row_index = row_indices[-1] + 1 if row_indices else 0
+                total = sum(codes.values())
                 for k, v in codes.items():
                     row_indices.append(row_index)
                     col_indices.append(k)
-                    values.append(v)
+                    values.append(v / total)
                 patient_summary_indicators[i] = True
             else:
                 if is_clinical_event(concept_id):

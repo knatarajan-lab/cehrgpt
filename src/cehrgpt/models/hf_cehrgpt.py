@@ -1104,7 +1104,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         code_distribution[patient_summary_row_indices, patient_summary_col_indices] = (
             patient_summary_values
         )
-        code_distribution = code_distribution.softmax(dim=-1)
 
         ps_code_logits = self.ps_code_distribution_head(patient_summary_hidden_states)
         ps_code_log_probs = f.log_softmax(ps_code_logits, dim=-1)  # [B,K]
