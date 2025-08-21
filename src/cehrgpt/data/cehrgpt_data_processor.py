@@ -156,6 +156,9 @@ class CehrGptDataProcessor(DatasetMapping):
                 input_ids, skip_special_tokens=False
             )
         example["ages"] = pd.Series(example["ages"]).ffill().tolist()
+        example["epoch_times"] = (
+            pd.Series(example["epoch_times"]).replace(0, np.nan).bfill().tolist()
+        )
         example = self.slice_out_input_sequence(example)
         # Add the motor labels
         if self.include_motor_time_to_event:
@@ -224,7 +227,7 @@ class CehrGptDataProcessor(DatasetMapping):
         record["epoch_times"] = np.concatenate(
             [
                 (
-                    np.zeros([DEMOGRAPHIC_PROMPT_SIZE])
+                    np.full([DEMOGRAPHIC_PROMPT_SIZE], record["epoch_times"][0])
                     if demographic_tokens is not None
                     else self.empty_array
                 ),
