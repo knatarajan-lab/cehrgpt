@@ -14,6 +14,7 @@ from cehrgpt.gpt_utils import (
     construct_time_sequence,
     extract_time_interval_in_days,
     extract_time_interval_in_hours,
+    get_att,
     is_att_token,
     is_clinical_event,
     is_inpatient_att_token,
@@ -42,6 +43,7 @@ class CehrGptDataProcessor(DatasetMapping):
         add_linear_prob_token: bool = False,
     ):
         self.tokenizer = tokenizer
+        self.att_token_to_index_mapping = self.tokenizer.att_token_to_index_mapping
         self.max_length = max_length
 
         self.vs_token_id = tokenizer.vs_token_id
@@ -421,6 +423,8 @@ class CehrGptDataProcessor(DatasetMapping):
             else:
                 previous_time_stamp = time_stamp
             event_times[i] = time_stamp
+        # Convert epoch time to days
+        event_times = (event_times // (3600 * 24)).astype(int)
 
         # Determine prediction positions
         before_valid_time_tokens = np.roll(valid_time_tokens, -1)
@@ -440,7 +444,7 @@ class CehrGptDataProcessor(DatasetMapping):
         prediction_indices = np.where(prediction_positions)[0]
         if len(prediction_indices) == 0:
             return {
-                "motor_censor_times": [],
+                "motor_censor_times": [0] * n_concepts,
                 "motor_row_indices": [],
                 "motor_col_indices": [],
                 "motor_values": [],
@@ -470,8 +474,7 @@ class CehrGptDataProcessor(DatasetMapping):
         last_event_time = event_times[-1]
 
         # Pre-allocate arrays with exact size needed
-        num_prediction_positions = len(prediction_indices)
-        motor_censor_times = np.zeros(num_prediction_positions, dtype=float)
+        motor_censor_times = np.zeros(n_concepts, dtype=float)
         motor_tte_task_indicators = np.zeros(n_concepts, dtype=bool)
 
         # Store sparse matrix data grouped by row for efficient construction
@@ -517,7 +520,7 @@ class CehrGptDataProcessor(DatasetMapping):
                 ) in global_motor_events.items()
             ]
             motor_tte_task_indicators[start_index] = True
-            motor_censor_times[i] = last_event_time - current_event_time
+            motor_censor_times[start_index] = last_event_time - current_event_time
 
         # Build final sparse matrix lists in forward order (no reversals needed)
         motor_row_indices = []
@@ -530,11 +533,6 @@ class CehrGptDataProcessor(DatasetMapping):
                 motor_col_indices.append(col_idx)
                 motor_values.append(value)
 
-        # Filter out unused positions from motor_censor_times
-        motor_censor_times = [
-            motor_censor_times[i] for i in sorted(sparse_data_by_row.keys())
-        ]
-
         if len(motor_row_indices) == 0:
             LOG.debug(
                 "No MOTOR tasks detected for this sample. "
@@ -543,10 +541,29 @@ class CehrGptDataProcessor(DatasetMapping):
                 concept_ids[-10:] if len(concept_ids) >= 10 else concept_ids,
             )
 
+        motor_att_values = list(map(get_att, motor_values))
+        motor_value_token_ids = self.tokenizer.encode(motor_att_values)
+        motor_censor_time_token_ids = list(map(get_att, motor_censor_times))
+        motor_censor_times_token_ids = self.tokenizer.encode(
+            motor_censor_time_token_ids
+        )
+        motor_value_token_indices = [
+            self.att_token_to_index_mapping.get(
+                token_id, len(self.att_token_to_index_mapping)
+            )
+            for token_id in motor_value_token_ids
+        ]
+        motor_censor_times_indices = [
+            self.att_token_to_index_mapping.get(
+                token_id, len(self.att_token_to_index_mapping)
+            )
+            for token_id in motor_censor_times_token_ids
+        ]
+
         return {
-            "motor_censor_times": motor_censor_times,
+            "motor_censor_times": motor_censor_times_indices,
             "motor_row_indices": motor_row_indices,
             "motor_col_indices": motor_col_indices,
-            "motor_values": motor_values,
+            "motor_values": motor_value_token_indices,
             "motor_tte_task_indicators": motor_tte_task_indicators.tolist(),
         }

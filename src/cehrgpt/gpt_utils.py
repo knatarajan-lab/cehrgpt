@@ -386,6 +386,13 @@ def extract_time_interval_in_days(token: str):
     raise ValueError(f"Invalid time token: {token}")
 
 
+def get_att(time_interval: int) -> str:
+    time_interval = int(max(0, time_interval))
+    if time_interval < 1080:
+        return f"D{time_interval}"
+    return "LT"
+
+
 def convert_time_interval_to_time_tuple(
     time_interval: int, is_inpatient: bool
 ) -> Tuple[str, str, str]:

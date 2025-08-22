@@ -902,11 +902,21 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             )
 
         if self.config.include_motor_time_to_event:
-            self.motor_tte = MotorTaskHead(
-                input_dim=config.n_embd,
-                motor_tte_vocab_size=config.motor_tte_vocab_size,
-                motor_num_time_pieces=config.motor_num_time_pieces,
+            self.motor_tte = nn.Linear(config.n_embd * 2, config.n_embd, bias=False)
+            # self.motor_tte = MotorTaskHead(
+            #     input_dim=config.n_embd,
+            #     motor_tte_vocab_size=config.motor_tte_vocab_size,
+            #     motor_num_time_pieces=config.motor_num_time_pieces,
+            # )
+            self.clinical_event_indicators = torch.zeros(
+                (self.config.vocab_size,),
+                dtype=torch.bool,
             )
+            clinical_token_ids = torch.tensor(
+                self.config.clinical_token_ids,
+                dtype=torch.int32,
+            )
+            self.clinical_event_indicators[clinical_token_ids] = True
 
         # Model parallel
         self.model_parallel = False
@@ -983,24 +993,21 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
     def update_motor_tte_vocab_size(
         self, motor_tte_vocab_size: Optional[int] = None
     ) -> None:
-        update_motor_tte_layer = False
         if motor_tte_vocab_size and motor_tte_vocab_size > 0:
             if self.config.include_motor_time_to_event:
                 if self.config.motor_tte_vocab_size != motor_tte_vocab_size:
                     self.config.include_motor_time_to_event = True
                     self.config.motor_tte_vocab_size = motor_tte_vocab_size
-                    update_motor_tte_layer = True
             else:
                 self.config.include_motor_time_to_event = True
                 self.config.motor_tte_vocab_size = motor_tte_vocab_size
-                update_motor_tte_layer = True
 
-        if update_motor_tte_layer:
-            self.motor_tte = MotorTaskHead(
-                self.config.n_embd,
-                self.config.motor_tte_vocab_size,
-                self.config.motor_num_time_pieces,
-            )
+        # if update_motor_tte_layer:
+        #     self.motor_tte = MotorTaskHead(
+        #         self.config.n_embd,
+        #         self.config.motor_tte_vocab_size,
+        #         self.config.motor_num_time_pieces,
+        #     )
 
     def prepare_inputs_for_generation(
         self,
@@ -1077,74 +1084,83 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
     def motor_nll_loss(
         self,
         hidden_states,
-        motor_tte_times,
-        motor_tte_event_indicators,
+        motor_row_indices,
+        motor_col_indices,
+        motor_values,
+        motor_censor_times,
         motor_tte_task_indicators,
-        motor_tte_masks,
         motor_end_index,
     ):
-        """
-        Computes the negative log-likelihood (NLL) loss using the LogNormal distribution.
-
-        for modeling time-to-event data at each visit.
-
-        Args:
-            hidden_states (Tensor): Hidden representations for sequence tokens [num_of_concepts, hidden_dim].
-            motor_tte_times (Tensor): Raw time-to-event durations [B, T, motor_vocab_size] (flattened).
-            motor_tte_task_indicators: (Tensor): Bool indicators (True if included, False if not included).
-            motor_tte_event_indicators (Tensor): Binary indicators (1 if censored, 0 if event occurred).
-            motor_tte_masks (Tensor): Binary indicators whether the prediction should be masked
-            (1 if not masked, 0 if masked).
-            motor_end_index (Tensor): Tensor indicating the number of valid [VE] tokens in the batch.
-
-        Returns:
-            Tensor: Scalar loss value (mean negative log-likelihood).
-        """
         motor_end_index = motor_end_index.sum().item()
-        motor_tte_times = motor_tte_times.view(
-            (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
-        )[:motor_end_index].clamp(min=1e-3)
-        motor_tte_event_indicators = motor_tte_event_indicators.reshape(
-            (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
-        )[:motor_end_index]
-        # motor_tte_masks = motor_tte_masks.view(
-        #     (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
-        # )[:motor_end_index]
-
+        motor_row_indices = motor_row_indices.view((-1, 1))[:motor_end_index]
+        motor_col_indices = motor_col_indices.view((-1, 1))[:motor_end_index]
+        motor_values = motor_values.view((-1, 1))[:motor_end_index]
+        motor_censor_times = motor_censor_times[motor_tte_task_indicators].view((-1, 1))
         tte_features = hidden_states[motor_tte_task_indicators].view(
             (-1, self.config.n_embd)
         )
+        # By default, we set all codes to censored
+        tte_labels = torch.full(
+            (tte_features.shape[0], self.config.vocab_size),
+            fill_value=self.config.motor_num_time_pieces,
+            device=tte_features.device,
+            dtype=torch.int32,
+        )
+        tte_labels[motor_row_indices, motor_col_indices] = motor_values
+        tte_labels = tte_labels[:, self.clinical_event_indicators.to(tte_labels.device)]
+        event_indicators = torch.full(
+            (tte_features.shape[0], self.config.vocab_size),
+            fill_value=False,
+            device=tte_features.device,
+            dtype=torch.bool,
+        )
+        event_indicators[motor_row_indices, motor_col_indices] = True
+        event_indicators = event_indicators[
+            :, self.clinical_event_indicators.to(event_indicators.device)
+        ]
 
-        assert tte_features.shape[0] == motor_tte_times.shape[0], (
-            "The number of VE tokens in the labels needs to match up "
-            "with the first dimension of motor_time_to_event_vectors. "
-            f"Received ve_token_features.shape[0]: {tte_features.shape[0]}, "
-            f"motor_time_to_event_vectors.shape[0]: {motor_tte_times.shape[0]}"
+        # TTE features
+        num_time_tokens = len(self.config.att_token_ids)
+        tte_features = torch.tile(tte_features[:, None, :], (1, num_time_tokens, 1))
+        att_embeddings = self.cehrgpt.wte(
+            torch.tensor(
+                self.config.att_token_ids,
+                dtype=torch.int32,
+                device=tte_features.device,
+            )
+        )[None, :]
+        att_embeddings = torch.tile(att_embeddings, (tte_features.shape[0], 1, 1))
+        tte_att_embeddings = torch.concat([tte_features, att_embeddings], dim=-1)
+        clinical_embeddings = self.cehrgpt.wte(
+            torch.tensor(
+                self.config.clinical_token_ids,
+                dtype=torch.int32,
+                device=tte_features.device,
+            )
         )
 
         # Get Exponential parameters from model
-        time_dependent_logits = self.motor_tte(tte_features)
-
-        # Compute event loss
-        # Calculate the accumulative hazard
-        # exp(-sum_{j} lambda_j)
-        survival_loss = torch.exp2(time_dependent_logits + motor_tte_times).mean()
-        event_loss = (
-            -math.log(2)
-            * torch.where(motor_tte_event_indicators, time_dependent_logits, 0).mean()
+        # shape = tte_att_embeddings.shape
+        tte_att_embeddings = self.motor_tte(tte_att_embeddings)
+        # tte_att_embeddings = tte_att_embeddings.view(shape[:2], self.config.n_embd)
+        tte_logits = tte_att_embeddings @ clinical_embeddings.t()
+        # n_predictions, n_clinical_concepts, n_piecewise
+        tte_prob = torch.softmax(tte_logits.transpose(1, 2), dim=-1)
+        tte_cum_prob = torch.cumsum(tte_prob, dim=-1)
+        motor_censor_times = torch.clip(motor_censor_times - 1, 0)
+        motor_censor_times = motor_censor_times[:, None, :].tile(
+            [1, tte_prob.shape[1], 1]
         )
 
-        # survival_loss = (
-        #     torch.where(motor_tte_masks, lambda_p * motor_tte_times, 0)
-        #     .sum(dim=1)
-        #     .mean()
-        # )
-        # event_loss = (
-        #     -torch.where(motor_tte_event_indicators, torch.log(lambda_p), 0)
-        #     .sum(dim=1)
-        #     .mean()
-        # )
-        return survival_loss + event_loss
+        event_term = f.cross_entropy(tte_logits, tte_labels, reduce=False)
+        survival_prob = 1 - torch.gather(
+            tte_cum_prob, dim=2, index=motor_censor_times.to(torch.int64)
+        )
+        survival_term = -torch.log(survival_prob)
+
+        loss = torch.where(event_indicators, event_term, survival_term.squeeze(-1))
+
+        return loss.mean()
 
     def forward(
         self,
@@ -1161,10 +1177,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         time_to_visits: Optional[torch.FloatTensor] = None,
         time_token_indicators: Optional[torch.BoolTensor] = None,
         sub_time_tokens: Optional[torch.LongTensor] = None,
-        motor_tte_times: Optional[torch.FloatTensor] = None,
-        motor_tte_event_indicators: Optional[torch.BoolTensor] = None,
+        motor_row_indices: Optional[torch.IntTensor] = None,
+        motor_col_indices: Optional[torch.IntTensor] = None,
+        motor_values: Optional[torch.IntTensor] = None,
+        motor_censor_times: Optional[torch.IntTensor] = None,
         motor_tte_task_indicators: Optional[torch.BoolTensor] = None,
-        motor_tte_masks: Optional[torch.BoolTensor] = None,
         motor_end_index: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
@@ -1298,18 +1315,20 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             if (
                 self.config.include_motor_time_to_event
-                and motor_tte_times is not None
-                and motor_tte_event_indicators is not None
+                and motor_row_indices is not None
+                and motor_col_indices is not None
+                and motor_values is not None
+                and motor_censor_times is not None
                 and motor_tte_task_indicators is not None
-                and motor_tte_masks is not None
                 and motor_end_index is not None
             ):
                 motor_tte_loss = self.motor_nll_loss(
                     hidden_states=hidden_states,
-                    motor_tte_times=motor_tte_times,
-                    motor_tte_event_indicators=motor_tte_event_indicators,
+                    motor_row_indices=motor_row_indices,
+                    motor_col_indices=motor_col_indices,
+                    motor_values=motor_values,
+                    motor_censor_times=motor_censor_times,
                     motor_tte_task_indicators=motor_tte_task_indicators,
-                    motor_tte_masks=motor_tte_masks,
                     motor_end_index=motor_end_index,
                 )
                 loss += motor_tte_loss * self.config.motor_time_to_event_weight

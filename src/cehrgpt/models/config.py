@@ -135,10 +135,11 @@ class CEHRGPTConfig(PretrainedConfig):
         motor_tte_vocab_size=None,
         motor_time_to_event_weight=1.0,
         motor_num_time_pieces=16,
-        token_to_time_token_mapping: Dict[int, List] = None,
         use_pretrained_embeddings=False,
         n_pretrained_embeddings_layers=2,
         pretrained_embedding_dim=768,
+        clinical_token_ids: List[int] = None,
+        att_token_ids: List[int] = None,
         pretrained_token_ids: List[int] = None,
         next_token_prediction_loss_weight=1.0,
         time_token_loss_weight=1.0,
@@ -154,10 +155,12 @@ class CEHRGPTConfig(PretrainedConfig):
         class_weights=None,
         **kwargs,
     ):
-        if token_to_time_token_mapping is None:
-            token_to_time_token_mapping = {}
         if pretrained_token_ids is None:
             pretrained_token_ids = list()
+        if clinical_token_ids is None:
+            clinical_token_ids = list()
+        if att_token_ids is None:
+            att_token_ids = list()
         self.vocab_size = vocab_size
         self.time_token_vocab_size = time_token_vocab_size
         self.n_positions = n_positions
@@ -199,7 +202,6 @@ class CEHRGPTConfig(PretrainedConfig):
         self.next_token_prediction_loss_weight = next_token_prediction_loss_weight
         self.include_ttv_prediction = include_ttv_prediction
         self.use_sub_time_tokenization = use_sub_time_tokenization
-        self._token_to_time_token_mapping = token_to_time_token_mapping
         self.time_token_loss_weight = time_token_loss_weight
         self.time_to_visit_loss_weight = time_to_visit_loss_weight
 
@@ -225,6 +227,8 @@ class CEHRGPTConfig(PretrainedConfig):
         self.pretrained_token_ids = pretrained_token_ids
         self.n_pretrained_embeddings_layers = n_pretrained_embeddings_layers
         # self.tie_word_embeddings = not use_pretrained_embeddings
+        self.clinical_token_ids = clinical_token_ids
+        self.att_token_ids = att_token_ids
 
         self.lab_token_penalty = lab_token_penalty
         self.lab_token_loss_weight = lab_token_loss_weight

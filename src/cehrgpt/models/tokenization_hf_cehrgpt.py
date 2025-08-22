@@ -31,6 +31,7 @@ from transformers.utils import logging
 from cehrgpt.gpt_utils import (
     convert_time_interval_to_time_tuple,
     extract_time_interval_in_days,
+    get_att,
     is_att_token,
     is_clinical_event,
     is_inpatient_att_token,
@@ -686,6 +687,34 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         self._race_map = race_map if race_map else {}
         self._ontology = ontology
         super().__init__()
+
+    @property
+    def att_token_to_index_mapping(self) -> Dict[int, int]:
+        att_idx_to_token_mapping: Dict[int, int] = {}
+        att_token_index = 0
+        prev_token = None
+        for i in range(10000):
+            att_token = get_att(i)
+            if prev_token is not None and prev_token == att_token:
+                break
+            else:
+                prev_token = att_token
+            if att_token in self.get_vocab().keys():
+                att_token_id = self.get_vocab()[att_token]
+                att_idx_to_token_mapping[att_token_id] = att_token_index
+                att_token_index += 1
+        return att_idx_to_token_mapping
+
+    @property
+    def clinical_token_ids(self) -> List[int]:
+        clinical_token_ids = [
+            v for k, v in self.get_vocab().items() if is_clinical_event(k)
+        ]
+        return clinical_token_ids
+
+    @property
+    def att_token_ids(self) -> List[int]:
+        return list(self.att_token_to_index_mapping.keys())
 
     @property
     def pretrained_concept_ids(self):
