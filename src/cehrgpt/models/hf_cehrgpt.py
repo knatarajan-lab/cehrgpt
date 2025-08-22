@@ -41,6 +41,88 @@ from cehrgpt.models.hf_modeling_outputs import (
 logger = logging.get_logger(__name__)
 
 
+def _stable_log_survival(log_cum_probs, eps) -> torch.Tensor:
+    """
+    Compute log(1 - exp(log_cum_probs)) in a numerically stable way.
+
+    Handles edge cases that cause NaN values.
+    """
+    # Clamp log_cum_probs to reasonable range to prevent overflow/underflow
+    log_cum_probs = torch.clamp(log_cum_probs, min=-50, max=0)
+
+    # Different strategies based on the magnitude of log_cum_probs
+    # Case 1: Very small cumulative probabilities (log_cum_prob < -10)
+    # When exp(x) is very small, log(1 - exp(x)) ≈ log(1) = 0
+    # But we want log(1 - exp(x)) ≈ log(1) when exp(x) is tiny
+    very_small_mask = log_cum_probs < -10
+
+    # Case 2: Small cumulative probabilities (-10 <= log_cum_prob < -1)
+    # Use log1p(-exp(x)) which is stable for negative x
+    small_mask = (log_cum_probs >= -10) & (log_cum_probs < -1)
+
+    # Case 3: Large cumulative probabilities (log_cum_prob >= -1)
+    # When cum_prob is close to 1, survival prob is close to 0
+    # Need special handling to avoid log(0)
+    large_mask = log_cum_probs >= -1
+
+    # Initialize result tensor
+    result = torch.zeros_like(log_cum_probs)
+
+    # Case 1: Very small cumulative probabilities
+    # log(1 - exp(x)) ≈ 0 when x << 0, but we'll use a small negative value
+    result[very_small_mask] = log_cum_probs[
+        very_small_mask
+    ]  # This approximates log(1-exp(x)) ≈ x when x << 0
+
+    # Case 2: Use log1p(-exp(x)) for numerical stability
+    if small_mask.any():
+        exp_vals = torch.exp(log_cum_probs[small_mask])
+        result[small_mask] = torch.log1p(-exp_vals + eps)
+
+    # Case 3: Handle large cumulative probabilities carefully
+    if large_mask.any():
+        # When cumulative probability is close to 1, survival probability is close to 0
+        # Use log(eps) as a floor to prevent -inf
+        exp_vals = torch.exp(log_cum_probs[large_mask])
+        survival_probs = 1.0 - exp_vals
+        survival_probs = torch.clamp(survival_probs, min=eps)
+        result[large_mask] = torch.log(survival_probs)
+
+    # Final safety check: replace any remaining NaN or -inf with log(eps)
+    result = torch.where(
+        torch.isfinite(result),
+        result,
+        torch.log(torch.tensor(eps, device=result.device)),
+    )
+
+    return result
+
+
+def _device_aware_logcumsumexp(log_probs, dim=-1):
+    """
+    Device-aware logcumsumexp that handles MPS limitations gracefully.
+
+    Falls back to CPU for MPS devices, uses native implementation elsewhere.
+    """
+    original_device = log_probs.device
+
+    # Check if we're on MPS device
+    is_mps = (
+        hasattr(torch.backends, "mps")
+        and torch.backends.mps.is_available()
+        and original_device.type == "mps"
+    )
+
+    if not is_mps:
+        # Use native implementation on non-MPS devices
+        return torch.logcumsumexp(log_probs, dim=dim)
+    else:
+        # MPS device: move to CPU, compute, move back
+        log_probs_cpu = log_probs.cpu()
+        result_cpu = torch.logcumsumexp(log_probs_cpu, dim=dim)
+        return result_cpu.to(original_device)
+
+
 def extract_features_from_packed_sequence(
     hidden_state: torch.Tensor,
     attention_mask: torch.Tensor,
@@ -903,6 +985,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         if self.config.include_motor_time_to_event:
             self.motor_tte = nn.Linear(config.n_embd * 2, config.n_embd, bias=False)
+            self.norm = RMSNorm(config.n_embd)
             # self.motor_tte = MotorTaskHead(
             #     input_dim=config.n_embd,
             #     motor_tte_vocab_size=config.motor_tte_vocab_size,
@@ -1099,10 +1182,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         tte_features = hidden_states[motor_tte_task_indicators].view(
             (-1, self.config.n_embd)
         )
-        # By default, we set all codes to censored
+        # By default, we set all codes to censored event
         tte_labels = torch.full(
             (tte_features.shape[0], self.config.vocab_size),
-            fill_value=self.config.motor_num_time_pieces,
+            fill_value=self.config.motor_num_time_pieces - 1,
             device=tte_features.device,
             dtype=torch.int32,
         )
@@ -1142,23 +1225,63 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # Get Exponential parameters from model
         # shape = tte_att_embeddings.shape
         tte_att_embeddings = self.motor_tte(tte_att_embeddings)
+        # tte_att_embeddings = self.norm(tte_att_embeddings)
         # tte_att_embeddings = tte_att_embeddings.view(shape[:2], self.config.n_embd)
+        # n_predictions, n_piecewise, n_clinical_concepts
         tte_logits = tte_att_embeddings @ clinical_embeddings.t()
         # n_predictions, n_clinical_concepts, n_piecewise
-        tte_prob = torch.softmax(tte_logits.transpose(1, 2), dim=-1)
-        tte_cum_prob = torch.cumsum(tte_prob, dim=-1)
-        motor_censor_times = torch.clip(motor_censor_times - 1, 0)
-        motor_censor_times = motor_censor_times[:, None, :].tile(
-            [1, tte_prob.shape[1], 1]
+        tte_logits = tte_logits.transpose(1, 2)
+
+        num_in_batch = 20
+        iter = tte_logits.shape[0] // num_in_batch + (
+            1 if tte_logits.shape[0] % num_in_batch > 0 else 0
         )
 
-        event_term = f.cross_entropy(tte_logits, tte_labels, reduce=False)
-        survival_prob = 1 - torch.gather(
-            tte_cum_prob, dim=2, index=motor_censor_times.to(torch.int64)
-        )
-        survival_term = -torch.log(survival_prob)
+        event_loss = None
+        survival_loss = None
 
-        loss = torch.where(event_indicators, event_term, survival_term.squeeze(-1))
+        for i in range(0, iter):
+            start_index = i * num_in_batch
+            end_index = (i + 1) * num_in_batch
+            tte_log_probs = torch.log_softmax(tte_logits[start_index:end_index], dim=-1)
+            # Vectorized log cumulative probabilities with device-aware fallback
+            tte_log_cum_probs = _device_aware_logcumsumexp(tte_log_probs, dim=-1)
+
+            # Gather event probabilities (in log space)
+            event_log_probs = torch.gather(
+                tte_log_probs,
+                dim=2,
+                index=tte_labels[start_index:end_index, :, None].long(),
+            ).squeeze(-1)
+
+            motor_censor_times_batch = torch.clip(
+                motor_censor_times[start_index:end_index] - 1, 0
+            )
+            motor_censor_times_batch = motor_censor_times_batch[:, None, :].tile(
+                [1, tte_log_probs.shape[1], 1]
+            )
+            censor_log_cum_probs = torch.gather(
+                tte_log_cum_probs, dim=2, index=motor_censor_times_batch.long()
+            ).squeeze(-1)
+
+            # Compute log survival probability: log(1 - exp(log_cum_prob))
+            # Use log1p(-exp(x)) = log(1 - exp(x)) for stability when x is large negative
+            survival_log_probs = _stable_log_survival(censor_log_cum_probs, 1e-8)
+
+            if event_loss is None:
+                event_loss = -event_log_probs
+            else:
+                event_loss = torch.concat([event_loss, -event_log_probs], dim=0)
+
+            if survival_loss is None:
+                survival_loss = -survival_log_probs
+            else:
+                survival_loss = torch.concat(
+                    [survival_loss, -survival_log_probs], dim=0
+                )
+
+        # Combine losses based on event indicators
+        loss = torch.where(event_indicators.bool(), event_loss, survival_loss)
 
         return loss.mean()
 
