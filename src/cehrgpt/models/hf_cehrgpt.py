@@ -1182,6 +1182,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         tte_features = hidden_states[motor_tte_task_indicators].view(
             (-1, self.config.n_embd)
         )
+        random_indicators = (
+            torch.rand_like(self.clinical_event_indicators.float()) < 0.2
+        )
+        indicators = random_indicators & self.clinical_event_indicators
+
         # By default, we set all codes to censored event
         tte_labels = torch.full(
             (tte_features.shape[0], self.config.vocab_size),
@@ -1190,17 +1195,17 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             dtype=torch.int32,
         )
         tte_labels[motor_row_indices, motor_col_indices] = motor_values
-        tte_labels = tte_labels[:, self.clinical_event_indicators.to(tte_labels.device)]
+        tte_labels = tte_labels[:, indicators.to(tte_labels.device)]
         event_indicators = torch.full(
             (tte_features.shape[0], self.config.vocab_size),
             fill_value=False,
             device=tte_features.device,
             dtype=torch.bool,
         )
+
         event_indicators[motor_row_indices, motor_col_indices] = True
-        event_indicators = event_indicators[
-            :, self.clinical_event_indicators.to(event_indicators.device)
-        ]
+
+        event_indicators = event_indicators[:, indicators.to(event_indicators.device)]
 
         # TTE features
         num_time_tokens = len(self.config.att_token_ids)
@@ -1214,13 +1219,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         )[None, :]
         att_embeddings = torch.tile(att_embeddings, (tte_features.shape[0], 1, 1))
         tte_att_embeddings = torch.concat([tte_features, att_embeddings], dim=-1)
-        clinical_embeddings = self.cehrgpt.wte(
-            torch.tensor(
-                self.config.clinical_token_ids,
-                dtype=torch.int32,
-                device=tte_features.device,
-            )
+        included_clinical_token_ids = (
+            torch.argwhere(indicators).squeeze().to(tte_att_embeddings.device)
         )
+        clinical_embeddings = self.cehrgpt.wte(included_clinical_token_ids)
 
         # Get Exponential parameters from model
         # shape = tte_att_embeddings.shape
@@ -1232,7 +1234,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # n_predictions, n_clinical_concepts, n_piecewise
         tte_logits = tte_logits.transpose(1, 2)
 
-        num_in_batch = 20
+        num_in_batch = 200
         iter = tte_logits.shape[0] // num_in_batch + (
             1 if tte_logits.shape[0] % num_in_batch > 0 else 0
         )

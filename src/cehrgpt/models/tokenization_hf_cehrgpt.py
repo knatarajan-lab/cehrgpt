@@ -710,9 +710,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     @property
     def clinical_token_ids(self) -> List[int]:
         clinical_token_ids = [
-            v
-            for k, v in self.get_vocab().items()
-            if self.is_motor_time_to_event_code(k)
+            v for k, v in self.get_vocab().items() if is_clinical_event(k)
         ]
         return clinical_token_ids
 
