@@ -549,13 +549,13 @@ class CehrGptDataProcessor(DatasetMapping):
         )
         motor_value_token_indices = [
             self.att_token_to_index_mapping.get(
-                token_id, len(self.att_token_to_index_mapping)
+                token_id, len(self.att_token_to_index_mapping) - 1
             )
             for token_id in motor_value_token_ids
         ]
         motor_censor_times_indices = [
             self.att_token_to_index_mapping.get(
-                token_id, len(self.att_token_to_index_mapping)
+                token_id, len(self.att_token_to_index_mapping) - 1
             )
             for token_id in motor_censor_times_token_ids
         ]

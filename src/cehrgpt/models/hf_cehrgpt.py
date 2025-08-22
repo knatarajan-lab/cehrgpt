@@ -991,6 +991,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             #     motor_tte_vocab_size=config.motor_tte_vocab_size,
             #     motor_num_time_pieces=config.motor_num_time_pieces,
             # )
+
+            # Precompute clinical event indicators
             self.clinical_event_indicators = torch.zeros(
                 (self.config.vocab_size,),
                 dtype=torch.bool,
@@ -1000,6 +1002,17 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 dtype=torch.int32,
             )
             self.clinical_event_indicators[clinical_token_ids] = True
+            #
+            # Precompute att indicators
+            # self.att_token_indicators = torch.zeros(
+            #     (self.config.vocab_size,),
+            #     dtype=torch.bool,
+            # )
+            self.att_token_ids = torch.tensor(
+                self.config.att_token_ids,
+                dtype=torch.int32,
+            )
+            # self.att_token_indicators[att_token_ids] = True
 
         # Model parallel
         self.model_parallel = False
@@ -1182,20 +1195,50 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         tte_features = hidden_states[motor_tte_task_indicators].view(
             (-1, self.config.n_embd)
         )
+        # Randomly mask out some prediction tasks due to the OOM issue
         random_indicators = (
             torch.rand_like(self.clinical_event_indicators.float()) < 0.2
         )
         indicators = random_indicators & self.clinical_event_indicators
+        clinical_token_ids = (
+            torch.argwhere(indicators).squeeze().to(hidden_states.device)
+        )
 
+        # Randomly pick a few time tokens to use for training this batch of data
+        att_token_indices = torch.arange(self.config.motor_num_time_pieces - 1)
+        random_att_indicators = torch.rand_like(att_token_indices.float()) < 0.1
+        att_token_indices = torch.concat(
+            [
+                att_token_indices[random_att_indicators],
+                torch.tensor([self.config.motor_num_time_pieces - 1]),
+            ]
+        ).to(hidden_states.device)
+        att_token_ids = self.att_token_ids.to(hidden_states.device)[att_token_indices]
+        att_token_new_indices = torch.arange(
+            att_token_indices.shape[0], device=hidden_states.device, dtype=torch.long
+        )
+        closest_token_indices = torch.argmax(
+            (motor_values <= att_token_indices[None, :]).int(), dim=-1
+        )
+        new_motor_values = att_token_new_indices[closest_token_indices][:, None]
         # By default, we set all codes to censored event
         tte_labels = torch.full(
             (tte_features.shape[0], self.config.vocab_size),
-            fill_value=self.config.motor_num_time_pieces - 1,
+            fill_value=att_token_indices.shape[0] - 1,
             device=tte_features.device,
             dtype=torch.int32,
         )
-        tte_labels[motor_row_indices, motor_col_indices] = motor_values
+        tte_labels[motor_row_indices, motor_col_indices] = new_motor_values.int()
         tte_labels = tte_labels[:, indicators.to(tte_labels.device)]
+
+        # Replace motor_censor_times
+        censor_closest_token_indices = torch.argmax(
+            (motor_censor_times <= att_token_indices[None, :]).int(), dim=-1
+        )
+        motor_censor_times = att_token_new_indices[censor_closest_token_indices][
+            :, None
+        ]
+
         event_indicators = torch.full(
             (tte_features.shape[0], self.config.vocab_size),
             fill_value=False,
@@ -1204,25 +1247,23 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         )
 
         event_indicators[motor_row_indices, motor_col_indices] = True
-
         event_indicators = event_indicators[:, indicators.to(event_indicators.device)]
 
         # TTE features
-        num_time_tokens = len(self.config.att_token_ids)
-        tte_features = torch.tile(tte_features[:, None, :], (1, num_time_tokens, 1))
+        tte_features = torch.tile(
+            tte_features[:, None, :], (1, att_token_indices.shape[0], 1)
+        )
         att_embeddings = self.cehrgpt.wte(
             torch.tensor(
-                self.config.att_token_ids,
+                att_token_ids,
                 dtype=torch.int32,
                 device=tte_features.device,
             )
         )[None, :]
         att_embeddings = torch.tile(att_embeddings, (tte_features.shape[0], 1, 1))
         tte_att_embeddings = torch.concat([tte_features, att_embeddings], dim=-1)
-        included_clinical_token_ids = (
-            torch.argwhere(indicators).squeeze().to(tte_att_embeddings.device)
-        )
-        clinical_embeddings = self.cehrgpt.wte(included_clinical_token_ids)
+
+        clinical_embeddings = self.cehrgpt.wte(clinical_token_ids)
 
         # Get Exponential parameters from model
         # shape = tte_att_embeddings.shape
@@ -1234,7 +1275,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # n_predictions, n_clinical_concepts, n_piecewise
         tte_logits = tte_logits.transpose(1, 2)
 
-        num_in_batch = 200
+        num_in_batch = 400
         iter = tte_logits.shape[0] // num_in_batch + (
             1 if tte_logits.shape[0] % num_in_batch > 0 else 0
         )
