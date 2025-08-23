@@ -1195,11 +1195,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         tte_features = hidden_states[motor_tte_task_indicators].view(
             (-1, self.config.n_embd)
         )
-        # Randomly mask out some prediction tasks due to the OOM issue
-        random_indicators = (
-            torch.rand_like(self.clinical_event_indicators.float()) < 0.2
-        )
-        indicators = random_indicators & self.clinical_event_indicators
+        # # Randomly mask out some prediction tasks due to the OOM issue
+        # random_indicators = (
+        #     torch.rand_like(self.clinical_event_indicators.float()) < 0.2
+        # )
+        # indicators = random_indicators & self.clinical_event_indicators
+        indicators = self.clinical_event_indicators
         clinical_token_ids = (
             torch.argwhere(indicators).squeeze().to(hidden_states.device)
         )

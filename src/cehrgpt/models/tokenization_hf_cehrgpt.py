@@ -897,20 +897,20 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             return True
         return False
 
-    def get_motor_parents(self, concept_id: str) -> List[str]:
-        motor_codes = []
-        if self._ontology is None:
-            if self.is_motor_time_to_event_code(concept_id):
-                motor_codes.append(concept_id)
-        else:
-            motor_codes.extend(
-                [
-                    p
-                    for p in self._ontology.get_all_parents(concept_id)
-                    if self.is_motor_time_to_event_code(p)
-                ]
-            )
-        return motor_codes
+    # def get_motor_parents(self, concept_id: str) -> List[str]:
+    #     motor_codes = []
+    #     if self._ontology is None:
+    #         if self.is_motor_time_to_event_code(concept_id):
+    #             motor_codes.append(concept_id)
+    #     else:
+    #         motor_codes.extend(
+    #             [
+    #                 p
+    #                 for p in self._ontology.get_all_parents(concept_id)
+    #                 if self.is_motor_time_to_event_code(p)
+    #             ]
+    #         )
+    #     return motor_codes
 
     def get_vocab(self) -> Dict[str, int]:
         return self._tokenizer.get_vocab()

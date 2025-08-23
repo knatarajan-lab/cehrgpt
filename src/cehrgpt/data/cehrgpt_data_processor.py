@@ -454,18 +454,23 @@ class CehrGptDataProcessor(DatasetMapping):
         # Pre-compute all motor codes for clinical events to avoid repeated lookups
         clinical_positions = np.where(is_clinical_events)[0]
         motor_codes_cache = {}  # position -> list of (motor_code, motor_token_id)
-
         for pos in clinical_positions:
             concept_id = concept_ids[pos]
             if concept_id in self.motor_code_cache:
                 motor_codes = self.motor_code_cache[concept_id]
             else:
-                motor_codes = self.tokenizer.get_motor_parents(concept_id)
-                self.motor_code_cache[concept_id] = motor_codes
+                # motor_codes = self.tokenizer.get_motor_parents(concept_id)
+                motor_codes = []
+                if (
+                    is_clinical_event(concept_id)
+                    and concept_id in self.tokenizer.get_vocab()
+                ):
+                    motor_codes.append(concept_id)
+                    self.motor_code_cache[concept_id] = motor_codes
 
             if motor_codes:
                 motor_codes_cache[pos] = [
-                    (motor_code, self.tokenizer.get_motor_token_id(motor_code))
+                    (motor_code, self.tokenizer._convert_token_to_id(motor_code))
                     for motor_code in motor_codes
                 ]
 
