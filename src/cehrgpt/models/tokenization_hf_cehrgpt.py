@@ -688,6 +688,13 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         super().__init__()
 
     @property
+    def clinical_token_ids(self) -> List[int]:
+        clinical_token_ids = [
+            v for k, v in self.get_vocab().items() if is_clinical_event(k)
+        ]
+        return clinical_token_ids
+
+    @property
     def pretrained_concept_ids(self):
         return self._pretrained_concept_ids
 

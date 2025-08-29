@@ -52,13 +52,10 @@ class CehrGptDataCollator:
         self.include_motor_time_to_event = include_motor_time_to_event
         self.motor_tte_vocab_size = motor_tte_vocab_size
         self.motor_num_time_pieces = motor_num_time_pieces
-        self.motor_time_bins = (
-            self.tokenizer.get_motor_time_bins(motor_num_time_pieces)
-            if self.include_motor_time_to_event
-            else []
-        )
         # Convert the time bins to seconds
-        self.motor_time_bins = [time_bin * 86400 for time_bin in self.motor_time_bins]
+        self.motor_time_bins = [180 * i for i in range(self.motor_num_time_pieces)] + [
+            np.inf
+        ]
         LOG.info("self.motor_time_bins: %s", self.motor_time_bins)
         if self.use_sub_time_tokenization:
             token_to_time_token_mapping = tokenizer.token_to_time_token_mapping
@@ -127,18 +124,16 @@ class CehrGptDataCollator:
         motor_censor_times = np.asarray(motor_censor_times, dtype=np.float32)
 
         n_tte_predictions = len(motor_censor_times)  # More direct than unique()
-        vocab_size = self.tokenizer.motor_tte_vocab_size
+        vocab_size = self.tokenizer.vocab_size
         n_time_pieces = self.motor_num_time_pieces
 
         # Create time_vectors more efficiently without broadcasting copy
         time_vectors = np.tile(
             motor_censor_times[:, np.newaxis], (1, vocab_size)
         ).astype(np.float32)
-        event_indicators = np.zeros((n_tte_predictions, vocab_size), dtype=bool)
 
         # Vectorized assignment (already optimal)
         time_vectors[motor_row_indices, motor_col_indices] = motor_values
-        event_indicators[motor_row_indices, motor_col_indices] = True
 
         # Early return if no predictions
         if n_tte_predictions == 0:
@@ -156,44 +151,28 @@ class CehrGptDataCollator:
 
         motor_time_bins = self._motor_time_bins_array
         start_times = motor_time_bins[:-1]
-        end_times = motor_time_bins[1:]
-        bin_widths = end_times - start_times  # Pre-compute bin widths
 
         # ELIMINATED TRANSPOSE: Compute directly in target shape (n_pred, n_bins, vocab)
         # Reshape for broadcasting in target order
         time_vectors_3d = time_vectors[:, np.newaxis, :]  # (n_pred, 1, vocab)
-        event_indicators_3d = event_indicators[:, np.newaxis, :]  # (n_pred, 1, vocab)
 
         # Broadcast time bins to match target shape
         start_times_broadcast = start_times[np.newaxis, :, np.newaxis]  # (1, n_bins, 1)
-        bin_widths_broadcast = bin_widths[np.newaxis, :, np.newaxis]  # (1, n_bins, 1)
-
-        # Compute directly in target shape (n_pred, n_bins, vocab)
-        time_diff = time_vectors_3d - start_times_broadcast
-        time_in_bin = np.clip(time_diff, 0, bin_widths_broadcast)
-
-        # Optimized mask computation
-        mask = time_in_bin > 0
-
-        # More efficient log computation with better constant
-        log_constant = 1e-8  # Better numerical stability than 1e-10
-        time_in_bin_log = np.where(
-            mask, np.log2(np.maximum(time_in_bin, log_constant)), -np.inf
-        )
 
         # Event indicator computation in target shape
         end_times_broadcast = motor_time_bins[1:][np.newaxis, :, np.newaxis]
-        time_in_range = (time_vectors_3d >= start_times_broadcast) & (
-            time_vectors_3d < end_times_broadcast
-        )
-        event_in_bin = event_indicators_3d & time_in_range
+        event_in_bin = (
+            (time_vectors_3d >= start_times_broadcast)
+            & (time_vectors_3d < end_times_broadcast)
+        ).astype(np.float32)
+
+        motor_censor_times_3d = motor_censor_times[:, np.newaxis, np.newaxis]
 
         # Combined mask computation
-        final_mask = mask | event_in_bin
+        final_mask = motor_censor_times_3d > end_times_broadcast
 
         # Direct assignment - NO TRANSPOSE NEEDED!
-        record["motor_tte_times"] = time_in_bin_log
-        record["motor_tte_event_indicators"] = event_in_bin
+        record["motor_tte_times"] = event_in_bin
         record["motor_tte_masks"] = final_mask
 
         # Validation (keep as is - important for correctness)
@@ -330,12 +309,6 @@ class CehrGptDataCollator:
                 )
                 for example in examples_with_motor_tte
             ]
-            motor_tte_event_indicators = [
-                self._try_reverse_tensor(
-                    self._convert_to_tensor(example["motor_tte_event_indicators"])
-                )
-                for example in examples_with_motor_tte
-            ]
             motor_tte_task_indicators = [
                 self._try_reverse_tensor(
                     self._convert_to_tensor(example["motor_tte_task_indicators"])
@@ -375,24 +348,6 @@ class CehrGptDataCollator:
                     )
                     .reshape((batch_size, -1, num_time_pieces, motor_tte_vocab_size))
                     .to(torch.float32)
-                )
-
-                # Motor event indicators that indicate there is an event occurred in this time interval
-                batch["motor_tte_event_indicators"] = (
-                    torch.concat(
-                        [
-                            torch.concat(motor_tte_event_indicators, dim=0).to(
-                                torch.bool
-                            ),
-                            torch.full(
-                                (padded_length, num_time_pieces, motor_tte_vocab_size),
-                                False,
-                            ),
-                        ],
-                        dim=0,
-                    )
-                    .reshape((batch_size, -1, num_time_pieces, motor_tte_vocab_size))
-                    .to(torch.bool)
                 )
 
                 # Input to indicate whether the visit should be included for TTE predictions

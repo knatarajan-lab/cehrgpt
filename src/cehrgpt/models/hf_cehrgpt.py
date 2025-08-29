@@ -1078,7 +1078,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         self,
         hidden_states,
         motor_tte_times,
-        motor_tte_event_indicators,
         motor_tte_task_indicators,
         motor_tte_masks,
         motor_end_index,
@@ -1092,7 +1091,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             hidden_states (Tensor): Hidden representations for sequence tokens [num_of_concepts, hidden_dim].
             motor_tte_times (Tensor): Raw time-to-event durations [B, T, motor_vocab_size] (flattened).
             motor_tte_task_indicators: (Tensor): Bool indicators (True if included, False if not included).
-            motor_tte_event_indicators (Tensor): Binary indicators (1 if censored, 0 if event occurred).
             motor_tte_masks (Tensor): Binary indicators whether the prediction should be masked
             (1 if not masked, 0 if masked).
             motor_end_index (Tensor): Tensor indicating the number of valid [VE] tokens in the batch.
@@ -1103,14 +1101,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         motor_end_index = motor_end_index.sum().item()
         motor_tte_times = motor_tte_times.view(
             (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
-        )[:motor_end_index].clamp(min=1e-3)
-        motor_tte_event_indicators = motor_tte_event_indicators.reshape(
-            (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
         )[:motor_end_index]
-        # motor_tte_masks = motor_tte_masks.view(
-        #     (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
-        # )[:motor_end_index]
-
         tte_features = hidden_states[motor_tte_task_indicators].view(
             (-1, self.config.n_embd)
         )
@@ -1125,26 +1116,17 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # Get Exponential parameters from model
         time_dependent_logits = self.motor_tte(tte_features)
 
-        # Compute event loss
-        # Calculate the accumulative hazard
-        # exp(-sum_{j} lambda_j)
-        survival_loss = torch.exp2(time_dependent_logits + motor_tte_times).mean()
-        event_loss = (
-            -math.log(2)
-            * torch.where(motor_tte_event_indicators, time_dependent_logits, 0).mean()
+        loss = f.binary_cross_entropy_with_logits(
+            time_dependent_logits.view(-1, 1),
+            motor_tte_times.view(-1, 1),
+            reduction="none",
         )
 
-        # survival_loss = (
-        #     torch.where(motor_tte_masks, lambda_p * motor_tte_times, 0)
-        #     .sum(dim=1)
-        #     .mean()
-        # )
-        # event_loss = (
-        #     -torch.where(motor_tte_event_indicators, torch.log(lambda_p), 0)
-        #     .sum(dim=1)
-        #     .mean()
-        # )
-        return survival_loss + event_loss
+        loss = torch.where(motor_tte_masks.view(-1, 1), loss, 0.0)
+
+        loss = loss.sum() / motor_tte_masks.sum()
+
+        return loss
 
     def forward(
         self,
@@ -1162,7 +1144,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         time_token_indicators: Optional[torch.BoolTensor] = None,
         sub_time_tokens: Optional[torch.LongTensor] = None,
         motor_tte_times: Optional[torch.FloatTensor] = None,
-        motor_tte_event_indicators: Optional[torch.BoolTensor] = None,
         motor_tte_task_indicators: Optional[torch.BoolTensor] = None,
         motor_tte_masks: Optional[torch.BoolTensor] = None,
         motor_end_index: Optional[torch.LongTensor] = None,
@@ -1299,7 +1280,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             if (
                 self.config.include_motor_time_to_event
                 and motor_tte_times is not None
-                and motor_tte_event_indicators is not None
                 and motor_tte_task_indicators is not None
                 and motor_tte_masks is not None
                 and motor_end_index is not None
@@ -1307,7 +1287,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 motor_tte_loss = self.motor_nll_loss(
                     hidden_states=hidden_states,
                     motor_tte_times=motor_tte_times,
-                    motor_tte_event_indicators=motor_tte_event_indicators,
                     motor_tte_task_indicators=motor_tte_task_indicators,
                     motor_tte_masks=motor_tte_masks,
                     motor_end_index=motor_end_index,
