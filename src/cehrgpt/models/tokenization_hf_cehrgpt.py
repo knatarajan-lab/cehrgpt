@@ -676,11 +676,9 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         self._motor_task_info: Dict[str, Any] = (
             motor_task_info if motor_task_info is not None else {}
         )
-        self._motor_time_to_event_codes = self._motor_task_info.get(
-            "motor_time_to_event_codes", []
-        )
+        self._motor_time_to_event_codes = self.clinical_concept_ids
         self._motor_code_to_id_mapping = {
-            code: i for i, code in enumerate(sorted(self._motor_time_to_event_codes))
+            code: i for i, code in enumerate(sorted(self.clinical_concept_ids))
         }
         self._gender_map = gender_map if gender_map else {}
         self._race_map = race_map if race_map else {}
@@ -688,11 +686,11 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         super().__init__()
 
     @property
-    def clinical_token_ids(self) -> List[int]:
-        clinical_token_ids = [
-            v for k, v in self.get_vocab().items() if is_clinical_event(k)
+    def clinical_concept_ids(self) -> List[str]:
+        clinical_concept_ids = [
+            k for k, v in self.get_vocab().items() if is_clinical_event(k)
         ]
-        return clinical_token_ids
+        return clinical_concept_ids
 
     @property
     def pretrained_concept_ids(self):

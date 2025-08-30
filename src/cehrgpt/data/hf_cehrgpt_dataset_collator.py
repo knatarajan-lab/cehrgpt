@@ -23,6 +23,7 @@ class CehrGptDataCollator:
         include_motor_time_to_event: bool = False,
         motor_tte_vocab_size: int = 0,
         motor_num_time_pieces: int = 8,
+        motor_time_bin_width: int = 180,
         motor_sampling_probability: float = 0.5,
         pretraining: bool = True,
         include_demographics: bool = False,
@@ -52,10 +53,12 @@ class CehrGptDataCollator:
         self.include_motor_time_to_event = include_motor_time_to_event
         self.motor_tte_vocab_size = motor_tte_vocab_size
         self.motor_num_time_pieces = motor_num_time_pieces
+        self.motor_time_bin_width = motor_time_bin_width
         # Convert the time bins to seconds
-        self.motor_time_bins = [180 * i for i in range(self.motor_num_time_pieces)] + [
-            np.inf
-        ]
+        self.motor_time_bins = np.asarray(
+            [self.motor_time_bin_width * i for i in range(self.motor_num_time_pieces)]
+            + [np.inf]
+        )
         LOG.info("self.motor_time_bins: %s", self.motor_time_bins)
         if self.use_sub_time_tokenization:
             token_to_time_token_mapping = tokenizer.token_to_time_token_mapping
@@ -102,6 +105,7 @@ class CehrGptDataCollator:
         """Ultra-optimized version using advanced vectorization techniques."""
         motor_row_indices = record["motor_row_indices"]
         motor_col_indices = record["motor_col_indices"]
+        motor_time_indices = record["motor_time_indices"]
         motor_values = record["motor_values"]
         motor_censor_times = record["motor_censor_times"]
 
@@ -120,20 +124,26 @@ class CehrGptDataCollator:
         # Convert to numpy arrays once and get dimensions
         motor_row_indices = np.asarray(motor_row_indices, dtype=np.int32)
         motor_col_indices = np.asarray(motor_col_indices, dtype=np.int32)
+        motor_time_indices = np.asarray(motor_time_indices, dtype=np.int32)
         motor_values = np.asarray(motor_values, dtype=np.float32)
         motor_censor_times = np.asarray(motor_censor_times, dtype=np.float32)
 
         n_tte_predictions = len(motor_censor_times)  # More direct than unique()
-        vocab_size = self.tokenizer.vocab_size
+        vocab_size = self.tokenizer.motor_tte_vocab_size
         n_time_pieces = self.motor_num_time_pieces
 
         # Create time_vectors more efficiently without broadcasting copy
-        time_vectors = np.tile(
-            motor_censor_times[:, np.newaxis], (1, vocab_size)
+        event_in_bin = np.tile(
+            np.zeros_like(motor_censor_times, dtype=np.float32)[
+                :, np.newaxis, np.newaxis
+            ],
+            (1, n_time_pieces, vocab_size),
         ).astype(np.float32)
 
         # Vectorized assignment (already optimal)
-        time_vectors[motor_row_indices, motor_col_indices] = motor_values
+        event_in_bin[motor_row_indices, motor_time_indices, motor_col_indices] = (
+            motor_values
+        )
 
         # Early return if no predictions
         if n_tte_predictions == 0:
@@ -143,30 +153,12 @@ class CehrGptDataCollator:
             record["motor_tte_masks"] = np.zeros(empty_shape, dtype=bool)
             return record
 
-        # Cache motor_time_bins as numpy array to avoid repeated conversion
-        if not hasattr(self, "_motor_time_bins_array"):
-            self._motor_time_bins_array = np.asarray(
-                self.motor_time_bins, dtype=np.float32
-            )
-
-        motor_time_bins = self._motor_time_bins_array
-        start_times = motor_time_bins[:-1]
-
-        # ELIMINATED TRANSPOSE: Compute directly in target shape (n_pred, n_bins, vocab)
-        # Reshape for broadcasting in target order
-        time_vectors_3d = time_vectors[:, np.newaxis, :]  # (n_pred, 1, vocab)
-
-        # Broadcast time bins to match target shape
-        start_times_broadcast = start_times[np.newaxis, :, np.newaxis]  # (1, n_bins, 1)
-
         # Event indicator computation in target shape
-        end_times_broadcast = motor_time_bins[1:][np.newaxis, :, np.newaxis]
-        event_in_bin = (
-            (time_vectors_3d >= start_times_broadcast)
-            & (time_vectors_3d < end_times_broadcast)
-        ).astype(np.float32)
-
-        motor_censor_times_3d = motor_censor_times[:, np.newaxis, np.newaxis]
+        end_times_broadcast = self.motor_time_bins[1:][np.newaxis, :, np.newaxis]
+        motor_censor_times_3d = np.tile(
+            motor_censor_times[:, np.newaxis, np.newaxis],
+            (1, 1, vocab_size),
+        )
 
         # Combined mask computation
         final_mask = motor_censor_times_3d > end_times_broadcast
@@ -183,6 +175,7 @@ class CehrGptDataCollator:
         # Clean up input data
         del record["motor_row_indices"]
         del record["motor_col_indices"]
+        del record["motor_time_indices"]
         del record["motor_values"]
 
         return record
@@ -369,7 +362,7 @@ class CehrGptDataCollator:
                         ],
                         dim=0,
                     )
-                    .reshape((batch_size, -1, num_time_pieces, motor_tte_vocab_size))
+                    .reshape((batch_size, -1, num_time_pieces, 1))
                     .to(torch.bool)
                 )
 
@@ -488,6 +481,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         current_motor_censor_times = []
         current_motor_row_indices = []
         current_motor_col_indices = []
+        current_motor_time_indices = []
         current_motor_values = []
         current_motor_tte_task_indicators = []
 
@@ -565,6 +559,11 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                     if isinstance(example["motor_values"], torch.Tensor)
                     else list(example["motor_values"])
                 )
+                current_motor_time_indices.extend(
+                    example["motor_time_indices"].tolist()
+                    if isinstance(example["motor_time_indices"], torch.Tensor)
+                    else list(example["motor_time_indices"])
+                )
                 current_motor_censor_times.extend(
                     example["motor_censor_times"].tolist()
                     if isinstance(example["motor_censor_times"], torch.Tensor)
@@ -614,6 +613,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                     "motor_censor_times": current_motor_censor_times,
                     "motor_row_indices": current_motor_row_indices,
                     "motor_col_indices": current_motor_col_indices,
+                    "motor_time_indices": current_motor_time_indices,
                     "motor_values": current_motor_values,
                     "motor_tte_task_indicators": current_motor_tte_task_indicators,
                 }

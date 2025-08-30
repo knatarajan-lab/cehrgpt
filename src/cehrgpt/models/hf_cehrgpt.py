@@ -1102,6 +1102,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         motor_tte_times = motor_tte_times.view(
             (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
         )[:motor_end_index]
+        motor_tte_masks = motor_tte_masks.view(
+            (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
+        )[:motor_end_index]
         tte_features = hidden_states[motor_tte_task_indicators].view(
             (-1, self.config.n_embd)
         )

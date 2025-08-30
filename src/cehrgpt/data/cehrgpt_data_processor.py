@@ -38,6 +38,8 @@ class CehrGptDataProcessor(DatasetMapping):
         include_values: bool = False,
         include_ttv_prediction: bool = False,
         include_motor_time_to_event: bool = False,
+        motor_num_time_pieces: int = 8,
+        motor_time_bin_width: int = 180,
         motor_sampling_probability: float = 0.5,
         pretraining: bool = True,
         include_demographics: bool = False,
@@ -56,6 +58,14 @@ class CehrGptDataProcessor(DatasetMapping):
         self.include_demographics = include_demographics
         self.add_linear_prob_token = add_linear_prob_token
         self.empty_array = np.asarray([])
+
+        self.motor_time_bin_width = motor_time_bin_width
+        self.motor_num_time_pieces = motor_num_time_pieces
+        # Convert the time bins to seconds
+        self.motor_time_bins = [180 * i for i in range(self.motor_num_time_pieces)] + [
+            np.inf
+        ]
+        LOG.info("self.motor_time_bins: %s", self.motor_time_bins)
 
         if self.pretraining and self.add_linear_prob_token:
             raise ValueError(
@@ -115,6 +125,10 @@ class CehrGptDataProcessor(DatasetMapping):
                 return -100
 
         return [float(default_value(_)) for _ in concept_ids]
+
+    def get_time_bin(self, time_interval: int):
+        time_bin = time_interval // self.motor_time_bin_width
+        return max(min(time_bin, self.motor_num_time_pieces - 1), 0)
 
     def random_sort(self, record: Dict[str, Any]) -> Dict[str, Any]:
         if "record_ranks" not in record:
@@ -400,7 +414,6 @@ class CehrGptDataProcessor(DatasetMapping):
 
         """Highly optimized vectorized version using pre-computed token type arrays."""
         concept_ids = record["concept_ids"]
-        token_ids = record["input_ids"]
         # Convert concept_ids to indices for vectorized operations
         concept_indices = np.array([self.vocab_to_idx[cid] for cid in concept_ids])
         # Vectorized token type detection
@@ -442,9 +455,10 @@ class CehrGptDataProcessor(DatasetMapping):
         prediction_indices = np.where(prediction_positions)[0]
         if len(prediction_indices) == 0:
             return {
-                "motor_censor_times": [0] * n_concepts,
+                "motor_censor_times": [],
                 "motor_row_indices": [],
                 "motor_col_indices": [],
+                "motor_time_indices": [],
                 "motor_values": [],
                 "motor_tte_task_indicators": [False] * n_concepts,
             }
@@ -485,7 +499,7 @@ class CehrGptDataProcessor(DatasetMapping):
 
             for pos in reversed(section_clinical_positions):
                 concept_id = concept_ids[pos]
-                token_id = token_ids[pos]
+                token_id = self.tokenizer.get_motor_token_id(concept_id)
                 concept_time = event_times[pos]
                 global_motor_events[concept_id].append((token_id, concept_time))
 
@@ -505,13 +519,15 @@ class CehrGptDataProcessor(DatasetMapping):
         # Build final sparse matrix lists in forward order (no reversals needed)
         motor_row_indices = []
         motor_col_indices = []
+        motor_time_indices = []
         motor_values = []
 
         for row_idx in sorted(sparse_data_by_row.keys()):
             for col_idx, value in sparse_data_by_row[row_idx]:
                 motor_row_indices.append(row_idx)
                 motor_col_indices.append(col_idx)
-                motor_values.append(value)
+                motor_time_indices.append(self.get_time_bin(value))
+                motor_values.append(1)
 
         # Filter out unused positions from motor_censor_times
         motor_censor_times = [
@@ -530,6 +546,7 @@ class CehrGptDataProcessor(DatasetMapping):
             "motor_censor_times": motor_censor_times,
             "motor_row_indices": motor_row_indices,
             "motor_col_indices": motor_col_indices,
+            "motor_time_indices": motor_time_indices,
             "motor_values": motor_values,
             "motor_tte_task_indicators": motor_tte_task_indicators.tolist(),
         }
