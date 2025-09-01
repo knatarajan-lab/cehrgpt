@@ -1,4 +1,4 @@
-from typing import Any, Dict, List
+from typing import Any
 
 import numpy as np
 import torch
@@ -21,7 +21,6 @@ class CehrGptDataCollator:
         include_ttv_prediction: bool = False,
         use_sub_time_tokenization: bool = False,
         include_motor_time_to_event: bool = False,
-        motor_tte_vocab_size: int = 0,
         motor_num_time_pieces: int = 8,
         motor_time_bin_width: int = 180,
         motor_sampling_probability: float = 0.5,
@@ -40,26 +39,10 @@ class CehrGptDataCollator:
         self.use_sub_time_tokenization = use_sub_time_tokenization
         self.pretraining = pretraining
         self.include_demographics = include_demographics
-        self.motor_code_cache: Dict[str, List[str]] = dict()
 
         # MOTOR TTE configuration
-        if include_motor_time_to_event:
-            assert motor_tte_vocab_size > 0, (
-                f"motor_tte_vocab_size must be greater than 0 "
-                f"when include_motor_time_to_event is set to True. "
-                f"But motor_tte_vocab_size: {motor_tte_vocab_size} is provided"
-            )
-
         self.include_motor_time_to_event = include_motor_time_to_event
-        self.motor_tte_vocab_size = motor_tte_vocab_size
-        self.motor_num_time_pieces = motor_num_time_pieces
-        self.motor_time_bin_width = motor_time_bin_width
-        # Convert the time bins to seconds
-        self.motor_time_bins = np.asarray(
-            [self.motor_time_bin_width * i for i in range(self.motor_num_time_pieces)]
-            + [np.inf]
-        )
-        LOG.info("self.motor_time_bins: %s", self.motor_time_bins)
+
         if self.use_sub_time_tokenization:
             token_to_time_token_mapping = tokenizer.token_to_time_token_mapping
             if not token_to_time_token_mapping:
@@ -82,6 +65,8 @@ class CehrGptDataCollator:
             include_ttv_prediction=include_ttv_prediction,
             include_values=include_values,
             include_motor_time_to_event=include_motor_time_to_event,
+            motor_num_time_pieces=motor_num_time_pieces,
+            motor_time_bin_width=motor_time_bin_width,
             motor_sampling_probability=motor_sampling_probability,
             pretraining=pretraining,
             add_linear_prob_token=add_linear_prob_token,
@@ -99,86 +84,87 @@ class CehrGptDataCollator:
         else:
             return torch.tensor(features)
 
-    def create_time_to_event_tensors_ultra_optimized(
-        self, record: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Ultra-optimized version using advanced vectorization techniques."""
-        motor_row_indices = record["motor_row_indices"]
-        motor_col_indices = record["motor_col_indices"]
-        motor_time_indices = record["motor_time_indices"]
-        motor_values = record["motor_values"]
-        motor_censor_times = record["motor_censor_times"]
-
-        if len(motor_row_indices) == 0:
-            # Handle empty case - use tuples for better performance
-            empty_shape = (
-                0,
-                self.motor_num_time_pieces,
-                self.tokenizer.motor_tte_vocab_size,
-            )
-            record["motor_tte_times"] = np.zeros(empty_shape, dtype=np.float32)
-            record["motor_tte_event_indicators"] = np.zeros(empty_shape, dtype=bool)
-            record["motor_tte_masks"] = np.zeros(empty_shape, dtype=bool)
-            return record
-
-        # Convert to numpy arrays once and get dimensions
-        motor_row_indices = np.asarray(motor_row_indices, dtype=np.int32)
-        motor_col_indices = np.asarray(motor_col_indices, dtype=np.int32)
-        motor_time_indices = np.asarray(motor_time_indices, dtype=np.int32)
-        motor_values = np.asarray(motor_values, dtype=np.float32)
-        motor_censor_times = np.asarray(motor_censor_times, dtype=np.float32)
-
-        n_tte_predictions = len(motor_censor_times)  # More direct than unique()
-        vocab_size = self.tokenizer.motor_tte_vocab_size
-        n_time_pieces = self.motor_num_time_pieces
-
-        # Create time_vectors more efficiently without broadcasting copy
-        event_in_bin = np.tile(
-            np.zeros_like(motor_censor_times, dtype=np.float32)[
-                :, np.newaxis, np.newaxis
-            ],
-            (1, n_time_pieces, vocab_size),
-        ).astype(np.float32)
-
-        # Vectorized assignment (already optimal)
-        event_in_bin[motor_row_indices, motor_time_indices, motor_col_indices] = (
-            motor_values
-        )
-
-        # Early return if no predictions
-        if n_tte_predictions == 0:
-            empty_shape = (0, n_time_pieces, vocab_size)
-            record["motor_tte_times"] = np.zeros(empty_shape, dtype=np.float32)
-            record["motor_tte_event_indicators"] = np.zeros(empty_shape, dtype=bool)
-            record["motor_tte_masks"] = np.zeros(empty_shape, dtype=bool)
-            return record
-
-        # Event indicator computation in target shape
-        end_times_broadcast = self.motor_time_bins[1:][np.newaxis, :, np.newaxis]
-        motor_censor_times_3d = np.tile(
-            motor_censor_times[:, np.newaxis, np.newaxis],
-            (1, 1, vocab_size),
-        )
-
-        # Combined mask computation
-        final_mask = motor_censor_times_3d > end_times_broadcast
-
-        # Direct assignment - NO TRANSPOSE NEEDED!
-        record["motor_tte_times"] = event_in_bin
-        record["motor_tte_masks"] = final_mask
-
-        # Validation (keep as is - important for correctness)
-        assert (
-            sum(record["motor_tte_task_indicators"]) == n_tte_predictions
-        ), f'sum(record["motor_tte_task_indicators"]) == n_tte_predictions must be true'
-
-        # Clean up input data
-        del record["motor_row_indices"]
-        del record["motor_col_indices"]
-        del record["motor_time_indices"]
-        del record["motor_values"]
-
-        return record
+    #
+    # def create_time_to_event_tensors_ultra_optimized(
+    #         self, record: Dict[str, Any]
+    # ) -> Dict[str, Any]:
+    #     """Ultra-optimized version using advanced vectorization techniques."""
+    #     motor_row_indices = record["motor_row_indices"]
+    #     motor_col_indices = record["motor_col_indices"]
+    #     motor_time_indices = record["motor_time_indices"]
+    #     motor_values = record["motor_values"]
+    #     motor_censor_times = record["motor_censor_times"]
+    #
+    #     if len(motor_row_indices) == 0:
+    #         # Handle empty case - use tuples for better performance
+    #         empty_shape = (
+    #             0,
+    #             self.motor_num_time_pieces,
+    #             self.tokenizer.motor_tte_vocab_size,
+    #         )
+    #         record["motor_tte_times"] = np.zeros(empty_shape, dtype=np.float32)
+    #         record["motor_tte_event_indicators"] = np.zeros(empty_shape, dtype=bool)
+    #         record["motor_tte_masks"] = np.zeros(empty_shape, dtype=bool)
+    #         return record
+    #
+    #     # Convert to numpy arrays once and get dimensions
+    #     motor_row_indices = np.asarray(motor_row_indices, dtype=np.int32)
+    #     motor_col_indices = np.asarray(motor_col_indices, dtype=np.int32)
+    #     motor_time_indices = np.asarray(motor_time_indices, dtype=np.int32)
+    #     motor_values = np.asarray(motor_values, dtype=np.float32)
+    #     motor_censor_times = np.asarray(motor_censor_times, dtype=np.float32)
+    #
+    #     n_tte_predictions = len(motor_censor_times)  # More direct than unique()
+    #     vocab_size = self.tokenizer.motor_tte_vocab_size
+    #     n_time_pieces = self.motor_num_time_pieces
+    #
+    #     # Create time_vectors more efficiently without broadcasting copy
+    #     event_in_bin = np.tile(
+    #         np.zeros_like(motor_censor_times, dtype=np.float32)[
+    #         :, np.newaxis, np.newaxis
+    #         ],
+    #         (1, n_time_pieces, vocab_size),
+    #     ).astype(np.float32)
+    #
+    #     # Vectorized assignment (already optimal)
+    #     event_in_bin[motor_row_indices, motor_time_indices, motor_col_indices] = (
+    #         motor_values
+    #     )
+    #
+    #     # Early return if no predictions
+    #     if n_tte_predictions == 0:
+    #         empty_shape = (0, n_time_pieces, vocab_size)
+    #         record["motor_tte_times"] = np.zeros(empty_shape, dtype=np.float32)
+    #         record["motor_tte_event_indicators"] = np.zeros(empty_shape, dtype=bool)
+    #         record["motor_tte_masks"] = np.zeros(empty_shape, dtype=bool)
+    #         return record
+    #
+    #     # Event indicator computation in target shape
+    #     end_times_broadcast = self.motor_time_bins[1:][np.newaxis, :, np.newaxis]
+    #     motor_censor_times_3d = np.tile(
+    #         motor_censor_times[:, np.newaxis, np.newaxis],
+    #         (1, 1, vocab_size),
+    #     )
+    #
+    #     # Combined mask computation
+    #     final_mask = motor_censor_times_3d > end_times_broadcast
+    #
+    #     # Direct assignment - NO TRANSPOSE NEEDED!
+    #     record["motor_tte_times"] = event_in_bin
+    #     record["motor_tte_masks"] = final_mask
+    #
+    #     # Validation (keep as is - important for correctness)
+    #     assert (
+    #             sum(record["motor_tte_task_indicators"]) == n_tte_predictions
+    #     ), f'sum(record["motor_tte_task_indicators"]) == n_tte_predictions must be true'
+    #
+    #     # Clean up input data
+    #     del record["motor_row_indices"]
+    #     del record["motor_col_indices"]
+    #     del record["motor_time_indices"]
+    #     del record["motor_values"]
+    #
+    #     return record
 
     def __call__(self, examples):
 
@@ -292,80 +278,125 @@ class CehrGptDataCollator:
             )
 
         if self.include_motor_time_to_event:
-            examples_with_motor_tte = [
-                self.create_time_to_event_tensors_ultra_optimized(_) for _ in examples
-            ]
-            # print(f"Creating MOTOR TTE tensors took {time.time() - start} seconds")
-            motor_tte_times = [
+            motor_row_indices = [
                 self._try_reverse_tensor(
-                    self._convert_to_tensor(example["motor_tte_times"])
+                    self._convert_to_tensor(example["motor_row_indices"])
                 )
-                for example in examples_with_motor_tte
+                for example in examples
+            ]
+            motor_col_indices = [
+                self._try_reverse_tensor(
+                    self._convert_to_tensor(example["motor_col_indices"])
+                )
+                for example in examples
+            ]
+            motor_time_indices = [
+                self._try_reverse_tensor(
+                    self._convert_to_tensor(example["motor_time_indices"])
+                )
+                for example in examples
+            ]
+            motor_values = [
+                self._try_reverse_tensor(
+                    self._convert_to_tensor(example["motor_values"])
+                )
+                for example in examples
             ]
             motor_tte_task_indicators = [
                 self._try_reverse_tensor(
                     self._convert_to_tensor(example["motor_tte_task_indicators"])
                 )
-                for example in examples_with_motor_tte
+                for example in examples
             ]
-            motor_tte_masks = [
+            motor_censor_times = [
                 self._try_reverse_tensor(
-                    self._convert_to_tensor(example["motor_tte_masks"])
+                    self._convert_to_tensor(example["motor_censor_times"])
                 )
-                for example in examples_with_motor_tte
+                for example in examples
             ]
 
-            motor_tte_times = torch.concat(motor_tte_times, dim=0).to(torch.float32)
+            motor_row_indices = torch.concat(motor_row_indices, dim=0)
 
             # If every example in the batch only contains one visit, there would be no labels generated for MOTOR TTE
             # we only create the labels when any example has more than one visit
-            if motor_tte_times.dim() <= 1:
+            if motor_row_indices.shape[0] <= 1:
                 LOG.warning(
                     "There are no MOTOR TTE labels generated for this batch "
                     "because every example in this batch only contains one visit."
                 )
             else:
                 batch_size = len(examples)
-                length, num_time_pieces, motor_tte_vocab_size = motor_tte_times.shape
+                length = motor_row_indices.shape[0]
                 padded_length = batch_size - length % batch_size
-                batch["motor_tte_times"] = (
+
+                batch["motor_row_indices"] = (
                     torch.concat(
                         [
-                            motor_tte_times,
+                            motor_row_indices,
                             torch.full(
-                                (padded_length, num_time_pieces, motor_tte_vocab_size),
+                                (padded_length,),
+                                0,
+                            ),
+                        ],
+                        dim=0,
+                    )
+                    .reshape((batch_size, -1))
+                    .to(torch.int32)
+                )
+                batch["motor_col_indices"] = (
+                    torch.concat(
+                        [
+                            torch.concat(motor_col_indices, dim=0),
+                            torch.full(
+                                (padded_length,),
+                                0,
+                            ),
+                        ],
+                        dim=0,
+                    )
+                    .reshape((batch_size, -1))
+                    .to(torch.int32)
+                )
+                batch["motor_time_indices"] = (
+                    torch.concat(
+                        [
+                            torch.concat(motor_time_indices, dim=0),
+                            torch.full(
+                                (padded_length,),
+                                0,
+                            ),
+                        ],
+                        dim=0,
+                    )
+                    .reshape((batch_size, -1))
+                    .to(torch.int32)
+                )
+                batch["motor_values"] = (
+                    torch.concat(
+                        [
+                            torch.concat(motor_values, dim=0),
+                            torch.full(
+                                (padded_length,),
                                 0.0,
                             ),
                         ],
                         dim=0,
                     )
-                    .reshape((batch_size, -1, num_time_pieces, motor_tte_vocab_size))
+                    .reshape((batch_size, -1))
                     .to(torch.float32)
                 )
-
+                # Input to indicate whether the visit should be included for TTE predictions
+                batch["motor_censor_times"] = pad_sequence(
+                    motor_censor_times,
+                    batch_first=True,
+                    padding_value=0.0,
+                ).to(torch.float32)
                 # Input to indicate whether the visit should be included for TTE predictions
                 batch["motor_tte_task_indicators"] = pad_sequence(
                     motor_tte_task_indicators,
                     batch_first=True,
                     padding_value=False,
                 ).to(torch.bool)
-
-                # Motor time indicators that indicate whether there are neither clinical events nor censor events
-                batch["motor_tte_masks"] = (
-                    torch.concat(
-                        [
-                            torch.concat(motor_tte_masks, dim=0).to(torch.bool),
-                            torch.full(
-                                (padded_length, num_time_pieces, motor_tte_vocab_size),
-                                False,
-                            ),
-                        ],
-                        dim=0,
-                    )
-                    .reshape((batch_size, -1, num_time_pieces, 1))
-                    .to(torch.bool)
-                )
-
                 batch["motor_end_index"] = torch.concat(
                     [
                         torch.full((length, 1), 1, dtype=torch.int32),
@@ -565,9 +596,12 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                     else list(example["motor_time_indices"])
                 )
                 current_motor_censor_times.extend(
-                    example["motor_censor_times"].tolist()
-                    if isinstance(example["motor_censor_times"], torch.Tensor)
-                    else list(example["motor_censor_times"])
+                    (
+                        example["motor_censor_times"].tolist()
+                        if isinstance(example["motor_censor_times"], torch.Tensor)
+                        else list(example["motor_censor_times"])
+                    )
+                    + [0.0]
                 )
                 current_motor_tte_task_indicators.extend(
                     (

@@ -132,9 +132,10 @@ class CEHRGPTConfig(PretrainedConfig):
         include_ttv_prediction=False,
         use_sub_time_tokenization=True,
         include_motor_time_to_event=True,
-        motor_tte_vocab_size=None,
         motor_time_to_event_weight=1.0,
-        motor_num_time_pieces=16,
+        motor_tte_vocab_size=None,
+        motor_num_time_pieces=8,
+        motor_time_bin_width=180,
         token_to_time_token_mapping: Dict[int, List] = None,
         use_pretrained_embeddings=False,
         n_pretrained_embeddings_layers=2,
@@ -217,6 +218,7 @@ class CEHRGPTConfig(PretrainedConfig):
         self.ve_token_id = ve_token_id
         self.motor_time_to_event_weight = motor_time_to_event_weight
         self.motor_num_time_pieces = motor_num_time_pieces
+        self.motor_time_bin_width = motor_time_bin_width
 
         self.causal_sfm = causal_sfm
         self.demographics_size = demographics_size

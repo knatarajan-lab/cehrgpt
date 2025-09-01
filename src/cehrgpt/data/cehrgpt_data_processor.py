@@ -16,6 +16,7 @@ from cehrgpt.gpt_utils import (
     construct_time_sequence,
     extract_time_interval_in_days,
     extract_time_interval_in_hours,
+    get_time_bin,
     is_att_token,
     is_clinical_event,
     is_inpatient_att_token,
@@ -61,11 +62,7 @@ class CehrGptDataProcessor(DatasetMapping):
 
         self.motor_time_bin_width = motor_time_bin_width
         self.motor_num_time_pieces = motor_num_time_pieces
-        # Convert the time bins to seconds
-        self.motor_time_bins = [180 * i for i in range(self.motor_num_time_pieces)] + [
-            np.inf
-        ]
-        LOG.info("self.motor_time_bins: %s", self.motor_time_bins)
+        self.motor_tte_vocab_size = self.tokenizer.motor_tte_vocab_size
 
         if self.pretraining and self.add_linear_prob_token:
             raise ValueError(
@@ -125,10 +122,6 @@ class CehrGptDataProcessor(DatasetMapping):
                 return -100
 
         return [float(default_value(_)) for _ in concept_ids]
-
-    def get_time_bin(self, time_interval: int):
-        time_bin = time_interval // self.motor_time_bin_width
-        return max(min(time_bin, self.motor_num_time_pieces - 1), 0)
 
     def random_sort(self, record: Dict[str, Any]) -> Dict[str, Any]:
         if "record_ranks" not in record:
@@ -455,7 +448,7 @@ class CehrGptDataProcessor(DatasetMapping):
         prediction_indices = np.where(prediction_positions)[0]
         if len(prediction_indices) == 0:
             return {
-                "motor_censor_times": [],
+                "motor_censor_times": [0.0] * n_concepts,
                 "motor_row_indices": [],
                 "motor_col_indices": [],
                 "motor_time_indices": [],
@@ -468,11 +461,9 @@ class CehrGptDataProcessor(DatasetMapping):
 
         # Process sections in REVERSE order but build results in FORWARD order
         section_boundaries = np.concatenate([prediction_indices, [n_concepts]])
-        last_event_time = event_times[-1]
 
         # Pre-allocate arrays with exact size needed
-        num_prediction_positions = len(prediction_indices)
-        motor_censor_times = np.zeros(num_prediction_positions, dtype=float)
+        motor_censor_times = event_times[-1] - event_times
         motor_tte_task_indicators = np.zeros(n_concepts, dtype=bool)
 
         # Store sparse matrix data grouped by row for efficient construction
@@ -514,7 +505,6 @@ class CehrGptDataProcessor(DatasetMapping):
                 ) in chain(*global_motor_events.values())
             ]
             motor_tte_task_indicators[start_index] = True
-            motor_censor_times[i] = last_event_time - current_event_time
 
         # Build final sparse matrix lists in forward order (no reversals needed)
         motor_row_indices = []
@@ -526,13 +516,12 @@ class CehrGptDataProcessor(DatasetMapping):
             for col_idx, value in sparse_data_by_row[row_idx]:
                 motor_row_indices.append(row_idx)
                 motor_col_indices.append(col_idx)
-                motor_time_indices.append(self.get_time_bin(value))
+                motor_time_indices.append(
+                    get_time_bin(
+                        value, self.motor_time_bin_width, self.motor_num_time_pieces
+                    )
+                )
                 motor_values.append(1)
-
-        # Filter out unused positions from motor_censor_times
-        motor_censor_times = [
-            motor_censor_times[i] for i in sorted(sparse_data_by_row.keys())
-        ]
 
         if len(motor_row_indices) == 0:
             LOG.debug(
@@ -541,6 +530,15 @@ class CehrGptDataProcessor(DatasetMapping):
                 len(concept_ids),
                 concept_ids[-10:] if len(concept_ids) >= 10 else concept_ids,
             )
+
+        # end_times_broadcast = self.motor_time_bins[1:][np.newaxis, :, np.newaxis]
+        # motor_censor_times_3d = np.tile(
+        #     motor_censor_times[:, np.newaxis, np.newaxis],
+        #     (1, 1, self.motor_tte_vocab_size),
+        # )
+        #
+        # # Combined mask computation
+        # motor_tte_masks = motor_censor_times_3d > end_times_broadcast
 
         return {
             "motor_censor_times": motor_censor_times,

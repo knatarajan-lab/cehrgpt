@@ -217,6 +217,10 @@ class CehrGPTArguments:
             "help": "The number of times each motor_num_time_pieces piece has to be"
         },
     )
+    motor_time_bin_width: Optional[int] = dataclasses.field(
+        default=180,
+        metadata={"help": "The width of the time bin in days"},
+    )
     motor_use_ontology: Optional[bool] = dataclasses.field(
         default=False,
         metadata={

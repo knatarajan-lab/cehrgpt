@@ -849,15 +849,6 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     def pretrained_concept_embedding_model(self):
         return self._pretrained_concept_embedding_model
 
-    def get_motor_time_bins(self, motor_num_time_pieces: int) -> List[int]:
-        time_bins = np.percentile(
-            self._motor_task_info["motor_event_times"].samples,
-            np.linspace(0, 100, motor_num_time_pieces + 1),
-        )
-        time_bins[0] = 0
-        time_bins[-1] = float("inf")
-        return list(time_bins)
-
     def get_motor_token_id(self, concept_id: str) -> int:
         if not self.is_motor_time_to_event_code(concept_id):
             raise RuntimeError(f"Invalid motor concept id: {concept_id}")

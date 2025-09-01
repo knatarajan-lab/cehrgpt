@@ -417,3 +417,16 @@ def generate_artificial_time_tokens():
     month_tokens = [f"M{i}" for i in range(12)]
     long_term_tokens = ["LT"]
     return day_tokens + week_tokens + month_tokens + long_term_tokens
+
+
+def get_motor_time_bins(
+    motor_num_time_pieces: int, motor_time_bin_width: int
+) -> List[float]:
+    return [motor_time_bin_width * i for i in range(motor_num_time_pieces)] + [np.inf]
+
+
+def get_time_bin(
+    time_interval: int, motor_time_bin_width: int, motor_num_time_pieces: int
+):
+    time_bin = time_interval // motor_time_bin_width
+    return max(min(time_bin, motor_num_time_pieces - 1), 0)

@@ -32,6 +32,7 @@ from cehrgpt.data.hf_cehrgpt_dataset_collator import (
     SamplePackingCehrGptDataCollator,
 )
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
+from cehrgpt.gpt_utils import get_motor_time_bins
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
@@ -219,6 +220,9 @@ def load_and_create_model(
             motor_time_to_event_weight=cehrgpt_args.motor_time_to_event_weight,
             motor_tte_vocab_size=len(tokenizer.clinical_concept_ids),
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
+            motor_time_bins=get_motor_time_bins(
+                cehrgpt_args.motor_num_time_pieces, cehrgpt_args.motor_time_bin_width
+            ),
             ve_token_id=tokenizer.ve_token_id,
             n_inner=cehrgpt_args.inner_dim,
             decoder_mlp=cehrgpt_args.decoder_mlp,
@@ -553,8 +557,8 @@ def main():
             use_sub_time_tokenization=model_args.use_sub_time_tokenization,
             include_values=model_args.include_values,
             include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
-            motor_tte_vocab_size=model.config.motor_tte_vocab_size,
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
+            motor_time_bin_width=cehrgpt_args.motor_time_bin_width,
             motor_sampling_probability=cehrgpt_args.motor_sampling_probability,
         ),
         train_dataset=processed_dataset["train"],
