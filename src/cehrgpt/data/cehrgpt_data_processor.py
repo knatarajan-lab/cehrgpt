@@ -427,15 +427,11 @@ class CehrGptDataProcessor(DatasetMapping):
             else:
                 previous_time_stamp = time_stamp
             event_times[i] = time_stamp
-        # Convert epoch time to days
-        event_times = (event_times // (3600 * 24)).astype(int)
 
         # Determine prediction positions
         before_valid_time_tokens = np.roll(valid_time_tokens, -1)
-        # We randomly make predictions at 50% of the sequence positions
-        prediction_positions = (
-            np.random.rand(n_concepts) < self.motor_sampling_probability
-        )
+        # We make the predictions at the end of the group of events that share the time stamp
+        prediction_positions = np.roll(event_times, -1) != event_times
         # We don't predict at the att time tokens
         prediction_positions &= ~is_att_tokens
         # We disable TTE predictions using the demographics alone
@@ -461,6 +457,9 @@ class CehrGptDataProcessor(DatasetMapping):
 
         # Process sections in REVERSE order but build results in FORWARD order
         section_boundaries = np.concatenate([prediction_indices, [n_concepts]])
+
+        # Convert epoch time to days
+        event_times = (event_times // (3600 * 24)).astype(int)
 
         # Pre-allocate arrays with exact size needed
         motor_censor_times = event_times[-1] - event_times
