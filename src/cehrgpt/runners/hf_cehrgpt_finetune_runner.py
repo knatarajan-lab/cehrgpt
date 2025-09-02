@@ -418,13 +418,22 @@ def main():
             )
             output_dir = os.path.join(training_args.output_dir, f"run-{run_id}")
 
-        if cehrgpt_args.hyperparameter_tuning and cehrgpt_args.retrain_with_full:
-            folders = glob.glob(f"{output_dir}/checkpoint-*")
-            for file_name in os.listdir(folders[0]):
-                full_file_name = os.path.join(output_dir, file_name)
-                destination = os.path.join(training_args.output_dir, file_name)
-                if os.path.isfile(full_file_name):
-                    shutil.copy(full_file_name, destination)
+        if cehrgpt_args.hyperparameter_tuning and not cehrgpt_args.retrain_with_full:
+            folders = glob.glob(os.path.join(output_dir, "checkpoint-*"))
+            if len(folders) == 0:
+                raise RuntimeError(
+                    f"There must be a checkpoint folder under {output_dir}"
+                )
+            checkpoint_dir = folders[0]
+            LOG.info("Best trial checkpoint folder: %s", checkpoint_dir)
+            for file_name in os.listdir(checkpoint_dir):
+                try:
+                    full_file_name = os.path.join(checkpoint_dir, file_name)
+                    destination = os.path.join(training_args.output_dir, file_name)
+                    if os.path.isfile(full_file_name):
+                        shutil.copy2(full_file_name, destination)
+                except Exception as e:
+                    LOG.error("Failed to copy %s: %s", file_name, str(e))
         else:
             # Initialize Trainer for final training on the combined train+val set
             trainer = trainer_class(
