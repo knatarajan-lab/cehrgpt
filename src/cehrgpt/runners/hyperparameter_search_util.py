@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Callable, Tuple
+from typing import Callable, Optional, Tuple
 
 import optuna
 from cehrbert.runners.hf_runner_argument_dataclass import ModelArguments
@@ -130,7 +130,7 @@ def perform_hyperparameter_search(
     training_args: TrainingArguments,
     model_args: ModelArguments,
     cehrgpt_args: CehrGPTArguments,
-) -> TrainingArguments:
+) -> Tuple[TrainingArguments, Optional[str]]:
     """
     Perform hyperparameter tuning for the CehrGPT model using Optuna with the Hugging Face Trainer.
 
@@ -176,7 +176,10 @@ def perform_hyperparameter_search(
     Logging:
         Logs the best hyperparameters found at the end of the search.
     """
+    run_id = None
     if cehrgpt_args.hyperparameter_tuning:
+        save_total_limit_original = training_args.save_total_limit
+        training_args.save_total_limit = 1
         sampled_train = sample_dataset(
             dataset["train"],
             cehrgpt_args.hyperparameter_tuning_percentage,
@@ -218,8 +221,10 @@ def perform_hyperparameter_search(
             sampler=optuna.samplers.TPESampler(seed=training_args.seed),
         )
         LOG.info("Best hyperparameters: %s", best_trial.hyperparameters)
+        LOG.info("Best run_id: %s", best_trial.run_id)
+        run_id = best_trial.run_id
+        training_args.save_total_limit = save_total_limit_original
         # Update training arguments with best hyperparameters and set epochs based on adjusted effective epochs
         for k, v in best_trial.hyperparameters.items():
             setattr(training_args, k, v)
-
-    return training_args
+    return training_args, run_id

@@ -1,3 +1,4 @@
+import glob
 import json
 import os
 import random
@@ -374,7 +375,6 @@ def main():
             SamplePackingCehrGptDataCollator,
             cehrgpt_args.max_tokens_per_batch,
             config.max_position_embeddings,
-            add_end_token_in_sample_packing=cehrgpt_args.add_end_token_in_sample_packing,
         )
     else:
         trainer_class = Trainer
@@ -401,8 +401,9 @@ def main():
     )
 
     if training_args.do_train:
+        output_dir = training_args.output_dir
         if cehrgpt_args.hyperparameter_tuning:
-            training_args = perform_hyperparameter_search(
+            training_args, run_id = perform_hyperparameter_search(
                 trainer_class,
                 partial(model_init, model_args, training_args, cehrgpt_args, tokenizer),
                 processed_dataset,
@@ -411,18 +412,19 @@ def main():
                 model_args,
                 cehrgpt_args,
             )
-
-        if cehrgpt_args.retrain_with_full:
-            # Always retrain with the full set when hyperparameter tuning is set to true
-            retrain_with_full_set(
-                trainer_class,
-                model_args,
-                training_args,
-                cehrgpt_args,
-                tokenizer,
-                processed_dataset,
-                data_collator,
+            # We enforce retraining if cehrgpt_args.hyperparameter_tuning_percentage < 1.0
+            cehrgpt_args.retrain_with_full |= (
+                cehrgpt_args.hyperparameter_tuning_percentage < 1.0
             )
+            output_dir = os.path.join(training_args.output_dir, f"run-{run_id}")
+
+        if cehrgpt_args.hyperparameter_tuning and cehrgpt_args.retrain_with_full:
+            folders = glob.glob(f"{output_dir}/checkpoint-*")
+            for file_name in os.listdir(folders[0]):
+                full_file_name = os.path.join(output_dir, file_name)
+                destination = os.path.join(training_args.output_dir, file_name)
+                if os.path.isfile(full_file_name):
+                    shutil.copy(full_file_name, destination)
         else:
             # Initialize Trainer for final training on the combined train+val set
             trainer = trainer_class(
@@ -469,63 +471,6 @@ def main():
             batch_sampler=batch_sampler,
         )
         do_predict(test_dataloader, model_args, training_args, cehrgpt_args)
-
-
-def retrain_with_full_set(
-    trainer_class,
-    model_args: ModelArguments,
-    training_args: TrainingArguments,
-    cehrgpt_args: CehrGPTArguments,
-    tokenizer: CehrGptTokenizer,
-    dataset: DatasetDict,
-    data_collator: CehrGptDataCollator,
-) -> None:
-    """
-    Retrains a model on the full training and validation dataset for final performance evaluation.
-
-    This function consolidates the training and validation datasets into a single
-    dataset for final model training, updates the output directory for the final model,
-    and disables evaluation during training. It resumes from the latest checkpoint if available,
-    trains the model on the combined dataset, and saves the model along with training metrics
-    and state information.
-
-    Args:
-        trainer_class: Trainer or its subclass
-        model_args (ModelArguments): Model configuration and hyperparameters.
-        training_args (TrainingArguments): Training configuration, including output directory,
-                                           evaluation strategy, and other training parameters.
-        cehrgpt_args (CehrGPTArguments): CehrGPT specific parameters.
-        tokenizer (CehrGptTokenizer): Tokenizer instance specific to CEHR-GPT.
-        dataset (DatasetDict): A dictionary containing the 'train' and 'validation' datasets.
-        data_collator (CehrGptDataCollator): Data collator for handling data batching and tokenization.
-
-    Returns:
-        None
-    """
-    # Initialize Trainer for final training on the combined train+val set
-    full_dataset = concatenate_datasets([dataset["train"], dataset["validation"]])
-    training_args.output_dir = os.path.join(training_args.output_dir, "full")
-    LOG.info(
-        "Final output_dir for final_training_args.output_dir %s",
-        training_args.output_dir,
-    )
-    Path(training_args.output_dir).mkdir(exist_ok=True)
-    # Disable evaluation
-    training_args.evaluation_strategy = "no"
-    checkpoint = get_last_hf_checkpoint(training_args)
-    final_trainer = trainer_class(
-        model=model_init(model_args, training_args, cehrgpt_args, tokenizer),
-        data_collator=data_collator,
-        args=training_args,
-        train_dataset=full_dataset,
-        tokenizer=tokenizer,
-    )
-    final_train_result = final_trainer.train(resume_from_checkpoint=checkpoint)
-    final_trainer.save_model()  # Saves the tokenizer too for easy upload
-    metrics = final_train_result.metrics
-    final_trainer.log_metrics("train", metrics)
-    final_trainer.save_metrics("train", metrics)
-    final_trainer.save_state()
 
 
 def do_predict(
