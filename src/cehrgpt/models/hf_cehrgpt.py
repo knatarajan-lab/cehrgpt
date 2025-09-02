@@ -1826,12 +1826,13 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
         values: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        ages: Optional[torch.FloatTensor] = None,
+        epoch_times: Optional[torch.FloatTensor] = None,
         **kwargs,
     ) -> CehrGptSequenceClassifierOutput:
 
@@ -1841,12 +1842,12 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
             values=values,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
-            position_ids=position_ids,
             head_mask=head_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            position_ids=ages,
         )
 
         if is_sample_pack(attention_mask):
