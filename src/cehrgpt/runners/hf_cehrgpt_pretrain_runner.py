@@ -217,11 +217,12 @@ def load_and_create_model(
                 else model_args.max_position_embeddings
             ),
             include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
+            motor_tte_vocab_size=tokenizer.motor_tte_vocab_size,
             motor_time_to_event_weight=cehrgpt_args.motor_time_to_event_weight,
-            motor_tte_vocab_size=len(tokenizer.clinical_concept_ids),
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
-            motor_time_bins=get_motor_time_bins(
-                cehrgpt_args.motor_num_time_pieces, cehrgpt_args.motor_time_bin_width
+            motor_time_bin_width=cehrgpt_args.motor_time_bin_width,
+            motor_time_bins=tokenizer.get_motor_time_bins(
+                cehrgpt_args.motor_num_time_pieces
             ),
             ve_token_id=tokenizer.ve_token_id,
             n_inner=cehrgpt_args.inner_dim,
@@ -480,7 +481,7 @@ def main():
 
     # Try to update motor tte vocab size if the new configuration is different from the existing one
     if cehrgpt_args.include_motor_time_to_event:
-        model.update_motor_tte_vocab_size(len(cehrgpt_tokenizer.clinical_concept_ids))
+        model.update_motor_tte_vocab_size(cehrgpt_tokenizer.motor_tte_vocab_size)
 
     # Expand tokenizer to adapt to the new pretraining dataset
     if model.config.vocab_size < cehrgpt_tokenizer.vocab_size:
