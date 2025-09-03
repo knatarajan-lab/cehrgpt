@@ -64,6 +64,14 @@ class CehrGPTArguments:
         default=128,
         metadata={"help": "The number of examples from the training set."},
     )
+    hyperparameter_tuning: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={"help": "A flag to indicate if we want to do hyperparameter tuning."},
+    )
+    hyperparameter_tuning_is_grid: Optional[bool] = dataclasses.field(
+        default=True,
+        metadata={"help": "A flag to indicate if we want to do hyperparameter tuning."},
+    )
     hyperparameter_tuning_percentage: Optional[float] = dataclasses.field(
         default=0.1,
         metadata={
@@ -76,10 +84,6 @@ class CehrGPTArguments:
             "help": "The number of trails will be use for hyperparameter tuning."
         },
     )
-    hyperparameter_tuning: Optional[bool] = dataclasses.field(
-        default=False,
-        metadata={"help": "A flag to indicate if we want to do hyperparameter tuning."},
-    )
     hyperparameter_batch_sizes: Optional[List[int]] = dataclasses.field(
         default_factory=lambda: [4, 8, 16],
         metadata={"help": "Hyperparameter search batch sizes"},
@@ -88,29 +92,13 @@ class CehrGPTArguments:
         default_factory=lambda: [10],
         metadata={"help": "Hyperparameter search num_train_epochs"},
     )
-    lr_low: Optional[float] = dataclasses.field(
-        default=1e-5,
-        metadata={
-            "help": "The lower bound of the learning rate range for hyperparameter tuning."
-        },
+    hyperparameter_learning_rates: Optional[List[int]] = dataclasses.field(
+        default_factory=lambda: [1e-5],
+        metadata={"help": "Hyperparameter search learning rates"},
     )
-    lr_high: Optional[float] = dataclasses.field(
-        default=5e-5,
-        metadata={
-            "help": "The upper bound of the learning rate range for hyperparameter tuning."
-        },
-    )
-    weight_decays_low: Optional[float] = dataclasses.field(
-        default=1e-3,
-        metadata={
-            "help": "The lower bound of the weight decays range for hyperparameter tuning."
-        },
-    )
-    weight_decays_high: Optional[float] = dataclasses.field(
-        default=1e-2,
-        metadata={
-            "help": "The upper bound of the weight decays range for hyperparameter tuning."
-        },
+    hyperparameter_weight_decays: Optional[List[int]] = dataclasses.field(
+        default_factory=lambda: [1e-2],
+        metadata={"help": "Hyperparameter search learning rates"},
     )
     causal_sfm: Optional[bool] = dataclasses.field(
         default=False,
