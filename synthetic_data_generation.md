@@ -81,6 +81,19 @@ sh scripts/omop_pipeline.sh \
 - **Output Directory**: `$SYNTHETIC_DATA_OUTPUT_DIR/top_p10000/restored_omop/` - OMOP-formatted output
 - **Vocabulary Directory**: `$OMOP_VOCAB_DIR` - OMOP vocabulary for concept mapping
 
+## Step 3: Upload OMOP tables to SQL Server
+
+You can upload the OMOP tables to a SQL server database, click on [credential sample example](sample_configs/credential_file_sample.ini) to see how the credential file is constructed.
+```bash
+# Set up the environment variable
+export CREDENTIAL_PATH="/path/to/credential/path"
+# Run the python script to upload OMOP tables
+python -u -m cehrgpt.tools.upload_omop \
+  --credential_path $CREDENTIAL_PATH\
+  --input_folder $SYNTHETIC_DATA_OUTPUT_DIR/top_p10000/restored_omop/
+```
+> **Tips**: This step requires spark, please refer to **Spark Environment**: Configured Apache Spark (see [Spark Setup README](./spark_setup.md)).
+> Currently, `upload_omop.py` only supports SQL Server, for other databases, you need to adjust the script.
 
 ## Privacy Analyses
 
