@@ -17,9 +17,8 @@ Extract meaningful patient embeddings from sequences of medical events using **l
 Generate outcome predictions directly from prompts without requiring task-specific training, enabling rapid evaluation in low-label clinical settings.
 
 ### Synthetic Data Generation
-Our synthetic data generation capabilities provide comprehensive patient profiles that include demographics, medical history, treatment courses, and outcomes.
-The system implements advanced privacy-preserving techniques to ensure generated data contains no identifiable information while maintaining clinical utility.
-The platform is fully compatible with the OMOP Common Data Model for seamless integration with existing healthcare systems and features an extensible architecture designed to adapt to new datasets and different EHR systems.
+Generate comprehensive patient profiles including demographics, medical history, treatment courses, and outcomes while implementing advanced privacy-preserving techniques to ensure generated data contains no identifiable information.
+The platform is fully compatible with the OMOP Common Data Model for seamless integration with existing healthcare systems.
 ## 🚀 Installation
 
 Clone the repository and install dependencies:
