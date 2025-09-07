@@ -37,9 +37,9 @@ python -u -m cehrgpt.generation.generate_batch_hf_gpt_sequence \
   --tokenizer_folder $CEHR_GPT_MODEL_DIR \
   --output_folder $SYNTHETIC_DATA_OUTPUT_DIR \
   --num_of_patients 128 \
-  --batch_size 32 \
+  --batch_size 16 \
   --buffer_size 128 \
-  --context_window 1024 \
+  --context_window 4096 \
   --sampling_strategy TopPStrategy \
   --top_p 1.0 --temperature 1.0 --repetition_penalty 1.0 \
   --epsilon_cutoff 0.00 \
@@ -53,9 +53,9 @@ python -u -m cehrgpt.generation.generate_batch_hf_gpt_sequence \
 - `--tokenizer_folder`: Directory containing the model tokenizer
 - `--output_folder`: Directory where synthetic sequences will be saved
 - `--num_of_patients`: Number of synthetic patients to generate (128)
-- `--batch_size`: Batch size for generation process (32)
+- `--batch_size`: Batch size for generation process (16)
 - `--buffer_size`: Buffer size for sequence generation (128)
-- `--context_window`: Maximum sequence length for generation (1024)
+- `--context_window`: Maximum sequence length for generation (4096)
 - `--sampling_strategy`: Sampling method for sequence generation (TopPStrategy)
 - `--top_p`: Nucleus sampling parameter for diversity control (1.0)
 - `--temperature`: Temperature for sampling randomness (1.0)
@@ -70,9 +70,10 @@ Transform synthetic sequences back to OMOP Common Data Model format for seamless
 ```bash
 # Execute conversion pipeline
 sh scripts/omop_pipeline.sh \
-  $SYNTHETIC_DATA_OUTPUT_DIR/top_p10000/generated_sequences/ \
-  $SYNTHETIC_DATA_OUTPUT_DIR/top_p10000/restored_omop/ \
-  $OMOP_VOCAB_DIR
+  --patient-sequence-folder=$SYNTHETIC_DATA_OUTPUT_DIR/top_p10000/generated_sequences/ \
+  --omop-folder=$SYNTHETIC_DATA_OUTPUT_DIR/top_p10000/restored_omop/ \
+  --source-omop-folder=$OMOP_VOCAB_DIR \
+  --cpu-cores=10
 ```
 
 ### Conversion Pipeline Parameters
