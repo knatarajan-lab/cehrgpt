@@ -17,6 +17,10 @@ Set up the necessary directory paths:
 ```bash
 # CEHR-GPT installation directory (auto-detect from git repository)
 export CEHRGPT_HOME=$(git rev-parse --show-toplevel)
+export OMOP_VOCAB_DIR="/path/to/source/omop/folder"
+export CEHR_GPT_DATA_DIR="/path/to/training/data"
+export CEHR_GPT_MODEL_DIR="/path/to/trained/model"
+export SYNTHETIC_DATA_OUTPUT_DIR="/path/to/generated/synthetic/data"
 ```
 
 ## Step 1: Generate Synthetic Sequences
@@ -28,9 +32,9 @@ export TRANSFORMERS_VERBOSITY=info
 export CUDA_VISIBLE_DEVICES="0"
 
 python -u -m cehrgpt.generation.generate_batch_hf_gpt_sequence \
-  --model_folder test_results \
-  --tokenizer_folder test_results \
-  --output_folder test_results \
+  --model_folder $CEHR_GPT_MODEL_DIR \
+  --tokenizer_folder $CEHR_GPT_MODEL_DIR \
+  --output_folder $SYNTHETIC_DATA_OUTPUT_DIR \
   --num_of_patients 128 \
   --batch_size 32 \
   --buffer_size 128 \
@@ -38,8 +42,9 @@ python -u -m cehrgpt.generation.generate_batch_hf_gpt_sequence \
   --sampling_strategy TopPStrategy \
   --top_p 1.0 --temperature 1.0 --repetition_penalty 1.0 \
   --epsilon_cutoff 0.00 \
-  --demographic_data_path sample_data/pretrain
+  --demographic_data_path $CEHR_GPT_DATA_DIR/patient_sequence/train
 ```
+> **Tip**: The synthetic data generation script is designed for single GPU usage. To leverage multiple GPUs, run separate instances of the script on each GPU with different `CUDA_VISIBLE_DEVICES` settings for parallel processing.
 
 ### Parameter Details
 
@@ -62,19 +67,17 @@ python -u -m cehrgpt.generation.generate_batch_hf_gpt_sequence \
 Transform synthetic sequences back to OMOP Common Data Model format for seamless integration with existing healthcare systems:
 > **Tips**: This step requires spark, please refer to **Spark Environment**: Configured Apache Spark (see [Spark Setup README](./spark_setup.md))
 ```bash
-# OMOP vocabulary directory for conversion
-export OMOP_VOCAB_DIR="/path/to/omop/"
 # Execute conversion pipeline
 sh scripts/omop_pipeline.sh \
-  test_results/top_p10000/generated_sequences/ \
-  test_results/top_p10000/restored_omop/ \
+  $SYNTHETIC_DATA_OUTPUT_DIR/top_p10000/generated_sequences/ \
+  $SYNTHETIC_DATA_OUTPUT_DIR/top_p10000/restored_omop/ \
   $OMOP_VOCAB_DIR
 ```
 
 ### Conversion Pipeline Parameters
 
-- **Input Directory**: `test_results/top_p10000/generated_sequences/` - Generated synthetic sequences
-- **Output Directory**: `test_results/top_p10000/restored_omop/` - OMOP-formatted output
+- **Input Directory**: `$SYNTHETIC_DATA_OUTPUT_DIR/top_p10000/generated_sequences/` - Generated synthetic sequences
+- **Output Directory**: `$SYNTHETIC_DATA_OUTPUT_DIR/top_p10000/restored_omop/` - OMOP-formatted output
 - **Vocabulary Directory**: `$OMOP_VOCAB_DIR` - OMOP vocabulary for concept mapping
 
 ## Privacy and Compliance

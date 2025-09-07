@@ -6,7 +6,7 @@
 [![license](https://img.shields.io/badge/License-MIT-green.svg?labelColor=gray)](https://github.com/knatarajan-lab/cehrgpt/blob/main/LICENSE)
 [![contributors](https://img.shields.io/github/contributors/knatarajan-lab/cehrgpt.svg)](https://github.com/knatarajan-lab/cehrgpt/graphs/contributors)
 
-CEHRGPT is a multi-task foundation model for structured electronic health records (EHR) data that unifies three capabilities within a single architecture: feature representation, zero-shot prediction, and synthetic data generation.
+CEHRGPT is a multi-task foundation model for structured electronic health records (EHR) data that supports three capabilities: feature representation, zero-shot prediction, and synthetic data generation.
 
 ## 🎯 Key Capabilities
 
