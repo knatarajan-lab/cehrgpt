@@ -6,22 +6,20 @@
 [![license](https://img.shields.io/badge/License-MIT-green.svg?labelColor=gray)](https://github.com/knatarajan-lab/cehrgpt/blob/main/LICENSE)
 [![contributors](https://img.shields.io/github/contributors/knatarajan-lab/cehrgpt.svg)](https://github.com/knatarajan-lab/cehrgpt/graphs/contributors)
 
-CEHRGPT is a comprehensive foundation model for structured electronic health records (EHR) data that unifies three essential capabilities within a single architecture: feature representation, zero-shot prediction, and synthetic data generation.
+CEHRGPT is a multi-task foundation model for structured electronic health records (EHR) data that unifies three capabilities within a single architecture: feature representation, zero-shot prediction, and synthetic data generation.
 
 ## 🎯 Key Capabilities
 
 ### Feature Representation
-Extract meaningful patient embeddings from sequences of medical events for downstream tasks such as disease prediction, patient clustering, and risk stratification.
+Extract meaningful patient embeddings from sequences of medical events using **linear probing** techniques for downstream tasks such as disease prediction, patient clustering, and risk stratification.
 
 ### Zero-Shot Prediction
-Generate outcome predictions directly from natural language prompts without requiring task-specific training, enabling rapid evaluation in low-label clinical settings.
+Generate outcome predictions directly from prompts without requiring task-specific training, enabling rapid evaluation in low-label clinical settings.
 
 ### Synthetic Data Generation
-- **Comprehensive Patient Profiles**: Generate complete patient data including demographics, medical history, treatment courses, and outcomes
-- **Privacy-Preserving**: Implements advanced techniques to ensure generated data contains no identifiable information
-- **OMOP Compatibility**: Fully compatible with the OMOP Common Data Model for seamless integration with existing healthcare systems
-- **Extensible Architecture**: Designed to adapt to new datasets and different EHR systems
-
+Our synthetic data generation capabilities provide comprehensive patient profiles that include demographics, medical history, treatment courses, and outcomes.
+The system implements advanced privacy-preserving techniques to ensure generated data contains no identifiable information while maintaining clinical utility.
+The platform is fully compatible with the OMOP Common Data Model for seamless integration with existing healthcare systems and features an extensible architecture designed to adapt to new datasets and different EHR systems.
 ## 🚀 Installation
 
 Clone the repository and install dependencies:
@@ -52,26 +50,7 @@ mkdir $CEHR_GPT_DATA_DIR/dataset_prepared
 
 ### Step 1: Generate Pre-training Data
 
-Configure Spark environment for data processing:
-
-```bash
-export SPARK_WORKER_INSTANCES="1"
-export SPARK_WORKER_CORES="16"
-export SPARK_EXECUTOR_CORES="2"
-export SPARK_DRIVER_MEMORY="12g"
-export SPARK_EXECUTOR_MEMORY="12g"
-```
-
-> **Note**: Adjust worker cores and executor memory based on your dataset size.
-
-Generate pre-training data:
-
-```bash
-sh $CEHRGPT_HOME/scripts/create_cehrgpt_pretraining_data.sh \
-  --input_folder $OMOP_DIR \
-  --output_folder $CEHR_GPT_DATA_DIR \
-  --start_date "1985-01-01"
-```
+Generate the training data following the [Data Generation Instruction](./data_generation.md).
 
 ### Step 2: Pre-train CEHR-GPT
 
@@ -98,108 +77,21 @@ python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner \
 
 ## 🎯 Feature Representation
 
-### Step 1: Generate Prediction Labels
+CEHR-GPT enables extraction of meaningful patient embeddings from medical event sequences using **linear probing** techniques for downstream prediction tasks. The feature representation pipeline includes label generation, patient sequence extraction, and linear regression model training on the extracted representations.
 
-Create heart failure readmission labels compatible with MEDS schema:
-
-```bash
-python -u -m cehrbert_data.prediction_cohorts.hf_readmission \
-   -c hf_readmission -i $OMOP_DIR -o $OMOP_DIR/labels \
-   -dl 1985-01-01 -du 2023-12-31 \
-   -l 18 -u 100 -ow 730 -ps 1 -pw 30 \
-   --is_new_patient_representation \
-   --should_construct_artificial_visits \
-   --include_concept_list \
-   --is_remove_index_prediction_starts \
-   --meds_format \
-   --exclude_features
-```
-
-### Step 2: Extract Patient Features
-
-Extract patient sequences using a 2-year observation window:
-
-```bash
-sh $CEHRGPT_HOME/scripts/extract_features_gpt.sh \
-  --cohort-folder $OMOP_DIR/labels \
-  --input-dir $OMOP_DIR \
-  --output-dir "$CEHR_GPT_DATA_DIR/phenotype_cehrgpt_sequences" \
-  --patient-splits-folder "$OMOP_DIR/patient_splits" \
-  --ehr-tables "condition_occurrence procedure_occurrence drug_exposure" \
-  --observation-window 730
-```
-
-### Step 3: Run Feature Extraction
-
-Execute CEHR-GPT feature extraction on phenotype tasks:
-
-```bash
-sh $CEHRGPT_HOME/run_cehrgpt.sh \
-  --base_dir="$CEHR_GPT_DATA_DIR/phenotype_cehrgpt_sequences" \
-  --dataset_prepared_path="$CEHR_GPT_DATA_DIR/dataset_prepared" \
-  --model_path=$CEHR_GPT_MODEL_DIR \
-  --output_dir=$CEHRGPT_FEATURES_DIR \
-  --preprocessing_workers=8 \
-  --model_name="cehrgpt"
-```
+For detailed instructions including cohort creation, patient feature extraction, and linear probing evaluation, please follow the [Feature Representation Guide](./feature_representation.md).
 
 ## 🔮 Zero-Shot Prediction
 
-Perform zero-shot predictions for time-to-event analysis:
+CEHR-GPT can generate outcome predictions directly from clinical prompts without requiring task-specific training, making it ideal for rapid evaluation in low-label clinical settings. The zero-shot prediction capability performs time-to-event analysis by processing patient sequences and generating risk predictions based on learned medical patterns.
 
-```bash
-python -m cehrgpt.time_to_event.time_to_event_prediction \
-  --batch_size 8 --context_window 4096 --sampling_strategy TopPStrategy --top_p 1.0 \
-  --dataset_folder $CEHR_GPT_DATA_DIR/phenotype_cehrgpt_sequences/hf_readmission/test \
-  --num_return_sequences 50 \
-  --task_config $CEHRGPT_HOME/src/cehrgpt/time_to_event/config/30_day_readmission.yaml
-```
+For complete setup instructions including label generation, sequence preparation, and prediction execution, please follow the [Zero-Shot Prediction Guide](./zero_shot_prediction.md).
 
 ## 🧬 Synthetic Data Generation
 
-### Generate Synthetic Sequences
+CEHR-GPT generates comprehensive synthetic patient profiles including demographics, medical history, treatment courses, and outcomes while implementing advanced privacy-preserving techniques. The synthetic data maintains statistical fidelity to real patient populations without containing identifiable information, and outputs are fully compatible with the OMOP Common Data Model.
 
-Create synthetic patient sequences:
-
-```bash
-export TRANSFORMERS_VERBOSITY=info
-export CUDA_VISIBLE_DEVICES="0"
-
-python -u -m cehrgpt.generation.generate_batch_hf_gpt_sequence \
-  --model_folder test_results \
-  --tokenizer_folder test_results \
-  --output_folder test_results \
-  --num_of_patients 128 \
-  --batch_size 32 \
-  --buffer_size 128 \
-  --context_window 1024 \
-  --sampling_strategy TopPStrategy \
-  --top_p 1.0 --temperature 1.0 --repetition_penalty 1.0 \
-  --epsilon_cutoff 0.00 \
-  --demographic_data_path sample_data/pretrain
-```
-
-### Convert to OMOP Format
-
-Transform synthetic sequences back to OMOP format:
-
-```bash
-# Set up OMOP vocabulary path
-export OMOP_VOCAB_DIR=""
-
-# Configure Spark environment
-export SPARK_WORKER_INSTANCES="1"
-export SPARK_WORKER_CORES="8"
-export SPARK_EXECUTOR_CORES="2"
-export SPARK_DRIVER_MEMORY="2g"
-export SPARK_EXECUTOR_MEMORY="2g"
-
-# Execute conversion pipeline
-sh scripts/omop_pipeline.sh \
-  test_results/top_p10000/generated_sequences/ \
-  test_results/top_p10000/restored_omop/ \
-  $OMOP_VOCAB_DIR
-```
+For step-by-step instructions on generating synthetic sequences and converting them to OMOP format, please follow the [Synthetic Data Generation Guide](./synthetic_data_generation.md).
 
 ## 📊 MEDS Support
 
