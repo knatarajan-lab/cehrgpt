@@ -114,8 +114,19 @@ echo "  Output folder: $OUTPUT_FOLDER"
 echo "  Start date: $START_DATE"
 echo ""
 
+export CEHRBERT_DATA_HOME=$(python -c "import cehrbert_data; print(cehrbert_data.__file__.rsplit('/', 1)[0])")
+
+# Check if SPARK_SUBMIT_OPTIONS is set and not empty
+if [ -n "$SPARK_SUBMIT_OPTIONS" ]; then
+    SPARK_OPTIONS="$SPARK_SUBMIT_OPTIONS"
+    echo "Using Spark options: $SPARK_OPTIONS"
+else
+    SPARK_OPTIONS=""
+    echo "No Spark options specified"
+fi
+
 # Step 1: Generate included concept list
-CONCEPT_LIST_CMD="python -u -m cehrbert_data.apps.generate_included_concept_list \
+CONCEPT_LIST_CMD="spark-submit $SPARK_OPTIONS $CEHRBERT_DATA_HOME/apps/generate_included_concept_list.py \
 -i \"$INPUT_FOLDER\" \
 -o \"$OUTPUT_FOLDER\" \
 --min_num_of_patients 100 \
@@ -131,7 +142,7 @@ if [ $? -ne 0 ]; then
 fi
 
 # Step 2: Generate training data
-TRAINING_DATA_CMD="python -m cehrbert_data.apps.generate_training_data \
+TRAINING_DATA_CMD="spark-submit $SPARK_OPTIONS $CEHRBERT_DATA_HOME/apps/generate_training_data.py \
 --input_folder \"$INPUT_FOLDER\" \
 --output_folder \"$OUTPUT_FOLDER\" \
 -d $START_DATE \
@@ -140,7 +151,6 @@ TRAINING_DATA_CMD="python -m cehrbert_data.apps.generate_training_data \
 -iv \
 -ip \
 --include_concept_list \
---include_death \
 --gpt_patient_sequence \
 --should_construct_artificial_visits \
 --disconnect_problem_list_records \

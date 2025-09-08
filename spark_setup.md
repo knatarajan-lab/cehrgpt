@@ -13,8 +13,8 @@ Set up the core Spark environment variables:
 export SPARK_HOME=$(python -c "import pyspark; print(pyspark.__file__.rsplit('/', 1)[0])")
 
 # Configure Python interpreters
-export PYSPARK_PYTHON=/opt/conda/bin/python
-export PYSPARK_DRIVER_PYTHON=/opt/conda/bin/python
+export PYSPARK_PYTHON=$(python -c "import sys; print(sys.executable)")
+export PYSPARK_DRIVER_PYTHON=$(python -c "import sys; print(sys.executable)")
 
 # Update Python and system paths
 export PYTHONPATH=$SPARK_HOME/python:$PYTHONPATH

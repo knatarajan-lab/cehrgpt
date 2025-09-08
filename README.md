@@ -47,7 +47,7 @@ mkdir $CEHR_GPT_DATA_DIR/dataset_prepared
 
 ## 🏗️ Model Training
 
-### Step 1: Generate Pre-training Data
+### Step 1: Generate Pre-training Data from OMOP
 
 Generate the training data following the [Data Generation Instruction](./data_generation.md).
 

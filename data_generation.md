@@ -32,12 +32,15 @@ Set up Spark environment variables optimized for healthcare data processing:
 ```bash
 # Worker configuration
 export SPARK_WORKER_INSTANCES="1"
+export SPARK_MASTER="local[16]"
 export SPARK_WORKER_CORES="16"
-export SPARK_EXECUTOR_CORES="2"
+export SPARK_EXECUTOR_CORES="4"
 
 # Memory configuration
-export SPARK_DRIVER_MEMORY="12g"
-export SPARK_EXECUTOR_MEMORY="12g"
+export SPARK_DRIVER_MEMORY="20g"
+export SPARK_EXECUTOR_MEMORY="20g"
+
+export SPARK_SUBMIT_OPTIONS="--master $SPARK_MASTER --driver-memory $SPARK_DRIVER_MEMORY --executor-memory $SPARK_EXECUTOR_MEMORY --executor-cores $SPARK_EXECUTOR_CORES"
 ```
 
 ### Configuration Guidelines
