@@ -237,6 +237,7 @@ log "Configuration:"
 log "  Patient Sequence Folder: $PATIENT_SEQUENCE_FOLDER"
 log "  OMOP Output Folder: $OMOP_FOLDER"
 log "  Source OMOP Folder: $SOURCE_OMOP_FOLDER"
+log "  Patient Splits Folder: $PATIENT_SPLITS_FOLDER"
 log "  Buffer Size: $BUFFER_SIZE"
 log "  CPU Cores: $CPU_CORES"
 log "  Domain Tables: $DOMAIN_TABLES"
@@ -249,11 +250,11 @@ fi
 
 # Remove existing OMOP tables
 log "Removing existing OMOP tables"
-rm -rf "$OMOP_FOLDER"/{person,visit_occurrence,condition_occurrence,procedure_occurrence,drug_exposure,death,measurement,observation_period,condition_era}
+rm -rf $OMOP_FOLDER/{person,visit_occurrence,condition_occurrence,procedure_occurrence,drug_exposure,death,measurement,observation_period,condition_era}
 
 # Remove existing OMOP concept tables
 log "Removing existing OMOP concept tables"
-rm -rf "$OMOP_FOLDER"/{concept,concept_ancestor,concept_relationship}
+rm -rf $OMOP_FOLDER/{concept,concept_ancestor,concept_relationship}
 
 # Copy OMOP concept tables if they don't already exist
 log "Copying OMOP concept tables"
