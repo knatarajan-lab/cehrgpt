@@ -1589,9 +1589,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     token_ids.numpy(), skip_special_tokens=False
                 )
                 batched_ages.append(construct_age_sequence(concept_ids))
-
-        # Turn this to a numpy array for easy manipulation
-        batched_ages = np.asarray(batched_ages)
+            # Turn this to a numpy array for easy manipulation
+            batched_ages = np.asarray(batched_ages)
+        else:
+            batched_ages = batched_ages.cpu().numpy()
         # This is the base to which we will add the time delta
         base_ages = np.asarray([ages[-1] for ages in batched_ages])
         # Update the keyword arguments for the prepare_inputs_for_generation
