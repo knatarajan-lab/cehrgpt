@@ -185,19 +185,6 @@ python -u -m cehrgpt.generation.cehrgpt_conditional_generation \
 - `generation_max_new_tokens`: Maximum new tokens to generate
 - `num_of_trajectories_per_sample`: Number of trajectories per patient sample
 
-## 📖 Citation
-
-If you use CEHRGPT in your research, please cite:
-
-```bibtex
-@article{cehrgpt2024,
-  title={CEHRGPT: Synthetic Data Generation for Electronic Health Records},
-  author={Natarajan, K and others},
-  journal={arXiv preprint arXiv:2402.04400},
-  year={2024}
-}
-```
-
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
