@@ -275,11 +275,7 @@ class CehrGptDataProcessor(DatasetMapping):
                         if demographic_tokens is not None
                         else self.empty_array
                     ),
-                    np.asarray(
-                        self._convert_time_to_event(
-                            record["concept_ids"][start_index:end_index]
-                        )
-                    ),
+                    np.asarray(record["time_to_visits"][start_index:end_index]),
                     np.asarray([-100.0]) if add_last_token else self.empty_array,
                 ]
             ).astype(np.float32)
@@ -302,6 +298,11 @@ class CehrGptDataProcessor(DatasetMapping):
         record["epoch_times"] = construct_time_sequence(
             record["concept_ids"], record["epoch_times"]
         )
+
+        if self.include_ttv_prediction:
+            record["time_to_visits"] = np.asarray(
+                self._convert_time_to_event(record["concept_ids"])
+            )
 
         # Return the record directly if the actual sequence length is less than the max sequence
         if seq_length <= new_max_length:
