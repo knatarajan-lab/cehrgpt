@@ -28,7 +28,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "cehrbert==1.4.8",
+    "cehrbert==1.4.9",
     "cehrbert_data==0.1.1",
     "openai==1.54.3",
     "optuna==4.0.0",
