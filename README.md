@@ -69,7 +69,9 @@ python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner \
   --sample_packing --max_tokens_per_batch 16384 \
   --warmup_ratio 0.01 --weight_decay 0.01 \
   --num_train_epochs 50 --learning_rate 0.0002 \
-  --use_early_stopping --early_stopping_threshold 0.001
+  --use_early_stopping \
+  --load_best_model_at_end true \
+  --early_stopping_threshold 0.001
 ```
 
 > **Tip**: Increase `max_position_embeddings` for longer context windows based on your use case.
