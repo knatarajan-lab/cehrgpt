@@ -528,6 +528,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         current_epoch_times = []
         current_value_indicators = []
         current_values = []
+        current_time_to_visits = []
 
         # MOTOR inputs
         current_motor_censor_times = []
@@ -566,6 +567,16 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 else list(example["epoch_times"])
             )
             current_epoch_times.extend(epoch_times + [max(epoch_times)])
+
+            if self.include_ttv_prediction:
+                current_time_to_visits.extend(
+                    (
+                        example["time_to_visits"].tolist()
+                        if isinstance(example["time_to_visits"], torch.Tensor)
+                        else list(example["time_to_visits"])
+                    )
+                    + [-100]
+                )
 
             if self.include_values:
                 current_value_indicators.extend(
@@ -648,6 +659,9 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
             "ages": current_ages,
             "epoch_times": current_epoch_times,
         }
+
+        if self.include_ttv_prediction:
+            packed_example.update({"time_to_visits": current_time_to_visits})
 
         if self.include_values:
             packed_example.update(
