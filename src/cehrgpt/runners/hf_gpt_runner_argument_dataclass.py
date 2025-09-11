@@ -8,6 +8,10 @@ from cehrgpt.models.gpt2 import ACT2FN
 class CehrGPTArguments:
     """Arguments pertaining to what data we are going to input our model for training and eval."""
 
+    patient_splits_path: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={"help": "Path to the patient splits file"},
+    )
     tokenized_full_dataset_path: Optional[str] = dataclasses.field(
         default=None,
         metadata={
