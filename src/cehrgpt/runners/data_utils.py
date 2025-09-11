@@ -208,14 +208,24 @@ def create_dataset_splits(
     train_patient_ids, val_patient_ids, test_patient_ids = None, None, None
 
     if cehrgpt_args.patient_splits_path:
-        patient_splits = pl.read_parquet(
-            os.path.join(cehrgpt_args.patient_splits_path, "*.parquet")
-        )
+        # If the patient_splits path is a folder (cehrgpt patient splits), then we assume that it contains a list of parquet files.
+        if os.path.isdir(cehrgpt_args.patient_splits_path):
+            patient_splits = pl.read_parquet(
+                os.path.join(cehrgpt_args.patient_splits_path, "*.parquet")
+            )
+        else:
+            # If the patient_splits path is a file, it must be a parquet file
+            file_parts = os.path.splitext(cehrgpt_args.patient_splits_path)
+            if not file_parts or not file_parts[-1].endswith("parquet"):
+                raise ValueError(
+                    f"{cehrgpt_args.patient_splits_path} is not a valid patient splits path."
+                )
+            patient_splits = pl.read_parquet(cehrgpt_args.patient_splits_path)
+
         if len(patient_splits) == 0:
             raise RuntimeError(
                 f"The patient_splits at {cehrgpt_args.patient_splits_path} contains empty rows"
             )
-
         split_values = patient_splits.select("split").unique()["split"].to_list()
         is_split_meds_schema = np.all(
             [
@@ -227,10 +237,16 @@ def create_dataset_splits(
         is_data_in_meds = (
             subject_id_field in patient_splits.columns
         ) and is_split_meds_schema
+        patient_splits = patient_splits.filter(
+            pl.col(subject_id_field if is_data_in_meds else "person_id").is_in(
+                unique_patient_ids
+            )
+        )
         LOG.info(
             f"Patient Splits Schema: %s",
             "MEDS patient splits" if is_data_in_meds else "Traditional patient splits",
         )
+        LOG.info("Effective patient_splits size: %s", len(patient_splits))
         if is_data_in_meds:
             train_patient_ids = patient_splits.filter(pl.col("split") == train_split)[
                 subject_id_field
@@ -266,8 +282,9 @@ def create_dataset_splits(
 
     # Helper function to apply patient-based filtering
     def filter_by_patient_ids(patient_ids):
+        unique_ids = set(patient_ids)
         return dataset.filter(
-            lambda batch: [pid in patient_ids for pid in batch["person_id"]],
+            lambda batch: [pid in unique_ids for pid in batch["person_id"]],
             num_proc=data_args.preprocessing_num_workers,
             batched=True,
             batch_size=data_args.preprocessing_batch_size,
@@ -278,6 +295,10 @@ def create_dataset_splits(
     validation_set = filter_by_patient_ids(val_patient_ids)
     if not test_set:
         test_set = filter_by_patient_ids(test_patient_ids)
+
+    LOG.info("Train size: %s", len(train_set))
+    LOG.info("Validation size: %s", len(validation_set))
+    LOG.info("Test size: %s", len(test_set))
 
     return train_set, validation_set, test_set
 
