@@ -1,0 +1,89 @@
+{
+  "zero_optimization": {
+    "stage": 3,
+    "offload_optimizer": {
+      "device": "cpu",
+      "pin_memory": true,
+      "buffer_count": 4,
+      "fast_init": false
+    },
+    "offload_param": {
+      "device": "cpu",
+      "pin_memory": true,
+      "buffer_count": 5,
+      "buffer_size": 100000000,
+      "max_in_cpu": 1000000000
+    },
+    "overlap_comm": true,
+    "contiguous_gradients": true,
+    "sub_group_size": 1000000000,
+    "reduce_bucket_size": 5000000,
+    "stage3_prefetch_bucket_size": 5000000,
+    "stage3_param_persistence_threshold": 10000,
+    "stage3_max_live_parameters": 1000000000,
+    "stage3_max_reuse_distance": 1000000000,
+    "stage3_gather_16bit_weights_on_model_save": true
+  },
+  "optimizer": {
+    "type": "AdamW",
+    "params": {
+      "lr": 0.00001,
+      "betas": [
+        0.9,
+        0.95
+      ],
+      "eps": 1e-8,
+      "weight_decay": 0.1
+    }
+  },
+  "scheduler": {
+    "type": "WarmupLR",
+    "params": {
+      "warmup_min_lr": 0,
+      "warmup_max_lr": 0.00001,
+      "warmup_num_steps": "auto"
+    }
+  },
+  "fp16": {
+    "enabled": false
+  },
+  "bf16": {
+    "enabled": false
+  },
+  "gradient_clipping": 1,
+  "prescale_gradients": false,
+  "wall_clock_breakdown": false,
+  "train_batch_size": 2,
+  "train_micro_batch_size_per_gpu": 1,
+  "gradient_accumulation_steps": 1,
+  "steps_per_print": 10,
+  "dump_state": false,
+  "activation_checkpointing": {
+    "partition_activations": false,
+    "cpu_checkpointing": false,
+    "contiguous_memory_optimization": false,
+    "number_checkpoints": null,
+    "synchronize_checkpoint_boundary": false,
+    "profile": false
+  },
+  "flops_profiler": {
+    "enabled": false,
+    "profile_step": 1,
+    "module_depth": -1,
+    "top_modules": 1,
+    "detailed": true,
+    "output_file": null
+  },
+  "memory_breakdown": false,
+  "comms_logger": {
+    "enabled": false,
+    "verbose": false,
+    "prof_all": false,
+    "debug": false
+  },
+  "tensorboard": {
+    "enabled": false,
+    "output_path": "./logs/deepspeed_logs/",
+    "job_name": "cehrgpt_training"
+  }
+}

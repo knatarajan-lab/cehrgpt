@@ -42,7 +42,7 @@ export CEHR_GPT_MODEL_DIR=""         # Path for model storage
 
 Create the dataset cache directory:
 ```bash
-mkdir $CEHR_GPT_DATA_DIR/dataset_prepared
+mkdir $CEHR_GPT_MODEL_DIR/dataset_prepared
 ```
 
 ## 🏗️ Model Training
@@ -61,7 +61,7 @@ python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner \
   --tokenizer_name_or_path $CEHR_GPT_MODEL_DIR \
   --output_dir $CEHR_GPT_MODEL_DIR \
   --data_folder "$CEHR_GPT_DATA_DIR/patient_sequence/train" \
-  --dataset_prepared_path "$CEHR_GPT_DATA_DIR/dataset_prepared" \
+  --dataset_prepared_path "$CEHR_GPT_MODEL_DIR/dataset_prepared" \
   --do_train true --seed 42 \
   --dataloader_num_workers 16 --dataloader_prefetch_factor 8 \
   --hidden_size 768 --num_hidden_layers 14 --max_position_embeddings 4096 \
@@ -75,6 +75,48 @@ python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner \
 ```
 
 > **Tip**: Increase `max_position_embeddings` for longer context windows based on your use case.
+
+For DDP training, you need to launch the script:
+```bash
+torchrun --nproc_per_node=2 src/cehrgpt/runners/hf_cehrgpt_pretrain_runner.py \
+  --model_name_or_path $CEHR_GPT_MODEL_DIR \
+  --tokenizer_name_or_path $CEHR_GPT_MODEL_DIR \
+  --output_dir $CEHR_GPT_MODEL_DIR \
+  --data_folder "$CEHR_GPT_DATA_DIR/patient_sequence/train" \
+  --dataset_prepared_path "$CEHR_GPT_MODEL_DIR/dataset_prepared" \
+  --do_train true --seed 42 \
+  --dataloader_num_workers 16 --dataloader_prefetch_factor 8 \
+  --hidden_size 768 --num_hidden_layers 14 --max_position_embeddings 4096 \
+  --evaluation_strategy epoch --save_strategy epoch \
+  --sample_packing --max_tokens_per_batch 16384 \
+  --warmup_ratio 0.01 --weight_decay 0.01 \
+  --num_train_epochs 50 --learning_rate 0.0002 \
+  --use_early_stopping \
+  --load_best_model_at_end true \
+  --early_stopping_threshold 0.001
+```
+
+To train large models using sharding with Deepspeed:
+```bash
+pip install deepspeed;
+deepspeed --num_gpus=2 src/cehrgpt/runners/hf_cehrgpt_pretrain_runner.py \
+  --model_name_or_path $CEHR_GPT_MODEL_DIR \
+  --tokenizer_name_or_path $CEHR_GPT_MODEL_DIR \
+  --output_dir $CEHR_GPT_MODEL_DIR \
+  --data_folder "$CEHR_GPT_DATA_DIR/patient_sequence/train" \
+  --dataset_prepared_path "$CEHR_GPT_MODEL_DIR/dataset_prepared" \
+  --do_train true --seed 42 \
+  --dataloader_num_workers 16 --dataloader_prefetch_factor 8 \
+  --hidden_size 768 --num_hidden_layers 14 --max_position_embeddings 4096 \
+  --evaluation_strategy epoch --save_strategy epoch \
+  --sample_packing --max_tokens_per_batch 16384 \
+  --warmup_ratio 0.01 --weight_decay 0.01 \
+  --num_train_epochs 50 --learning_rate 0.0002 \
+  --use_early_stopping \
+  --load_best_model_at_end true \
+  --early_stopping_threshold 0.001 \
+  --deepspeed sample_configs/zero_stage3_config.json
+```
 
 ## 🎯 Feature Representation
 
