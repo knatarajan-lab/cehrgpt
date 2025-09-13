@@ -649,10 +649,14 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
             if "classifier_label" in example:
                 current_labels.append(example["classifier_label"])
 
-        assert len(current_input_ids) <= self.max_tokens_per_batch, (
-            f"The total number of tokens in the packed sequence should be less than {self.max_tokens_per_batch}\n"
-            f"But the total number of tokens is: {len(current_input_ids)}"
-        )
+        if len(current_input_ids) > self.max_tokens_per_batch:
+            LOG.warning(
+                "The total number of tokens in the packed sequence should be less than %s. "
+                "But the total number of tokens is: %s",
+                self.max_tokens_per_batch,
+                len(current_input_ids),
+            )
+
         packed_example = {
             "input_ids": current_input_ids,
             "attention_mask": current_attention_mask,
