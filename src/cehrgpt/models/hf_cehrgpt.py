@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn.functional as f
+from pyasn1_modules.rfc6031 import at_pskc_model
 from torch import nn
 from torch.distributions import Gamma
 from torch.nn import CrossEntropyLoss
@@ -37,6 +38,7 @@ from cehrgpt.models.hf_modeling_outputs import (
     CehrGptOutputWithPast,
     CehrGptSequenceClassifierOutput,
 )
+from cehrgpt.models.linear_prob import LinearProbBlock
 
 logger = logging.get_logger(__name__)
 
@@ -441,6 +443,66 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
                     self.config.max_position_embeddings = new_num_position_embeddings
                     self.update_attn_bias(new_num_position_embeddings)
 
+    def prepare_attention_mask(
+        self,
+        inputs: torch.Tensor,
+        attention_mask: Optional[torch.FloatTensor] = None,
+    ):
+        batch_size = inputs.shape[0]
+        # GPT2Attention mask.
+        if attention_mask is not None:
+            if batch_size <= 0:
+                raise ValueError("batch_size has to be defined and > 0")
+
+            if (
+                self.config.causal_sfm
+                and attention_mask.shape[-1] >= self.config.demographics_size
+            ):
+                # # Specify the indices to set to 0
+                # rows = [1, 2, 2, 3, 3, 3]
+                # cols = [0, 0, 1, 0, 1, 2]
+                # # Set the specified indices to 0
+                # attention_mask[rows, cols] = 0.0
+                attention_mask = torch.concat(
+                    [
+                        attention_mask[..., : self.config.demographics_size],
+                        attention_mask.new_ones(attention_mask.shape[:-1] + (1,)),
+                        attention_mask[..., self.config.demographics_size :],
+                    ],
+                    dim=-1,
+                )
+
+            # The flash attention requires the original attention_mask
+            if (
+                not getattr(self.config, "_attn_implementation", "eager")
+                == "flash_attention_2"
+            ):
+                attention_mask = attention_mask.view(batch_size, -1)
+
+                # If this is sample packing, we need to great the
+                if is_sample_pack(attention_mask):
+                    attention_mask = create_sample_packing_attention_mask(
+                        attention_mask
+                    )[:, None, :, :]
+                else:
+                    # We create a 3D attention mask from a 2D tensor mask.
+                    # Sizes are [batch_size, 1, 1, to_seq_length]
+                    # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
+                    # this attention mask is more simple than the triangular masking of causal attention
+                    # used in OpenAI GPT, we just need to prepare the broadcast dimension here.
+                    attention_mask = attention_mask[:, None, None, :]
+
+                # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
+                # masked positions, this operation will create a tensor which is 0.0 for
+                # positions we want to attend and the dtype's smallest value for masked positions.
+                # Since we are adding it to the raw scores before the softmax, this is
+                # effectively the same as removing these entirely.
+                attention_mask = attention_mask.to(
+                    dtype=self.dtype
+                )  # fp16 compatibility
+                attention_mask = (1.0 - attention_mask) * torch.finfo(self.dtype).min
+        return attention_mask
+
 
 class CEHRGPT2Model(CEHRGPTPreTrainedModel):
 
@@ -641,7 +703,6 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.warn_if_padding_and_no_attention_mask(input_ids, attention_mask)
         input_shape = input_ids.size()
         input_ids = input_ids.view(-1, input_shape[-1])
-        batch_size = input_ids.shape[0]
 
         # When causal SFM is enabled, we need to expand the context window by one to make room for the random vector
         if (
@@ -655,66 +716,12 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             # Convert list back to torch.Size if needed
             input_shape = torch.Size(shape_list)
 
-        input_ids.device
-
         if past_key_values is None:
             past_key_values = tuple([None] * len(self.h))
         else:
             past_key_values[0][0].size(-2)
 
-        # GPT2Attention mask.
-        if attention_mask is not None:
-            if batch_size <= 0:
-                raise ValueError("batch_size has to be defined and > 0")
-
-            if (
-                self.config.causal_sfm
-                and attention_mask.shape[-1] >= self.config.demographics_size
-            ):
-                # # Specify the indices to set to 0
-                # rows = [1, 2, 2, 3, 3, 3]
-                # cols = [0, 0, 1, 0, 1, 2]
-                # # Set the specified indices to 0
-                # attention_mask[rows, cols] = 0.0
-                attention_mask = torch.concat(
-                    [
-                        attention_mask[..., : self.config.demographics_size],
-                        attention_mask.new_ones(attention_mask.shape[:-1] + (1,)),
-                        attention_mask[..., self.config.demographics_size :],
-                    ],
-                    dim=-1,
-                )
-
-            # The flash attention requires the original attention_mask
-            if (
-                not getattr(self.config, "_attn_implementation", "eager")
-                == "flash_attention_2"
-            ):
-                attention_mask = attention_mask.view(batch_size, -1)
-
-                # If this is sample packing, we need to great the
-                if is_sample_pack(attention_mask):
-                    attention_mask = create_sample_packing_attention_mask(
-                        attention_mask
-                    )[:, None, :, :]
-                else:
-                    # We create a 3D attention mask from a 2D tensor mask.
-                    # Sizes are [batch_size, 1, 1, to_seq_length]
-                    # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
-                    # this attention mask is more simple than the triangular masking of causal attention
-                    # used in OpenAI GPT, we just need to prepare the broadcast dimension here.
-                    attention_mask = attention_mask[:, None, None, :]
-
-                # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
-                # masked positions, this operation will create a tensor which is 0.0 for
-                # positions we want to attend and the dtype's smallest value for masked positions.
-                # Since we are adding it to the raw scores before the softmax, this is
-                # effectively the same as removing these entirely.
-                attention_mask = attention_mask.to(
-                    dtype=self.dtype
-                )  # fp16 compatibility
-                attention_mask = (1.0 - attention_mask) * torch.finfo(self.dtype).min
-
+        attention_mask = self.prepare_attention_mask(input_ids, attention_mask)
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
         # attention_probs has shape bsz x n_heads x N x N
@@ -881,6 +888,133 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         )
 
 
+class LinearProbModule(CEHRGPTPreTrainedModel):
+
+    def __init__(self, config: CEHRGPTConfig):
+        super().__init__(config)
+        self.embed_dim = config.hidden_size
+
+        linear_prob_blocks = []
+        for i in range(config.num_hidden_layers):
+            linear_prob_block = LinearProbBlock(config, layer_idx=i)
+            linear_prob_block.is_causal = True
+            linear_prob_blocks.append(linear_prob_block)
+        self.linear_prob = nn.ModuleList(linear_prob_blocks)
+
+        # Model parallel
+        self.model_parallel = False
+        self.device_map = None
+        self.gradient_checkpointing = False
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+        # We do need to update the pre-computed attention bias matrix if sample packing requires a larger context window
+        if self.config.sample_packing_max_positions > self.config.n_positions:
+            logger.info(
+                "Updated attn_bias to %s according to sample_packing_max_positions",
+                config.sample_packing_max_positions,
+            )
+            self.update_attn_bias(self.config.sample_packing_max_positions)
+
+    def parallelize(self, device_map=None):
+        # Check validity of device_map
+        warnings.warn(
+            "`CEHRGPT2Model.parallelize` is deprecated and will be removed in v5 of Transformers, you should load your"
+            " model with `device_map='balanced'` in the call to `from_pretrained`. You can also provide your own"
+            " `device_map` but it needs to be a dictionary module_name to device, so for instance {'h.0': 0, 'h.1': 1,"
+            " ...}",
+            FutureWarning,
+        )
+        self.device_map = (
+            get_device_map(len(self.linear_prob), range(torch.cuda.device_count()))
+            if device_map is None
+            else device_map
+        )
+        assert_device_map(self.device_map, len(self.h))
+        self.model_parallel = True
+        # Load onto devices
+        for k, v in self.device_map.items():
+            for block in v:
+                cuda_device = "cuda:" + str(k)
+                self.linear_prob[block] = self.linear_prob[block].to(cuda_device)
+
+    def deparallelize(self):
+        warnings.warn(
+            "Like `parallelize`, `deparallelize` is deprecated and will be removed in v5 of Transformers.",
+            FutureWarning,
+        )
+        self.model_parallel = False
+        self.device_map = None
+        for index in range(len(self.linear_prob)):
+            self.linear_prob[index] = self.linear_prob[index].to("cpu")
+        torch.cuda.empty_cache()
+
+    def update_attn_bias(self, max_position_embeddings: int):
+        for i in range(len(self.linear_prob)):
+            self.linear_prob[i].attn.register_buffer(
+                "bias",
+                torch.tril(
+                    torch.ones(
+                        (max_position_embeddings, max_position_embeddings),
+                        dtype=torch.bool,
+                    )
+                )
+                .view(1, 1, max_position_embeddings, max_position_embeddings)
+                .to(self.linear_prob[i].attn.bias.device),
+                persistent=False,
+            )
+
+    def forward(
+        self,
+        linear_prob_hidden_state: Optional[torch.LongTensor],
+        all_encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.FloatTensor] = None,
+    ) -> Union[Tuple, CehrGptOutputWithPast]:
+
+        encoder_attention_mask = self.prepare_attention_mask(
+            linear_prob_hidden_state, encoder_attention_mask
+        )
+        for i, encoder_hidden_states in enumerate(all_encoder_hidden_states):
+            # Model parallel
+            if self.model_parallel:
+                torch.cuda.set_device(linear_prob_hidden_state.device)
+                # Ensure that attention_mask is always on the same device as hidden_states
+                if encoder_hidden_states is not None:
+                    encoder_hidden_states = encoder_hidden_states.to(
+                        linear_prob_hidden_state.device
+                    )
+                if encoder_attention_mask is not None:
+                    encoder_attention_mask = encoder_attention_mask.to(
+                        linear_prob_hidden_state.device
+                    )
+
+            linear_prob_layer = self.linear_prob[i]
+            if self.gradient_checkpointing and self.training:
+                linear_prob_hidden_state = self._gradient_checkpointing_func(
+                    linear_prob_layer.__call__,
+                    linear_prob_hidden_state,
+                    encoder_hidden_states,
+                    encoder_attention_mask,
+                )
+            else:
+                linear_prob_hidden_state = linear_prob_layer(
+                    linear_prob_hidden_states=linear_prob_hidden_state,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_attention_mask,
+                )
+
+            # Model Parallel: If it's the last layer for that device, put things on the next device
+            if self.model_parallel:
+                for k, v in self.device_map.items():
+                    if i == v[-1] and "cuda:" + str(k) != self.last_device:
+                        linear_prob_hidden_state = linear_prob_hidden_state.to(
+                            "cuda:" + str(k + 1)
+                        )
+
+        return linear_prob_hidden_state
+
+
 class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight", "value_head.weight"]
 
@@ -902,6 +1036,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             )
 
         if self.config.include_motor_time_to_event:
+            self.linear_prob = LinearProbModule(config)
             self.motor_tte = MotorTaskHead(
                 input_dim=config.n_embd,
                 motor_tte_vocab_size=config.motor_tte_vocab_size,
@@ -936,6 +1071,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         if self.config.include_ttv_prediction:
             self.tte_head = self.tte_head.to(self.cehrgpt.first_device)
         if self.config.include_motor_time_to_event:
+            self.linear_prob.parallelize(self.device_map)
             self.motor_tte = self.motor_tte.to(self.cehrgpt.first_device)
         self.model_parallel = True
 
@@ -952,6 +1088,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         if self.config.include_ttv_prediction:
             self.tte_head = self.tte_head.to("cpu")
         if self.config.include_motor_time_to_event:
+            self.linear_prob.deparallelize()
+            self.linear_prob = self.linear_prob.to("cpu")
             self.motor_tte = self.motor_tte.to("cpu")
         self.model_parallel = False
         torch.cuda.empty_cache()
@@ -979,6 +1117,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
     def update_attn_bias(self, max_position_embeddings: int):
         self.cehrgpt.update_attn_bias(max_position_embeddings)
+        self.linear_prob.update_attn_bias(max_position_embeddings)
 
     def update_motor_tte_vocab_size(
         self, motor_tte_vocab_size: Optional[int] = None
@@ -1194,7 +1333,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             head_mask=head_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
+            output_hidden_states=output_hidden_states
+            or self.config.include_motor_time_to_event,
             return_dict=return_dict,
         )
         hidden_states = transformer_outputs[0]
@@ -1304,8 +1444,27 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 and motor_tte_masks is not None
                 and motor_end_index is not None
             ):
+                # all hidden states also contains the first embedding layer outputs so we remove the first layer
+                all_hidden_states = transformer_outputs[2][1:]
+                assert self.config.num_hidden_layers == len(all_hidden_states), (
+                    "self.config.num_hidden_layers == len(all_hidden_states) must be true, "
+                    f"but received {self.config.num_hidden_layers} and {len(all_hidden_states)}"
+                )
+                linear_prob_input_ids = torch.full_like(
+                    input_ids,
+                    self.config.linear_prob_token_id,
+                    device=input_ids.device,
+                    dtype=input_ids.dtype,
+                )
+                linear_prob_hidden_states = self.cehrgpt.wte(linear_prob_input_ids)
+                linear_prob_hidden_states = self.linear_prob(
+                    linear_prob_hidden_states,
+                    all_hidden_states,
+                    attention_mask,
+                )
+
                 motor_tte_loss = self.motor_nll_loss(
-                    hidden_states=hidden_states,
+                    hidden_states=linear_prob_hidden_states,
                     motor_tte_times=motor_tte_times,
                     motor_tte_event_indicators=motor_tte_event_indicators,
                     motor_tte_task_indicators=motor_tte_task_indicators,
