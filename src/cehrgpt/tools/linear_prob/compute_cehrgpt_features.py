@@ -9,15 +9,11 @@ from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
-import polars as pl
 import torch
 import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
 from cehrbert.runners.runner_util import generate_prepared_ds_path
 from datasets import concatenate_datasets, load_from_disk
-from torch.distributed.algorithms.ddp_comm_hooks.powerSGD_hook import (
-    batched_powerSGD_hook,
-)
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers.trainer_utils import is_main_process
@@ -30,7 +26,7 @@ from cehrgpt.data.hf_cehrgpt_dataset_collator import (
 )
 from cehrgpt.data.sample_packing_sampler import SamplePackingBatchSampler
 from cehrgpt.models.hf_cehrgpt import (
-    CEHRGPT2Model,
+    CEHRGPT2LMHeadModel,
     extract_features_from_packed_sequence,
 )
 from cehrgpt.models.special_tokens import LINEAR_PROB_TOKEN
@@ -110,7 +106,7 @@ def main():
     )
     torch_dtype = get_torch_dtype(model_args.torch_dtype)
     cehrgpt_model = (
-        CEHRGPT2Model.from_pretrained(
+        CEHRGPT2LMHeadModel.from_pretrained(
             model_args.model_name_or_path,
             attn_implementation=(
                 "flash_attention_2" if is_flash_attn_2_available() else "eager"
@@ -279,7 +275,7 @@ def main():
         include_ttv_prediction=False,
         use_sub_time_tokenization=False,
         include_demographics=cehrgpt_args.include_demographics,
-        add_linear_prob_token=True,
+        add_linear_prob_token=False,
     )
 
     train_loader = DataLoader(
@@ -401,7 +397,7 @@ def main():
                         )
                         features = (
                             extract_averaged_embeddings_from_packed_sequence(
-                                cehrgpt_output.last_hidden_state,
+                                cehrgpt_output.linear_prob_hidden_states,
                                 batch["attention_mask"],
                                 ve_token_indicators,
                             )
@@ -413,7 +409,7 @@ def main():
                     else:
                         features = (
                             extract_features_from_packed_sequence(
-                                cehrgpt_output.last_hidden_state,
+                                cehrgpt_output.linear_prob_hidden_states,
                                 batch["attention_mask"],
                             )
                             .cpu()
@@ -426,7 +422,7 @@ def main():
                     if cehrgpt_args.average_over_sequence:
                         features = torch.where(
                             batch["attention_mask"].unsqueeze(dim=-1).to(torch.bool),
-                            cehrgpt_output.last_hidden_state,
+                            cehrgpt_output.linear_prob_hidden_states,
                             0,
                         )
                         # Average across the sequence
@@ -448,7 +444,9 @@ def main():
                             last_token_index,
                         )
                         features = (
-                            cehrgpt_output.last_hidden_state[..., last_token_index, :]
+                            cehrgpt_output.linear_prob_hidden_states[
+                                ..., last_token_index, :
+                            ]
                             .cpu()
                             .float()
                             .detach()

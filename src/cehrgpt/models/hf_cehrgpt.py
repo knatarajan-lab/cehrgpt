@@ -952,7 +952,7 @@ class LinearProbModule(CEHRGPTPreTrainedModel):
 
     def update_attn_bias(self, max_position_embeddings: int):
         for i in range(len(self.linear_prob)):
-            self.linear_prob[i].attn.register_buffer(
+            self.linear_prob[i].crossattention.register_buffer(
                 "bias",
                 torch.tril(
                     torch.ones(
@@ -961,7 +961,7 @@ class LinearProbModule(CEHRGPTPreTrainedModel):
                     )
                 )
                 .view(1, 1, max_position_embeddings, max_position_embeddings)
-                .to(self.linear_prob[i].attn.bias.device),
+                .to(self.linear_prob[i].crossattention.bias.device),
                 persistent=False,
             )
 
@@ -1368,6 +1368,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         time_to_visit_loss = None
         token_value_loss = None
         motor_tte_loss = None
+        linear_prob_hidden_states = None
 
         if labels is not None:
             # move labels to correct device to enable model parallelism
@@ -1567,6 +1568,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             next_value_logits=value_logits,
             past_key_values=transformer_outputs.past_key_values,
             hidden_states=transformer_outputs.hidden_states,
+            linear_prob_hidden_states=linear_prob_hidden_states,
             attentions=transformer_outputs.attentions,
             token_loss=token_loss,
             time_token_loss=time_token_loss,
