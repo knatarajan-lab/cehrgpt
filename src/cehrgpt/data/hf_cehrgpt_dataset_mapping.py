@@ -1,5 +1,6 @@
 import datetime
 from collections import defaultdict
+from copy import deepcopy
 from typing import Any, Dict, Generator, List, Optional, Union
 
 import numpy as np
@@ -413,7 +414,11 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         self,
         concept_tokenizer: CehrGptTokenizer,
     ):
-        self._concept_tokenizer = concept_tokenizer
+        self._concept_tokenizer = deepcopy(concept_tokenizer)
+        self._concept_tokenizer._ontology = None
+        self._concept_tokenizer._motor_task_info = {}
+        self._concept_tokenizer._motor_time_to_event_codes = []
+        self._concept_tokenizer._motor_code_to_id_mapping = {}
         self._lab_token_ids = self._concept_tokenizer.lab_token_ids
 
     def remove_columns(self):
