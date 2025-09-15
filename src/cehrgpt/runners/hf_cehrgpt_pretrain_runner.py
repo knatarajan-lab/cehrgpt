@@ -81,7 +81,7 @@ def load_and_create_tokenizer(
     if not tokenizer_exists(tokenizer_abspath):
         if cehrgpt_args.include_motor_time_to_event and not cehrgpt_args.vocab_dir:
             raise RuntimeError(
-                "motor_vocab_dir must be specified if include_motor_time_to_event is True"
+                "vocab_dir must be specified if include_motor_time_to_event is True"
             )
         ontology: Optional[Ontology] = None
         concept_name_mapping = {}
@@ -219,6 +219,9 @@ def load_and_create_model(
             motor_tte_vocab_size=tokenizer.motor_tte_vocab_size,
             motor_time_to_event_weight=cehrgpt_args.motor_time_to_event_weight,
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
+            motor_time_bins=tokenizer.get_motor_time_bins(
+                cehrgpt_args.motor_num_time_pieces
+            ),
             ve_token_id=tokenizer.ve_token_id,
             linear_prob_token_id=tokenizer.linear_token_id,
             n_inner=cehrgpt_args.inner_dim,

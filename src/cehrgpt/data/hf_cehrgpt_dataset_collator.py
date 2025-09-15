@@ -325,104 +325,105 @@ class CehrGptDataCollator:
             )
 
         if self.include_motor_time_to_event:
-            examples_with_motor_tte = [
-                self.create_time_to_event_tensors_ultra_optimized(_) for _ in examples
-            ]
-            # print(f"Creating MOTOR TTE tensors took {time.time() - start} seconds")
-            motor_tte_times = [
+            motor_row_indices = [
                 self._try_reverse_tensor(
-                    self._convert_to_tensor(example["motor_tte_times"])
+                    self._convert_to_tensor(example["motor_row_indices"])
                 )
-                for example in examples_with_motor_tte
+                for example in examples
             ]
-            motor_tte_event_indicators = [
+            motor_col_indices = [
                 self._try_reverse_tensor(
-                    self._convert_to_tensor(example["motor_tte_event_indicators"])
+                    self._convert_to_tensor(example["motor_col_indices"])
                 )
-                for example in examples_with_motor_tte
+                for example in examples
+            ]
+            motor_values = [
+                self._try_reverse_tensor(
+                    self._convert_to_tensor(example["motor_values"])
+                )
+                for example in examples
             ]
             motor_tte_task_indicators = [
                 self._try_reverse_tensor(
                     self._convert_to_tensor(example["motor_tte_task_indicators"])
                 )
-                for example in examples_with_motor_tte
+                for example in examples
             ]
-            motor_tte_masks = [
+            motor_censor_times = [
                 self._try_reverse_tensor(
-                    self._convert_to_tensor(example["motor_tte_masks"])
+                    self._convert_to_tensor(example["motor_censor_times"])
                 )
-                for example in examples_with_motor_tte
+                for example in examples
             ]
 
-            motor_tte_times = torch.concat(motor_tte_times, dim=0).to(torch.float32)
+            motor_row_indices = torch.concat(motor_row_indices, dim=0)
 
             # If every example in the batch only contains one visit, there would be no labels generated for MOTOR TTE
             # we only create the labels when any example has more than one visit
-            if motor_tte_times.dim() <= 1:
+            if motor_row_indices.shape[0] <= 1:
                 LOG.warning(
                     "There are no MOTOR TTE labels generated for this batch "
                     "because every example in this batch only contains one visit."
                 )
             else:
                 batch_size = len(examples)
-                length, num_time_pieces, motor_tte_vocab_size = motor_tte_times.shape
+                length = motor_row_indices.shape[0]
                 padded_length = batch_size - length % batch_size
-                batch["motor_tte_times"] = (
+
+                batch["motor_row_indices"] = (
                     torch.concat(
                         [
-                            motor_tte_times,
+                            motor_row_indices,
                             torch.full(
-                                (padded_length, num_time_pieces, motor_tte_vocab_size),
+                                (padded_length,),
+                                0,
+                            ),
+                        ],
+                        dim=0,
+                    )
+                    .reshape((batch_size, -1))
+                    .to(torch.int32)
+                )
+                batch["motor_col_indices"] = (
+                    torch.concat(
+                        [
+                            torch.concat(motor_col_indices, dim=0),
+                            torch.full(
+                                (padded_length,),
+                                0,
+                            ),
+                        ],
+                        dim=0,
+                    )
+                    .reshape((batch_size, -1))
+                    .to(torch.int32)
+                )
+                batch["motor_values"] = (
+                    torch.concat(
+                        [
+                            torch.concat(motor_values, dim=0),
+                            torch.full(
+                                (padded_length,),
                                 0.0,
                             ),
                         ],
                         dim=0,
                     )
-                    .reshape((batch_size, -1, num_time_pieces, motor_tte_vocab_size))
+                    .reshape((batch_size, -1))
                     .to(torch.float32)
                 )
-
-                # Motor event indicators that indicate there is an event occurred in this time interval
-                batch["motor_tte_event_indicators"] = (
-                    torch.concat(
-                        [
-                            torch.concat(motor_tte_event_indicators, dim=0).to(
-                                torch.bool
-                            ),
-                            torch.full(
-                                (padded_length, num_time_pieces, motor_tte_vocab_size),
-                                False,
-                            ),
-                        ],
-                        dim=0,
-                    )
-                    .reshape((batch_size, -1, num_time_pieces, motor_tte_vocab_size))
-                    .to(torch.bool)
-                )
-
+                # Input to indicate whether the visit should be included for TTE predictions
+                batch["motor_censor_times"] = pad_sequence(
+                    motor_censor_times,
+                    batch_first=True,
+                    padding_value=0.0,
+                ).to(torch.float32)
                 # Input to indicate whether the visit should be included for TTE predictions
                 batch["motor_tte_task_indicators"] = pad_sequence(
                     motor_tte_task_indicators,
                     batch_first=True,
                     padding_value=False,
                 ).to(torch.bool)
-
-                # Motor time indicators that indicate whether there are neither clinical events nor censor events
-                batch["motor_tte_masks"] = (
-                    torch.concat(
-                        [
-                            torch.concat(motor_tte_masks, dim=0).to(torch.bool),
-                            torch.full(
-                                (padded_length, num_time_pieces, motor_tte_vocab_size),
-                                False,
-                            ),
-                        ],
-                        dim=0,
-                    )
-                    .reshape((batch_size, -1, num_time_pieces, motor_tte_vocab_size))
-                    .to(torch.bool)
-                )
-
                 batch["motor_end_index"] = torch.concat(
                     [
                         torch.full((length, 1), 1, dtype=torch.int32),

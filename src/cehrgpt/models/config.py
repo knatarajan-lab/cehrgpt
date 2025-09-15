@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from transformers import PretrainedConfig
 
@@ -135,6 +135,7 @@ class CEHRGPTConfig(PretrainedConfig):
         motor_tte_vocab_size=None,
         motor_time_to_event_weight=1.0,
         motor_num_time_pieces=16,
+        motor_time_bins: Optional[List[float]] = None,
         linear_prob_token_id=None,
         token_to_time_token_mapping: Dict[int, List] = None,
         use_pretrained_embeddings=False,
@@ -219,10 +220,15 @@ class CEHRGPTConfig(PretrainedConfig):
             raise RuntimeError(
                 f"linear_prob_token_id must be provided when include_motor_time_to_event is True"
             )
+        if self.include_motor_time_to_event and not motor_time_bins:
+            raise RuntimeError(
+                "motor_time_bins must be provided when include_motor_time_to_event is True"
+            )
         self.ve_token_id = ve_token_id
         self.motor_time_to_event_weight = motor_time_to_event_weight
         self.motor_num_time_pieces = motor_num_time_pieces
         self.linear_prob_token_id = linear_prob_token_id
+        self.motor_time_bins = motor_time_bins
 
         self.causal_sfm = causal_sfm
         self.demographics_size = demographics_size
