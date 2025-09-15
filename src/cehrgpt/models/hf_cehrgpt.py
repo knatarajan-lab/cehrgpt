@@ -1036,6 +1036,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             )
 
         if self.config.include_motor_time_to_event:
+            if self.config.motor_time_bins[-1] == "inf":
+                self.config.motor_time_bins[-1] = float("inf")
             self.motor_time_bins = torch.tensor(
                 self.config.motor_time_bins, dtype=torch.float32
             )
