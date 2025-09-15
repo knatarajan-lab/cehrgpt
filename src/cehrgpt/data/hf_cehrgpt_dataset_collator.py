@@ -636,9 +636,12 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                     else list(example["motor_values"])
                 )
                 current_motor_censor_times.extend(
-                    example["motor_censor_times"].tolist()
-                    if isinstance(example["motor_censor_times"], torch.Tensor)
-                    else list(example["motor_censor_times"])
+                    (
+                        example["motor_censor_times"].tolist()
+                        if isinstance(example["motor_censor_times"], torch.Tensor)
+                        else list(example["motor_censor_times"])
+                    )
+                    + [0]
                 )
                 current_motor_tte_task_indicators.extend(
                     (
