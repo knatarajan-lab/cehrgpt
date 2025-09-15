@@ -234,6 +234,8 @@ while read -r cohort_name; do
         continue
     fi
 
+
+
     # Step 2: Model training
     log "Starting model training for $cohort_name..."
     log "Command: python -u -m cehrgpt.tools.linear_prob.train_with_cehrgpt_features --features_data_dir $output_dir --output_dir $output_dir"
@@ -243,18 +245,20 @@ while read -r cohort_name; do
         --output_dir "$output_dir" \
         >> "$cohort_log" 2>&1
 
-    echo "Running meds-evaluation for logistic regression for $TASK_NAME..."
-    meds-evaluation-cli predictions_path="$output_dir/logistic/test_predictions" \
-      output_dir="$output_dir/logistic/"
-
-        # Check if the second command succeeded
-    if [ $? -ne 0 ]; then
-        echo "Error: Running meds-evaluation failed for logistic regression for task $TASK_NAME"
-    fi
-
     model_training_status=$?
     if [ $model_training_status -ne 0 ]; then
         log "ERROR: Model training failed for $cohort_name. Check $cohort_log for details."
+        continue
+    fi
+
+    # Step 3: meds-evaluation
+    log "Running meds-evaluation for logistic regression for $cohort_name..."
+    meds-evaluation-cli predictions_path="$output_dir/logistic/test_predictions" \
+      output_dir="$output_dir/logistic/" >> "$cohort_log" 2>&1
+
+    # Check if the evaluation command succeeded
+    if [ $? -ne 0 ]; then
+        log "ERROR: Running meds-evaluation failed for logistic regression for cohort $cohort_name. Check $cohort_log for details."
         continue
     fi
 
