@@ -845,6 +845,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         return self._pretrained_concept_embedding_model
 
     def get_motor_time_bins(self, motor_num_time_pieces: int) -> List[int]:
+        if "motor_event_times" not in self._motor_task_info:
+            return []
         time_bins = np.percentile(
             self._motor_task_info["motor_event_times"].samples,
             np.linspace(0, 100, motor_num_time_pieces + 1),
