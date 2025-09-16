@@ -164,6 +164,17 @@ fi
 echo "Found $COHORT_COUNT cohort directories to process"
 echo "Starting processing at $(date)"
 
+export CEHRBERT_DATA_HOME=$(python -c "import cehrbert_data; print(cehrbert_data.__file__.rsplit('/', 1)[0])")
+
+# Check if SPARK_SUBMIT_OPTIONS is set and not empty
+if [ -n "$SPARK_SUBMIT_OPTIONS" ]; then
+    SPARK_OPTIONS="$SPARK_SUBMIT_OPTIONS"
+    echo "Using Spark options: $SPARK_OPTIONS"
+else
+    SPARK_OPTIONS=""
+    echo "No Spark options specified"
+fi
+
 # Process counter
 PROCESSED=0
 FAILED=0
@@ -183,7 +194,7 @@ for cohort_dir in "$COHORT_FOLDER"/*; do
         fi
 
         # Run the Python script with the directory-specific arguments
-        if python -u -m cehrbert_data.tools.extract_features \
+        if spark-submit $SPARK_OPTIONS $CEHRBERT_DATA_HOME/tools/extract_features.py \
             -c "$COHORT_NAME" \
             -i "$INPUT_DIR" \
             -o "$OUTPUT_DIR" \

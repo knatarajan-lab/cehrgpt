@@ -27,18 +27,27 @@ export CEHR_GPT_DATA_DIR="/path/to/output/data"
 
 ## Step 1: Configure Spark for Data Processing
 
-Set up Spark environment variables optimized for healthcare data processing:
+CEHR-GPT leverages Apache Spark for efficient large-scale data processing. Set up Spark environment variables optimized for data processing:
 
 ```bash
-# Worker configuration
-export SPARK_WORKER_INSTANCES="1"
-export SPARK_MASTER="local[16]"
-export SPARK_WORKER_CORES="16"
-export SPARK_EXECUTOR_CORES="4"
+# Set Spark home directory
+export SPARK_HOME=$(python -c "import pyspark; print(pyspark.__file__.rsplit('/', 1)[0])")
 
-# Memory configuration
-export SPARK_DRIVER_MEMORY="20g"
-export SPARK_EXECUTOR_MEMORY="20g"
+# Configure Python interpreters for Spark processes
+export PYSPARK_PYTHON=$(python -c "import sys; print(sys.executable)")
+export PYSPARK_DRIVER_PYTHON=$(python -c "import sys; print(sys.executable)")
+
+# Update Python and system paths
+export PYTHONPATH=$SPARK_HOME/python:$PYTHONPATH
+export PATH=$SPARK_HOME/bin:$PATH
+
+# Configure Spark resource allocation
+export SPARK_WORKER_INSTANCES=1
+export SPARK_WORKER_CORES=16
+export SPARK_EXECUTOR_CORES=8
+export SPARK_DRIVER_MEMORY=20g
+export SPARK_EXECUTOR_MEMORY=20g
+export SPARK_MASTER=local[16]
 
 export SPARK_SUBMIT_OPTIONS="--master $SPARK_MASTER --driver-memory $SPARK_DRIVER_MEMORY --executor-memory $SPARK_EXECUTOR_MEMORY --executor-cores $SPARK_EXECUTOR_CORES"
 ```
