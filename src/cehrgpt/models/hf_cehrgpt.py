@@ -1035,6 +1035,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 config.n_embd, config.value_vocab_size, bias=False
             )
 
+        self.motor_time_bins = None
+        self.linear_prob = None
+        self.motor_tte = None
+
         if self.config.include_motor_time_to_event:
             self.enable_motor_tte()
 
