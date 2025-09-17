@@ -237,10 +237,6 @@ def load_and_create_model(
             tokenizer.pretrained_embeddings,
         )
 
-    if cehrgpt_args.freeze_cehrgpt_generation_model:
-        for param in model.cehrgpt.parameters():
-            param.requires_grad = False
-
     if model.config.torch_dtype == torch.bfloat16:
         return model.bfloat16()
     elif model.config.torch_dtype == torch.float16:
@@ -552,6 +548,18 @@ def main():
             )
         model.update_motor_tte_vocab_size(cehrgpt_tokenizer.motor_tte_vocab_size)
 
+        if cehrgpt_args.freeze_cehrgpt_generation_model:
+            for param in model.cehrgpt.parameters():
+                param.requires_grad = False
+            # Calculate the total number of trainable parameters
+            trainable_params = sum(
+                p.numel() for p in model.parameters() if p.requires_grad
+            )
+            LOG.info(
+                "Freeze the cehrgpt generation model weights. Total number of trainable parameters: %s",
+                trainable_params,
+            )
+
     # Expand tokenizer to adapt to the new pretraining dataset
     if model.config.vocab_size < cehrgpt_tokenizer.vocab_size:
         model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)
@@ -627,8 +635,6 @@ def main():
             use_sub_time_tokenization=model_args.use_sub_time_tokenization,
             include_values=model_args.include_values,
             include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
-            motor_tte_vocab_size=model.config.motor_tte_vocab_size,
-            motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
             motor_sampling_probability=cehrgpt_args.motor_sampling_probability,
         ),
         train_dataset=processed_dataset["train"],
