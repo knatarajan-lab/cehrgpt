@@ -216,6 +216,7 @@ def load_and_create_model(
                 else model_args.max_position_embeddings
             ),
             include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
+            freeze_cehrgpt_generation_model=cehrgpt_args.freeze_cehrgpt_generation_model,
             motor_tte_vocab_size=tokenizer.motor_tte_vocab_size,
             motor_time_to_event_weight=cehrgpt_args.motor_time_to_event_weight,
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
@@ -235,6 +236,11 @@ def load_and_create_model(
             tokenizer.pretrained_token_ids,
             tokenizer.pretrained_embeddings,
         )
+
+    if cehrgpt_args.freeze_cehrgpt_generation_model:
+        for param in model.cehrgpt.parameters():
+            param.requires_grad = False
+
     if model.config.torch_dtype == torch.bfloat16:
         return model.bfloat16()
     elif model.config.torch_dtype == torch.float16:

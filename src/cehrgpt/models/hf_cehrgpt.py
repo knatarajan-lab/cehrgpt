@@ -1471,7 +1471,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 )
                 token_loss = token_loss.sum() / total_num_tokens
 
-            loss = token_loss * self.cehrgpt.config.next_token_prediction_loss_weight
+            loss = (
+                token_loss
+                * self.cehrgpt.config.next_token_prediction_loss_weight
+                * float(not self.config.freeze_cehrgpt_generation_model)
+            )
 
             if self.cehrgpt.config.entropy_penalty:
                 # Compute probabilities using softmax
@@ -1539,7 +1543,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     0,
                 )
                 time_token_loss = time_token_loss.sum() / total_num_tokens
-                loss += time_token_loss * self.config.time_token_loss_weight
+                loss += (
+                    time_token_loss
+                    * self.config.time_token_loss_weight
+                    * float(not self.config.freeze_cehrgpt_generation_model)
+                )
 
             if time_to_visits is not None and time_to_visits is not None:
                 # Get lambda and k parameters
@@ -1564,7 +1572,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 log_probs = torch.where(time_to_visit_indicator, log_probs, 0)
                 time_to_visit_loss = -log_probs.sum() / total_num_tokens
                 # Compute the loss
-                loss += time_to_visit_loss * self.config.time_to_visit_loss_weight
+                loss += (
+                    time_to_visit_loss
+                    * self.config.time_to_visit_loss_weight
+                    * float(not self.config.freeze_cehrgpt_generation_model)
+                )
 
             if true_values is not None and true_value_indicators is not None:
                 true_values = true_values.to(value_logits.device)
@@ -1587,7 +1599,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     token_value_loss = (
                         token_value_loss * self.config.lab_token_loss_weight
                     )
-                loss += token_value_loss * self.config.value_prediction_loss_weight
+                loss += (
+                    token_value_loss
+                    * self.config.value_prediction_loss_weight
+                    * float(not self.config.freeze_cehrgpt_generation_model)
+                )
 
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]
