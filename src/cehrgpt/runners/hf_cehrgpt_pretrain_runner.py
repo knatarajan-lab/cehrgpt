@@ -528,6 +528,28 @@ def main():
 
     # Try to update motor tte vocab size if the new configuration is different from the existing one
     if cehrgpt_args.include_motor_time_to_event:
+        # Backward compatibility
+        if getattr(model.config, "linear_prob_token_id", None) is None:
+            setattr(
+                model.config, "linear_prob_token_id", cehrgpt_tokenizer.linear_token_id
+            )
+        if getattr(model.config, "motor_time_bins", None) is None:
+            setattr(
+                model.config,
+                "motor_time_bins",
+                cehrgpt_tokenizer.get_motor_time_bins(
+                    model.config.motor_num_time_pieces
+                ),
+            )
+        if (
+            getattr(model.config, "motor_time_to_event_weight", None)
+            != cehrgpt_args.motor_time_to_event_weight
+        ):
+            setattr(
+                model.config,
+                "motor_time_to_event_weight",
+                cehrgpt_args.motor_time_to_event_weight,
+            )
         model.update_motor_tte_vocab_size(cehrgpt_tokenizer.motor_tte_vocab_size)
 
     # Expand tokenizer to adapt to the new pretraining dataset
