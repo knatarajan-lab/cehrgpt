@@ -100,7 +100,9 @@ def main(args):
         else:
             train_dataset = prepare_dataset(feature_train, feature_processor)
             # Train logistic regression
-            model = LogisticRegressionCV(scoring="roc_auc", random_state=42)
+            model = LogisticRegressionCV(
+                scoring="roc_auc", random_state=42, max_iter=1000
+            )
             model.fit(train_dataset["features"], train_dataset["boolean_value"])
             with open(logistic_model_file, "wb") as f:
                 pickle.dump(model, f)
