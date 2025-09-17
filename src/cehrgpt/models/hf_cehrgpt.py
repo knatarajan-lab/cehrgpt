@@ -9,7 +9,7 @@ from pyasn1_modules.rfc6031 import at_pskc_model
 from torch import nn
 from torch.distributions import Gamma
 from torch.nn import CrossEntropyLoss
-from transformers import PreTrainedModel
+from transformers import PretrainedConfig, PreTrainedModel
 from transformers.activations import gelu_new
 from transformers.generation.logits_process import LogitsProcessorList
 from transformers.generation.stopping_criteria import (
@@ -890,7 +890,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
 
 class LinearProbModule(CEHRGPTPreTrainedModel):
 
-    def __init__(self, config: CEHRGPTConfig):
+    def __init__(self, config: Union[CEHRGPTConfig, PretrainedConfig]):
         super().__init__(config)
         self.embed_dim = config.hidden_size
 
@@ -1036,17 +1036,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             )
 
         if self.config.include_motor_time_to_event:
-            if str(self.config.motor_time_bins[-1]).lower().startswith("inf"):
-                self.config.motor_time_bins[-1] = float("inf")
-            self.motor_time_bins = torch.tensor(
-                self.config.motor_time_bins, dtype=torch.float32
-            )
-            self.linear_prob = LinearProbModule(config)
-            self.motor_tte = MotorTaskHead(
-                input_dim=config.n_embd,
-                motor_tte_vocab_size=config.motor_tte_vocab_size,
-                motor_num_time_pieces=config.motor_num_time_pieces,
-            )
+            self.enable_motor_tte()
 
         # Model parallel
         self.model_parallel = False
@@ -1140,11 +1130,20 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 update_motor_tte_layer = True
 
         if update_motor_tte_layer:
-            self.motor_tte = MotorTaskHead(
-                self.config.n_embd,
-                self.config.motor_tte_vocab_size,
-                self.config.motor_num_time_pieces,
-            )
+            self.enable_motor_tte()
+
+    def enable_motor_tte(self):
+        if str(self.config.motor_time_bins[-1]).lower().startswith("inf"):
+            self.config.motor_time_bins[-1] = float("inf")
+        self.motor_time_bins = torch.tensor(
+            self.config.motor_time_bins, dtype=torch.float32
+        )
+        self.linear_prob = LinearProbModule(self.config)
+        self.motor_tte = MotorTaskHead(
+            input_dim=self.config.n_embd,
+            motor_tte_vocab_size=self.config.motor_tte_vocab_size,
+            motor_num_time_pieces=self.config.motor_num_time_pieces,
+        )
 
     def prepare_inputs_for_generation(
         self,

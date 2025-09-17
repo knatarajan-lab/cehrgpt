@@ -1,4 +1,4 @@
-from typing import Any, Dict, List
+from typing import Any
 
 import numpy as np
 import torch
@@ -21,8 +21,6 @@ class CehrGptDataCollator:
         include_ttv_prediction: bool = False,
         use_sub_time_tokenization: bool = False,
         include_motor_time_to_event: bool = False,
-        motor_tte_vocab_size: int = 0,
-        motor_num_time_pieces: int = 8,
         motor_sampling_probability: float = 0.5,
         pretraining: bool = True,
         include_demographics: bool = False,
@@ -36,27 +34,7 @@ class CehrGptDataCollator:
         self.use_sub_time_tokenization = use_sub_time_tokenization
         self.pretraining = pretraining
         self.include_demographics = include_demographics
-        self.motor_code_cache: Dict[str, List[str]] = dict()
-
-        # MOTOR TTE configuration
-        if include_motor_time_to_event:
-            assert motor_tte_vocab_size > 0, (
-                f"motor_tte_vocab_size must be greater than 0 "
-                f"when include_motor_time_to_event is set to True. "
-                f"But motor_tte_vocab_size: {motor_tte_vocab_size} is provided"
-            )
-
         self.include_motor_time_to_event = include_motor_time_to_event
-        self.motor_tte_vocab_size = motor_tte_vocab_size
-        self.motor_num_time_pieces = motor_num_time_pieces
-        self.motor_time_bins = (
-            self.tokenizer.get_motor_time_bins(motor_num_time_pieces)
-            if self.include_motor_time_to_event
-            else []
-        )
-        # Convert the time bins to seconds
-        self.motor_time_bins = [time_bin * 86400 for time_bin in self.motor_time_bins]
-        LOG.info("self.motor_time_bins: %s", self.motor_time_bins)
         if self.use_sub_time_tokenization:
             token_to_time_token_mapping = tokenizer.token_to_time_token_mapping
             if not token_to_time_token_mapping:
@@ -95,115 +73,6 @@ class CehrGptDataCollator:
             return features
         else:
             return torch.tensor(features)
-
-    def create_time_to_event_tensors_ultra_optimized(
-        self, record: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Ultra-optimized version using advanced vectorization techniques."""
-        motor_row_indices = record["motor_row_indices"]
-        motor_col_indices = record["motor_col_indices"]
-        motor_values = record["motor_values"]
-        motor_censor_times = record["motor_censor_times"]
-
-        if len(motor_row_indices) == 0:
-            # Handle empty case - use tuples for better performance
-            empty_shape = (
-                0,
-                self.motor_num_time_pieces,
-                self.tokenizer.motor_tte_vocab_size,
-            )
-            record["motor_tte_times"] = np.zeros(empty_shape, dtype=np.float32)
-            record["motor_tte_event_indicators"] = np.zeros(empty_shape, dtype=bool)
-            record["motor_tte_masks"] = np.zeros(empty_shape, dtype=bool)
-            return record
-
-        # Convert to numpy arrays once and get dimensions
-        motor_row_indices = np.asarray(motor_row_indices, dtype=np.int32)
-        motor_col_indices = np.asarray(motor_col_indices, dtype=np.int32)
-        motor_values = np.asarray(motor_values, dtype=np.float32)
-        motor_censor_times = np.asarray(motor_censor_times, dtype=np.float32)
-
-        n_tte_predictions = len(motor_censor_times)  # More direct than unique()
-        vocab_size = self.tokenizer.motor_tte_vocab_size
-        n_time_pieces = self.motor_num_time_pieces
-
-        # Create time_vectors more efficiently without broadcasting copy
-        time_vectors = np.tile(
-            motor_censor_times[:, np.newaxis], (1, vocab_size)
-        ).astype(np.float32)
-        event_indicators = np.zeros((n_tte_predictions, vocab_size), dtype=bool)
-
-        # Vectorized assignment (already optimal)
-        time_vectors[motor_row_indices, motor_col_indices] = motor_values
-        event_indicators[motor_row_indices, motor_col_indices] = True
-
-        # Early return if no predictions
-        if n_tte_predictions == 0:
-            empty_shape = (0, n_time_pieces, vocab_size)
-            record["motor_tte_times"] = np.zeros(empty_shape, dtype=np.float32)
-            record["motor_tte_event_indicators"] = np.zeros(empty_shape, dtype=bool)
-            record["motor_tte_masks"] = np.zeros(empty_shape, dtype=bool)
-            return record
-
-        # Cache motor_time_bins as numpy array to avoid repeated conversion
-        if not hasattr(self, "_motor_time_bins_array"):
-            self._motor_time_bins_array = np.asarray(
-                self.motor_time_bins, dtype=np.float32
-            )
-
-        motor_time_bins = self._motor_time_bins_array
-        start_times = motor_time_bins[:-1]
-        end_times = motor_time_bins[1:]
-        bin_widths = end_times - start_times  # Pre-compute bin widths
-
-        # ELIMINATED TRANSPOSE: Compute directly in target shape (n_pred, n_bins, vocab)
-        # Reshape for broadcasting in target order
-        time_vectors_3d = time_vectors[:, np.newaxis, :]  # (n_pred, 1, vocab)
-        event_indicators_3d = event_indicators[:, np.newaxis, :]  # (n_pred, 1, vocab)
-
-        # Broadcast time bins to match target shape
-        start_times_broadcast = start_times[np.newaxis, :, np.newaxis]  # (1, n_bins, 1)
-        bin_widths_broadcast = bin_widths[np.newaxis, :, np.newaxis]  # (1, n_bins, 1)
-
-        # Compute directly in target shape (n_pred, n_bins, vocab)
-        time_diff = time_vectors_3d - start_times_broadcast
-        time_in_bin = np.clip(time_diff, 0, bin_widths_broadcast)
-
-        # Optimized mask computation
-        mask = time_in_bin > 0
-
-        # More efficient log computation with better constant
-        log_constant = 1e-8  # Better numerical stability than 1e-10
-        time_in_bin_log = np.where(
-            mask, np.log2(np.maximum(time_in_bin, log_constant)), -np.inf
-        )
-
-        # Event indicator computation in target shape
-        end_times_broadcast = motor_time_bins[1:][np.newaxis, :, np.newaxis]
-        time_in_range = (time_vectors_3d >= start_times_broadcast) & (
-            time_vectors_3d < end_times_broadcast
-        )
-        event_in_bin = event_indicators_3d & time_in_range
-
-        # Combined mask computation
-        final_mask = mask | event_in_bin
-
-        # Direct assignment - NO TRANSPOSE NEEDED!
-        record["motor_tte_times"] = time_in_bin_log
-        record["motor_tte_event_indicators"] = event_in_bin
-        record["motor_tte_masks"] = final_mask
-
-        # Validation (keep as is - important for correctness)
-        assert (
-            sum(record["motor_tte_task_indicators"]) == n_tte_predictions
-        ), f'sum(record["motor_tte_task_indicators"]) == n_tte_predictions must be true'
-
-        # Clean up input data
-        del record["motor_row_indices"]
-        del record["motor_col_indices"]
-        del record["motor_values"]
-
-        return record
 
     def __call__(self, examples):
 
