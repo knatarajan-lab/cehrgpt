@@ -128,7 +128,7 @@ fi
 # Step 1: Generate included concept list
 CONCEPT_LIST_CMD="spark-submit $SPARK_OPTIONS $CEHRBERT_DATA_HOME/apps/generate_included_concept_list.py \
 -i \"$INPUT_FOLDER\" \
--o \"$OUTPUT_FOLDER\" \
+-o \"$INPUT_FOLDER\" \
 --min_num_of_patients 100 \
 --ehr_table_list $DOMAIN_TABLES"
 
