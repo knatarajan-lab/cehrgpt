@@ -189,6 +189,12 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether we want to include the motor time to events"
         },
     )
+    freeze_cehrgpt_generation_model: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to freeze the CEHR-GPT generation model weights"
+        },
+    )
     num_motor_tasks: Optional[int] = dataclasses.field(
         default=10000,
         metadata={"help": "The number of max MOTOR tasks"},
