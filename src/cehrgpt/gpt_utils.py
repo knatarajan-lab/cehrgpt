@@ -98,13 +98,19 @@ def construct_age_sequence(
         return ages
     elif concept_ids[1].lower().startswith("age"):
         age_str = concept_ids[1].split(":")[1]
-        assert age_str.isnumeric(), f"age_str: {age_str}"
+        try:
+            age = max(int(age_str), 0)
+        except ValueError:
+            logger.warning(
+                "Age is not an integer: %s. Setting it to default value 0", age_str
+            )
+            age = 0
         ages = []
         time_delta = 0
         for concept_id in concept_ids:
             if is_att_token(concept_id):
                 time_delta += extract_time_interval_in_days(concept_id)
-            ages.append(int(age_str) + time_delta // 365)
+            ages.append(age + time_delta // 365)
         return ages
     else:
         logger.warning(
