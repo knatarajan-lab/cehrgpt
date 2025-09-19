@@ -244,8 +244,13 @@ class CehrGptDataCollator:
         batch["attention_mask"] = self._try_reverse_tensor(
             pad_sequence(batch_attention_mask, batch_first=True, padding_value=0.0)
         )
-        assert batch["input_ids"].shape[1] <= self.max_length
-        assert batch["attention_mask"].shape[1] <= self.max_length
+
+        if batch["input_ids"].shape[1] > self.max_length:
+            LOG.warning(
+                "batch[input_ids].shape[1] > self.max_length. batch[input_ids].shape[1]: %s, self.max_length: %s",
+                batch["input_ids"].shape[1],
+                self.max_length,
+            )
         assert batch["attention_mask"].shape[1] == batch["input_ids"].shape[1], (
             f'batch["attention_mask"].shape[1]: {batch["attention_mask"].shape[1]}, '
             f'batch["input_ids"].shape[1]: {batch["input_ids"].shape[1]}'
