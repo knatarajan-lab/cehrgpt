@@ -313,7 +313,7 @@ class CehrGptDataProcessor(DatasetMapping):
             return record
 
         if self.pretraining:
-            end_index = new_max_length
+            end_index = new_max_length - 1
             # There is a 50% chance we randomly slice out a portion of the patient history and update the demographic
             # prompt depending on the new starting point
             if random.random() < 0.5:
