@@ -453,8 +453,14 @@ class CehrGptDataCollator:
                     padding_value=self.tokenizer.pad_value_token_id,
                 ).to(torch.int64)
             )
-            assert batch["value_indicators"].shape[1] <= self.max_length
-            assert batch["values"].shape[1] <= self.max_length
+
+            if batch["value_indicators"].shape[1] > self.max_length:
+                LOG.warning(
+                    "The total number of values in the packed sequence should be less than %s. "
+                    "But the total number of tokens is: %s",
+                    self.max_length,
+                    batch["value_indicators"].shape[1],
+                )
 
             if self.pretraining:
                 batch["true_value_indicators"] = batch["value_indicators"].clone()
