@@ -313,7 +313,6 @@ class CehrGptDataProcessor(DatasetMapping):
             return record
 
         if self.pretraining:
-            end_index = new_max_length - 1
             # There is a 50% chance we randomly slice out a portion of the patient history and update the demographic
             # prompt depending on the new starting point
             if random.random() < 0.5:
@@ -326,6 +325,7 @@ class CehrGptDataProcessor(DatasetMapping):
                     )
                     return record
 
+            end_index = new_max_length - 1
             # The default employs a right truncation strategy, where the demographic prompt is reserved
             for i in reversed(list(range(0, end_index))):
                 current_token = record["input_ids"][i]
