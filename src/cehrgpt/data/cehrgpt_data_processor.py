@@ -209,7 +209,7 @@ class CehrGptDataProcessor(DatasetMapping):
                 (
                     np.full(
                         [DEMOGRAPHIC_PROMPT_SIZE],
-                        record["ages"][0] if record["ages"] else 0,
+                        record["ages"][0] if len(record["ages"]) > 0 else 0,
                     )
                     if demographic_tokens is not None
                     else self.empty_array
@@ -218,7 +218,7 @@ class CehrGptDataProcessor(DatasetMapping):
                 (
                     (
                         np.asarray([record["ages"][-1]])
-                        if record["ages"]
+                        if len(record["ages"]) > 0
                         else self.empty_array
                     )
                     if add_last_token
@@ -233,7 +233,11 @@ class CehrGptDataProcessor(DatasetMapping):
                 (
                     np.full(
                         [DEMOGRAPHIC_PROMPT_SIZE],
-                        record["epoch_times"][0] if record["epoch_times"] else 0,
+                        (
+                            record["epoch_times"][0]
+                            if len(record["epoch_times"]) > 0
+                            else 0
+                        ),
                     )
                     if demographic_tokens is not None
                     else self.empty_array
@@ -242,7 +246,7 @@ class CehrGptDataProcessor(DatasetMapping):
                 (
                     (
                         np.asarray([record["epoch_times"][-1]])
-                        if record["epoch_times"]
+                        if len(record["epoch_times"]) > 0
                         else self.empty_array
                     )
                     if add_last_token
