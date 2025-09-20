@@ -570,14 +570,16 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 if isinstance(example["ages"], torch.Tensor)
                 else list(example["ages"])
             )
-            current_ages.extend(ages + [max(ages)])
+            current_ages.extend(ages + [max(ages)] if ages else [])
 
             epoch_times = (
                 example["epoch_times"].tolist()
                 if isinstance(example["epoch_times"], torch.Tensor)
                 else list(example["epoch_times"])
             )
-            current_epoch_times.extend(epoch_times + [max(epoch_times)])
+            current_epoch_times.extend(
+                epoch_times + [max(epoch_times)] if epoch_times else []
+            )
 
             if self.include_ttv_prediction:
                 current_time_to_visits.extend(
