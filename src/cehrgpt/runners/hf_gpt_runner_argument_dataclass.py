@@ -223,10 +223,6 @@ class CehrGPTArguments:
         default=None,
         metadata={"help": "The directory where the concept data is stored."},
     )
-    average_over_sequence: bool = dataclasses.field(
-        default=False,
-        metadata={"help": "Whether or not to average tokens per sequence"},
-    )
     apply_entropy_filter: Optional[bool] = dataclasses.field(
         default=False,
         metadata={"help": "A flag to indicate whether we want to use entropy filter."},
@@ -256,4 +252,11 @@ class CehrGPTArguments:
     generation_max_new_tokens: Optional[int] = dataclasses.field(
         default=1024,
         metadata={"help": "The maximum number of tokens in the generation sequence"},
+    )
+    combine_global_local_features: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to combine global (linear prob) "
+            "and local (last token hidden states) features"
+        },
     )

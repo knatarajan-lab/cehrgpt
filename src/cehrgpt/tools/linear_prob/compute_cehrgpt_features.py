@@ -47,53 +47,6 @@ def get_torch_dtype(torch_dtype: Optional[str] = None) -> Union[torch.dtype, str
     return torch.float32
 
 
-def extract_averaged_embeddings_from_packed_sequence(
-    hidden_states: torch.Tensor,
-    attention_mask: torch.Tensor,
-    ve_token_indicators: torch.BoolTensor,
-) -> torch.Tensor:
-    """
-    Args:
-
-        hidden_states: (batch_size=1, seq_len, hidden_dim) tensor
-        attention_mask: (batch_size=1, seq_len) tensor, where 0 indicates padding
-        ve_token_indicators: (batch_size=1, seq_len) bool tensor, True if token is VE token
-    Returns:
-        (num_samples, hidden_dim) tensor: averaged embeddings over VE tokens for each sample
-    """
-    # Step 1: Create segment IDs
-    mask = attention_mask[0]  # (seq_len,)
-    segment_ids = (mask == 0).cumsum(dim=0) + 1  # start segment IDs from 1
-    segment_ids = (segment_ids * mask).to(torch.int32)  # set PAD positions back to 0
-
-    # Step 2: Only keep tokens that are both valid and VE tokens
-    valid = (segment_ids > 0) & (ve_token_indicators[0])
-    valid_embeddings = hidden_states[0, valid].to(
-        torch.float32
-    )  # (num_valid_ve_tokens, hidden_dim)
-    valid_segments = segment_ids[valid]  # (num_valid_ve_tokens,)
-
-    # Step 3: Group by segment id and average
-    num_segments = int(segment_ids.max().item())
-
-    sample_embeddings = torch.zeros(
-        num_segments, hidden_states.size(-1), device=hidden_states.device
-    )
-    counts = torch.zeros(num_segments, device=hidden_states.device)
-
-    sample_embeddings.index_add_(0, valid_segments - 1, valid_embeddings)
-    counts.index_add_(
-        0, valid_segments - 1, torch.ones_like(valid_segments, dtype=counts.dtype)
-    )
-
-    # Avoid divide-by-zero (if some segments have no VE tokens, set their embeddings to zero)
-    counts = counts.masked_fill(counts == 0, 1.0)
-
-    sample_embeddings = sample_embeddings / counts.unsqueeze(-1)
-
-    return sample_embeddings
-
-
 def main():
     cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
     if torch.cuda.is_available():
@@ -331,7 +284,7 @@ def main():
 
     data_loaders = [("train", train_loader), ("test", test_dataloader)]
 
-    ve_token_id = cehrgpt_tokenizer.ve_token_id
+    cehrgpt_tokenizer.ve_token_id
     for split, data_loader in data_loaders:
         # Ensure prediction folder exists
         feature_output_folder = (
@@ -391,25 +344,21 @@ def main():
                     **batch, output_attentions=False, output_hidden_states=False
                 )
                 if cehrgpt_args.sample_packing:
-                    if cehrgpt_args.average_over_sequence:
-                        ve_token_indicators: torch.BoolTensor = (
-                            batch["input_ids"] == ve_token_id
+                    features = (
+                        extract_features_from_packed_sequence(
+                            cehrgpt_output.linear_prob_hidden_states,
+                            batch["attention_mask"],
                         )
-                        features = (
-                            extract_averaged_embeddings_from_packed_sequence(
-                                cehrgpt_output.linear_prob_hidden_states,
-                                batch["attention_mask"],
-                                ve_token_indicators,
-                            )
-                            .cpu()
-                            .float()
-                            .detach()
-                            .numpy()
-                        )
-                    else:
-                        features = (
+                        .cpu()
+                        .float()
+                        .detach()
+                        .numpy()
+                        .squeeze(axis=0)
+                    )
+                    if cehrgpt_args.combine_global_local_features:
+                        last_features = (
                             extract_features_from_packed_sequence(
-                                cehrgpt_output.linear_prob_hidden_states,
+                                cehrgpt_output.hidden_states[-1],
                                 batch["attention_mask"],
                             )
                             .cpu()
@@ -418,40 +367,24 @@ def main():
                             .numpy()
                             .squeeze(axis=0)
                         )
+                        features = np.concatenate((features, last_features), axis=0)
                 else:
-                    if cehrgpt_args.average_over_sequence:
-                        features = torch.where(
-                            batch["attention_mask"].unsqueeze(dim=-1).to(torch.bool),
-                            cehrgpt_output.linear_prob_hidden_states,
-                            0,
-                        )
-                        # Average across the sequence
-                        features = features.mean(dim=1)
-                    else:
-                        last_end_token = any(
-                            [
-                                cehrgpt_tokenizer.end_token_id == input_id
-                                for input_id in batch.pop("input_ids")
-                                .cpu()
-                                .numpy()
-                                .squeeze()
-                                .tolist()
-                            ]
-                        )
-                        last_token_index = -2 if last_end_token else -1
-                        LOG.debug(
-                            "The last token is [END], we need to use the token index before that: %s",
-                            last_token_index,
-                        )
-                        features = (
-                            cehrgpt_output.linear_prob_hidden_states[
-                                ..., last_token_index, :
-                            ]
+                    features = (
+                        cehrgpt_output.linear_prob_hidden_states[..., -1, :]
+                        .cpu()
+                        .float()
+                        .detach()
+                        .numpy()
+                    )
+                    if cehrgpt_args.combine_global_local_features:
+                        last_features = (
+                            cehrgpt_output.hidden_states[-1][..., -1, :]
                             .cpu()
                             .float()
                             .detach()
                             .numpy()
                         )
+                        features = np.concatenate((features, last_features), axis=0)
 
                 # Flatten features or handle them as a list of arrays (one array per row)
                 features_list = [feature for feature in features]
