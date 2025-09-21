@@ -260,3 +260,9 @@ class CehrGPTArguments:
             "and local (last token hidden states) features"
         },
     )
+    add_random_token: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to use linear prob tokens"
+        },
+    )
