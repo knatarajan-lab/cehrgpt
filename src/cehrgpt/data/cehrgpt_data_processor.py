@@ -174,7 +174,7 @@ class CehrGptDataProcessor(DatasetMapping):
     ) -> Dict[str, Any]:
 
         last_token_id = (
-            self.tokenizer.linear_token_id
+            self.tokenizer.oov_token_id
             if self.add_linear_prob_token
             else self.tokenizer.end_token_id
         )
