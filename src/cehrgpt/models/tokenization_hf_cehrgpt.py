@@ -41,6 +41,7 @@ from cehrgpt.models.special_tokens import (
     LINEAR_PROB_TOKEN,
     OUT_OF_VOCABULARY_TOKEN,
     PAD_TOKEN,
+    RANDOM_TOKEN,
     START_TOKEN,
 )
 from cehrgpt.omop.ontology import Ontology
@@ -656,6 +657,12 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         else:
             self._linear_token_id = self._oov_token_id
 
+        self._random_token_id = None
+        if RANDOM_TOKEN in self._tokenizer.get_vocab():
+            self._random_token_id = self._tokenizer.token_to_id(RANDOM_TOKEN)
+        else:
+            self._random_token_id = self._oov_token_id
+
         self._numeric_concept_ids = (
             self._numeric_event_statistics.get_numeric_concept_ids()
         )
@@ -774,6 +781,16 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     def linear_token(self) -> Optional[str]:
         if LINEAR_PROB_TOKEN in self._tokenizer.get_vocab():
             return LINEAR_PROB_TOKEN
+        return None
+
+    @property
+    def random_token_id(self) -> Optional[int]:
+        return self._random_token_id
+
+    @property
+    def random_token(self) -> Optional[str]:
+        if RANDOM_TOKEN in self._tokenizer.get_vocab():
+            return RANDOM_TOKEN
         return None
 
     @property

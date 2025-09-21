@@ -29,7 +29,7 @@ from cehrgpt.models.hf_cehrgpt import (
     CEHRGPT2LMHeadModel,
     extract_features_from_packed_sequence,
 )
-from cehrgpt.models.special_tokens import LINEAR_PROB_TOKEN
+from cehrgpt.models.special_tokens import LINEAR_PROB_TOKEN, RANDOM_TOKEN
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.data_utils import (
     extract_cohort_sequences,
@@ -69,10 +69,11 @@ def main():
         .eval()
         .to(device)
     )
-
-    if LINEAR_PROB_TOKEN not in cehrgpt_tokenizer.get_vocab():
-        cehrgpt_tokenizer.add_tokens(LINEAR_PROB_TOKEN)
-        cehrgpt_model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)
+    for additional_token in [LINEAR_PROB_TOKEN, RANDOM_TOKEN]:
+        if additional_token not in cehrgpt_tokenizer.get_vocab():
+            cehrgpt_tokenizer.add_tokens(additional_token)
+        if cehrgpt_tokenizer.vocab_size > cehrgpt_model.config.vocab_size:
+            cehrgpt_model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)
 
     prepared_ds_path = generate_prepared_ds_path(
         data_args, model_args, data_folder=data_args.cohort_folder
@@ -228,7 +229,7 @@ def main():
         include_ttv_prediction=False,
         use_sub_time_tokenization=False,
         include_demographics=cehrgpt_args.include_demographics,
-        add_linear_prob_token=False,
+        add_linear_prob_token=cehrgpt_args.add_random_token,
     )
 
     train_loader = DataLoader(
@@ -367,7 +368,7 @@ def main():
                             .numpy()
                             .squeeze(axis=0)
                         )
-                        features = np.concatenate((features, last_features), axis=0)
+                        features = np.concatenate([features, last_features], axis=-1)
                 else:
                     features = (
                         cehrgpt_output.linear_prob_hidden_states[..., -1, :]
@@ -384,7 +385,7 @@ def main():
                             .detach()
                             .numpy()
                         )
-                        features = np.concatenate((features, last_features), axis=0)
+                        features = np.concatenate([features, last_features], axis=-1)
 
                 # Flatten features or handle them as a list of arrays (one array per row)
                 features_list = [feature for feature in features]
