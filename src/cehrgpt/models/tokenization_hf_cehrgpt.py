@@ -94,9 +94,15 @@ def get_dataset_len(dataset: Union[Dataset, IterableDataset]) -> int:
 
 
 def get_allowed_motor_codes(
-    original_concept_codes: List[str], ontology: Optional[Ontology]
+    original_concept_codes: List[str],
+    data_args: DataTrainingArguments,
+    ontology: Optional[Ontology],
 ) -> List[str]:
-    filtered_original_concept_codes = filter(is_clinical_event, original_concept_codes)
+    filtered_original_concept_codes = [
+        concept_code
+        for concept_code in original_concept_codes
+        if is_clinical_event(concept_code, data_args.is_data_in_meds)
+    ]
     if ontology:
         allowed_motor_codes = []
         for concept in filtered_original_concept_codes:
@@ -1560,7 +1566,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         if num_motor_tasks:
             LOG.info("Computing the MOTOR TTE statistics")
             allowed_motor_codes = get_allowed_motor_codes(
-                original_concept_codes, ontology
+                original_concept_codes, data_args, ontology
             )
             motor_tte_statistics = compute_motor_tte_statistics(
                 dataset, data_args, allowed_motor_codes, ontology
