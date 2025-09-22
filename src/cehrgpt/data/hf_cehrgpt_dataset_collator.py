@@ -22,6 +22,7 @@ class CehrGptDataCollator:
         use_sub_time_tokenization: bool = False,
         include_motor_time_to_event: bool = False,
         motor_sampling_probability: float = 0.5,
+        is_data_in_meds: bool = False,
         pretraining: bool = True,
         include_demographics: bool = False,
         add_linear_prob_token: bool = False,
@@ -61,6 +62,7 @@ class CehrGptDataCollator:
             include_values=include_values,
             include_motor_time_to_event=include_motor_time_to_event,
             motor_sampling_probability=motor_sampling_probability,
+            is_data_in_meds=is_data_in_meds,
             pretraining=pretraining,
             add_linear_prob_token=add_linear_prob_token,
         )

@@ -37,6 +37,7 @@ class CehrGptDataProcessor(DatasetMapping):
         include_ttv_prediction: bool = False,
         include_motor_time_to_event: bool = False,
         motor_sampling_probability: float = 0.5,
+        is_data_in_meds: bool = False,
         pretraining: bool = True,
         include_demographics: bool = False,
         add_linear_prob_token: bool = False,
@@ -64,6 +65,7 @@ class CehrGptDataProcessor(DatasetMapping):
         self.include_motor_time_to_event = include_motor_time_to_event
         self.motor_sampling_probability = motor_sampling_probability
         self.motor_code_cache: Dict[str, List[str]] = {}
+        self.is_data_in_meds = is_data_in_meds
         # Pre-compute vocab-wide token type mappings
         self._precompute_vocab_mappings()
 
@@ -89,7 +91,7 @@ class CehrGptDataProcessor(DatasetMapping):
                 except (ValueError, AttributeError):
                     self.time_intervals_array[i] = -1
 
-            if is_clinical_event(token):
+            if is_clinical_event(token, self.is_data_in_meds):
                 self.is_clinical_event_array[i] = True
 
         LOG.info(f"Processed {n_vocab} vocabulary tokens")
