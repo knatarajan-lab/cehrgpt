@@ -79,10 +79,16 @@ def load_and_create_tokenizer(
     # Try to load the pretrained tokenizer
     tokenizer_abspath = os.path.expanduser(model_args.tokenizer_name_or_path)
     if not tokenizer_exists(tokenizer_abspath):
-        if cehrgpt_args.include_motor_time_to_event and not cehrgpt_args.vocab_dir:
+        if (
+            cehrgpt_args.include_motor_time_to_event
+            and cehrgpt_args.motor_use_ontology
+            and not cehrgpt_args.vocab_dir
+        ):
             raise RuntimeError(
-                "vocab_dir must be specified if include_motor_time_to_event is True"
+                "The argument include_motor_time_to_event and motor_use_ontology are True, "
+                "but vocab_dir is not specified"
             )
+
         ontology: Optional[Ontology] = None
         concept_name_mapping = {}
         if cehrgpt_args.vocab_dir:
