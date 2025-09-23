@@ -229,6 +229,7 @@ def load_and_create_model(
             motor_time_bins=tokenizer.get_motor_time_bins(
                 cehrgpt_args.motor_num_time_pieces
             ),
+            linear_prob_n_layer=cehrgpt_args.linear_prob_n_layer,
             ve_token_id=tokenizer.ve_token_id,
             linear_prob_token_id=tokenizer.linear_token_id,
             n_inner=cehrgpt_args.inner_dim,
@@ -534,6 +535,16 @@ def main():
         if getattr(model.config, "linear_prob_token_id", None) is None:
             setattr(
                 model.config, "linear_prob_token_id", cehrgpt_tokenizer.linear_token_id
+            )
+        # This specify the number of layers used in the linear prob module
+        if (
+            getattr(model.config, "linear_prob_n_layer", None)
+            != cehrgpt_args.linear_prob_n_layer
+        ):
+            setattr(
+                model.config,
+                "linear_prob_n_layer",
+                cehrgpt_args.linear_prob_n_layer,
             )
         if getattr(model.config, "motor_time_bins", None) is None:
             setattr(

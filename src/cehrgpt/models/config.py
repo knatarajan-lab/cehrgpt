@@ -133,6 +133,7 @@ class CEHRGPTConfig(PretrainedConfig):
         use_sub_time_tokenization=True,
         include_motor_time_to_event=True,
         freeze_cehrgpt_generation_model=False,
+        linear_prob_n_layer=None,
         motor_tte_vocab_size=None,
         motor_time_to_event_weight=1.0,
         motor_num_time_pieces=16,
@@ -213,6 +214,7 @@ class CEHRGPTConfig(PretrainedConfig):
             and self.motor_tte_vocab_size
             and self.motor_tte_vocab_size > 0
         )
+        self.linear_prob_n_layer = linear_prob_n_layer
         self.freeze_cehrgpt_generation_model = freeze_cehrgpt_generation_model
         if self.include_motor_time_to_event and not ve_token_id:
             raise RuntimeError(
