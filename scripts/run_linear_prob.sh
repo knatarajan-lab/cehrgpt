@@ -15,6 +15,8 @@ usage() {
     echo "  --max_tokens_per_batch=NUM     Maximum tokens per batch (default: 16384)"
     echo "  --torch_type=TYPE              Torch data type (default: float32)"
     echo "  --disable_sample_packing       Disable sample packing (enabled by default)"
+    echo "  --disable_combine_global_local Disable combining global and local features (enabled by default)"
+    echo "  --disable_add_random_token     Disable adding random token (enabled by default)"
     echo ""
     echo "Example:"
     echo "  $0 --base_dir=/path/to/cohorts --dataset_prepared_path=/path/to/dataset_prepared \\"
@@ -28,6 +30,8 @@ MODEL_NAME="cehrgpt_model"
 MAX_TOKENS_PER_BATCH="16384"
 TORCH_TYPE="bfloat16"
 DISABLE_SAMPLE_PACKING="false"
+DISABLE_COMBINE_GLOBAL_LOCAL="false"
+DISABLE_ADD_RANDOM_TOKEN="false"
 
 # Parse command line arguments
 for arg in "$@"; do
@@ -61,6 +65,12 @@ for arg in "$@"; do
             ;;
         --disable_sample_packing)
             DISABLE_SAMPLE_PACKING="true"
+            ;;
+        --disable_combine_global_local)
+            DISABLE_COMBINE_GLOBAL_LOCAL="true"
+            ;;
+        --disable_add_random_token)
+            DISABLE_ADD_RANDOM_TOKEN="true"
             ;;
         --help|-h)
             usage
@@ -125,9 +135,19 @@ case "$TORCH_TYPE" in
         ;;
 esac
 
-# Validate disable_sample_packing is boolean-like
+# Validate disable flags are boolean-like
 if [ "$DISABLE_SAMPLE_PACKING" != "true" ] && [ "$DISABLE_SAMPLE_PACKING" != "false" ]; then
     echo "Error: disable_sample_packing must be 'true' or 'false': $DISABLE_SAMPLE_PACKING"
+    exit 1
+fi
+
+if [ "$DISABLE_COMBINE_GLOBAL_LOCAL" != "true" ] && [ "$DISABLE_COMBINE_GLOBAL_LOCAL" != "false" ]; then
+    echo "Error: disable_combine_global_local must be 'true' or 'false': $DISABLE_COMBINE_GLOBAL_LOCAL"
+    exit 1
+fi
+
+if [ "$DISABLE_ADD_RANDOM_TOKEN" != "true" ] && [ "$DISABLE_ADD_RANDOM_TOKEN" != "false" ]; then
+    echo "Error: disable_add_random_token must be 'true' or 'false': $DISABLE_ADD_RANDOM_TOKEN"
     exit 1
 fi
 
@@ -156,6 +176,8 @@ log "  --model_name=$MODEL_NAME"
 log "  --max_tokens_per_batch=$MAX_TOKENS_PER_BATCH"
 log "  --torch_type=$TORCH_TYPE"
 log "  --disable_sample_packing=$DISABLE_SAMPLE_PACKING"
+log "  --disable_combine_global_local=$DISABLE_COMBINE_GLOBAL_LOCAL"
+log "  --disable_add_random_token=$DISABLE_ADD_RANDOM_TOKEN"
 
 # Find valid cohorts and write to a temp file
 TEMP_COHORT_LIST="$LOG_DIR/cohort_list_${TIMESTAMP}.txt"
@@ -204,7 +226,7 @@ while read -r cohort_name; do
     # Create output directory if it doesn't exist
     mkdir -p "$output_dir"
 
-    # Prepare command for feature extraction
+    # Prepare base command for feature extraction
     FEATURE_CMD="python -u -m cehrgpt.tools.linear_prob.compute_cehrgpt_features \
         --data_folder \"$BASE_DIR/$cohort_name/train/\" \
         --test_data_folder \"$BASE_DIR/$cohort_name/test/\" \
@@ -217,9 +239,17 @@ while read -r cohort_name; do
         --max_tokens_per_batch \"$MAX_TOKENS_PER_BATCH\" \
         --torch_dtype \"$TORCH_TYPE\""
 
-    # Add sample packing flag if not disabled
+    # Add optional flags based on configuration
     if [ "$DISABLE_SAMPLE_PACKING" = "false" ]; then
         FEATURE_CMD="$FEATURE_CMD --sample_packing"
+    fi
+
+    if [ "$DISABLE_COMBINE_GLOBAL_LOCAL" = "false" ]; then
+        FEATURE_CMD="$FEATURE_CMD --combine_global_local_features"
+    fi
+
+    if [ "$DISABLE_ADD_RANDOM_TOKEN" = "false" ]; then
+        FEATURE_CMD="$FEATURE_CMD --add_random_token"
     fi
 
     # Step 1: Feature extraction
