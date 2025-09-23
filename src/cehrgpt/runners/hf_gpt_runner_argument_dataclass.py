@@ -219,6 +219,10 @@ class CehrGPTArguments:
         default=0.0,
         metadata={"help": "A flag to indicate whether we want to use sample packing"},
     )
+    linear_prob_n_layer: Optional[int] = dataclasses.field(
+        default=None,
+        metadata={"help": "The number of linear prob layers to use."},
+    )
     vocab_dir: Optional[str] = dataclasses.field(
         default=None,
         metadata={"help": "The directory where the concept data is stored."},

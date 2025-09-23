@@ -893,9 +893,15 @@ class LinearProbModule(CEHRGPTPreTrainedModel):
     def __init__(self, config: Union[CEHRGPTConfig, PretrainedConfig]):
         super().__init__(config)
         self.embed_dim = config.hidden_size
-
+        if config.linear_prob_n_layer:
+            self.linear_prob_n_layer = max(
+                min(config.num_hidden_layers, config.linear_prob_n_layer), 1
+            )
+        else:
+            self.linear_prob_n_layer = config.num_hidden_layers
+        logger.info("linear_prob_n_layer is set to %s", self.linear_prob_n_layer)
         linear_prob_blocks = []
-        for i in range(config.num_hidden_layers):
+        for i in range(self.linear_prob_n_layer):
             linear_prob_block = LinearProbBlock(config, layer_idx=i)
             linear_prob_block.is_causal = True
             linear_prob_blocks.append(linear_prob_block)
@@ -975,7 +981,9 @@ class LinearProbModule(CEHRGPTPreTrainedModel):
         encoder_attention_mask = self.prepare_attention_mask(
             linear_prob_hidden_state, encoder_attention_mask
         )
-        for i, encoder_hidden_states in enumerate(all_encoder_hidden_states):
+        for i, encoder_hidden_states in enumerate(
+            all_encoder_hidden_states[-self.linear_prob_n_layer :]
+        ):
             # Model parallel
             if self.model_parallel:
                 torch.cuda.set_device(linear_prob_hidden_state.device)

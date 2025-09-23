@@ -207,7 +207,8 @@ done < "$TEMP_COHORT_LIST"
 
 # Process each cohort sequentially
 while read -r cohort_name; do
-    cohort_dir="$OUTPUT_DIR/$cohort_name"
+    # Remove trailing slash from OUTPUT_DIR if present, then add cohort_name
+    cohort_dir="${OUTPUT_DIR%/}/$cohort_name"
     output_dir="$cohort_dir/$MODEL_NAME"
     metrics_file="$output_dir/logistic/metrics.json"
 
@@ -290,6 +291,29 @@ while read -r cohort_name; do
     if [ $? -ne 0 ]; then
         log "ERROR: Running meds-evaluation failed for logistic regression for cohort $cohort_name. Check $cohort_log for details."
         continue
+    fi
+
+    # Print results.json if it exists
+    results_file="$output_dir/logistic/results.json"
+    log "Looking for results file at: $results_file"
+    # Check for results.json
+    if [ -f "$results_file" ]; then
+        log "Results for $cohort_name:"
+        log "$(cat "$results_file")"
+    else
+        log "Results file not found at $results_file"
+        # Check if there are any JSON files in the logistic directory
+        if [ -d "$output_dir/logistic" ]; then
+            json_files=$(find "$output_dir/logistic" -name "*.json" 2>/dev/null)
+            if [ -n "$json_files" ]; then
+                log "Found other JSON files in logistic directory:"
+                echo "$json_files" | while read json_file; do
+                    log "  $json_file"
+                done
+            else
+                log "No JSON files found in logistic directory"
+            fi
+        fi
     fi
 
     log "Successfully completed processing for $cohort_name"
