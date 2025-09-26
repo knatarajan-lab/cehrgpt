@@ -19,6 +19,8 @@ def prepare_dataset(
     age_scaler = feature_processor["age_scaler"]
     gender_encoder = feature_processor["gender_encoder"]
     race_encoder = feature_processor["race_encoder"]
+    feature_scaler = feature_processor["feature_scaler"]
+
     age_scaler.transform(df[["age_at_index"]].to_numpy())
 
     one_hot_gender = gender_encoder.transform(
@@ -29,6 +31,7 @@ def prepare_dataset(
     )
 
     features = np.stack(df["features"].apply(lambda x: np.array(x).flatten()))
+    features = feature_scaler.transform(features)
     # features = np.hstack(
     #     [scaled_age, one_hot_gender.toarray(), one_hot_race.toarray(), features]
     # )
@@ -68,10 +71,14 @@ def main(args):
         with open(feature_processor_path, "rb") as f:
             feature_processor = pickle.load(f)
     else:
-        age_scaler, gender_encoder, race_encoder = (
+        feature_scaler, age_scaler, gender_encoder, race_encoder = (
+            StandardScaler(),
             StandardScaler(),
             OneHotEncoder(handle_unknown="ignore"),
             OneHotEncoder(handle_unknown="ignore"),
+        )
+        feature_scaler = feature_scaler.fit(
+            np.stack(feature_train["features"].apply(lambda x: np.array(x).flatten()))
         )
         age_scaler = age_scaler.fit(feature_train[["age_at_index"]].to_numpy())
         gender_encoder = gender_encoder.fit(
@@ -79,6 +86,7 @@ def main(args):
         )
         race_encoder = race_encoder.fit(feature_train[["race_concept_id"]].to_numpy())
         feature_processor = {
+            "feature_scaler": feature_scaler,
             "age_scaler": age_scaler,
             "gender_encoder": gender_encoder,
             "race_encoder": race_encoder,
