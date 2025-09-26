@@ -7,6 +7,7 @@ from typing import Any, Dict, Union
 import numpy as np
 import pandas as pd
 import polars as pl
+from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegressionCV
 from sklearn.metrics import auc, precision_recall_curve, roc_auc_score
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
@@ -82,6 +83,15 @@ def main(args):
             "gender_encoder": gender_encoder,
             "race_encoder": race_encoder,
         }
+
+        if args.apply_pca:
+            pca = PCA()
+            x_train_features = np.stack(
+                feature_train["features"].apply(lambda x: np.array(x).flatten())
+            )
+            pca = pca.fit(x_train_features)
+            feature_processor["pca"] = pca
+
         with open(feature_processor_path, "wb") as f:
             pickle.dump(feature_processor, f)
 
@@ -99,6 +109,14 @@ def main(args):
                 model = pickle.load(f)
         else:
             train_dataset = prepare_dataset(feature_train, feature_processor)
+            if args.apply_pca:
+                train_dataset = apply_pca_to_features(
+                    train_dataset, feature_processor["pca"], args.pca_variance
+                )
+                print(
+                    f"Training data features have been reduced to {train_dataset['features'].shape}"
+                )
+
             # Train logistic regression
             model = LogisticRegressionCV(
                 scoring="roc_auc",
@@ -111,6 +129,14 @@ def main(args):
                 pickle.dump(model, f)
 
         test_dataset = prepare_dataset(feature_test, feature_processor)
+        if args.apply_pca:
+            test_dataset = apply_pca_to_features(
+                test_dataset, feature_processor["pca"], args.pca_variance
+            )
+            print(
+                f"Test data features have been reduced to {test_dataset['features'].shape}"
+            )
+
         y_pred = model.predict_proba(test_dataset["features"])[:, 1]
         logistic_predictions = pl.DataFrame(
             {
@@ -142,6 +168,16 @@ def main(args):
             json.dump(metrics, f, indent=4)
 
 
+def apply_pca_to_features(dataset: Dict[str, Any], pca: PCA, pca_variance: float):
+    features = pca.transform(dataset["features"])
+    var_ratio = pca.explained_variance_ratio_
+    cum_var = np.cumsum(var_ratio)
+    k = np.searchsorted(cum_var, pca_variance) + 1
+    features_reduced = features[:, :k]
+    dataset["features"] = features_reduced
+    return dataset
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Train logistic regression model with cehrgpt features"
@@ -153,5 +189,18 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--output_dir", required=True, help="Directory to save the output results"
+    )
+    parser.add_argument(
+        "--apply_pca",
+        action="store_true",
+        default=False,
+        help="A flag to indicate whether or not to apply PCA to features",
+    )
+    parser.add_argument(
+        "--pca_variance",
+        action="store",
+        default=0.99,
+        type=float,
+        help="The amount of the variance to keep through PCA",
     )
     main(parser.parse_args())
