@@ -1,5 +1,6 @@
 import os
 from functools import partial
+from pathlib import Path
 from typing import Optional, Union
 
 import datasets
@@ -75,7 +76,6 @@ def load_and_create_tokenizer(
     cehrgpt_args: CehrGPTArguments,
     dataset: Union[Dataset, DatasetDict],
 ) -> CehrGptTokenizer:
-
     # Try to load the pretrained tokenizer
     tokenizer_abspath = os.path.expanduser(model_args.tokenizer_name_or_path)
     if not tokenizer_exists(tokenizer_abspath):
@@ -257,10 +257,12 @@ def main():
     processed_dataset: Optional[DatasetDict] = None
     cache_file_collector = CacheFileCollector()
     if cehrgpt_args.tokenized_dataset_name:
-        prepared_ds_path = os.path.join(
-            data_args.dataset_prepared_path, cehrgpt_args.tokenized_dataset_name
+        prepared_ds_path = Path(
+            os.path.join(
+                data_args.dataset_prepared_path, cehrgpt_args.tokenized_dataset_name
+            )
         )
-        if os.path.exists(prepared_ds_path):
+        if prepared_ds_path.exists():
             LOG.warning(
                 "The dataset name %s already exists under %s",
                 cehrgpt_args.tokenized_dataset_name,
