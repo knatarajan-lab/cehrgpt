@@ -12,6 +12,10 @@ class CehrGPTArguments:
         default=None,
         metadata={"help": "Path to the patient splits file"},
     )
+    tokenized_dataset_name: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={"help": "The name of the dataset to use for tokenization."},
+    )
     tokenized_full_dataset_path: Optional[str] = dataclasses.field(
         default=None,
         metadata={

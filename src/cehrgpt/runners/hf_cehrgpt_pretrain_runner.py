@@ -256,7 +256,19 @@ def main():
 
     processed_dataset: Optional[DatasetDict] = None
     cache_file_collector = CacheFileCollector()
-    prepared_ds_path = generate_prepared_ds_path(data_args, model_args)
+    if cehrgpt_args.tokenized_dataset_name:
+        prepared_ds_path = os.path.join(
+            data_args.dataset_prepared_path, cehrgpt_args.tokenized_dataset_name
+        )
+        if os.path.exists(prepared_ds_path):
+            LOG.warning(
+                "The dataset name %s already exists under %s",
+                cehrgpt_args.tokenized_dataset_name,
+                data_args.dataset_prepared_path,
+            )
+    else:
+        prepared_ds_path = generate_prepared_ds_path(data_args, model_args)
+
     if os.path.exists(os.path.join(data_args.data_folder, "dataset_dict.json")):
         LOG.info(f"Loading prepared dataset from disk at {data_args.data_folder}...")
         processed_dataset = load_from_disk(data_args.data_folder)
