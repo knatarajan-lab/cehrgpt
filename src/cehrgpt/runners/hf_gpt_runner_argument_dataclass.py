@@ -258,7 +258,7 @@ class CehrGPTArguments:
         metadata={"help": "The maximum number of tokens in the generation sequence"},
     )
     combine_global_local_features: Optional[bool] = dataclasses.field(
-        default=False,
+        default=True,
         metadata={
             "help": "A flag to indicate whether we want to combine global (linear prob) "
             "and local (last token hidden states) features"
