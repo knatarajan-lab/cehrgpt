@@ -38,7 +38,7 @@ from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.omop.ontology import Ontology
-from cehrgpt.runners.data_utils import get_torch_dtype
+from cehrgpt.runners.data_utils import get_torch_dtype, load_patient_splits, filter_by_patient_ids
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.runners.sample_packing_trainer import SamplePackingTrainer
@@ -369,6 +369,24 @@ def main():
                     train_set = dataset.skip(data_args.validation_split_num)
                     val_set = dataset.take(data_args.validation_split_num)
                     dataset = DatasetDict({"train": train_set, "validation": val_set})
+                elif cehrgpt_args.patient_splits_path:
+                    train_patient_ids, val_patient_ids, _ = load_patient_splits(
+                        cehrgpt_args.patient_splits_path
+                    )
+                    train_set = filter_by_patient_ids(
+                        dataset=dataset,
+                        patient_ids=train_patient_ids,
+                        data_args=data_args,
+                    )
+                    val_set = filter_by_patient_ids(
+                        dataset=dataset,
+                        patient_ids=val_patient_ids,
+                        data_args=data_args,
+                    )
+                    dataset = DatasetDict({
+                        "train": train_set,
+                        "validation" : val_set
+                    })
                 elif data_args.validation_split_percentage:
                     dataset = dataset.train_test_split(
                         test_size=data_args.validation_split_percentage,

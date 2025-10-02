@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Tuple
 
 import numpy as np
 import polars as pl
@@ -14,7 +14,7 @@ from cehrbert.runners.runner_util import (
     get_meds_extension_path,
     load_parquet_as_dataset,
 )
-from datasets import DatasetDict, concatenate_datasets, load_from_disk
+from datasets import Dataset, DatasetDict, concatenate_datasets, load_from_disk
 from meds import held_out_split, subject_id_field, train_split, tuning_split
 from transformers import TrainingArguments
 from transformers.utils import logging
@@ -138,6 +138,75 @@ def prepare_finetune_dataset(
     return final_splits
 
 
+# Helper function to apply patient-based filtering
+def filter_by_patient_ids(
+        dataset: Dataset,
+        patient_ids: List[Union[str, int]],
+        data_args: DataTrainingArguments,
+):
+    unique_ids = set(patient_ids)
+    return dataset.filter(
+        lambda batch: [pid in unique_ids for pid in batch["person_id"]],
+        num_proc=data_args.preprocessing_num_workers,
+        batched=True,
+        batch_size=data_args.preprocessing_batch_size,
+    )
+
+
+def load_patient_splits(
+        patient_splits_path: str
+) -> Tuple[List[Union[str, int]], List[Union[str, int]], List[Union[str, int]]]:
+    # If the patient_splits path is a folder (cehrgpt patient splits), then we assume that it contains a list of parquet files.
+    if os.path.isdir(patient_splits_path):
+        patient_splits = pl.read_parquet(
+            os.path.join(patient_splits_path, "*.parquet")
+        )
+    else:
+        # If the patient_splits path is a file, it must be a parquet file
+        file_parts = os.path.splitext(patient_splits_path)
+        if not file_parts or not file_parts[-1].endswith("parquet"):
+            raise ValueError(
+                f"{patient_splits_path} is not a valid patient splits path."
+            )
+        patient_splits = pl.read_parquet(patient_splits_path)
+
+    if len(patient_splits) == 0:
+        raise RuntimeError(
+            f"The patient_splits at {patient_splits_path} contains empty rows"
+        )
+    split_values = patient_splits.select("split").unique()["split"].to_list()
+    is_split_meds_schema = np.all(
+        [
+            split in split_values
+            for split in [train_split, tuning_split, held_out_split]
+        ]
+    )
+    # Auto-detect whether or not the patient splits follow the MEDS schema or not.
+    is_data_in_meds = (subject_id_field in patient_splits.columns) and is_split_meds_schema
+    if is_data_in_meds:
+        train_patient_ids = patient_splits.filter(pl.col("split") == train_split)[
+            subject_id_field
+        ].to_list()
+        val_patient_ids = patient_splits.filter(pl.col("split") == tuning_split)[
+            subject_id_field
+        ].to_list()
+        test_patient_ids = patient_splits.filter(pl.col("split") == held_out_split)[
+            subject_id_field
+        ].to_list()
+    else:
+        train_patient_ids = patient_splits.filter(pl.col("split") == "train")[
+            "person_id"
+        ].to_list()
+        val_patient_ids = patient_splits.filter(pl.col("split") == "validation")[
+            "person_id"
+        ].to_list()
+        test_patient_ids = patient_splits.filter(pl.col("split") == "test")[
+            "person_id"
+        ].to_list()
+
+    return train_patient_ids, val_patient_ids, test_patient_ids
+
+
 def create_dataset_splits(
     data_args: DataTrainingArguments,
     cehrgpt_args: CehrGPTArguments,
@@ -208,65 +277,9 @@ def create_dataset_splits(
     train_patient_ids, val_patient_ids, test_patient_ids = None, None, None
 
     if cehrgpt_args.patient_splits_path:
-        # If the patient_splits path is a folder (cehrgpt patient splits), then we assume that it contains a list of parquet files.
-        if os.path.isdir(cehrgpt_args.patient_splits_path):
-            patient_splits = pl.read_parquet(
-                os.path.join(cehrgpt_args.patient_splits_path, "*.parquet")
-            )
-        else:
-            # If the patient_splits path is a file, it must be a parquet file
-            file_parts = os.path.splitext(cehrgpt_args.patient_splits_path)
-            if not file_parts or not file_parts[-1].endswith("parquet"):
-                raise ValueError(
-                    f"{cehrgpt_args.patient_splits_path} is not a valid patient splits path."
-                )
-            patient_splits = pl.read_parquet(cehrgpt_args.patient_splits_path)
-
-        if len(patient_splits) == 0:
-            raise RuntimeError(
-                f"The patient_splits at {cehrgpt_args.patient_splits_path} contains empty rows"
-            )
-        split_values = patient_splits.select("split").unique()["split"].to_list()
-        is_split_meds_schema = np.all(
-            [
-                split in split_values
-                for split in [train_split, tuning_split, held_out_split]
-            ]
+        train_patient_ids, val_patient_ids, test_patient_ids = load_patient_splits(
+            cehrgpt_args.patient_splits_path
         )
-        # Auto-detect whether or not the patient splits follow the MEDS schema or not.
-        is_data_in_meds = (
-            subject_id_field in patient_splits.columns
-        ) and is_split_meds_schema
-        patient_splits = patient_splits.filter(
-            pl.col(subject_id_field if is_data_in_meds else "person_id").is_in(
-                unique_patient_ids
-            )
-        )
-        LOG.info(
-            f"Patient Splits Schema: %s",
-            "MEDS patient splits" if is_data_in_meds else "Traditional patient splits",
-        )
-        LOG.info("Effective patient_splits size: %s", len(patient_splits))
-        if is_data_in_meds:
-            train_patient_ids = patient_splits.filter(pl.col("split") == train_split)[
-                subject_id_field
-            ].to_list()
-            val_patient_ids = patient_splits.filter(pl.col("split") == tuning_split)[
-                subject_id_field
-            ].to_list()
-            test_patient_ids = patient_splits.filter(pl.col("split") == held_out_split)[
-                subject_id_field
-            ].to_list()
-        else:
-            train_patient_ids = patient_splits.filter(pl.col("split") == "train")[
-                "person_id"
-            ].to_list()
-            val_patient_ids = patient_splits.filter(pl.col("split") == "validation")[
-                "person_id"
-            ].to_list()
-            test_patient_ids = patient_splits.filter(pl.col("split") == "test")[
-                "person_id"
-            ].to_list()
 
     # In case that we could not retrieve the corresponding patient_ids
     if not train_patient_ids:
@@ -280,21 +293,25 @@ def create_dataset_splits(
         val_patient_ids = val_patient_ids[:validation_end]
         test_patient_ids = val_patient_ids[validation_end:]
 
-    # Helper function to apply patient-based filtering
-    def filter_by_patient_ids(patient_ids):
-        unique_ids = set(patient_ids)
-        return dataset.filter(
-            lambda batch: [pid in unique_ids for pid in batch["person_id"]],
-            num_proc=data_args.preprocessing_num_workers,
-            batched=True,
-            batch_size=data_args.preprocessing_batch_size,
-        )
-
     # Generate splits
-    train_set = filter_by_patient_ids(train_patient_ids).shuffle(seed=seed)
-    validation_set = filter_by_patient_ids(val_patient_ids)
+    train_set = filter_by_patient_ids(
+        dataset=dataset,
+        patient_ids=train_patient_ids,
+        data_args=data_args
+    ).shuffle(
+        seed=seed
+    )
+    validation_set = filter_by_patient_ids(
+        dataset=dataset,
+        patient_ids=val_patient_ids,
+        data_args=data_args,
+    )
     if not test_set:
-        test_set = filter_by_patient_ids(test_patient_ids)
+        test_set = filter_by_patient_ids(
+            dataset=dataset,
+            patient_ids=test_patient_ids,
+            data_args=data_args,
+        )
 
     LOG.info("Train size: %s", len(train_set))
     LOG.info("Validation size: %s", len(validation_set))
