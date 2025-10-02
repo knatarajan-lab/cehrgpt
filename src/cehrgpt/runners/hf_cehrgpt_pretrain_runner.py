@@ -373,6 +373,16 @@ def main():
                     train_patient_ids, val_patient_ids, _ = load_patient_splits(
                         cehrgpt_args.patient_splits_path
                     )
+                    # In case there is no validation set, we split the data into train/val randomly
+                    if not val_patient_ids:
+                        np.random.seed(seed=training_args.seed)
+                        np.random.shuffle(train_patient_ids)
+                        train_end = int(
+                            len(train_patient_ids) * (1 - data_args.validation_split_percentage)
+                        )
+                        train_patient_ids = train_patient_ids[:train_end]
+                        val_patient_ids = train_patient_ids[train_end:]
+
                     train_set = filter_by_patient_ids(
                         dataset=dataset,
                         patient_ids=train_patient_ids,
