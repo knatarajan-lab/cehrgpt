@@ -362,14 +362,10 @@ def main():
                 if prediction_time_posix.ndim == 0:
                     prediction_time_posix = np.asarray([prediction_time_posix])
 
-                prediction_time = list(
-                    map(
-                        lambda posix_time: datetime.datetime.utcfromtimestamp(
-                            posix_time
-                        ).replace(tzinfo=None),
-                        prediction_time_posix,
-                    )
-                )
+                prediction_time = [
+                    datetime.datetime.fromtimestamp(posix_time)
+                    for posix_time in prediction_time_posix
+                ]
 
                 labels = (
                     batch.pop("classifier_label")
