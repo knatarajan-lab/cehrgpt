@@ -154,7 +154,8 @@ def filter_by_patient_ids(
 
 
 def load_patient_splits(
-        patient_splits_path: str
+        patient_splits_path: str,
+        unique_patient_ids: List[Union[str, int]],
 ) -> Tuple[List[Union[str, int]], List[Union[str, int]], List[Union[str, int]]]:
     # If the patient_splits path is a folder (cehrgpt patient splits), then we assume that it contains a list of parquet files.
     if os.path.isdir(patient_splits_path):
@@ -174,6 +175,7 @@ def load_patient_splits(
         raise RuntimeError(
             f"The patient_splits at {patient_splits_path} contains empty rows"
         )
+
     split_values = patient_splits.select("split").unique()["split"].to_list()
     is_split_meds_schema = np.all(
         [
@@ -183,6 +185,13 @@ def load_patient_splits(
     )
     # Auto-detect whether or not the patient splits follow the MEDS schema or not.
     is_data_in_meds = (subject_id_field in patient_splits.columns) and is_split_meds_schema
+
+    patient_splits = patient_splits.filter(
+        pl.col(subject_id_field if is_data_in_meds else "person_id").is_in(
+            unique_patient_ids
+        )
+    )
+
     if is_data_in_meds:
         train_patient_ids = patient_splits.filter(pl.col("split") == train_split)[
             subject_id_field
@@ -278,7 +287,8 @@ def create_dataset_splits(
 
     if cehrgpt_args.patient_splits_path:
         train_patient_ids, val_patient_ids, test_patient_ids = load_patient_splits(
-            cehrgpt_args.patient_splits_path
+            cehrgpt_args.patient_splits_path,
+            unique_patient_ids
         )
 
     # In case that we could not retrieve the corresponding patient_ids
