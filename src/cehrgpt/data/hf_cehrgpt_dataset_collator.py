@@ -31,9 +31,6 @@ class CehrGptDataCollator:
         self.tokenizer = tokenizer
         self.max_length = max_length
 
-        self.vs_token_id = tokenizer.vs_token_id
-        self.ve_token_id = tokenizer.ve_token_id
-
         self.include_values = include_values
         self.include_ttv_prediction = include_ttv_prediction
         self.use_sub_time_tokenization = use_sub_time_tokenization

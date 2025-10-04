@@ -123,7 +123,6 @@ class CEHRGPTConfig(PretrainedConfig):
         bos_token_id=50256,
         eos_token_id=50256,
         lab_token_ids=None,
-        ve_token_id=None,
         scale_attn_by_inverse_layer_idx=False,
         reorder_and_upcast_attn=False,
         apply_rotary=False,
@@ -210,11 +209,6 @@ class CEHRGPTConfig(PretrainedConfig):
             and self.motor_tte_vocab_size
             and self.motor_tte_vocab_size > 0
         )
-        if self.include_motor_time_to_event and not ve_token_id:
-            raise RuntimeError(
-                f"ve_token_id must be provided when include_motor_time_to_event is True"
-            )
-        self.ve_token_id = ve_token_id
         self.motor_time_to_event_weight = motor_time_to_event_weight
         self.motor_num_time_pieces = motor_num_time_pieces
 

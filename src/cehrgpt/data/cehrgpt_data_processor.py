@@ -44,8 +44,17 @@ class CehrGptDataProcessor(DatasetMapping):
         self.tokenizer = tokenizer
         self.max_length = max_length
 
-        self.vs_token_id = tokenizer.vs_token_id
-        self.ve_token_id = tokenizer.ve_token_id
+        try:
+            self.vs_token_id = tokenizer.vs_token_id
+        except RuntimeError:
+            LOG.warning(f"vs_token_id does not exist in the tokenizer")
+            self.vs_token_id = tokenizer.pad_token_id
+
+        try:
+            self.ve_token_id = tokenizer.ve_token_id
+        except RuntimeError:
+            LOG.warning(f"ve_token_id does not exist in the tokenizer")
+            self.ve_token_id = tokenizer.pad_token_id
 
         self.shuffle_records = shuffle_records
         self.include_values = include_values
