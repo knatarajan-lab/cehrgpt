@@ -99,6 +99,7 @@ class TimeToEventModel:
                 results = self.model.generate(
                     inputs=prompt,
                     generation_config=self.generation_config,
+                    cehrgpt_tokenizer=self.tokenizer,
                 )
                 # Clear the cache
                 torch.cuda.empty_cache()
