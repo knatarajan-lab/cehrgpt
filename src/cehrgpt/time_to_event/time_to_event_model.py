@@ -63,7 +63,7 @@ class TimeToEventModel:
         self,
         tokenizer: CehrGptTokenizer,
         model: CEHRGPT2LMHeadModel,
-        outcome_events: List[str],
+        outcome_events: List[Union[str, List[str]]],
         generation_config: GenerationConfig,
         device: torch.device = torch.device("cpu"),
         batch_size: int = 32,
@@ -75,9 +75,22 @@ class TimeToEventModel:
         self.device = device
         self.batch_size = batch_size
         self.max_sequence = model.config.n_positions
+        self.is_ethos_task = isinstance(self.outcome_events[0], list)
+        self.max_outcome_token_length = max(map(len, self.outcome_events))
 
-    def is_outcome_event(self, token: str):
-        return token in self.outcome_events
+    def is_outcome_event(self, token: Union[str, List[str]]) -> bool:
+        if self.is_ethos_task:
+            for outcome_event in self.outcome_events:
+                if len(token) == len(outcome_event):
+                    if token == outcome_event:
+                        return True
+                elif len(token) > len(outcome_event):
+                    for i in range(len(token) - len(outcome_event) + 1):
+                        if token[i:i + len(outcome_event)] == outcome_event:
+                            return True
+            return False
+        else:
+            return token in self.outcome_events
 
     def simulate(
         self,
@@ -144,7 +157,8 @@ class TimeToEventModel:
                 visit_counter = 0
                 time_delta = 0
                 success = False
-                for next_token in seq[patient_history_length:]:
+                generated_trajectory = seq[patient_history_length:]
+                for i, next_token in enumerate(generated_trajectory):
                     visit_counter += int(is_visit_start(next_token))
                     if (
                         visit_counter > future_visit_end != -1
@@ -158,10 +172,16 @@ class TimeToEventModel:
                     elif (
                         visit_counter >= future_visit_start
                         and time_delta >= prediction_window_start
-                    ) and self.is_outcome_event(next_token):
-                        time_event_tuples.append((next_token, time_delta))
-                        success = True
-                        break
+                    ):
+                        if self.is_ethos_task:
+                            lookback_tokens = generated_trajectory[max(i - self.max_outcome_token_length, 0): i + 1]
+                            outcome_occurred = self.is_outcome_event(lookback_tokens)
+                        else:
+                            outcome_occurred = self.is_outcome_event(next_token)
+                        if outcome_occurred:
+                            time_event_tuples.append((next_token, time_delta))
+                            success = True
+                            break
                 if not success:
                     # This indicates the generated sequence did not satisfy the criteria
                     if future_visit_end != -1 or prediction_window_end != -1:
