@@ -76,7 +76,10 @@ class TimeToEventModel:
         self.batch_size = batch_size
         self.max_sequence = model.config.n_positions
         self.is_ethos_task = isinstance(self.outcome_events[0], list)
-        self.max_outcome_token_length = max(map(len, self.outcome_events))
+        if self.is_ethos_task:
+            self.max_outcome_token_length = max(map(len, self.outcome_events))
+        else:
+            self.max_outcome_token_length = 0
 
     def is_outcome_event(self, token: Union[str, List[str]]) -> bool:
         if self.is_ethos_task:

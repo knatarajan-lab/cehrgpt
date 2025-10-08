@@ -107,7 +107,7 @@ def main(args):
         new_outcome_events = []
         for t in concept[concept.concept_id.isin(outcome_events)].itertuples():
             new_outcome_events.append(
-                [f"{t.vocabulary_id}/{i}/part" for i, part in enumerate(t.concept_code.split("."))]
+                [f"{t.vocabulary_id}/{i}/{part}" for i, part in enumerate(t.concept_code.split("."))]
             )
         outcome_events = new_outcome_events
 
