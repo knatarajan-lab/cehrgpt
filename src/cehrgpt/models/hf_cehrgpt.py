@@ -5,7 +5,6 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn.functional as f
-from pyasn1_modules.rfc6031 import at_pskc_model
 from torch import nn
 from torch.distributions import Gamma
 from torch.nn import CrossEntropyLoss
