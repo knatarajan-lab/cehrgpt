@@ -1,8 +1,8 @@
-import datetime
 import glob
 import os
 import shutil
 import uuid
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Optional, Union
@@ -47,6 +47,32 @@ def get_torch_dtype(torch_dtype: Optional[str] = None) -> Union[torch.dtype, str
     return torch.float32
 
 
+def _ensure_1d(arr: np.ndarray) -> np.ndarray:
+    """Promote a 0-d numpy array to 1-d; leave higher-rank arrays unchanged."""
+    return np.asarray([arr]) if arr.ndim == 0 else arr
+
+
+def _create_feature_dataset(data_args, training_args, cehrgpt_args, tokenizer, cache_file_collector):
+    """Process the raw data into a tokenized DatasetDict for feature extraction."""
+    if cehrgpt_args.tokenized_full_dataset_path is not None:
+        return extract_cohort_sequences(data_args, cehrgpt_args)
+
+    final_splits = prepare_finetune_dataset(
+        data_args, training_args, cehrgpt_args, cache_file_collector
+    )
+    # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
+    if not data_args.streaming:
+        if "visit_concept_ids" in final_splits["train"].column_names:
+            final_splits = final_splits.remove_columns(["visit_concept_ids"])
+
+    return create_cehrgpt_finetuning_dataset(
+        dataset=final_splits,
+        cehrgpt_tokenizer=tokenizer,
+        data_args=data_args,
+        cache_file_collector=cache_file_collector,
+    )
+
+
 def main():
     cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
     if torch.cuda.is_available():
@@ -80,10 +106,10 @@ def main():
     )
     cache_file_collector = CacheFileCollector()
     processed_dataset = None
+
     if any(prepared_ds_path.glob("*")):
-        LOG.info(f"Loading prepared dataset from disk at {prepared_ds_path}...")
+        LOG.info("Loading prepared dataset from disk at %s...", prepared_ds_path)
         processed_dataset = load_from_disk(str(prepared_ds_path))
-        LOG.info("Prepared dataset loaded from disk...")
         if cehrgpt_args.expand_tokenizer:
             if tokenizer_exists(training_args.output_dir):
                 cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
@@ -91,52 +117,34 @@ def main():
                 )
             else:
                 LOG.warning(
-                    f"CehrGptTokenizer must exist in {training_args.output_dir} "
-                    f"when the dataset has been processed and expand_tokenizer is set to True. "
-                    f"Please delete the processed dataset at {prepared_ds_path}."
+                    "CehrGptTokenizer must exist in %s when the dataset has been processed "
+                    "and expand_tokenizer is set to True. "
+                    "Please delete the processed dataset at %s.",
+                    training_args.output_dir,
+                    prepared_ds_path,
                 )
                 processed_dataset = None
                 shutil.rmtree(prepared_ds_path)
 
     if processed_dataset is None:
         if is_main_process(training_args.local_rank):
-            # If the full dataset has been tokenized, we don't want to tokenize the cohort containing
-            # the subset of the data. We should slice out the portion of the tokenized sequences for each sample
-            if cehrgpt_args.tokenized_full_dataset_path is not None:
-                processed_dataset = extract_cohort_sequences(
-                    data_args, cehrgpt_args, cache_file_collector
-                )
-            else:
-                # Organize them into a single DatasetDict
-                final_splits = prepare_finetune_dataset(
-                    data_args, training_args, cehrgpt_args, cache_file_collector
-                )
-                # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
-                if not data_args.streaming:
-                    all_columns = final_splits["train"].column_names
-                    if "visit_concept_ids" in all_columns:
-                        final_splits = final_splits.remove_columns(
-                            ["visit_concept_ids"]
-                        )
-
-                processed_dataset = create_cehrgpt_finetuning_dataset(
-                    dataset=final_splits,
-                    cehrgpt_tokenizer=cehrgpt_tokenizer,
-                    data_args=data_args,
-                    cache_file_collector=cache_file_collector,
-                )
+            processed_dataset = _create_feature_dataset(
+                data_args, training_args, cehrgpt_args, cehrgpt_tokenizer, cache_file_collector
+            )
             if not data_args.streaming:
                 processed_dataset.save_to_disk(prepared_ds_path)
-                processed_dataset.cleanup_cache_files()
-
-            # Remove all the cached files if processed_dataset.cleanup_cache_files() did not remove them already
+                stats = processed_dataset.cleanup_cache_files()
+                LOG.info(
+                    "Clean up the cached files for the cehrgpt feature dataset: %s",
+                    stats,
+                )
             cache_file_collector.remove_cache_files()
 
         # After main-process-only operations, synchronize all processes to ensure consistency
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
 
-        # Load the dataset from disk again to in torch distributed training
+        # Load the dataset from disk again in torch distributed training
         processed_dataset = load_from_disk(str(prepared_ds_path))
 
     # Getting the existing features
@@ -178,7 +186,8 @@ def main():
         < model_args.max_position_embeddings
     ):
         LOG.info(
-            f"Increase model.config.max_position_embeddings to {model_args.max_position_embeddings}"
+            "Increase model.config.max_position_embeddings to %s",
+            model_args.max_position_embeddings,
         )
         cehrgpt_model.config.max_position_embeddings = (
             model_args.max_position_embeddings
@@ -272,7 +281,7 @@ def main():
 
         demographics_df["index_date"] = (
             demographics_df["index_date"].dt.tz_localize("UTC")
-            - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+            - datetime(1970, 1, 1, tzinfo=timezone.utc)
         ).dt.total_seconds()
 
         demographics_dict = {
@@ -286,7 +295,6 @@ def main():
     data_loaders = [("train", train_loader), ("test", test_dataloader)]
 
     for split, data_loader in data_loaders:
-        # Ensure prediction folder exists
         feature_output_folder = (
             Path(training_args.output_dir) / "features_with_label" / f"{split}_features"
         )
@@ -298,29 +306,20 @@ def main():
             for index, batch in enumerate(
                 tqdm(data_loader, desc="Generating features")
             ):
-                prediction_time_ages = (
+                prediction_time_ages = _ensure_1d(
                     batch.pop("age_at_index").numpy().astype(float).squeeze()
                 )
-                if prediction_time_ages.ndim == 0:
-                    prediction_time_ages = np.asarray([prediction_time_ages])
-
-                person_ids = batch.pop("person_id").numpy().astype(int).squeeze()
-                if person_ids.ndim == 0:
-                    person_ids = np.asarray([person_ids])
-                prediction_time_posix = batch.pop("index_date").numpy().squeeze()
-                if prediction_time_posix.ndim == 0:
-                    prediction_time_posix = np.asarray([prediction_time_posix])
-
-                prediction_time = list(
-                    map(
-                        lambda posix_time: datetime.datetime.utcfromtimestamp(
-                            posix_time
-                        ).replace(tzinfo=None),
-                        prediction_time_posix,
-                    )
+                person_ids = _ensure_1d(
+                    batch.pop("person_id").numpy().astype(int).squeeze()
                 )
-
-                labels = (
+                prediction_time_posix = _ensure_1d(
+                    batch.pop("index_date").numpy().squeeze()
+                )
+                prediction_time = [
+                    datetime.fromtimestamp(t, tz=timezone.utc).replace(tzinfo=None)
+                    for t in prediction_time_posix
+                ]
+                labels = _ensure_1d(
                     batch.pop("classifier_label")
                     .float()
                     .cpu()
@@ -328,8 +327,6 @@ def main():
                     .astype(bool)
                     .squeeze()
                 )
-                if labels.ndim == 0:
-                    labels = np.asarray([labels])
 
                 # Right now the model does not support this column, we need to pop it
                 if "epoch_times" in batch:
@@ -339,7 +336,6 @@ def main():
                     batch.pop("ages")
 
                 batch = {k: v.to(device) for k, v in batch.items()}
-                # Forward pass
                 cehrgpt_output = cehrgpt_model(
                     **batch, output_attentions=False, output_hidden_states=False
                 )
@@ -386,7 +382,6 @@ def main():
                         )
                         features = np.concatenate([features, last_features], axis=-1)
 
-                # Flatten features or handle them as a list of arrays (one array per row)
                 features_list = [feature for feature in features]
                 race_concept_ids = []
                 gender_concept_ids = []
@@ -409,7 +404,6 @@ def main():
                         "age_at_index": prediction_time_ages,
                     }
                 )
-                # Adding features as a separate column where each row contains a feature array
                 features_pd["features"] = features_list
                 features_pd["race_concept_id"] = race_concept_ids
                 features_pd["gender_concept_id"] = gender_concept_ids

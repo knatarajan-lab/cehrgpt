@@ -290,8 +290,8 @@ def create_dataset_splits(
 
     if not test_set and not test_patient_ids:
         validation_end = int(len(val_patient_ids) * data_args.test_eval_ratio)
-        val_patient_ids = val_patient_ids[:validation_end]
         test_patient_ids = val_patient_ids[validation_end:]
+        val_patient_ids = val_patient_ids[:validation_end]
 
     # Generate splits
     train_set = filter_by_patient_ids(
@@ -323,7 +323,6 @@ def create_dataset_splits(
 def extract_cohort_sequences(
     data_args: DataTrainingArguments,
     cehrgpt_args: CehrGPTArguments,
-    cache_file_collector: Optional[CacheFileCollector] = None,
 ) -> DatasetDict:
     """
     Extracts and processes cohort-specific tokenized sequences from a pre-tokenized dataset,.
@@ -345,8 +344,6 @@ def extract_cohort_sequences(
         data_args (DataTrainingArguments): Configuration parameters for data processing,
             including cohort folder, observation window, batch size, and parallelism.
         cehrgpt_args (CehrGPTArguments): Contains paths to pre-tokenized datasets and CEHR-GPT-specific arguments.
-        cache_file_collector (CacheFileCollector): Utility to register and manage dataset cache files.
-
     Returns:
         DatasetDict: A Hugging Face `DatasetDict` containing the processed datasets (e.g., train/validation/test),
                      where each entry includes sequences filtered and truncated by the observation window.
@@ -355,15 +352,24 @@ def extract_cohort_sequences(
         RuntimeError: If any `person_id` in the cohort is missing from the tokenized dataset.
     """
 
-    cohort = pl.read_parquet(os.path.join(data_args.cohort_folder, "*.parquet"))
     if data_args.is_data_in_meds:
-        cohort = cohort.rename(
-            mapping={
-                "prediction_time": "index_date",
-                "subject_id": "person_id",
-                "boolean_value": "label",
-            }
-        )
+        id_col, time_col, label_col = "subject_id", "prediction_time", "boolean_value"
+    else:
+        id_col, time_col, label_col = "person_id", "index_date", "label"
+
+    lf = pl.scan_parquet(os.path.join(data_args.cohort_folder, "**", "*.parquet"))
+    cols_to_load = [id_col, time_col]
+    if label_col in lf.schema:
+        cols_to_load.append(label_col)
+    cohort = lf.select(cols_to_load).collect()
+    LOG.info("Loaded cohort with %s rows from %s", len(cohort), data_args.cohort_folder)
+
+    if data_args.is_data_in_meds:
+        rename_map = {"subject_id": "person_id", "prediction_time": "index_date"}
+        if "boolean_value" in cohort.columns:
+            rename_map["boolean_value"] = "label"
+        cohort = cohort.rename(rename_map)
+
     all_person_ids = cohort["person_id"].unique().to_list()
     # In case the label column does not exist, we add a fake column to the dataframe so subsequent process can work
     if "label" not in cohort.columns:
@@ -392,9 +398,9 @@ def extract_cohort_sequences(
         )
     )
     LOG.info(f"person_index_date_agg: {person_index_date_agg}")
-    tokenized_person_ids = []
+    tokenized_person_ids = set()
     for _, dataset in filtered_tokenized_dataset.items():
-        tokenized_person_ids.extend(dataset["person_id"])
+        tokenized_person_ids.update(dataset["person_id"])
     missing_person_ids = [
         person_id
         for person_id in person_index_date_map.keys()

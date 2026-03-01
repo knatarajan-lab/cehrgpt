@@ -1,0 +1,17 @@
+NUM_OF_BINS = 10
+DEGREE_OF_FREEDOM = 3
+SAMPLE_SIZE = 10_000
+NA = "N/A"
+UNKNOWN_BIN = "BIN:unknown"
+NONE_BIN = "BIN:NONE"
+TOKENIZER_FILE_NAME = "cehrgpt_tokenizer.json"
+VALUE_TOKENIZER_FILE_NAME = "cehrgpt_value_tokenizer.json"
+TIME_TOKENIZER_FILE_NAME = "cehrgpt_time_tokenizer.json"
+TOKEN_TO_SUB_TIME_TOKEN_MAPPING_FILE_NAME = "token_to_sub_time_token_mapping.json"
+LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.pickle"
+LEGACY_LAB_STATS_FILE_NAME = "cehrgpt_lab_stats.json"
+CONCEPT_STATS_FILE_NAME = "cehrgpt_concept_stats.json"
+DEMOGRAPHICS_STATS_FILE_NAME = "demographics_stats.pickle"
+CONCEPT_MAPPING_FILE_NAME = "concept_name_mapping.json"
+MOTOR_TIME_TO_EVENT_TASK_INFO_FILE_NAME = "motor_time_to_event_info.pickle"
+ONTOLOGY_FILE_NAME = "ontology.pickle"
