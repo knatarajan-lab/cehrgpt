@@ -1301,9 +1301,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # Calculate the accumulative hazard
         # exp(-sum_{j} lambda_j)
         num_predictions = motor_censor_times.shape[0]
-        survival_loss = torch.exp2(time_dependent_logits + time_in_bin_log).sum() / num_predictions
+        normalizer = num_predictions * self.config.motor_tte_vocab_size
+        survival_loss = torch.exp2(time_dependent_logits + time_in_bin_log).sum() / normalizer
         event_loss = (
-            -math.log(2) * torch.where(event_in_bin, time_dependent_logits, 0).sum() / num_predictions
+            -math.log(2) * torch.where(event_in_bin, time_dependent_logits, 0).sum() / normalizer
         )
         return survival_loss + event_loss
 
