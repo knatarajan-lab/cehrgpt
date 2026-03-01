@@ -18,6 +18,7 @@ usage() {
     echo "  --disable_combine_global_local Disable combining global and local features (enabled by default)"
     echo "  --disable_add_random_token     Disable adding random token (enabled by default)"
     echo "  --tokenized_full_dataset_path=PATH Path to a pre-tokenized full dataset (optional)"
+    echo "  --observation_window=NUM       Observation window in days (optional, default: None)"
     echo ""
     echo "Example:"
     echo "  $0 --base_dir=/path/to/cohorts --dataset_prepared_path=/path/to/dataset_prepared \\"
@@ -34,6 +35,7 @@ DISABLE_SAMPLE_PACKING="false"
 DISABLE_COMBINE_GLOBAL_LOCAL="false"
 DISABLE_ADD_RANDOM_TOKEN="false"
 TOKENIZED_FULL_DATASET_PATH=""
+OBSERVATION_WINDOW=""
 
 # Parse command line arguments
 for arg in "$@"; do
@@ -76,6 +78,9 @@ for arg in "$@"; do
             ;;
         --tokenized_full_dataset_path=*)
             TOKENIZED_FULL_DATASET_PATH="${arg#*=}"
+            ;;
+        --observation_window=*)
+            OBSERVATION_WINDOW="${arg#*=}"
             ;;
         --help|-h)
             usage
@@ -189,6 +194,7 @@ log "  --disable_sample_packing=$DISABLE_SAMPLE_PACKING"
 log "  --disable_combine_global_local=$DISABLE_COMBINE_GLOBAL_LOCAL"
 log "  --disable_add_random_token=$DISABLE_ADD_RANDOM_TOKEN"
 log "  --tokenized_full_dataset_path=$TOKENIZED_FULL_DATASET_PATH"
+log "  --observation_window=$OBSERVATION_WINDOW"
 
 # Find valid cohorts and write to a temp file
 TEMP_COHORT_LIST="$LOG_DIR/cohort_list_${TIMESTAMP}.txt"
@@ -275,6 +281,10 @@ while read -r cohort_name; do
         FEATURE_CMD="$FEATURE_CMD \
         --tokenized_full_dataset_path \"$TOKENIZED_FULL_DATASET_PATH\" \
         --cohort_folder \"$BASE_DIR/$cohort_name\""
+    fi
+
+    if [ -n "$OBSERVATION_WINDOW" ]; then
+        FEATURE_CMD="$FEATURE_CMD --observation_window \"$OBSERVATION_WINDOW\""
     fi
 
     # Step 1: Feature extraction
