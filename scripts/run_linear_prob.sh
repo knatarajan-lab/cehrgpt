@@ -17,6 +17,8 @@ usage() {
     echo "  --disable_sample_packing       Disable sample packing (enabled by default)"
     echo "  --disable_combine_global_local Disable combining global and local features (enabled by default)"
     echo "  --disable_add_random_token     Disable adding random token (enabled by default)"
+    echo "  --tokenized_full_dataset_path=PATH Path to a pre-tokenized full dataset (optional)"
+    echo "  --cohort_folder=PATH           Path to the cohort folder (optional, defaults to per-cohort subdirectory)"
     echo ""
     echo "Example:"
     echo "  $0 --base_dir=/path/to/cohorts --dataset_prepared_path=/path/to/dataset_prepared \\"
@@ -32,6 +34,8 @@ TORCH_TYPE="bfloat16"
 DISABLE_SAMPLE_PACKING="false"
 DISABLE_COMBINE_GLOBAL_LOCAL="false"
 DISABLE_ADD_RANDOM_TOKEN="false"
+TOKENIZED_FULL_DATASET_PATH=""
+COHORT_FOLDER=""
 
 # Parse command line arguments
 for arg in "$@"; do
@@ -72,6 +76,12 @@ for arg in "$@"; do
         --disable_add_random_token)
             DISABLE_ADD_RANDOM_TOKEN="true"
             ;;
+        --tokenized_full_dataset_path=*)
+            TOKENIZED_FULL_DATASET_PATH="${arg#*=}"
+            ;;
+        --cohort_folder=*)
+            COHORT_FOLDER="${arg#*=}"
+            ;;
         --help|-h)
             usage
             ;;
@@ -101,6 +111,24 @@ fi
 
 if [ ! -d "$MODEL_PATH" ]; then
     echo "Error: Model path does not exist: $MODEL_PATH"
+    exit 1
+fi
+
+# tokenized_full_dataset_path and cohort_folder must be provided together
+if [ -n "$TOKENIZED_FULL_DATASET_PATH" ] && [ -z "$COHORT_FOLDER" ]; then
+    echo "Error: --cohort_folder is required when --tokenized_full_dataset_path is set"
+    exit 1
+fi
+if [ -n "$COHORT_FOLDER" ] && [ -z "$TOKENIZED_FULL_DATASET_PATH" ]; then
+    echo "Error: --tokenized_full_dataset_path is required when --cohort_folder is set"
+    exit 1
+fi
+if [ -n "$TOKENIZED_FULL_DATASET_PATH" ] && [ ! -d "$TOKENIZED_FULL_DATASET_PATH" ]; then
+    echo "Error: Tokenized full dataset path does not exist: $TOKENIZED_FULL_DATASET_PATH"
+    exit 1
+fi
+if [ -n "$COHORT_FOLDER" ] && [ ! -d "$COHORT_FOLDER" ]; then
+    echo "Error: Cohort folder does not exist: $COHORT_FOLDER"
     exit 1
 fi
 
@@ -178,6 +206,8 @@ log "  --torch_type=$TORCH_TYPE"
 log "  --disable_sample_packing=$DISABLE_SAMPLE_PACKING"
 log "  --disable_combine_global_local=$DISABLE_COMBINE_GLOBAL_LOCAL"
 log "  --disable_add_random_token=$DISABLE_ADD_RANDOM_TOKEN"
+log "  --tokenized_full_dataset_path=$TOKENIZED_FULL_DATASET_PATH"
+log "  --cohort_folder=$COHORT_FOLDER"
 
 # Find valid cohorts and write to a temp file
 TEMP_COHORT_LIST="$LOG_DIR/cohort_list_${TIMESTAMP}.txt"
@@ -251,6 +281,12 @@ while read -r cohort_name; do
 
     if [ "$DISABLE_ADD_RANDOM_TOKEN" = "false" ]; then
         FEATURE_CMD="$FEATURE_CMD --add_random_token"
+    fi
+
+    if [ -n "$TOKENIZED_FULL_DATASET_PATH" ] && [ -n "$COHORT_FOLDER" ]; then
+        FEATURE_CMD="$FEATURE_CMD \
+        --tokenized_full_dataset_path \"$TOKENIZED_FULL_DATASET_PATH\" \
+        --cohort_folder \"$COHORT_FOLDER/$cohort_name\""
     fi
 
     # Step 1: Feature extraction
