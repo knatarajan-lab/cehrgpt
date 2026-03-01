@@ -18,7 +18,6 @@ usage() {
     echo "  --disable_combine_global_local Disable combining global and local features (enabled by default)"
     echo "  --disable_add_random_token     Disable adding random token (enabled by default)"
     echo "  --tokenized_full_dataset_path=PATH Path to a pre-tokenized full dataset (optional)"
-    echo "  --cohort_folder=PATH           Path to the cohort folder (optional, defaults to per-cohort subdirectory)"
     echo ""
     echo "Example:"
     echo "  $0 --base_dir=/path/to/cohorts --dataset_prepared_path=/path/to/dataset_prepared \\"
@@ -35,7 +34,6 @@ DISABLE_SAMPLE_PACKING="false"
 DISABLE_COMBINE_GLOBAL_LOCAL="false"
 DISABLE_ADD_RANDOM_TOKEN="false"
 TOKENIZED_FULL_DATASET_PATH=""
-COHORT_FOLDER=""
 
 # Parse command line arguments
 for arg in "$@"; do
@@ -79,9 +77,6 @@ for arg in "$@"; do
         --tokenized_full_dataset_path=*)
             TOKENIZED_FULL_DATASET_PATH="${arg#*=}"
             ;;
-        --cohort_folder=*)
-            COHORT_FOLDER="${arg#*=}"
-            ;;
         --help|-h)
             usage
             ;;
@@ -114,21 +109,8 @@ if [ ! -d "$MODEL_PATH" ]; then
     exit 1
 fi
 
-# tokenized_full_dataset_path and cohort_folder must be provided together
-if [ -n "$TOKENIZED_FULL_DATASET_PATH" ] && [ -z "$COHORT_FOLDER" ]; then
-    echo "Error: --cohort_folder is required when --tokenized_full_dataset_path is set"
-    exit 1
-fi
-if [ -n "$COHORT_FOLDER" ] && [ -z "$TOKENIZED_FULL_DATASET_PATH" ]; then
-    echo "Error: --tokenized_full_dataset_path is required when --cohort_folder is set"
-    exit 1
-fi
 if [ -n "$TOKENIZED_FULL_DATASET_PATH" ] && [ ! -d "$TOKENIZED_FULL_DATASET_PATH" ]; then
     echo "Error: Tokenized full dataset path does not exist: $TOKENIZED_FULL_DATASET_PATH"
-    exit 1
-fi
-if [ -n "$COHORT_FOLDER" ] && [ ! -d "$COHORT_FOLDER" ]; then
-    echo "Error: Cohort folder does not exist: $COHORT_FOLDER"
     exit 1
 fi
 
@@ -207,15 +189,21 @@ log "  --disable_sample_packing=$DISABLE_SAMPLE_PACKING"
 log "  --disable_combine_global_local=$DISABLE_COMBINE_GLOBAL_LOCAL"
 log "  --disable_add_random_token=$DISABLE_ADD_RANDOM_TOKEN"
 log "  --tokenized_full_dataset_path=$TOKENIZED_FULL_DATASET_PATH"
-log "  --cohort_folder=$COHORT_FOLDER"
 
 # Find valid cohorts and write to a temp file
 TEMP_COHORT_LIST="$LOG_DIR/cohort_list_${TIMESTAMP}.txt"
 > "$TEMP_COHORT_LIST" # Clear the file
 
-# Find all valid cohorts (directories with train and test subdirectories)
+# Find all valid cohorts
+# When tokenized_full_dataset_path is set, any subdirectory is a valid cohort.
+# Otherwise require train/ and test/ subdirectories.
 for cohort_dir in "$BASE_DIR"/*; do
-    if [ -d "$cohort_dir" ] && [ -d "$cohort_dir/train" ] && [ -d "$cohort_dir/test" ]; then
+    if [ -n "$TOKENIZED_FULL_DATASET_PATH" ]; then
+        if [ -d "$cohort_dir" ]; then
+            cohort_name=$(basename "$cohort_dir")
+            echo "$cohort_name" >> "$TEMP_COHORT_LIST"
+        fi
+    elif [ -d "$cohort_dir" ] && [ -d "$cohort_dir/train" ] && [ -d "$cohort_dir/test" ]; then
         cohort_name=$(basename "$cohort_dir")
         echo "$cohort_name" >> "$TEMP_COHORT_LIST"
     fi
@@ -283,10 +271,10 @@ while read -r cohort_name; do
         FEATURE_CMD="$FEATURE_CMD --add_random_token"
     fi
 
-    if [ -n "$TOKENIZED_FULL_DATASET_PATH" ] && [ -n "$COHORT_FOLDER" ]; then
+    if [ -n "$TOKENIZED_FULL_DATASET_PATH" ]; then
         FEATURE_CMD="$FEATURE_CMD \
         --tokenized_full_dataset_path \"$TOKENIZED_FULL_DATASET_PATH\" \
-        --cohort_folder \"$COHORT_FOLDER/$cohort_name\""
+        --cohort_folder \"$BASE_DIR/$cohort_name\""
     fi
 
     # Step 1: Feature extraction
