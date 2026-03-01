@@ -69,34 +69,34 @@ def map_motor_tte_statistics(
         batch: Dict[str, Any],
         allowed_motor_codes: List[str],
 ) -> Dict[str, Any]:
+    allowed_motor_codes_set = set(allowed_motor_codes)
     motor_event_times = femr.stat_utils.ReservoirSampler(100_000)
     task_tte_stats: Dict[str, int] = collections.defaultdict(int)
     task_censor_stats: Dict[str, int] = collections.defaultdict(int)
     for concept_ids, epoch_times in zip(batch["concept_ids"], batch["epoch_times"]):
-        censor_time = epoch_times[-1]
-        # First, collect TTE data in reverse chronological order
-        code_time_dict = collections.defaultdict(int)
-        # Reverse walk through concept_ids to calculate TTE from each [VE] point
+        # Reverse walk through concept_ids to calculate TTE from each prediction point
+        code_time_dict: Dict[str, float] = {}
+        num_predictions = 0
         for concept_id, current_time in zip(reversed(concept_ids), reversed(epoch_times)):
-            # For ATT token and the time duration is greater tha 0
             if is_att_token(concept_id) and extract_time_interval_in_days(concept_id) > 0:
-                for motor_code in allowed_motor_codes:
-                    # Keep track of the time to event value
-                    if motor_code in code_time_dict:
-                        tte = (code_time_dict[motor_code] - current_time) / 86400
-                        is_censored = False
-                    else:
-                        tte = (censor_time - current_time) / 86400
-                        is_censored = True
-
-                    if is_censored:
-                        task_censor_stats[motor_code] += 1
-                    else:
-                        motor_event_times.add(tte, 1)
-                        task_tte_stats[motor_code] += 1
-
-            else:
+                num_predictions += 1
+                # Only iterate over observed motor codes — O(observed) not O(all motor codes)
+                for motor_code, motor_time in code_time_dict.items():
+                    tte = (motor_time - current_time) / 86400
+                    motor_event_times.add(tte, 1)
+                    task_tte_stats[motor_code] += 1
+            elif concept_id in allowed_motor_codes_set:
+                if concept_id not in code_time_dict:
+                    # First (nearest) occurrence in reverse walk = last occurrence in forward.
+                    # num_predictions is the count of ATTs seen so far, all of which occur
+                    # *after* this position in forward time — so the code was censored at each.
+                    task_censor_stats[concept_id] += num_predictions
                 code_time_dict[concept_id] = current_time
+
+        # Motor codes never observed: every prediction point was censored
+        for motor_code in allowed_motor_codes:
+            if motor_code not in code_time_dict:
+                task_censor_stats[motor_code] += num_predictions
 
     return {
         "motor_event_times": motor_event_times,
