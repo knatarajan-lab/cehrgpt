@@ -1300,21 +1300,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # Compute event loss
         # Calculate the accumulative hazard
         # exp(-sum_{j} lambda_j)
-        survival_loss = torch.exp2(time_dependent_logits + time_in_bin_log).mean()
+        num_predictions = motor_censor_times.shape[0]
+        survival_loss = torch.exp2(time_dependent_logits + time_in_bin_log).sum() / num_predictions
         event_loss = (
-            -math.log(2) * torch.where(event_in_bin, time_dependent_logits, 0).mean()
+            -math.log(2) * torch.where(event_in_bin, time_dependent_logits, 0).sum() / num_predictions
         )
-
-        # survival_loss = (
-        #     torch.where(motor_tte_masks, lambda_p * motor_tte_times, 0)
-        #     .sum(dim=1)
-        #     .mean()
-        # )
-        # event_loss = (
-        #     -torch.where(motor_tte_event_indicators, torch.log(lambda_p), 0)
-        #     .sum(dim=1)
-        #     .mean()
-        # )
         return survival_loss + event_loss
 
     def forward(
@@ -1449,7 +1439,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # Shift so that tokens < n predict n
             shift_logits = lm_logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-            valid_tokens: torch.BoolTensor = shift_labels != 100
+            valid_tokens: torch.BoolTensor = shift_labels != -100
             total_num_tokens = valid_tokens.sum()
             if (
                 self.cehrgpt.config.lab_token_penalty
