@@ -236,7 +236,6 @@ def map_motor_tte_statistics(
         allowed_motor_codes: List[str],
 ) -> Dict[str, Any]:
     motor_event_times = femr.stat_utils.ReservoirSampler(100_000)
-    motor_time_to_event_or_censor_times = femr.stat_utils.ReservoirSampler(100_000)
     task_tte_stats: Dict[str, int] = collections.defaultdict(int)
     task_censor_stats: Dict[str, int] = collections.defaultdict(int)
     for concept_ids, epoch_times in zip(batch["concept_ids"], batch["epoch_times"]):
@@ -261,13 +260,12 @@ def map_motor_tte_statistics(
                     else:
                         motor_event_times.add(tte, 1)
                         task_tte_stats[motor_code] += 1
-                    motor_time_to_event_or_censor_times.add(tte, 1)
+
             else:
                 code_time_dict[concept_id] = current_time
 
     return {
         "motor_event_times": motor_event_times,
-        "motor_time_to_event_or_censor_times": motor_time_to_event_or_censor_times,
         "task_tte_stats": task_tte_stats,
         "task_censor_stats": task_censor_stats,
     }
@@ -308,9 +306,6 @@ def compute_motor_tte_statistics(
             current = fixed_stat
         else:
             current["motor_event_times"].combine(fixed_stat["motor_event_times"])
-            current["motor_time_to_event_or_censor_times"].combine(
-                fixed_stat["motor_time_to_event_or_censor_times"]
-            )
             for k, v in fixed_stat["task_tte_stats"].items():
                 current["task_tte_stats"][k] += v
             for k, v in fixed_stat["task_censor_stats"].items():
