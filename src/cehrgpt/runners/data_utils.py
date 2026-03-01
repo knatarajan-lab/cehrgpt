@@ -352,15 +352,23 @@ def extract_cohort_sequences(
         RuntimeError: If any `person_id` in the cohort is missing from the tokenized dataset.
     """
 
-    cohort = pl.read_parquet(os.path.join(data_args.cohort_folder, "*.parquet"))
     if data_args.is_data_in_meds:
-        cohort = cohort.rename(
-            mapping={
-                "prediction_time": "index_date",
-                "subject_id": "person_id",
-                "boolean_value": "label",
-            }
-        )
+        id_col, time_col, label_col = "subject_id", "prediction_time", "boolean_value"
+    else:
+        id_col, time_col, label_col = "person_id", "index_date", "label"
+
+    lf = pl.scan_parquet(os.path.join(data_args.cohort_folder, "**", "*.parquet"))
+    cols_to_load = [id_col, time_col]
+    if label_col in lf.schema:
+        cols_to_load.append(label_col)
+    cohort = lf.select(cols_to_load).collect()
+
+    if data_args.is_data_in_meds:
+        rename_map = {"subject_id": "person_id", "prediction_time": "index_date"}
+        if "boolean_value" in cohort.columns:
+            rename_map["boolean_value"] = "label"
+        cohort = cohort.rename(rename_map)
+
     all_person_ids = cohort["person_id"].unique().to_list()
     # In case the label column does not exist, we add a fake column to the dataframe so subsequent process can work
     if "label" not in cohort.columns:
