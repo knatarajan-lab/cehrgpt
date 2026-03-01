@@ -290,8 +290,8 @@ def create_dataset_splits(
 
     if not test_set and not test_patient_ids:
         validation_end = int(len(val_patient_ids) * data_args.test_eval_ratio)
-        val_patient_ids = val_patient_ids[:validation_end]
         test_patient_ids = val_patient_ids[validation_end:]
+        val_patient_ids = val_patient_ids[:validation_end]
 
     # Generate splits
     train_set = filter_by_patient_ids(
@@ -323,7 +323,6 @@ def create_dataset_splits(
 def extract_cohort_sequences(
     data_args: DataTrainingArguments,
     cehrgpt_args: CehrGPTArguments,
-    cache_file_collector: Optional[CacheFileCollector] = None,
 ) -> DatasetDict:
     """
     Extracts and processes cohort-specific tokenized sequences from a pre-tokenized dataset,.
@@ -345,8 +344,6 @@ def extract_cohort_sequences(
         data_args (DataTrainingArguments): Configuration parameters for data processing,
             including cohort folder, observation window, batch size, and parallelism.
         cehrgpt_args (CehrGPTArguments): Contains paths to pre-tokenized datasets and CEHR-GPT-specific arguments.
-        cache_file_collector (CacheFileCollector): Utility to register and manage dataset cache files.
-
     Returns:
         DatasetDict: A Hugging Face `DatasetDict` containing the processed datasets (e.g., train/validation/test),
                      where each entry includes sequences filtered and truncated by the observation window.
@@ -392,9 +389,9 @@ def extract_cohort_sequences(
         )
     )
     LOG.info(f"person_index_date_agg: {person_index_date_agg}")
-    tokenized_person_ids = []
+    tokenized_person_ids = set()
     for _, dataset in filtered_tokenized_dataset.items():
-        tokenized_person_ids.extend(dataset["person_id"])
+        tokenized_person_ids.update(dataset["person_id"])
     missing_person_ids = [
         person_id
         for person_id in person_index_date_map.keys()
