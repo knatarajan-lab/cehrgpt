@@ -25,28 +25,24 @@ class LinearProbBlock(nn.Module):
 
     def forward(
         self,
-        linear_prob_hidden_states: Optional[Tuple[torch.FloatTensor]],
+        hidden_states: Optional[Tuple[torch.FloatTensor]],
         encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
     ) -> torch.Tensor:
-        residual = linear_prob_hidden_states
-        linear_prob_hidden_states = self.ln_1(linear_prob_hidden_states)
+        residual = hidden_states
+        hidden_states = self.ln_1(hidden_states)
         # We disable the causal attention between linear probing tokens
         cross_attn_outputs = self.crossattention(
-            linear_prob_hidden_states,
+            hidden_states,
             attention_mask=None,
             head_mask=None,
             encoder_hidden_states=encoder_hidden_states,
             encoder_attention_mask=encoder_attention_mask,
             output_attentions=False,
         )
-        attn_output = cross_attn_outputs[0]
-        # residual connection
-        linear_prob_hidden_states = residual + attn_output
+        hidden_states = residual + cross_attn_outputs[0]
+        residual = hidden_states
 
-        linear_prob_hidden_states = self.ln_2(linear_prob_hidden_states)
-
-        feed_forward_hidden_states = self.mlp(linear_prob_hidden_states)
-        # residual connection
-        linear_prob_hidden_states = residual + feed_forward_hidden_states
-        return linear_prob_hidden_states
+        hidden_states = self.ln_2(hidden_states)
+        hidden_states = residual + self.mlp(hidden_states)
+        return hidden_states

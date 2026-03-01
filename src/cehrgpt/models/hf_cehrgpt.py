@@ -1006,7 +1006,7 @@ class LinearProbModule(CEHRGPTPreTrainedModel):
                 )
             else:
                 linear_prob_hidden_state = linear_prob_layer(
-                    linear_prob_hidden_states=linear_prob_hidden_state,
+                    hidden_states=linear_prob_hidden_state,
                     encoder_hidden_states=encoder_hidden_states,
                     encoder_attention_mask=encoder_attention_mask,
                 )
