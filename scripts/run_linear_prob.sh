@@ -16,7 +16,7 @@ usage() {
     echo "  --torch_type=TYPE              Torch data type (default: float32)"
     echo "  --disable_sample_packing       Disable sample packing (enabled by default)"
     echo "  --disable_combine_global_local Disable combining global and local features (enabled by default)"
-    echo "  --disable_add_random_token     Disable adding random token (enabled by default)"
+    echo "  --add_random_token             Enable adding random token (disabled by default)"
     echo "  --tokenized_full_dataset_path=PATH Path to a pre-tokenized full dataset (optional)"
     echo "  --observation_window=NUM       Observation window in days (optional, default: None)"
     echo ""
@@ -33,7 +33,7 @@ MAX_TOKENS_PER_BATCH="16384"
 TORCH_TYPE="bfloat16"
 DISABLE_SAMPLE_PACKING="false"
 DISABLE_COMBINE_GLOBAL_LOCAL="false"
-DISABLE_ADD_RANDOM_TOKEN="false"
+ADD_RANDOM_TOKEN="false"
 TOKENIZED_FULL_DATASET_PATH=""
 OBSERVATION_WINDOW=""
 
@@ -73,8 +73,8 @@ for arg in "$@"; do
         --disable_combine_global_local)
             DISABLE_COMBINE_GLOBAL_LOCAL="true"
             ;;
-        --disable_add_random_token)
-            DISABLE_ADD_RANDOM_TOKEN="true"
+        --add_random_token)
+            ADD_RANDOM_TOKEN="true"
             ;;
         --tokenized_full_dataset_path=*)
             TOKENIZED_FULL_DATASET_PATH="${arg#*=}"
@@ -161,10 +161,6 @@ if [ "$DISABLE_COMBINE_GLOBAL_LOCAL" != "true" ] && [ "$DISABLE_COMBINE_GLOBAL_L
     exit 1
 fi
 
-if [ "$DISABLE_ADD_RANDOM_TOKEN" != "true" ] && [ "$DISABLE_ADD_RANDOM_TOKEN" != "false" ]; then
-    echo "Error: disable_add_random_token must be 'true' or 'false': $DISABLE_ADD_RANDOM_TOKEN"
-    exit 1
-fi
 
 # Log file setup
 LOG_DIR="$BASE_DIR/logs"
@@ -192,7 +188,7 @@ log "  --max_tokens_per_batch=$MAX_TOKENS_PER_BATCH"
 log "  --torch_type=$TORCH_TYPE"
 log "  --disable_sample_packing=$DISABLE_SAMPLE_PACKING"
 log "  --disable_combine_global_local=$DISABLE_COMBINE_GLOBAL_LOCAL"
-log "  --disable_add_random_token=$DISABLE_ADD_RANDOM_TOKEN"
+log "  --add_random_token=$ADD_RANDOM_TOKEN"
 log "  --tokenized_full_dataset_path=$TOKENIZED_FULL_DATASET_PATH"
 log "  --observation_window=$OBSERVATION_WINDOW"
 
@@ -273,7 +269,7 @@ while read -r cohort_name; do
         FEATURE_CMD="$FEATURE_CMD --combine_global_local_features"
     fi
 
-    if [ "$DISABLE_ADD_RANDOM_TOKEN" = "false" ]; then
+    if [ "$ADD_RANDOM_TOKEN" = "true" ]; then
         FEATURE_CMD="$FEATURE_CMD --add_random_token"
     fi
 
