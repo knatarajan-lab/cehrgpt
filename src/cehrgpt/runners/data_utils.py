@@ -362,6 +362,7 @@ def extract_cohort_sequences(
     if label_col in lf.schema:
         cols_to_load.append(label_col)
     cohort = lf.select(cols_to_load).collect()
+    LOG.info("Loaded cohort with %s rows from %s", len(cohort), data_args.cohort_folder)
 
     if data_args.is_data_in_meds:
         rename_map = {"subject_id": "person_id", "prediction_time": "index_date"}
