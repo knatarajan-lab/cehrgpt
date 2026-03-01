@@ -251,6 +251,141 @@ def load_and_create_model(
     return model
 
 
+
+def _load_parquet_dataset(
+    data_args: DataTrainingArguments,
+    cehrgpt_args: CehrGPTArguments,
+    training_args,
+) -> DatasetDict:
+    """Load and split the raw parquet dataset into train/validation/(optional) test splits."""
+    dataset = load_parquet_as_dataset(
+        os.path.expanduser(data_args.data_folder),
+        split="train",
+        streaming=data_args.streaming,
+    )
+
+    # Streaming: split by count
+    if data_args.streaming and data_args.validation_split_num:
+        dataset = dataset.shuffle(buffer_size=10_000, seed=training_args.seed)
+        return DatasetDict({
+            "train": dataset.skip(data_args.validation_split_num),
+            "validation": dataset.take(data_args.validation_split_num),
+        })
+
+    # Split by explicit patient ID lists
+    if cehrgpt_args.patient_splits_path:
+        train_patient_ids, val_patient_ids, test_patient_ids = load_patient_splits(
+            cehrgpt_args.patient_splits_path
+        )
+        if not val_patient_ids:
+            np.random.seed(seed=training_args.seed)
+            np.random.shuffle(train_patient_ids)
+            train_end = int(
+                len(train_patient_ids) * (1 - data_args.validation_split_percentage)
+            )
+            train_patient_ids = train_patient_ids[:train_end]
+            val_patient_ids = train_patient_ids[train_end:]
+
+        # Take the union of data_folder and test_data_folder so all splits can be
+        # filtered uniformly from one combined dataset.
+        if data_args.test_data_folder:
+            test_dataset = load_parquet_as_dataset(
+                os.path.expanduser(data_args.test_data_folder),
+                split="train",
+            )
+            dataset = datasets.concatenate_datasets([dataset, test_dataset])
+
+        train_set = filter_by_patient_ids(
+            dataset=dataset, patient_ids=train_patient_ids, data_args=data_args
+        )
+        val_set = filter_by_patient_ids(
+            dataset=dataset, patient_ids=val_patient_ids, data_args=data_args
+        )
+        splits = {"train": train_set, "validation": val_set}
+        if test_patient_ids:
+            test_set = filter_by_patient_ids(
+                dataset=dataset, patient_ids=test_patient_ids, data_args=data_args
+            )
+            if len(test_set) > 0:
+                splits["test"] = test_set
+        return DatasetDict(splits)
+
+    # Split by percentage
+    if data_args.validation_split_percentage:
+        split = dataset.train_test_split(
+            test_size=data_args.validation_split_percentage, seed=training_args.seed
+        )
+        splits = {"train": split["train"], "validation": split["test"]}
+        if data_args.test_data_folder:
+            test_set = load_parquet_as_dataset(
+                os.path.expanduser(data_args.test_data_folder), split="train"
+            )
+            if len(test_set) > 0:
+                splits["test"] = test_set
+        return DatasetDict(splits)
+
+    raise RuntimeError(
+        f"Can not split the data. If streaming is enabled, validation_split_num needs to be "
+        f"defined, otherwise validation_split_percentage needs to be provided. "
+        f"The current values are:\n"
+        f"validation_split_percentage: {data_args.validation_split_percentage}\n"
+        f"validation_split_num: {data_args.validation_split_num}\n"
+        f"streaming: {data_args.streaming}"
+    )
+
+
+def _load_meds_dataset(
+    data_args: DataTrainingArguments,
+    cehrgpt_args: CehrGPTArguments,
+    training_args,
+    cache_file_collector: CacheFileCollector,
+) -> DatasetDict:
+    """Load (or create and cache) the MEDS-formatted dataset."""
+    meds_extension_path = get_meds_extension_path(
+        data_folder=data_args.data_folder,
+        dataset_prepared_path=data_args.dataset_prepared_path,
+    )
+    try:
+        LOG.info(
+            "Trying to load the MEDS extension from disk at %s...", meds_extension_path
+        )
+        dataset = load_from_disk(meds_extension_path)
+        if data_args.streaming:
+            if isinstance(dataset, DatasetDict):
+                dataset = {
+                    k: v.to_iterable_dataset(
+                        num_shards=training_args.dataloader_num_workers
+                    )
+                    for k, v in dataset.items()
+                }
+            else:
+                dataset = dataset.to_iterable_dataset(
+                    num_shards=training_args.dataloader_num_workers
+                )
+    except FileNotFoundError as e:
+        LOG.warning(e)
+        dataset = create_dataset_from_meds_reader(
+            data_args=data_args,
+            dataset_mappings=[
+                MedToCehrGPTDatasetMapping(
+                    data_args=data_args,
+                    include_inpatient_hour_token=cehrgpt_args.include_inpatient_hour_token,
+                )
+            ],
+            cache_file_collector=cache_file_collector,
+        )
+        if not data_args.streaming:
+            dataset.save_to_disk(str(meds_extension_path))
+            stats = dataset.cleanup_cache_files()
+            LOG.info(
+                "Clean up the cached files for the cehrgpt dataset transformed from the MEDS: %s",
+                stats,
+            )
+            cache_file_collector.remove_cache_files()
+            dataset = load_from_disk(str(meds_extension_path))
+    return dataset
+
+
 def main():
     cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
     if cehrgpt_args.sample_packing and data_args.streaming:
@@ -269,6 +404,7 @@ def main():
 
     processed_dataset: Optional[DatasetDict] = None
     cache_file_collector = CacheFileCollector()
+
     if cehrgpt_args.tokenized_dataset_name:
         prepared_ds_path = Path(
             os.path.join(
@@ -284,28 +420,17 @@ def main():
     else:
         prepared_ds_path = generate_prepared_ds_path(data_args, model_args)
 
+    # Determine if an already-tokenized dataset exists and where it lives
     if os.path.exists(os.path.join(data_args.data_folder, "dataset_dict.json")):
-        LOG.info(f"Loading prepared dataset from disk at {data_args.data_folder}...")
-        processed_dataset = load_from_disk(data_args.data_folder)
-        # If the data has been processed in the past, it's assume the tokenizer has been created before.
-        # we load the CEHR-GPT tokenizer from the output folder, otherwise an exception will be raised.
-        tokenizer_name_or_path = os.path.expanduser(
-            training_args.output_dir
-            if cehrgpt_args.expand_tokenizer
-            else model_args.tokenizer_name_or_path
-        )
-        if not tokenizer_exists(tokenizer_name_or_path):
-            raise RuntimeError(
-                f"The dataset has been tokenized but the corresponding tokenizer: "
-                f"{model_args.tokenizer_name_or_path} does not exist"
-            )
-        cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_name_or_path)
+        already_tokenized_path = data_args.data_folder
     elif any(prepared_ds_path.glob("*")):
-        LOG.info(f"Loading prepared dataset from disk at {prepared_ds_path}...")
-        processed_dataset = load_from_disk(str(prepared_ds_path))
-        LOG.info("Prepared dataset loaded from disk...")
-        # If the data has been processed in the past, it's assume the tokenizer has been created before.
-        # we load the CEHR-GPT tokenizer from the output folder, otherwise an exception will be raised.
+        already_tokenized_path = str(prepared_ds_path)
+    else:
+        already_tokenized_path = None
+
+    if already_tokenized_path is not None:
+        LOG.info("Loading prepared dataset from disk at %s...", already_tokenized_path)
+        processed_dataset = load_from_disk(already_tokenized_path)
         tokenizer_name_or_path = os.path.expanduser(
             training_args.output_dir
             if cehrgpt_args.expand_tokenizer
@@ -321,116 +446,13 @@ def main():
         # Only run tokenization and data transformation in the main process in torch distributed training
         # otherwise the multiple processes will create tokenizers at the same time
         if is_main_process(training_args.local_rank):
-            # If the data is in the MEDS format, we need to convert it to the CEHR-BERT format
             if data_args.is_data_in_meds:
-                meds_extension_path = get_meds_extension_path(
-                    data_folder=data_args.data_folder,
-                    dataset_prepared_path=data_args.dataset_prepared_path,
+                dataset = _load_meds_dataset(
+                    data_args, cehrgpt_args, training_args, cache_file_collector
                 )
-                try:
-                    LOG.info(
-                        "Trying to load the MEDS extension from disk at %s...",
-                        meds_extension_path,
-                    )
-                    dataset = load_from_disk(meds_extension_path)
-                    if data_args.streaming:
-                        if isinstance(dataset, DatasetDict):
-                            dataset = {
-                                k: v.to_iterable_dataset(
-                                    num_shards=training_args.dataloader_num_workers
-                                )
-                                for k, v in dataset.items()
-                            }
-                        else:
-                            dataset = dataset.to_iterable_dataset(
-                                num_shards=training_args.dataloader_num_workers
-                            )
-                except FileNotFoundError as e:
-                    LOG.warning(e)
-                    dataset = create_dataset_from_meds_reader(
-                        data_args=data_args,
-                        dataset_mappings=[
-                            MedToCehrGPTDatasetMapping(
-                                data_args=data_args,
-                                include_inpatient_hour_token=cehrgpt_args.include_inpatient_hour_token,
-                            )
-                        ],
-                        cache_file_collector=cache_file_collector,
-                    )
-                    if not data_args.streaming:
-                        dataset.save_to_disk(str(meds_extension_path))
-                        stats = dataset.cleanup_cache_files()
-                        LOG.info(
-                            "Clean up the cached files for the cehrgpt dataset transformed from the MEDS: %s",
-                            stats,
-                        )
-                        # Clean up the files created from the data generator
-                        cache_file_collector.remove_cache_files()
-                        dataset = load_from_disk(str(meds_extension_path))
             else:
-                # Load the dataset from the parquet files
-                dataset = load_parquet_as_dataset(
-                    os.path.expanduser(data_args.data_folder),
-                    split="train",
-                    streaming=data_args.streaming,
-                )
-                # If streaming is enabled, we need to manually split the data into train/val
-                if data_args.streaming and data_args.validation_split_num:
-                    dataset = dataset.shuffle(
-                        buffer_size=10_000, seed=training_args.seed
-                    )
-                    train_set = dataset.skip(data_args.validation_split_num)
-                    val_set = dataset.take(data_args.validation_split_num)
-                    dataset = DatasetDict({"train": train_set, "validation": val_set})
-                elif cehrgpt_args.patient_splits_path:
-                    unique_patient_ids = dataset.unique("person_id")
-                    train_patient_ids, val_patient_ids, _ = load_patient_splits(
-                        cehrgpt_args.patient_splits_path,
-                        unique_patient_ids,
-                    )
-                    # In case there is no validation set, we split the data into train/val randomly
-                    if not val_patient_ids:
-                        np.random.seed(seed=training_args.seed)
-                        np.random.shuffle(unique_patient_ids)
-                        train_end = int(
-                            len(unique_patient_ids) * (1 - data_args.validation_split_percentage)
-                        )
-                        train_patient_ids = unique_patient_ids[:train_end]
-                        val_patient_ids = unique_patient_ids[train_end:]
+                dataset = _load_parquet_dataset(data_args, cehrgpt_args, training_args)
 
-                    train_set = filter_by_patient_ids(
-                        dataset=dataset,
-                        patient_ids=train_patient_ids,
-                        data_args=data_args,
-                    )
-                    val_set = filter_by_patient_ids(
-                        dataset=dataset,
-                        patient_ids=val_patient_ids,
-                        data_args=data_args,
-                    )
-                    dataset = DatasetDict({
-                        "train": train_set,
-                        "validation" : val_set
-                    })
-                elif data_args.validation_split_percentage:
-                    dataset = dataset.train_test_split(
-                        test_size=data_args.validation_split_percentage,
-                        seed=training_args.seed,
-                    )
-                    dataset = DatasetDict(
-                        {"train": dataset["train"], "validation": dataset["test"]}
-                    )
-                else:
-                    raise RuntimeError(
-                        f"Can not split the data. If streaming is enabled, validation_split_num needs to be "
-                        f"defined, otherwise validation_split_percentage needs to be provided. "
-                        f"The current values are:\n"
-                        f"validation_split_percentage: {data_args.validation_split_percentage}\n"
-                        f"validation_split_num: {data_args.validation_split_num}\n"
-                        f"streaming: {data_args.streaming}"
-                    )
-
-            # Create the CEHR-GPT tokenizer if it's not available in the output folder
             cehrgpt_tokenizer = load_and_create_tokenizer(
                 data_args=data_args,
                 model_args=model_args,
@@ -467,14 +489,14 @@ def main():
                 if "visit_concept_ids" in all_columns:
                     dataset = dataset.remove_columns(["visit_concept_ids"])
 
-            # sort the patient features chronologically and tokenize the data
+            # Sort the patient features chronologically and tokenize the data
             processed_dataset = create_cehrgpt_pretraining_dataset(
                 dataset=dataset,
                 cehrgpt_tokenizer=cehrgpt_tokenizer,
                 data_args=data_args,
                 cache_file_collector=cache_file_collector,
             )
-            # only save the data to the disk if it is not streaming
+            # Only save the data to disk if it is not streaming
             if not data_args.streaming:
                 processed_dataset.save_to_disk(str(prepared_ds_path))
                 stats = processed_dataset.cleanup_cache_files()

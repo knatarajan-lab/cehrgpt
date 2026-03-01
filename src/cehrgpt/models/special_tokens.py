@@ -1,32 +1,13 @@
-# Special tokens for the cehr-gpt tokenizer
-START_TOKEN = "[START]"
-END_TOKEN = "[END]"
-PAD_TOKEN = "[PAD]"
-OUT_OF_VOCABULARY_TOKEN = "[OOV]"
-LINEAR_PROB_TOKEN = "[LINEAR_PROB]"
-RANDOM_TOKEN = "[RANDOM]"
+# Backward-compatibility shim — do not remove.
+# special_tokens has moved to cehrgpt.tokenization.special_tokens.
 
-# OMOP CONCEPT IDs
-VISIT_CONCEPT_IDS = [
-    "9202",
-    "9203",
-    "581477",
-    "9201",
-    "5083",
-    "262",
-    "38004250",
-    "0",
-    "8883",
-    "38004238",
-    "38004251",
-    "38004222",
-    "38004268",
-    "38004228",
-    "32693",
-    "8971",
-    "38004269",
-    "38004193",
-    "32036",
-    "8782",
-]
-DISCHARGE_CONCEPT_IDS = []
+from cehrgpt.tokenization.special_tokens import (  # noqa: F401
+    DISCHARGE_CONCEPT_IDS,
+    END_TOKEN,
+    LINEAR_PROB_TOKEN,
+    OUT_OF_VOCABULARY_TOKEN,
+    PAD_TOKEN,
+    RANDOM_TOKEN,
+    START_TOKEN,
+    VISIT_CONCEPT_IDS,
+)
