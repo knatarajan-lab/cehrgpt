@@ -235,6 +235,7 @@ while read -r cohort_name; do
     # Check if metrics file exists to determine if cohort has already been processed
     if [ -f "$metrics_file" ]; then
         log "Skipping cohort $cohort_name: results already exist at $metrics_file"
+        log "$(cat "$metrics_file")"
         continue
     fi
 
