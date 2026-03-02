@@ -230,11 +230,11 @@ while read -r cohort_name; do
     # Remove trailing slash from OUTPUT_DIR if present, then add cohort_name
     cohort_dir="${OUTPUT_DIR%/}/$cohort_name"
     output_dir="$cohort_dir/$MODEL_NAME"
-    metrics_file="$output_dir/logistic/metrics.json"
+    results_file="$output_dir/logistic/results.json"
 
-    # Check if metrics file exists to determine if cohort has been processed
-    if [ -f "$metrics_file" ]; then
-        log "Skipping cohort $cohort_name: metrics file already exists at $metrics_file"
+    # Check if results file exists to determine if cohort has already been processed
+    if [ -f "$results_file" ]; then
+        log "Skipping cohort $cohort_name: results already exist at $results_file"
         continue
     fi
 
