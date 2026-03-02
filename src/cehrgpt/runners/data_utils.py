@@ -417,9 +417,10 @@ def extract_cohort_sequences(
         if person_id not in tokenized_person_ids
     ]
     if missing_person_ids:
-        raise RuntimeError(
-            f"There are {len(missing_person_ids)} missing in the tokenized dataset. "
-            f"The list contains: {missing_person_ids}"
+        LOG.warning(
+            "There are %s missing in the tokenized dataset. The list contains: %s",
+            len(missing_person_ids),
+            missing_person_ids,
         )
     processed_dataset = filtered_tokenized_dataset.map(
         ExtractTokenizedSequenceDataMapping(
