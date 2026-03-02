@@ -41,7 +41,7 @@ from cehrgpt.omop.ontology import Ontology
 from cehrgpt.runners.data_utils import get_torch_dtype, load_patient_splits, filter_by_patient_ids
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
-from cehrgpt.runners.sample_packing_trainer import SamplePackingTrainer
+from cehrgpt.runners.sample_packing_trainer import CehrGptTrainer, SamplePackingTrainer
 
 LOG = logging.get_logger("transformers")
 
@@ -666,7 +666,7 @@ def main():
             model_args.max_position_embeddings,
         )
     else:
-        trainer_class = Trainer
+        trainer_class = CehrGptTrainer
         data_collator_fn = CehrGptDataCollator
 
     trainer = trainer_class(

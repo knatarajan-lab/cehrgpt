@@ -13,8 +13,49 @@ DEFAULT_MAX_TOKENS_PER_BATCH = 16384
 
 LOG = logging.get_logger("transformers")
 
+# Loss fields exposed by CehrGptCausalLMOutput that we want to log separately.
+_CEHRGPT_SUB_LOSSES = [
+    "token_loss",
+    "time_token_loss",
+    "time_to_visit_loss",
+    "token_value_loss",
+    "motor_tte_loss",
+    "age_at_ve_loss",
+]
 
-class SamplePackingTrainer(Trainer):
+
+class CehrGptTrainer(Trainer):
+    """Trainer that logs individual CEHR-GPT loss components in addition to the total loss."""
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        outputs = model(**inputs)
+        loss = outputs.loss
+
+        # Accumulate each sub-loss so we can average over the logging interval.
+        if not hasattr(self, "_sub_loss_sums"):
+            self._sub_loss_sums = {}
+            self._sub_loss_counts = {}
+
+        for name in _CEHRGPT_SUB_LOSSES:
+            value = getattr(outputs, name, None)
+            if value is not None:
+                self._sub_loss_sums[name] = self._sub_loss_sums.get(name, 0.0) + value.detach().item()
+                self._sub_loss_counts[name] = self._sub_loss_counts.get(name, 0) + 1
+
+        return (loss, outputs) if return_outputs else loss
+
+    def log(self, logs, *args, **kwargs):
+        # Flush averaged sub-losses into the log dict, then reset accumulators.
+        if hasattr(self, "_sub_loss_sums") and self._sub_loss_sums:
+            for name, total in self._sub_loss_sums.items():
+                count = self._sub_loss_counts.get(name, 1)
+                logs[name] = round(total / count, 6)
+            self._sub_loss_sums = {}
+            self._sub_loss_counts = {}
+        super().log(logs, *args, **kwargs)
+
+
+class SamplePackingTrainer(CehrGptTrainer):
     def __init__(self, *args, **kwargs):
         if "max_tokens_per_batch" in kwargs:
             self.max_tokens_per_batch = kwargs.pop("max_tokens_per_batch")
