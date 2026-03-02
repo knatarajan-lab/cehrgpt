@@ -364,8 +364,8 @@ def extract_cohort_sequences(
 
     lf = pl.scan_parquet(os.path.join(data_args.cohort_folder, "**", "*.parquet"))
     # Auto-detect MEDS format from the actual schema, regardless of the is_data_in_meds flag
-    schema_cols = set(lf.schema.names())
-    if data_args.is_data_in_meds or "subject_id" in schema_cols:
+    is_meds = data_args.is_data_in_meds or "subject_id" in set(lf.schema.names())
+    if is_meds:
         id_col, time_col, label_col = "subject_id", "prediction_time", "boolean_value"
     else:
         id_col, time_col, label_col = "person_id", "index_date", "label"
@@ -376,7 +376,7 @@ def extract_cohort_sequences(
     cohort = lf.select(cols_to_load).collect()
     LOG.info("Loaded cohort with %s rows from %s", len(cohort), data_args.cohort_folder)
 
-    if data_args.is_data_in_meds:
+    if is_meds:
         rename_map = {"subject_id": "person_id", "prediction_time": "index_date"}
         if "boolean_value" in cohort.columns:
             rename_map["boolean_value"] = "label"
