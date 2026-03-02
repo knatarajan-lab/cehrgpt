@@ -362,12 +362,14 @@ def extract_cohort_sequences(
         RuntimeError: If any `person_id` in the cohort is missing from the tokenized dataset.
     """
 
-    if data_args.is_data_in_meds:
+    lf = pl.scan_parquet(os.path.join(data_args.cohort_folder, "**", "*.parquet"))
+    # Auto-detect MEDS format from the actual schema, regardless of the is_data_in_meds flag
+    schema_cols = set(lf.schema.names())
+    if data_args.is_data_in_meds or "subject_id" in schema_cols:
         id_col, time_col, label_col = "subject_id", "prediction_time", "boolean_value"
     else:
         id_col, time_col, label_col = "person_id", "index_date", "label"
 
-    lf = pl.scan_parquet(os.path.join(data_args.cohort_folder, "**", "*.parquet"))
     cols_to_load = [id_col, time_col]
     if label_col in lf.schema:
         cols_to_load.append(label_col)
