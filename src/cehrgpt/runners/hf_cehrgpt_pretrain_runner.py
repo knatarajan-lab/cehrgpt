@@ -223,6 +223,13 @@ def load_and_create_model(
             ),
             include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
             freeze_cehrgpt_generation_model=cehrgpt_args.freeze_cehrgpt_generation_model,
+            include_age_at_ve_prediction=cehrgpt_args.include_age_at_ve_prediction,
+            age_at_ve_vocab_size=(
+                tokenizer.age_at_ve_vocab_size
+                if cehrgpt_args.include_age_at_ve_prediction
+                else None
+            ),
+            age_at_ve_prediction_loss_weight=cehrgpt_args.age_at_ve_prediction_loss_weight,
             motor_tte_vocab_size=tokenizer.motor_tte_vocab_size,
             motor_time_to_event_weight=cehrgpt_args.motor_time_to_event_weight,
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
@@ -678,6 +685,7 @@ def main():
             include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
             motor_sampling_probability=cehrgpt_args.motor_sampling_probability,
             is_data_in_meds=data_args.is_data_in_meds,
+            include_age_at_ve_prediction=cehrgpt_args.include_age_at_ve_prediction,
         ),
         train_dataset=processed_dataset["train"],
         eval_dataset=(

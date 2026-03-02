@@ -26,12 +26,25 @@ class CehrGptDataCollator:
         pretraining: bool = True,
         include_demographics: bool = False,
         add_linear_prob_token: bool = False,
+        include_age_at_ve_prediction: bool = False,
     ):
         self.tokenizer = tokenizer
         self.max_length = max_length
 
         self.vs_token_id = tokenizer.vs_token_id
         self.ve_token_id = tokenizer.ve_token_id
+
+        self.include_age_at_ve_prediction = include_age_at_ve_prediction
+        if include_age_at_ve_prediction:
+            # Precompute valid integer age → vocabulary token id mapping.
+            # Only ages whose 'age:<N>' token exists in the vocab are kept.
+            self._age_to_token_id = {
+                age: tid
+                for age in tokenizer.valid_age_values
+                if (tid := tokenizer.get_age_token_id(age)) is not None
+            }
+        else:
+            self._age_to_token_id = {}
 
         self.include_values = include_values
         self.include_ttv_prediction = include_ttv_prediction
@@ -165,6 +178,21 @@ class CehrGptDataCollator:
                 batch["input_ids"],
                 -100,
             )
+
+        if self.include_age_at_ve_prediction and self._age_to_token_id:
+            ve_mask = batch["input_ids"] == self.ve_token_id
+            # Default all positions to -100 (ignored in loss)
+            age_reconstruction_labels = torch.full_like(batch["input_ids"], -100)
+            # At each VE position, if the integer age has a valid 'age:<N>' token,
+            # set the label to the integer age value.
+            ages_int = batch["ages"].to(torch.int64)
+            for age_val, _tok_id in self._age_to_token_id.items():
+                age_reconstruction_labels = torch.where(
+                    ve_mask & (ages_int == age_val),
+                    age_val,
+                    age_reconstruction_labels,
+                )
+            batch["age_reconstruction_labels"] = age_reconstruction_labels
 
         if self.use_sub_time_tokenization:
             time_token_indicators = torch.isin(batch["input_ids"], self.time_tokens)

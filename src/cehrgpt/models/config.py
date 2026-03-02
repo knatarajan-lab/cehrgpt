@@ -156,6 +156,9 @@ class CEHRGPTConfig(PretrainedConfig):
         entropy_penalty_alpha=0.01,
         sample_packing_max_positions=None,
         class_weights=None,
+        include_age_at_ve_prediction=False,
+        age_at_ve_vocab_size=None,
+        age_at_ve_prediction_loss_weight=1.0,
         **kwargs,
     ):
         if token_to_time_token_mapping is None:
@@ -219,6 +222,13 @@ class CEHRGPTConfig(PretrainedConfig):
         if self.include_motor_time_to_event and not ve_token_id:
             raise RuntimeError(
                 f"ve_token_id must be provided when include_motor_time_to_event is True"
+            )
+        self.include_age_at_ve_prediction = include_age_at_ve_prediction
+        self.age_at_ve_vocab_size = age_at_ve_vocab_size
+        self.age_at_ve_prediction_loss_weight = age_at_ve_prediction_loss_weight
+        if self.include_age_at_ve_prediction and not ve_token_id:
+            raise RuntimeError(
+                "ve_token_id must be provided when include_age_at_ve_prediction is True"
             )
         if self.include_motor_time_to_event and not linear_prob_token_id:
             raise RuntimeError(

@@ -267,6 +267,45 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             raise RuntimeError("The tokenizer does not contain either VE or [VE]")
 
     @property
+    def valid_age_values(self) -> frozenset:
+        """
+        Returns the frozenset of integer ages that have a corresponding 'age:<int>' token
+        in the vocabulary (case-insensitive). Used for constructing age reconstruction labels.
+        """
+        import re
+        pattern = re.compile(r"^age:(\d+)$", re.IGNORECASE)
+        return frozenset(
+            int(m.group(1))
+            for token in self._tokenizer.get_vocab()
+            if (m := pattern.match(token))
+        )
+
+    @property
+    def age_at_ve_vocab_size(self) -> int:
+        """
+        Returns max_age + 1 derived from age tokens (pattern 'age:<int>') in the vocabulary.
+        This is used as the number of age classes for the age-at-VE prediction head.
+        """
+        ages = self.valid_age_values
+        if not ages:
+            raise RuntimeError(
+                "No age tokens matching 'age:<int>' found in the vocabulary. "
+                "Cannot derive age_at_ve_vocab_size."
+            )
+        return max(ages) + 1
+
+    def get_age_token_id(self, age: int) -> Optional[int]:
+        """
+        Returns the vocabulary token ID for 'age:<age>' (tries common casings),
+        or None if the token is not found in the vocabulary.
+        """
+        vocab = self._tokenizer.get_vocab()
+        for candidate in (f"age:{age}", f"Age:{age}", f"AGE:{age}"):
+            if candidate in vocab:
+                return vocab[candidate]
+        return None
+
+    @property
     def numeric_concept_ids(self):
         return self._numeric_concept_ids
 
