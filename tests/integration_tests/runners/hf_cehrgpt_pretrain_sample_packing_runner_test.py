@@ -115,7 +115,7 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "true",
             "--apply_rotary",
             "true",
-            "--include_age_at_ve_prediction",
+            "--include_age_at_vs_prediction",
             "true"
         ]
         train_main()
