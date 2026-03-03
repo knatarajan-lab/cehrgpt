@@ -43,8 +43,18 @@ class CehrGptDataCollator:
                 for age in tokenizer.valid_age_values
                 if (tid := tokenizer.get_age_token_id(age)) is not None
             }
+            # Precompute a boolean lookup tensor so __call__ can validate ages with
+            # a single index operation instead of a Python loop over all valid ages.
+            if self._age_to_token_id:
+                _max_valid_age = max(self._age_to_token_id.keys())
+                self._valid_age_lookup = torch.zeros(_max_valid_age + 1, dtype=torch.bool)
+                for age in self._age_to_token_id:
+                    self._valid_age_lookup[age] = True
+            else:
+                self._valid_age_lookup = torch.zeros(0, dtype=torch.bool)
         else:
             self._age_to_token_id = {}
+            self._valid_age_lookup = torch.zeros(0, dtype=torch.bool)
 
         self.include_values = include_values
         self.include_ttv_prediction = include_ttv_prediction
@@ -181,17 +191,17 @@ class CehrGptDataCollator:
 
         if self.include_age_at_vs_prediction and self._age_to_token_id:
             vs_mask = batch["input_ids"] == self.vs_token_id
-            # Default all positions to -100 (ignored in loss)
-            age_reconstruction_labels = torch.full_like(batch["input_ids"], -100)
-            # At each VS position, if the integer age has a valid 'age:<N>' token,
-            # set the label to the integer age value.
             ages_int = batch["ages"].to(torch.int64)
-            for age_val, _tok_id in self._age_to_token_id.items():
-                age_reconstruction_labels = torch.where(
-                    vs_mask & (ages_int == age_val),
-                    age_val,
-                    age_reconstruction_labels,
-                )
+            # Use a precomputed boolean lookup tensor to validate ages in one shot,
+            # avoiding a Python loop over all ~121 valid age values.
+            lookup = self._valid_age_lookup.to(ages_int.device)
+            in_range = (ages_int >= 0) & (ages_int < lookup.shape[0])
+            valid_age_mask = lookup[ages_int.clamp(0, lookup.shape[0] - 1)] & in_range
+            age_reconstruction_labels = torch.where(
+                vs_mask & valid_age_mask,
+                ages_int,
+                torch.full_like(ages_int, -100),
+            )
             batch["age_reconstruction_labels"] = age_reconstruction_labels
 
         if self.use_sub_time_tokenization:
