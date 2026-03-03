@@ -275,8 +275,6 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         Ages above 120 are excluded as data-quality outliers.
         Used for constructing age reconstruction labels.
         """
-
-
         pattern = re.compile(r"^age:(\d+)$", re.IGNORECASE)
         return frozenset(
             age
@@ -288,18 +286,16 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     @property
     def age_at_ve_vocab_size(self) -> int:
         """
-        Returns max_age + 1 derived from age tokens (pattern 'age:<int>') in the vocabulary,
-        capped at MAX_CLINICAL_AGE + 1 to exclude data-quality outliers (e.g. age:900).
+        Returns the number of valid age values (capped at MAX_CLINICAL_AGE) found in the vocabulary.
         This is used as the number of age classes for the age-at-VE prediction head.
         """
-
         ages = self.valid_age_values
         if not ages:
             raise RuntimeError(
                 "No age tokens matching 'age:<int>' found in the vocabulary. "
                 "Cannot derive age_at_ve_vocab_size."
             )
-        return min(max(ages), MAX_CLINICAL_AGE) + 1
+        return len(ages)
 
     def get_age_token_id(self, age: int) -> Optional[int]:
         """
