@@ -28,16 +28,28 @@ class CehrGptTrainer(Trainer):
     """Trainer that logs individual CEHR-GPT loss components in addition to the total loss."""
 
     def __init__(self, *args, **kwargs):
+        self.aux_loss_start_step = kwargs.pop("aux_loss_start_step", 0)
         self.aux_loss_warmup_steps = kwargs.pop("aux_loss_warmup_steps", 0)
-        if self.aux_loss_warmup_steps > 0:
+        if self.aux_loss_start_step > 0:
+            LOG.info("aux_loss_start_step: %s (overrides warmup)", self.aux_loss_start_step)
+        elif self.aux_loss_warmup_steps > 0:
             LOG.info("aux_loss_warmup_steps: %s", self.aux_loss_warmup_steps)
         super().__init__(*args, **kwargs)
 
     def _aux_weight(self) -> float:
-        """Linear ramp from 0 → 1 over aux_loss_warmup_steps global steps."""
-        if self.aux_loss_warmup_steps <= 0:
-            return 1.0
-        return min(1.0, self.state.global_step / self.aux_loss_warmup_steps)
+        """
+        Returns the weight [0, 1] applied to auxiliary losses at the current step.
+
+        - If aux_loss_start_step > 0: step function — 0 before the step, 1 at/after.
+          This overrides aux_loss_warmup_steps.
+        - Elif aux_loss_warmup_steps > 0: linear ramp from 0 → 1 over that many steps.
+        - Otherwise: always 1 (no warmup).
+        """
+        if self.aux_loss_start_step > 0:
+            return 1.0 if self.state.global_step >= self.aux_loss_start_step else 0.0
+        if self.aux_loss_warmup_steps > 0:
+            return min(1.0, self.state.global_step / self.aux_loss_warmup_steps)
+        return 1.0
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         outputs = model(**inputs)
@@ -75,8 +87,8 @@ class CehrGptTrainer(Trainer):
                 logs[name] = round(total / count, 6)
             self._sub_loss_sums = {}
             self._sub_loss_counts = {}
-        # Log the current aux warmup weight so progress is visible in training logs.
-        if self.aux_loss_warmup_steps > 0:
+        # Log the current aux weight so progress is visible in training logs.
+        if self.aux_loss_start_step > 0 or self.aux_loss_warmup_steps > 0:
             logs["aux_loss_weight"] = round(self._aux_weight(), 4)
         super().log(logs, *args, **kwargs)
 

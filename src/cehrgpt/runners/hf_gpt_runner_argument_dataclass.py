@@ -287,6 +287,15 @@ class CehrGPTArguments:
         metadata={
             "help": "Number of training steps over which auxiliary losses (all losses except "
             "token_loss) are linearly ramped from 0 to their full weight. "
-            "Set to 0 (default) to disable warmup and use full weights from the start."
+            "Set to 0 (default) to disable warmup and use full weights from the start. "
+            "Ignored when aux_loss_start_step > 0."
+        },
+    )
+    aux_loss_start_step: int = dataclasses.field(
+        default=0,
+        metadata={
+            "help": "Step at which auxiliary losses are switched on (step function). "
+            "Before this step the weight is 0; at and after it the weight is 1. "
+            "When set (> 0) this overrides aux_loss_warmup_steps."
         },
     )
