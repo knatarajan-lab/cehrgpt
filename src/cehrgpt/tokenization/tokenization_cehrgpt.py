@@ -305,6 +305,9 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         Returns the vocabulary token ID for 'age:<age>' (tries common casings),
         or None if the token is not found in the vocabulary.
         """
+        if age > 120:
+            return None
+
         vocab = self._tokenizer.get_vocab()
         for candidate in (f"age:{age}", f"Age:{age}", f"AGE:{age}"):
             if candidate in vocab:
