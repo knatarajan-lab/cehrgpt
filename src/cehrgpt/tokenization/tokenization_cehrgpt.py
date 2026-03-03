@@ -269,30 +269,36 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     @property
     def valid_age_values(self) -> frozenset:
         """
-        Returns the frozenset of integer ages that have a corresponding 'age:<int>' token
-        in the vocabulary (case-insensitive). Used for constructing age reconstruction labels.
+        Returns the frozenset of integer ages (capped at 120) that have a corresponding
+        'age:<int>' token in the vocabulary (case-insensitive).
+        Ages above 120 are excluded as data-quality outliers.
+        Used for constructing age reconstruction labels.
         """
         import re
+        MAX_CLINICAL_AGE = 120
         pattern = re.compile(r"^age:(\d+)$", re.IGNORECASE)
         return frozenset(
-            int(m.group(1))
+            age
             for token in self._tokenizer.get_vocab()
             if (m := pattern.match(token))
+            and (age := int(m.group(1))) <= MAX_CLINICAL_AGE
         )
 
     @property
     def age_at_ve_vocab_size(self) -> int:
         """
-        Returns max_age + 1 derived from age tokens (pattern 'age:<int>') in the vocabulary.
+        Returns max_age + 1 derived from age tokens (pattern 'age:<int>') in the vocabulary,
+        capped at MAX_CLINICAL_AGE + 1 to exclude data-quality outliers (e.g. age:900).
         This is used as the number of age classes for the age-at-VE prediction head.
         """
+        MAX_CLINICAL_AGE = 120
         ages = self.valid_age_values
         if not ages:
             raise RuntimeError(
                 "No age tokens matching 'age:<int>' found in the vocabulary. "
                 "Cannot derive age_at_ve_vocab_size."
             )
-        return max(ages) + 1
+        return min(max(ages), MAX_CLINICAL_AGE) + 1
 
     def get_age_token_id(self, age: int) -> Optional[int]:
         """
