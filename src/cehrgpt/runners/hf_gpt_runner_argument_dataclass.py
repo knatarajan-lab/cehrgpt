@@ -270,7 +270,7 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether we want to use linear prob tokens"
         },
     )
-    include_age_at_ve_prediction: Optional[bool] = dataclasses.field(
+    include_age_at_vs_prediction: Optional[bool] = dataclasses.field(
         default=False,
         metadata={
             "help": "A flag to include the age-at-VE reconstruction learning objective, "
@@ -278,7 +278,7 @@ class CehrGPTArguments:
             "The age vocab size is derived automatically from the tokenizer vocabulary."
         },
     )
-    age_at_ve_prediction_loss_weight: Optional[float] = dataclasses.field(
+    age_at_vs_prediction_loss_weight: Optional[float] = dataclasses.field(
         default=1.0,
         metadata={"help": "Loss weight for the age-at-VE prediction objective."},
     )

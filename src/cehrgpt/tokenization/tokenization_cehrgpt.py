@@ -284,7 +284,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         )
 
     @property
-    def age_at_ve_vocab_size(self) -> int:
+    def age_at_vs_vocab_size(self) -> int:
         """
         Returns the number of valid age values (capped at MAX_CLINICAL_AGE) found in the vocabulary.
         This is used as the number of age classes for the age-at-VE prediction head.
@@ -293,7 +293,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         if not ages:
             raise RuntimeError(
                 "No age tokens matching 'age:<int>' found in the vocabulary. "
-                "Cannot derive age_at_ve_vocab_size."
+                "Cannot derive age_at_vs_vocab_size."
             )
         return len(ages)
 

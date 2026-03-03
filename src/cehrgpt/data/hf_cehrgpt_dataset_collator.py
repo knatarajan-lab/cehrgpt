@@ -26,7 +26,7 @@ class CehrGptDataCollator:
         pretraining: bool = True,
         include_demographics: bool = False,
         add_linear_prob_token: bool = False,
-        include_age_at_ve_prediction: bool = False,
+        include_age_at_vs_prediction: bool = False,
     ):
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -34,8 +34,8 @@ class CehrGptDataCollator:
         self.vs_token_id = tokenizer.vs_token_id
         self.ve_token_id = tokenizer.ve_token_id
 
-        self.include_age_at_ve_prediction = include_age_at_ve_prediction
-        if include_age_at_ve_prediction:
+        self.include_age_at_vs_prediction = include_age_at_vs_prediction
+        if include_age_at_vs_prediction:
             # Precompute valid integer age → vocabulary token id mapping.
             # Only ages whose 'age:<N>' token exists in the vocab are kept.
             self._age_to_token_id = {
@@ -179,7 +179,7 @@ class CehrGptDataCollator:
                 -100,
             )
 
-        if self.include_age_at_ve_prediction and self._age_to_token_id:
+        if self.include_age_at_vs_prediction and self._age_to_token_id:
             vs_mask = batch["input_ids"] == self.vs_token_id
             # Default all positions to -100 (ignored in loss)
             age_reconstruction_labels = torch.full_like(batch["input_ids"], -100)

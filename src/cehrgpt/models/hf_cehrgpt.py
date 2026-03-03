@@ -1041,9 +1041,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             self.value_head = nn.Linear(
                 config.n_embd, config.value_vocab_size, bias=False
             )
-        if self.config.include_age_at_ve_prediction:
-            self.age_at_ve_head = nn.Linear(
-                config.n_embd, config.age_at_ve_vocab_size, bias=False
+        if self.config.include_age_at_vs_prediction:
+            self.age_at_vs_head = nn.Linear(
+                config.n_embd, config.age_at_vs_vocab_size, bias=False
             )
 
         self.motor_time_bins = None
@@ -1423,7 +1423,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         time_to_visit_loss = None
         token_value_loss = None
         motor_tte_loss = None
-        age_at_ve_loss = None
+        age_at_vs_loss = None
 
         if labels is not None:
             # move labels to correct device to enable model parallelism
@@ -1613,18 +1613,18 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 )
 
             if (
-                self.config.include_age_at_ve_prediction
+                self.config.include_age_at_vs_prediction
                 and age_reconstruction_labels is not None
             ):
-                age_logits = self.age_at_ve_head(hidden_states)
+                age_logits = self.age_at_vs_head(hidden_states)
                 age_loss_fct = CrossEntropyLoss(ignore_index=-100, reduction="sum")
-                age_at_ve_loss = age_loss_fct(
-                    age_logits.view(-1, self.config.age_at_ve_vocab_size),
+                age_at_vs_loss = age_loss_fct(
+                    age_logits.view(-1, self.config.age_at_vs_vocab_size),
                     age_reconstruction_labels.view(-1),
                 ) / total_num_tokens
                 loss += (
-                    age_at_ve_loss
-                    * self.config.age_at_ve_prediction_loss_weight
+                    age_at_vs_loss
+                    * self.config.age_at_vs_prediction_loss_weight
                     * float(not self.config.freeze_cehrgpt_generation_model)
                 )
 
@@ -1646,7 +1646,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             time_to_visit_loss=time_to_visit_loss,
             token_value_loss=token_value_loss,
             motor_tte_loss=motor_tte_loss,
-            age_at_ve_loss=age_at_ve_loss,
+            age_at_vs_loss=age_at_vs_loss,
         )
 
     @staticmethod
