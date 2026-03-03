@@ -73,6 +73,13 @@ def map_motor_tte_statistics(
     motor_event_times = femr.stat_utils.ReservoirSampler(100_000)
     task_tte_stats: Dict[str, int] = collections.defaultdict(int)
     task_censor_stats: Dict[str, int] = collections.defaultdict(int)
+    # Per-task OnlineStatistics for TTE (events only). Used together with
+    # task_tte_stats / task_censor_stats to compute a per-task hazard rate
+    # for MotorTaskHead bias initialisation:
+    #   rate_k = frac_events_k / mean_event_tte_k
+    task_tte_time_stats: Dict[str, femr.stat_utils.OnlineStatistics] = collections.defaultdict(
+        femr.stat_utils.OnlineStatistics
+    )
     for concept_ids, epoch_times in zip(batch["concept_ids"], batch["epoch_times"]):
         # Reverse walk through concept_ids to calculate TTE from each prediction point
         code_time_dict: Dict[str, float] = {}
@@ -85,6 +92,7 @@ def map_motor_tte_statistics(
                     tte = (motor_time - current_time) / 86400
                     motor_event_times.add(tte, 1)
                     task_tte_stats[motor_code] += 1
+                    task_tte_time_stats[motor_code].add(1, tte)
             elif concept_id in allowed_motor_codes_set:
                 if concept_id not in code_time_dict:
                     # First (nearest) occurrence in reverse walk = last occurrence in forward.
@@ -102,6 +110,7 @@ def map_motor_tte_statistics(
         "motor_event_times": motor_event_times,
         "task_tte_stats": task_tte_stats,
         "task_censor_stats": task_censor_stats,
+        "task_tte_time_stats": dict(task_tte_time_stats),
     }
 
 
@@ -144,6 +153,11 @@ def compute_motor_tte_statistics(
                 current["task_tte_stats"][k] += v
             for k, v in fixed_stat["task_censor_stats"].items():
                 current["task_censor_stats"][k] += v
+            for k, v in fixed_stat["task_tte_time_stats"].items():
+                if k in current["task_tte_time_stats"]:
+                    current["task_tte_time_stats"][k].combine(v)
+                else:
+                    current["task_tte_time_stats"][k] = v
 
     # Aggregate the counts for the parent concepts
     if ontology is not None:
@@ -157,6 +171,18 @@ def compute_motor_tte_statistics(
                     current["task_censor_stats"][parent] += current[
                         "task_censor_stats"
                     ][k]
+        for k in list(current["task_tte_time_stats"].keys()):
+            for parent in ontology.get_all_parents(k):
+                if parent != k:
+                    if parent in current["task_tte_time_stats"]:
+                        current["task_tte_time_stats"][parent].combine(
+                            current["task_tte_time_stats"][k]
+                        )
+                    else:
+                        import copy
+                        current["task_tte_time_stats"][parent] = copy.deepcopy(
+                            current["task_tte_time_stats"][k]
+                        )
     return current
 
 

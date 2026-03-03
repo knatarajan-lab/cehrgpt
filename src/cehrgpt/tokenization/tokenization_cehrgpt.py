@@ -357,6 +357,30 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     def pretrained_concept_embedding_model(self):
         return self._pretrained_concept_embedding_model
 
+    def get_motor_task_prevalence_rates(self) -> List[float]:
+        """
+        Returns the per-task hazard rate for each MOTOR task in sorted code order.
+        Rate = frac_events / mean_event_tte (days), matching the original MOTOR
+        implementation. Used to initialize task_layer bias in MotorTaskHead.
+        """
+        task_tte = self._motor_task_info.get("task_tte_stats", {})
+        task_censor = self._motor_task_info.get("task_censor_stats", {})
+        task_tte_time = self._motor_task_info.get("task_tte_time_stats", {})
+        rates = []
+        for code in sorted(self._motor_time_to_event_codes):
+            events = task_tte.get(code, 0)
+            censored = task_censor.get(code, 0)
+            total = events + censored
+            frac_events = events / total if total > 0 else 1e-6
+            tte_stats = task_tte_time.get(code)
+            if tte_stats is not None and tte_stats.count > 0:
+                mean_tte = tte_stats.mean()
+                rate = frac_events / mean_tte if mean_tte > 0 else 1e-6
+            else:
+                rate = 1e-6
+            rates.append(max(rate, 1e-6))
+        return rates
+
     def get_motor_time_bins(self, motor_num_time_pieces: int) -> List[int]:
         if "motor_event_times" not in self._motor_task_info:
             return []

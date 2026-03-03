@@ -138,6 +138,7 @@ class CEHRGPTConfig(PretrainedConfig):
         motor_time_to_event_weight=1.0,
         motor_num_time_pieces=16,
         motor_time_bins: Optional[List[float]] = None,
+        motor_task_prevalence_rates: Optional[List[float]] = None,
         linear_prob_token_id=None,
         token_to_time_token_mapping: Dict[int, List] = None,
         use_pretrained_embeddings=False,
@@ -243,6 +244,7 @@ class CEHRGPTConfig(PretrainedConfig):
         self.motor_num_time_pieces = motor_num_time_pieces
         self.linear_prob_token_id = linear_prob_token_id
         self.motor_time_bins = motor_time_bins
+        self.motor_task_prevalence_rates = motor_task_prevalence_rates
 
         self.causal_sfm = causal_sfm
         self.demographics_size = demographics_size

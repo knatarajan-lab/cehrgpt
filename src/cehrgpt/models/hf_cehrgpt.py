@@ -84,6 +84,7 @@ class MotorTaskHead(nn.Module):
         input_dim,
         motor_tte_vocab_size,
         motor_num_time_pieces,
+        task_prevalence_rates=None,
         eps=1e-6,
     ):
         super(MotorTaskHead, self).__init__()
@@ -93,6 +94,14 @@ class MotorTaskHead(nn.Module):
         self.final_layer = nn.Linear(input_dim, input_dim * motor_num_time_pieces)
         self.norm = RMSNorm(input_dim, eps)
         self.task_layer = nn.Linear(input_dim, motor_tte_vocab_size)
+        # Initialise task_layer bias with log2(prevalence_rate) per task so the
+        # model starts with calibrated log-hazard predictions (matching the
+        # original MOTOR implementation) rather than zero for all tasks.
+        if task_prevalence_rates is not None:
+            start_bias = torch.log2(
+                torch.tensor(task_prevalence_rates, dtype=torch.float32)
+            )
+            self.task_layer.bias.data = start_bias
         self.task_time_bias = nn.Parameter(
             torch.zeros(1, self.motor_num_time_pieces, motor_tte_vocab_size)
         )
@@ -1158,6 +1167,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             input_dim=self.config.n_embd,
             motor_tte_vocab_size=self.config.motor_tte_vocab_size,
             motor_num_time_pieces=self.config.motor_num_time_pieces,
+            task_prevalence_rates=getattr(self.config, "motor_task_prevalence_rates", None),
         )
 
     def prepare_inputs_for_generation(
