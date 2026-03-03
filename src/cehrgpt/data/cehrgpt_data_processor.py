@@ -157,7 +157,7 @@ class CehrGptDataProcessor(DatasetMapping):
             example["concept_ids"] = self.tokenizer.decode(
                 input_ids, skip_special_tokens=False
             )
-        example["ages"] = pd.Series(example["ages"]).ffill().tolist()
+        example["ages"] = pd.Series(example["ages"]).ffill().bfill().tolist()
         example = self.slice_out_input_sequence(example)
         # Add the motor labels
         if self.include_motor_time_to_event:
