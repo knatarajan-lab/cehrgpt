@@ -282,3 +282,11 @@ class CehrGPTArguments:
         default=1.0,
         metadata={"help": "Loss weight for the age-at-VE prediction objective."},
     )
+    aux_loss_warmup_steps: int = dataclasses.field(
+        default=0,
+        metadata={
+            "help": "Number of training steps over which auxiliary losses (all losses except "
+            "token_loss) are linearly ramped from 0 to their full weight. "
+            "Set to 0 (default) to disable warmup and use full weights from the start."
+        },
+    )

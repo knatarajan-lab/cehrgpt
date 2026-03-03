@@ -664,6 +664,7 @@ def main():
                 if "validation" in processed_dataset
                 else processed_dataset["test"]
             )["num_of_concepts"],
+            aux_loss_warmup_steps=cehrgpt_args.aux_loss_warmup_steps,
         )
         training_args.per_device_train_batch_size = 1
         training_args.per_device_eval_batch_size = 1
@@ -673,7 +674,10 @@ def main():
             model_args.max_position_embeddings,
         )
     else:
-        trainer_class = CehrGptTrainer
+        trainer_class = partial(
+            CehrGptTrainer,
+            aux_loss_warmup_steps=cehrgpt_args.aux_loss_warmup_steps,
+        )
         data_collator_fn = CehrGptDataCollator
 
     trainer = trainer_class(
