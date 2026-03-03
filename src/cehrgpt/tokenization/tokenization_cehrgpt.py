@@ -2,6 +2,7 @@ import collections
 import copy
 import json
 import os
+import re
 import pickle
 from functools import partial
 from itertools import islice
@@ -67,7 +68,7 @@ from cehrgpt.tokenization.tokenization_statistics import (
 from cehrgpt.omop.ontology import Ontology
 
 LOG = logging.get_logger("transformers")
-
+MAX_CLINICAL_AGE = 120
 
 class CehrGptTokenizer(PreTrainedTokenizer):
 
@@ -274,8 +275,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         Ages above 120 are excluded as data-quality outliers.
         Used for constructing age reconstruction labels.
         """
-        import re
-        MAX_CLINICAL_AGE = 120
+
+
         pattern = re.compile(r"^age:(\d+)$", re.IGNORECASE)
         return frozenset(
             age
@@ -291,7 +292,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         capped at MAX_CLINICAL_AGE + 1 to exclude data-quality outliers (e.g. age:900).
         This is used as the number of age classes for the age-at-VE prediction head.
         """
-        MAX_CLINICAL_AGE = 120
+
         ages = self.valid_age_values
         if not ages:
             raise RuntimeError(
@@ -305,7 +306,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         Returns the vocabulary token ID for 'age:<age>' (tries common casings),
         or None if the token is not found in the vocabulary.
         """
-        if age > 120:
+        if age > MAX_CLINICAL_AGE:
             return None
 
         vocab = self._tokenizer.get_vocab()
