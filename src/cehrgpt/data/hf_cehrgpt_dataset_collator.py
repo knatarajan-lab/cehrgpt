@@ -180,15 +180,15 @@ class CehrGptDataCollator:
             )
 
         if self.include_age_at_ve_prediction and self._age_to_token_id:
-            ve_mask = batch["input_ids"] == self.ve_token_id
+            vs_mask = batch["input_ids"] == self.vs_token_id
             # Default all positions to -100 (ignored in loss)
             age_reconstruction_labels = torch.full_like(batch["input_ids"], -100)
-            # At each VE position, if the integer age has a valid 'age:<N>' token,
+            # At each VS position, if the integer age has a valid 'age:<N>' token,
             # set the label to the integer age value.
             ages_int = batch["ages"].to(torch.int64)
             for age_val, _tok_id in self._age_to_token_id.items():
                 age_reconstruction_labels = torch.where(
-                    ve_mask & (ages_int == age_val),
+                    vs_mask & (ages_int == age_val),
                     age_val,
                     age_reconstruction_labels,
                 )
