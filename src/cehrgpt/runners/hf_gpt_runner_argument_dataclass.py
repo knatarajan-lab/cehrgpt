@@ -299,3 +299,10 @@ class CehrGPTArguments:
             "When set (> 0) this overrides aux_loss_warmup_steps."
         },
     )
+    refresh_processed_dataset: bool = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "If set, delete the cached prepared dataset at prepared_ds_path and "
+            "rebuild it from scratch, ignoring any previously saved version."
+        },
+    )

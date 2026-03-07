@@ -294,6 +294,10 @@ def main():
     cache_file_collector = CacheFileCollector()
     processed_dataset = None
 
+    if cehrgpt_args.refresh_processed_dataset and prepared_ds_path.exists():
+        LOG.info("Refreshing prepared dataset: removing cache at %s", prepared_ds_path)
+        shutil.rmtree(prepared_ds_path)
+
     if any(prepared_ds_path.glob("*")):
         LOG.info("Loading prepared dataset from disk at %s...", prepared_ds_path)
         processed_dataset = load_from_disk(str(prepared_ds_path))
