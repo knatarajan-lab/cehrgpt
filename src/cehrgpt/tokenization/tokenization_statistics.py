@@ -2,7 +2,7 @@ import collections
 import math
 import pickle
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import femr.stat_utils
 import numpy as np
@@ -46,6 +46,7 @@ def get_allowed_motor_codes(
         original_concept_codes: List[str],
         data_args: DataTrainingArguments,
         ontology: Optional[Ontology],
+        measurement_concept_ids: Optional[Set[str]] = None,
 ) -> List[str]:
     filtered_original_concept_codes = [
         concept_code
@@ -60,9 +61,15 @@ def get_allowed_motor_codes(
                 allowed_motor_codes.append(concept)
             elif concept in [DEATH_TOKEN, death_code]:
                 allowed_motor_codes.append(concept)
-        return allowed_motor_codes
     else:
-        return list(filtered_original_concept_codes)
+        allowed_motor_codes = list(filtered_original_concept_codes)
+
+    if measurement_concept_ids:
+        allowed_motor_codes = [
+            concept for concept in allowed_motor_codes
+            if concept not in measurement_concept_ids
+        ]
+    return allowed_motor_codes
 
 
 def map_motor_tte_statistics(

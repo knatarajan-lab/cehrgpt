@@ -1079,8 +1079,12 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         motor_task_info = None
         if num_motor_tasks:
             LOG.info("Computing the MOTOR TTE statistics")
+            measurement_concept_ids = set(
+                [stat["concept_id"] for stat in numeric_lab_stats]
+                + [t[0] for t in categorical_lab_stats.keys()]
+            )
             allowed_motor_codes = get_allowed_motor_codes(
-                original_concept_codes, data_args, ontology
+                original_concept_codes, data_args, ontology, measurement_concept_ids
             )
             motor_tte_statistics = compute_motor_tte_statistics(
                 dataset, data_args, allowed_motor_codes, ontology
