@@ -34,6 +34,7 @@ from cehrgpt.gpt_utils import (
     construct_age_sequence,
     construct_time_sequence,
     encode_demographics,
+    is_att_token,
     multiple_of_10,
 )
 from cehrgpt.models.tokenization_hf_cehrgpt import (
@@ -618,29 +619,35 @@ class ExtractTokenizedSequenceDataMapping:
         for feature_extraction_start, index_date, label in prediction_start_end_times:
             # Find the first [VS] at or after the observation window start so that the
             # extracted sequence always begins at a visit boundary.
-            vs_start_idx = None
+            obs_start_idx = None
             for i in range(DEMOGRAPHIC_PROMPT_SIZE, seq_length):
                 if epoch_times[i] >= feature_extraction_start and concept_ids[i] == "[VS]":
-                    vs_start_idx = i
+                    obs_start_idx = i
                     break
 
-            if vs_start_idx is None:
+            if obs_start_idx is None:
                 # No visit starts within the observation window; skip this sample.
                 continue
 
             # Find the last token at or before the index_date.
-            vs_end_idx = None
+            obs_end_idx = None
             for i in range(seq_length - 1, DEMOGRAPHIC_PROMPT_SIZE - 1, -1):
                 if epoch_times[i] <= index_date:
-                    vs_end_idx = i
+                    obs_end_idx = i
                     break
 
-            if vs_end_idx is None or vs_end_idx < vs_start_idx:
+            # If the prediction time lands in the middle of a visit (e.g. 24 h
+            # after admission), obs_end_idx may point at an ATT/time token.
+            # Step backward until we land on a non-time token.
+            while obs_end_idx is not None and obs_end_idx > obs_start_idx and is_att_token(concept_ids[obs_end_idx]):
+                obs_end_idx -= 1
+
+            if obs_end_idx is None or obs_end_idx < obs_start_idx:
                 continue
 
             # Recalculate year and age at the start of the observation window.
-            vs_epoch_time = float(epoch_times[vs_start_idx])
-            new_year = datetime.datetime.utcfromtimestamp(vs_epoch_time).year
+            obs_epoch_time = float(epoch_times[obs_start_idx])
+            new_year = datetime.datetime.utcfromtimestamp(obs_epoch_time).year
             new_age = (new_year - birth_year) if birth_year is not None else -1
             new_demographic_concept_ids = [
                 f"year:{new_year}", f"age:{new_age}", original_gender, original_race
@@ -654,7 +661,7 @@ class ExtractTokenizedSequenceDataMapping:
 
             for col in time_series_columns:
                 values = np.asarray(record[col])
-                sliced = values[vs_start_idx: vs_end_idx + 1]
+                sliced = values[obs_start_idx: obs_end_idx + 1]
 
                 if col == "concept_ids":
                     demo = np.array(new_demographic_concept_ids)
@@ -667,7 +674,7 @@ class ExtractTokenizedSequenceDataMapping:
                         demo_ids = values[:DEMOGRAPHIC_PROMPT_SIZE]
                     batched_samples[col].append(np.concatenate([demo_ids, sliced]))
                 elif col == "epoch_times":
-                    demo_times = np.full(DEMOGRAPHIC_PROMPT_SIZE, vs_epoch_time)
+                    demo_times = np.full(DEMOGRAPHIC_PROMPT_SIZE, obs_epoch_time)
                     batched_samples[col].append(np.concatenate([demo_times, sliced]))
                 elif col == "ages":
                     demo_ages = np.full(DEMOGRAPHIC_PROMPT_SIZE, new_age)

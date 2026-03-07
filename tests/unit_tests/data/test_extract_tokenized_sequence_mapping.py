@@ -355,5 +355,81 @@ class TestExtractMultiplePredictionTimes(unittest.TestCase):
         self.assertEqual(self.result["classifier_label"][1], 0)
 
 
+class TestExtractIndexDateMidVisit(unittest.TestCase):
+    """
+    The prediction time (index_date) falls in the middle of a hospitalization,
+    so the last token at or before index_date is an inpatient ATT token (i-D1).
+    The backward step should skip it and land on the preceding clinical event.
+
+    Fixture (single inpatient visit, 10 tokens):
+
+      idx  token   epoch
+      ---  ------  -----------
+       0   year:2020  T_admit
+       1   age:70     T_admit
+       2   8507       T_admit
+       3   Race/0     T_admit
+       4   [VS]       T_admit      ← vs_start_idx (observation_window=0)
+       5   9201       T_admit
+       6   cond1      T_admit
+       7   i-D1       T_day1       ← inpatient ATT; epoch > T_admit but <= index_date
+       8   cond2      T_day2       ← epoch > index_date → excluded
+       9   [VE]       T_day2       ← epoch > index_date → excluded
+
+    index_date = T_day1 exactly:
+      - Tokens 0-7 have epoch <= T_day1; token 7 (i-D1) is last → initial vs_end_idx=7
+      - i-D1 is an ATT token → step back to idx 6 (cond1)
+      - Expected last token: cond1; cond2 must not appear.
+    """
+
+    T_ADMIT = datetime.datetime(2020, 1, 1, tzinfo=UTC)
+    T_DAY1  = datetime.datetime(2020, 1, 2, tzinfo=UTC)  # index_date
+    T_DAY2  = datetime.datetime(2020, 1, 3, tzinfo=UTC)
+
+    def _make_inpatient_record(self):
+        EP_ADMIT = self.T_ADMIT.timestamp()
+        EP_DAY1  = self.T_DAY1.timestamp()
+        EP_DAY2  = self.T_DAY2.timestamp()
+        concept_ids  = ["year:2020", "age:70", "8507", "Race/0",
+                        "[VS]", "9201", "cond1", "i-D1", "cond2", "[VE]"]
+        epoch_times  = [EP_ADMIT] * 7 + [EP_DAY1, EP_DAY2, EP_DAY2]
+        ages         = [70] * 10
+        return {
+            "person_id": PERSON_ID,
+            "concept_ids": concept_ids,
+            "input_ids": list(range(10)),
+            "epoch_times": epoch_times,
+            "ages": ages,
+            "concept_value_masks": [0] * 10,
+        }
+
+    def setUp(self):
+        self.mapping = _make_mapping(observation_window=0, index_date=self.T_DAY1)
+        self.result = self.mapping.transform(self._make_inpatient_record())
+
+    def test_single_sample_produced(self):
+        self.assertEqual(len(self.result["concept_ids"]), 1)
+
+    def test_sequence_does_not_end_on_att_token(self):
+        last_token = self.result["concept_ids"][0][-1]
+        self.assertFalse(
+            last_token.startswith("i-D"),
+            f"Sequence ended on inpatient ATT token: {last_token}",
+        )
+
+    def test_sequence_ends_on_clinical_event(self):
+        last_token = self.result["concept_ids"][0][-1]
+        self.assertEqual(last_token, "cond1")
+
+    def test_post_index_events_excluded(self):
+        tokens = list(self.result["concept_ids"][0])
+        self.assertNotIn("cond2", tokens)
+        self.assertNotIn("[VE]", tokens)
+
+    def test_pre_index_events_included(self):
+        tokens = list(self.result["concept_ids"][0])
+        self.assertIn("cond1", tokens)
+
+
 if __name__ == "__main__":
     unittest.main()
