@@ -23,6 +23,7 @@ from cehrgpt.data.hf_cehrgpt_dataset_mapping import (
     ExtractTokenizedSequenceDataMapping,
     MedToCehrGPTDatasetMapping,
 )
+from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 
 LOG = logging.get_logger("transformers")
@@ -323,6 +324,7 @@ def create_dataset_splits(
 def extract_cohort_sequences(
     data_args: DataTrainingArguments,
     cehrgpt_args: CehrGPTArguments,
+    tokenizer: Optional[CehrGptTokenizer] = None,
 ) -> DatasetDict:
     """
     Extracts and processes cohort-specific tokenized sequences from a pre-tokenized dataset,.
@@ -337,13 +339,17 @@ def extract_cohort_sequences(
     4. Aggregates each person's index date and label into a mapping.
     5. Checks for consistency to ensure all cohort person_ids are present in the tokenized dataset.
     6. Applies a transformation (`ExtractTokenizedSequenceDataMapping`) to generate
-       observation-window-constrained patient sequences.
+       observation-window-constrained patient sequences, with recalculated demographic tokens
+       prepended to each extracted slice.
     7. Caches both the filtered and processed datasets using the provided `cache_file_collector`.
 
     Args:
         data_args (DataTrainingArguments): Configuration parameters for data processing,
             including cohort folder, observation window, batch size, and parallelism.
         cehrgpt_args (CehrGPTArguments): Contains paths to pre-tokenized datasets and CEHR-GPT-specific arguments.
+        tokenizer (Optional[CehrGptTokenizer]): Tokenizer used to encode the recalculated demographic
+            tokens (year, age) for the `input_ids` column. If ``None``, the original demographic
+            token ids are reused as a fallback.
     Returns:
         DatasetDict: A Hugging Face `DatasetDict` containing the processed datasets (e.g., train/validation/test),
                      where each entry includes sequences filtered and truncated by the observation window.
@@ -416,7 +422,7 @@ def extract_cohort_sequences(
         )
     processed_dataset = filtered_tokenized_dataset.map(
         ExtractTokenizedSequenceDataMapping(
-            person_index_date_map, data_args.observation_window
+            person_index_date_map, data_args.observation_window, tokenizer
         ).batch_transform,
         batched=True,
         batch_size=data_args.preprocessing_batch_size,

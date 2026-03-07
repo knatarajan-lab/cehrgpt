@@ -30,6 +30,7 @@ from dateutil.relativedelta import relativedelta
 from pandas import Series
 
 from cehrgpt.gpt_utils import (
+    DEMOGRAPHIC_PROMPT_SIZE,
     construct_age_sequence,
     construct_time_sequence,
     encode_demographics,
@@ -561,9 +562,11 @@ class ExtractTokenizedSequenceDataMapping:
         self,
         person_index_date_map: Dict[int, List[Dict[str, Any]]],
         observation_window: int = 0,
+        tokenizer: Optional["CehrGptTokenizer"] = None,
     ):
         self.person_index_date_map = person_index_date_map
         self.observation_window = observation_window
+        self._tokenizer = tokenizer
 
     def _calculate_prediction_start_time(self, prediction_time: float):
         if self.observation_window and self.observation_window > 0:
@@ -587,27 +590,24 @@ class ExtractTokenizedSequenceDataMapping:
             )
             for prediction_time_label_map in prediction_times
         ]
-        observation_window_indices = np.zeros(
-            (len(prediction_times), len(record["epoch_times"])), dtype=bool
-        )
-        for i, epoch_time in enumerate(record["epoch_times"]):
-            for sample_n, (
-                feature_extraction_time_start,
-                feature_extraction_end_end,
-                _,
-            ) in enumerate(prediction_start_end_times):
-                if (
-                    feature_extraction_time_start
-                    <= epoch_time
-                    <= feature_extraction_end_end
-                ):
-                    observation_window_indices[sample_n][i] = True
 
-        seq_length = len(record["epoch_times"])
+        concept_ids = record["concept_ids"]
+        epoch_times = np.asarray(record["epoch_times"], dtype=float)
+        seq_length = len(epoch_times)
+
+        # The first DEMOGRAPHIC_PROMPT_SIZE tokens are always: year:YYYY, age:NN, gender, race.
+        # Derive birth_year so we can recalculate age at any observation window start.
+        try:
+            birth_year = int(concept_ids[0].split(":")[1]) - int(concept_ids[1].split(":")[1])
+        except Exception:
+            birth_year = None
+        original_gender = concept_ids[2]
+        original_race = concept_ids[3]
+
         time_series_columns = ["concept_ids", "input_ids"]
-        static_inputs = dict()
+        static_inputs = {}
         for k, v in record.items():
-            if k in ["concept_ids", "input_ids"]:
+            if k in ("concept_ids", "input_ids"):
                 continue
             if isinstance(v, (list, np.ndarray)) and len(v) == seq_length:
                 time_series_columns.append(k)
@@ -615,22 +615,68 @@ class ExtractTokenizedSequenceDataMapping:
                 static_inputs[k] = v
 
         batched_samples = defaultdict(list)
-        for (_, index_date, label), observation_window_index in zip(
-            prediction_start_end_times, observation_window_indices
-        ):
+        for feature_extraction_start, index_date, label in prediction_start_end_times:
+            # Find the first [VS] at or after the observation window start so that the
+            # extracted sequence always begins at a visit boundary.
+            vs_start_idx = None
+            for i in range(DEMOGRAPHIC_PROMPT_SIZE, seq_length):
+                if epoch_times[i] >= feature_extraction_start and concept_ids[i] == "[VS]":
+                    vs_start_idx = i
+                    break
+
+            if vs_start_idx is None:
+                # No visit starts within the observation window; skip this sample.
+                continue
+
+            # Find the last token at or before the index_date.
+            vs_end_idx = None
+            for i in range(seq_length - 1, DEMOGRAPHIC_PROMPT_SIZE - 1, -1):
+                if epoch_times[i] <= index_date:
+                    vs_end_idx = i
+                    break
+
+            if vs_end_idx is None or vs_end_idx < vs_start_idx:
+                continue
+
+            # Recalculate year and age at the start of the observation window.
+            vs_epoch_time = float(epoch_times[vs_start_idx])
+            new_year = datetime.datetime.utcfromtimestamp(vs_epoch_time).year
+            new_age = (new_year - birth_year) if birth_year is not None else -1
+            new_demographic_concept_ids = [
+                f"year:{new_year}", f"age:{new_age}", original_gender, original_race
+            ]
+
             for k, v in static_inputs.items():
                 batched_samples[k].append(v)
             batched_samples["classifier_label"].append(label)
             batched_samples["index_date"].append(index_date)
-            try:
-                start_age = int(record["concept_ids"][1].split(":")[1])
-            except Exception:
-                start_age = -1
-            batched_samples["age_at_index"].append(start_age)
-            for time_series_column in time_series_columns:
-                batched_samples[time_series_column].append(
-                    np.asarray(record[time_series_column])[observation_window_index]
-                )
+            batched_samples["age_at_index"].append(new_age)
+
+            for col in time_series_columns:
+                values = np.asarray(record[col])
+                sliced = values[vs_start_idx: vs_end_idx + 1]
+
+                if col == "concept_ids":
+                    demo = np.array(new_demographic_concept_ids)
+                    batched_samples[col].append(np.concatenate([demo, sliced]))
+                elif col == "input_ids":
+                    if self._tokenizer is not None:
+                        demo_ids = np.array(self._tokenizer.encode(new_demographic_concept_ids))
+                    else:
+                        # Fallback: reuse original demographic token ids unchanged.
+                        demo_ids = values[:DEMOGRAPHIC_PROMPT_SIZE]
+                    batched_samples[col].append(np.concatenate([demo_ids, sliced]))
+                elif col == "epoch_times":
+                    demo_times = np.full(DEMOGRAPHIC_PROMPT_SIZE, vs_epoch_time)
+                    batched_samples[col].append(np.concatenate([demo_times, sliced]))
+                elif col == "ages":
+                    demo_ages = np.full(DEMOGRAPHIC_PROMPT_SIZE, new_age)
+                    batched_samples[col].append(np.concatenate([demo_ages, sliced]))
+                else:
+                    # For mask/unit columns, reuse the original demographic token values (always 0/NA).
+                    demo_vals = values[:DEMOGRAPHIC_PROMPT_SIZE]
+                    batched_samples[col].append(np.concatenate([demo_vals, sliced]))
+
         return batched_samples
 
     def batch_transform(self, record: Dict[str, Any]) -> Dict[str, Any]:

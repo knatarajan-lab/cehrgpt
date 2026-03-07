@@ -55,7 +55,7 @@ def _ensure_1d(arr: np.ndarray) -> np.ndarray:
 def _create_feature_dataset(data_args, training_args, cehrgpt_args, tokenizer, cache_file_collector):
     """Process the raw data into a tokenized DatasetDict for feature extraction."""
     if cehrgpt_args.tokenized_full_dataset_path is not None:
-        return extract_cohort_sequences(data_args, cehrgpt_args)
+        return extract_cohort_sequences(data_args, cehrgpt_args, tokenizer)
 
     final_splits = prepare_finetune_dataset(
         data_args, training_args, cehrgpt_args, cache_file_collector
