@@ -566,31 +566,30 @@ class ExtractTokenizedSequenceDataMapping:
         tokenizer: Optional["CehrGptTokenizer"] = None,
     ):
         self.person_index_date_map = person_index_date_map
-        self.observation_window = observation_window
+        # Pre-compute the offset once so the inner loop does no arithmetic.
+        self._obs_window_seconds = (
+            observation_window * 24 * 3600
+            if observation_window and observation_window > 0
+            else 0
+        )
         self._tokenizer = tokenizer
-
-    def _calculate_prediction_start_time(self, prediction_time: float):
-        if self.observation_window and self.observation_window > 0:
-            return max(prediction_time - self.observation_window * 24 * 3600, 0)
-        return 0
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
         person_id = record["person_id"]
         prediction_times = self.person_index_date_map[person_id]
-        prediction_start_end_times = [
-            (
-                self._calculate_prediction_start_time(
-                    prediction_time_label_map["index_date"]
-                    .replace(tzinfo=datetime.timezone.utc)
-                    .timestamp()
-                ),
-                prediction_time_label_map["index_date"]
-                .replace(tzinfo=datetime.timezone.utc)
-                .timestamp(),
-                prediction_time_label_map["label"],
+
+        obs_window_seconds = self._obs_window_seconds
+        prediction_start_end_times = []
+        for ptm in prediction_times:
+            index_date_ts = (
+                ptm["index_date"].replace(tzinfo=datetime.timezone.utc).timestamp()
             )
-            for prediction_time_label_map in prediction_times
-        ]
+            feature_start = (
+                max(index_date_ts - obs_window_seconds, 0)
+                if obs_window_seconds > 0
+                else 0
+            )
+            prediction_start_end_times.append((feature_start, index_date_ts, ptm["label"]))
 
         concept_ids = record["concept_ids"]
         epoch_times = np.asarray(record["epoch_times"], dtype=float)
@@ -605,44 +604,51 @@ class ExtractTokenizedSequenceDataMapping:
         original_gender = concept_ids[2]
         original_race = concept_ids[3]
 
-        time_series_columns = ["concept_ids", "input_ids"]
-        static_inputs = {}
+        # Convert all time-series columns to numpy arrays once, before the prediction-time loop.
+        extra_ts_cols: List[str] = []
+        static_inputs: Dict[str, Any] = {}
+        col_arrays: Dict[str, np.ndarray] = {}
         for k, v in record.items():
             if k in ("concept_ids", "input_ids"):
                 continue
             if isinstance(v, (list, np.ndarray)) and len(v) == seq_length:
-                time_series_columns.append(k)
+                extra_ts_cols.append(k)
+                col_arrays[k] = np.asarray(v)
             else:
                 static_inputs[k] = v
 
-        batched_samples = defaultdict(list)
-        for feature_extraction_start, index_date, label in prediction_start_end_times:
-            # Find the first [VS] at or after the observation window start so that the
-            # extracted sequence always begins at a visit boundary.
-            obs_start_idx = None
-            for i in range(DEMOGRAPHIC_PROMPT_SIZE, seq_length):
-                if epoch_times[i] >= feature_extraction_start and concept_ids[i] == "[VS]":
-                    obs_start_idx = i
-                    break
+        concept_ids_arr = np.asarray(concept_ids)  # object array for string slicing
+        input_ids_arr = np.asarray(record["input_ids"]) if "input_ids" in record else None
 
-            if obs_start_idx is None:
-                # No visit starts within the observation window; skip this sample.
+        # Precompute a boolean ATT mask and the sorted array of [VS] positions
+        # so each prediction window needs only O(log n) work.
+        is_att_mask = np.array([is_att_token(c) for c in concept_ids])
+        vs_indices = np.where(concept_ids_arr == "[VS]")[0]
+        vs_indices = vs_indices[vs_indices >= DEMOGRAPHIC_PROMPT_SIZE]
+        vs_epoch_times = epoch_times[vs_indices]  # sorted because epoch_times is sorted
+
+        batched_samples: Dict[str, list] = defaultdict(list)
+        for feature_extraction_start, index_date, label in prediction_start_end_times:
+            # O(log k): find the first [VS] whose epoch_time >= feature_extraction_start.
+            vs_pos = int(np.searchsorted(vs_epoch_times, feature_extraction_start, side="left"))
+            if vs_pos >= len(vs_indices):
+                continue  # No visit starts within the observation window.
+            obs_start_idx = int(vs_indices[vs_pos])
+
+            # O(log n): find the last token whose epoch_time <= index_date.
+            obs_end_idx = int(np.searchsorted(epoch_times, index_date, side="right")) - 1
+            if obs_end_idx < DEMOGRAPHIC_PROMPT_SIZE:
                 continue
 
-            # Find the last token at or before the index_date.
-            obs_end_idx = None
-            for i in range(seq_length - 1, DEMOGRAPHIC_PROMPT_SIZE - 1, -1):
-                if epoch_times[i] <= index_date:
-                    obs_end_idx = i
-                    break
+            # If obs_end_idx landed on an ATT/time token (prediction time mid-visit),
+            # find the last non-ATT token in [obs_start_idx, obs_end_idx] via numpy.
+            if is_att_mask[obs_end_idx]:
+                non_att = np.where(~is_att_mask[obs_start_idx: obs_end_idx + 1])[0]
+                if len(non_att) == 0:
+                    continue
+                obs_end_idx = obs_start_idx + int(non_att[-1])
 
-            # If the prediction time lands in the middle of a visit (e.g. 24 h
-            # after admission), obs_end_idx may point at an ATT/time token.
-            # Step backward until we land on a non-time token.
-            while obs_end_idx is not None and obs_end_idx > obs_start_idx and is_att_token(concept_ids[obs_end_idx]):
-                obs_end_idx -= 1
-
-            if obs_end_idx is None or obs_end_idx < obs_start_idx:
+            if obs_end_idx < obs_start_idx:
                 continue
 
             # Recalculate year and age at the start of the observation window.
@@ -659,30 +665,29 @@ class ExtractTokenizedSequenceDataMapping:
             batched_samples["index_date"].append(index_date)
             batched_samples["age_at_index"].append(new_age)
 
-            for col in time_series_columns:
-                values = np.asarray(record[col])
-                sliced = values[obs_start_idx: obs_end_idx + 1]
+            sliced_concept_ids = concept_ids_arr[obs_start_idx: obs_end_idx + 1]
+            batched_samples["concept_ids"].append(
+                np.concatenate([np.array(new_demographic_concept_ids), sliced_concept_ids])
+            )
 
-                if col == "concept_ids":
-                    demo = np.array(new_demographic_concept_ids)
-                    batched_samples[col].append(np.concatenate([demo, sliced]))
-                elif col == "input_ids":
-                    if self._tokenizer is not None:
-                        demo_ids = np.array(self._tokenizer.encode(new_demographic_concept_ids))
-                    else:
-                        # Fallback: reuse original demographic token ids unchanged.
-                        demo_ids = values[:DEMOGRAPHIC_PROMPT_SIZE]
-                    batched_samples[col].append(np.concatenate([demo_ids, sliced]))
-                elif col == "epoch_times":
-                    demo_times = np.full(DEMOGRAPHIC_PROMPT_SIZE, obs_epoch_time)
-                    batched_samples[col].append(np.concatenate([demo_times, sliced]))
-                elif col == "ages":
-                    demo_ages = np.full(DEMOGRAPHIC_PROMPT_SIZE, new_age)
-                    batched_samples[col].append(np.concatenate([demo_ages, sliced]))
+            if input_ids_arr is not None:
+                sliced_input_ids = input_ids_arr[obs_start_idx: obs_end_idx + 1]
+                if self._tokenizer is not None:
+                    demo_ids = np.array(self._tokenizer.encode(new_demographic_concept_ids))
                 else:
-                    # For mask/unit columns, reuse the original demographic token values (always 0/NA).
-                    demo_vals = values[:DEMOGRAPHIC_PROMPT_SIZE]
-                    batched_samples[col].append(np.concatenate([demo_vals, sliced]))
+                    demo_ids = input_ids_arr[:DEMOGRAPHIC_PROMPT_SIZE]
+                batched_samples["input_ids"].append(np.concatenate([demo_ids, sliced_input_ids]))
+
+            for col in extra_ts_cols:
+                values = col_arrays[col]
+                sliced = values[obs_start_idx: obs_end_idx + 1]
+                if col == "epoch_times":
+                    demo = np.full(DEMOGRAPHIC_PROMPT_SIZE, obs_epoch_time)
+                elif col == "ages":
+                    demo = np.full(DEMOGRAPHIC_PROMPT_SIZE, new_age)
+                else:
+                    demo = values[:DEMOGRAPHIC_PROMPT_SIZE]
+                batched_samples[col].append(np.concatenate([demo, sliced]))
 
         return batched_samples
 
