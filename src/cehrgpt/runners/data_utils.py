@@ -420,13 +420,20 @@ def extract_cohort_sequences(
             len(missing_person_ids),
             missing_person_ids,
         )
-    processed_dataset = filtered_tokenized_dataset.map(
-        ExtractTokenizedSequenceDataMapping(
-            person_index_date_map, data_args.observation_window, tokenizer
-        ).batch_transform,
-        batched=True,
-        batch_size=data_args.preprocessing_batch_size,
-        num_proc=data_args.preprocessing_num_workers,
-        remove_columns=filtered_tokenized_dataset["train"].column_names,
-    )
-    return processed_dataset
+    mapping_fn = ExtractTokenizedSequenceDataMapping(
+        person_index_date_map, data_args.observation_window, tokenizer
+    ).batch_transform
+    max_workers = data_args.preprocessing_num_workers
+    # Apply per-split so num_proc scales with split size.
+    # Process startup overhead dominates for small splits when num_proc is large.
+    processed_splits = {}
+    for split_name, split_ds in filtered_tokenized_dataset.items():
+        num_proc = min(max_workers, max(1, len(split_ds) // 1000))
+        processed_splits[split_name] = split_ds.map(
+            mapping_fn,
+            batched=True,
+            batch_size=data_args.preprocessing_batch_size,
+            num_proc=num_proc,
+            remove_columns=split_ds.column_names,
+        )
+    return DatasetDict(processed_splits)
