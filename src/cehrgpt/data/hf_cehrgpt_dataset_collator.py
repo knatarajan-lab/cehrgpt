@@ -236,7 +236,7 @@ class CehrGptDataCollator:
         if self.include_motor_time_to_event:
 
             motor_row_indices = [example["motor_row_indices"] for example in examples]
-            row_index_pads = [0] + [max_row_index + 1 for max_row_index in map(max, motor_row_indices)][:-1]
+            row_index_pads = [0] + [max(indices, default=-1) + 1 for indices in motor_row_indices][:-1]
             row_index_pads = np.cumsum(row_index_pads)
             for i, row_index_pad in enumerate(row_index_pads):
                 motor_row_indices[i] = np.asarray(motor_row_indices[i]) + row_index_pad
