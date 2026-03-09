@@ -1,3 +1,4 @@
+import math
 import os
 from datetime import datetime
 from typing import Dict, List, Optional, Union, Tuple
@@ -139,6 +140,13 @@ def prepare_finetune_dataset(
     return final_splits
 
 
+def _clamp_num_proc(dataset_len: int, num_proc: Optional[int], batch_size: int) -> Optional[int]:
+    """Clamp num_proc so we don't spawn more workers than there are batches."""
+    if num_proc is None:
+        return None
+    return min(num_proc, max(1, math.ceil(dataset_len / batch_size)))
+
+
 # Helper function to apply patient-based filtering
 def filter_by_patient_ids(
         dataset: Dataset,
@@ -148,7 +156,7 @@ def filter_by_patient_ids(
     unique_ids = set(patient_ids)
     return dataset.filter(
         lambda batch: [pid in unique_ids for pid in batch["person_id"]],
-        num_proc=data_args.preprocessing_num_workers,
+        num_proc=_clamp_num_proc(len(dataset), data_args.preprocessing_num_workers, data_args.preprocessing_batch_size),
         batched=True,
         batch_size=data_args.preprocessing_batch_size,
     )
@@ -389,12 +397,18 @@ def extract_cohort_sequences(
 
     # data_args.observation_window
     tokenized_dataset = load_from_disk(cehrgpt_args.tokenized_full_dataset_path)
-    filtered_tokenized_dataset = tokenized_dataset.filter(
-        lambda batch: [person_id in all_person_ids for person_id in batch["person_id"]],
-        batched=True,
-        batch_size=data_args.preprocessing_batch_size,
-        num_proc=data_args.preprocessing_num_workers,
-    )
+
+    all_person_ids_set = set(all_person_ids)
+    filtered_tokenized_dataset = DatasetDict({
+        split: ds.filter(
+            lambda batch: [pid in all_person_ids_set for pid in batch["person_id"]],
+            batched=True,
+            batch_size=data_args.preprocessing_batch_size,
+            num_proc=_clamp_num_proc(len(ds), data_args.preprocessing_num_workers, data_args.preprocessing_batch_size),
+        )
+        for split, ds in tokenized_dataset.items()
+    })
+
     person_index_date_agg = cohort.group_by("person_id").agg(
         pl.struct("index_date", "label").alias("index_date_label")
     )
@@ -420,20 +434,17 @@ def extract_cohort_sequences(
             len(missing_person_ids),
             missing_person_ids,
         )
-    mapping_fn = ExtractTokenizedSequenceDataMapping(
+    transform = ExtractTokenizedSequenceDataMapping(
         person_index_date_map, data_args.observation_window, tokenizer
-    ).batch_transform
-    max_workers = data_args.preprocessing_num_workers
-    # Apply per-split so num_proc scales with split size.
-    # Process startup overhead dominates for small splits when num_proc is large.
-    processed_splits = {}
-    for split_name, split_ds in filtered_tokenized_dataset.items():
-        num_proc = min(max_workers, max(1, len(split_ds) // 1000))
-        processed_splits[split_name] = split_ds.map(
-            mapping_fn,
+    )
+    processed_dataset = DatasetDict({
+        split: ds.map(
+            transform.batch_transform,
             batched=True,
             batch_size=data_args.preprocessing_batch_size,
-            num_proc=num_proc,
-            remove_columns=split_ds.column_names,
+            num_proc=_clamp_num_proc(len(ds), data_args.preprocessing_num_workers, data_args.preprocessing_batch_size),
+            remove_columns=ds.column_names,
         )
-    return DatasetDict(processed_splits)
+        for split, ds in filtered_tokenized_dataset.items()
+    })
+    return processed_dataset
