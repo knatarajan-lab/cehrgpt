@@ -2,6 +2,7 @@ import collections
 import copy
 import json
 import os
+import re
 import pickle
 from functools import partial
 from itertools import islice
@@ -67,7 +68,7 @@ from cehrgpt.tokenization.tokenization_statistics import (
 from cehrgpt.omop.ontology import Ontology
 
 LOG = logging.get_logger("transformers")
-
+MAX_CLINICAL_AGE = 120
 
 class CehrGptTokenizer(PreTrainedTokenizer):
 
@@ -267,6 +268,50 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             raise RuntimeError("The tokenizer does not contain either VE or [VE]")
 
     @property
+    def valid_age_values(self) -> frozenset:
+        """
+        Returns the frozenset of integer ages (capped at 120) that have a corresponding
+        'age:<int>' token in the vocabulary (case-insensitive).
+        Ages above 120 are excluded as data-quality outliers.
+        Used for constructing age reconstruction labels.
+        """
+        pattern = re.compile(r"^age:(\d+)$", re.IGNORECASE)
+        return frozenset(
+            age
+            for token in self._tokenizer.get_vocab()
+            if (m := pattern.match(token))
+            and (age := int(m.group(1))) <= MAX_CLINICAL_AGE
+        )
+
+    @property
+    def age_at_vs_vocab_size(self) -> int:
+        """
+        Returns the number of valid age values (capped at MAX_CLINICAL_AGE) found in the vocabulary.
+        This is used as the number of age classes for the age-at-VE prediction head.
+        """
+        ages = self.valid_age_values
+        if not ages:
+            raise RuntimeError(
+                "No age tokens matching 'age:<int>' found in the vocabulary. "
+                "Cannot derive age_at_vs_vocab_size."
+            )
+        return len(ages)
+
+    def get_age_token_id(self, age: int) -> Optional[int]:
+        """
+        Returns the vocabulary token ID for 'age:<age>' (tries common casings),
+        or None if the token is not found in the vocabulary.
+        """
+        if age > MAX_CLINICAL_AGE:
+            return None
+
+        vocab = self._tokenizer.get_vocab()
+        for candidate in (f"age:{age}", f"Age:{age}", f"AGE:{age}"):
+            if candidate in vocab:
+                return vocab[candidate]
+        return None
+
+    @property
     def numeric_concept_ids(self):
         return self._numeric_concept_ids
 
@@ -311,6 +356,30 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     @property
     def pretrained_concept_embedding_model(self):
         return self._pretrained_concept_embedding_model
+
+    def get_motor_task_prevalence_rates(self) -> List[float]:
+        """
+        Returns the per-task hazard rate for each MOTOR task in sorted code order.
+        Rate = frac_events / mean_event_tte (days), matching the original MOTOR
+        implementation. Used to initialize task_layer bias in MotorTaskHead.
+        """
+        task_tte = self._motor_task_info.get("task_tte_stats", {})
+        task_censor = self._motor_task_info.get("task_censor_stats", {})
+        task_tte_time = self._motor_task_info.get("task_tte_time_stats", {})
+        rates = []
+        for code in sorted(self._motor_time_to_event_codes):
+            events = task_tte.get(code, 0)
+            censored = task_censor.get(code, 0)
+            total = events + censored
+            frac_events = events / total if total > 0 else 1e-6
+            tte_stats = task_tte_time.get(code)
+            if tte_stats is not None and tte_stats.count > 0:
+                mean_tte = tte_stats.mean()
+                rate = frac_events / mean_tte if mean_tte > 0 else 1e-6
+            else:
+                rate = 1e-6
+            rates.append(max(rate, 1e-6))
+        return rates
 
     def get_motor_time_bins(self, motor_num_time_pieces: int) -> List[int]:
         if "motor_event_times" not in self._motor_task_info:
@@ -1010,8 +1079,12 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         motor_task_info = None
         if num_motor_tasks:
             LOG.info("Computing the MOTOR TTE statistics")
+            measurement_concept_ids = set(
+                [stat["concept_id"] for stat in numeric_lab_stats]
+                + [t[0] for t in categorical_lab_stats.keys()]
+            )
             allowed_motor_codes = get_allowed_motor_codes(
-                original_concept_codes, data_args, ontology
+                original_concept_codes, data_args, ontology, measurement_concept_ids
             )
             motor_tte_statistics = compute_motor_tte_statistics(
                 dataset, data_args, allowed_motor_codes, ontology

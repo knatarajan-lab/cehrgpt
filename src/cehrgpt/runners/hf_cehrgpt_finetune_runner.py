@@ -242,7 +242,7 @@ def _create_finetune_dataset(
     """Process the raw finetuning data into a tokenized DatasetDict and save the tokenizer."""
     # If the full dataset has been pre-tokenized, slice out the cohort sequences directly
     if cehrgpt_args.tokenized_full_dataset_path is not None:
-        return extract_cohort_sequences(data_args, cehrgpt_args)
+        return extract_cohort_sequences(data_args, cehrgpt_args, tokenizer)
 
     final_splits = prepare_finetune_dataset(
         data_args, training_args, cehrgpt_args, cache_file_collector
@@ -293,6 +293,10 @@ def main():
     )
     cache_file_collector = CacheFileCollector()
     processed_dataset = None
+
+    if cehrgpt_args.refresh_processed_dataset and prepared_ds_path.exists():
+        LOG.info("Refreshing prepared dataset: removing cache at %s", prepared_ds_path)
+        shutil.rmtree(prepared_ds_path)
 
     if any(prepared_ds_path.glob("*")):
         LOG.info("Loading prepared dataset from disk at %s...", prepared_ds_path)

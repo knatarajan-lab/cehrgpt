@@ -138,6 +138,7 @@ class CEHRGPTConfig(PretrainedConfig):
         motor_time_to_event_weight=1.0,
         motor_num_time_pieces=16,
         motor_time_bins: Optional[List[float]] = None,
+        motor_task_prevalence_rates: Optional[List[float]] = None,
         linear_prob_token_id=None,
         token_to_time_token_mapping: Dict[int, List] = None,
         use_pretrained_embeddings=False,
@@ -156,6 +157,9 @@ class CEHRGPTConfig(PretrainedConfig):
         entropy_penalty_alpha=0.01,
         sample_packing_max_positions=None,
         class_weights=None,
+        include_age_at_vs_prediction=False,
+        age_at_vs_vocab_size=None,
+        age_at_vs_prediction_loss_weight=1.0,
         **kwargs,
     ):
         if token_to_time_token_mapping is None:
@@ -220,6 +224,13 @@ class CEHRGPTConfig(PretrainedConfig):
             raise RuntimeError(
                 f"ve_token_id must be provided when include_motor_time_to_event is True"
             )
+        self.include_age_at_vs_prediction = include_age_at_vs_prediction
+        self.age_at_vs_vocab_size = age_at_vs_vocab_size
+        self.age_at_vs_prediction_loss_weight = age_at_vs_prediction_loss_weight
+        if self.include_age_at_vs_prediction and not ve_token_id:
+            raise RuntimeError(
+                "ve_token_id must be provided when include_age_at_vs_prediction is True"
+            )
         if self.include_motor_time_to_event and not linear_prob_token_id:
             raise RuntimeError(
                 f"linear_prob_token_id must be provided when include_motor_time_to_event is True"
@@ -233,6 +244,7 @@ class CEHRGPTConfig(PretrainedConfig):
         self.motor_num_time_pieces = motor_num_time_pieces
         self.linear_prob_token_id = linear_prob_token_id
         self.motor_time_bins = motor_time_bins
+        self.motor_task_prevalence_rates = motor_task_prevalence_rates
 
         self.causal_sfm = causal_sfm
         self.demographics_size = demographics_size

@@ -270,3 +270,39 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether we want to use linear prob tokens"
         },
     )
+    include_age_at_vs_prediction: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to include the age-at-VE reconstruction learning objective, "
+            "which predicts patient age at each [VE] token using cross-entropy loss. "
+            "The age vocab size is derived automatically from the tokenizer vocabulary."
+        },
+    )
+    age_at_vs_prediction_loss_weight: Optional[float] = dataclasses.field(
+        default=1.0,
+        metadata={"help": "Loss weight for the age-at-VE prediction objective."},
+    )
+    aux_loss_warmup_steps: int = dataclasses.field(
+        default=0,
+        metadata={
+            "help": "Number of training steps over which auxiliary losses (all losses except "
+            "token_loss) are linearly ramped from 0 to their full weight. "
+            "Set to 0 (default) to disable warmup and use full weights from the start. "
+            "Ignored when aux_loss_start_step > 0."
+        },
+    )
+    aux_loss_start_step: int = dataclasses.field(
+        default=0,
+        metadata={
+            "help": "Step at which auxiliary losses are switched on (step function). "
+            "Before this step the weight is 0; at and after it the weight is 1. "
+            "When set (> 0) this overrides aux_loss_warmup_steps."
+        },
+    )
+    refresh_processed_dataset: bool = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "If set, delete the cached prepared dataset at prepared_ds_path and "
+            "rebuild it from scratch, ignoring any previously saved version."
+        },
+    )

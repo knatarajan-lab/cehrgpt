@@ -84,6 +84,7 @@ class MotorTaskHead(nn.Module):
         input_dim,
         motor_tte_vocab_size,
         motor_num_time_pieces,
+        task_prevalence_rates=None,
         eps=1e-6,
     ):
         super(MotorTaskHead, self).__init__()
@@ -93,6 +94,14 @@ class MotorTaskHead(nn.Module):
         self.final_layer = nn.Linear(input_dim, input_dim * motor_num_time_pieces)
         self.norm = RMSNorm(input_dim, eps)
         self.task_layer = nn.Linear(input_dim, motor_tte_vocab_size)
+        # Initialise task_layer bias with log2(prevalence_rate) per task so the
+        # model starts with calibrated log-hazard predictions (matching the
+        # original MOTOR implementation) rather than zero for all tasks.
+        if task_prevalence_rates is not None:
+            start_bias = torch.log2(
+                torch.tensor(task_prevalence_rates, dtype=torch.float32)
+            )
+            self.task_layer.bias.data = start_bias
         self.task_time_bias = nn.Parameter(
             torch.zeros(1, self.motor_num_time_pieces, motor_tte_vocab_size)
         )
@@ -1041,6 +1050,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             self.value_head = nn.Linear(
                 config.n_embd, config.value_vocab_size, bias=False
             )
+        if self.config.include_age_at_vs_prediction:
+            self.age_at_vs_head = nn.Linear(
+                config.n_embd, config.age_at_vs_vocab_size, bias=False
+            )
 
         self.motor_time_bins = None
         self.linear_prob = None
@@ -1154,6 +1167,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             input_dim=self.config.n_embd,
             motor_tte_vocab_size=self.config.motor_tte_vocab_size,
             motor_num_time_pieces=self.config.motor_num_time_pieces,
+            task_prevalence_rates=getattr(self.config, "motor_task_prevalence_rates", None),
         )
 
     def prepare_inputs_for_generation(
@@ -1335,6 +1349,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         return_dict: Optional[bool] = None,
         ages: Optional[torch.FloatTensor] = None,
         epoch_times: Optional[torch.FloatTensor] = None,
+        age_reconstruction_labels: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, CehrGptCausalLMOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -1418,6 +1433,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         time_to_visit_loss = None
         token_value_loss = None
         motor_tte_loss = None
+        age_at_vs_loss = None
 
         if labels is not None:
             # move labels to correct device to enable model parallelism
@@ -1606,6 +1622,22 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     * float(not self.config.freeze_cehrgpt_generation_model)
                 )
 
+            if (
+                self.config.include_age_at_vs_prediction
+                and age_reconstruction_labels is not None
+            ):
+                age_logits = self.age_at_vs_head(hidden_states)
+                age_loss_fct = CrossEntropyLoss(ignore_index=-100, reduction="sum")
+                age_at_vs_loss = age_loss_fct(
+                    age_logits.view(-1, self.config.age_at_vs_vocab_size),
+                    age_reconstruction_labels.view(-1),
+                ) / total_num_tokens
+                loss += (
+                    age_at_vs_loss
+                    * self.config.age_at_vs_prediction_loss_weight
+                    * float(not self.config.freeze_cehrgpt_generation_model)
+                )
+
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]
             return ((loss,) + output) if loss is not None else output
@@ -1624,6 +1656,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             time_to_visit_loss=time_to_visit_loss,
             token_value_loss=token_value_loss,
             motor_tte_loss=motor_tte_loss,
+            age_at_vs_loss=age_at_vs_loss,
         )
 
     @staticmethod

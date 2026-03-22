@@ -41,7 +41,7 @@ from cehrgpt.omop.ontology import Ontology
 from cehrgpt.runners.data_utils import get_torch_dtype, load_patient_splits, filter_by_patient_ids
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
-from cehrgpt.runners.sample_packing_trainer import SamplePackingTrainer
+from cehrgpt.runners.sample_packing_trainer import CehrGptTrainer, SamplePackingTrainer
 
 LOG = logging.get_logger("transformers")
 
@@ -223,12 +223,20 @@ def load_and_create_model(
             ),
             include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
             freeze_cehrgpt_generation_model=cehrgpt_args.freeze_cehrgpt_generation_model,
+            include_age_at_vs_prediction=cehrgpt_args.include_age_at_vs_prediction,
+            age_at_vs_vocab_size=(
+                tokenizer.age_at_vs_vocab_size
+                if cehrgpt_args.include_age_at_vs_prediction
+                else None
+            ),
+            age_at_vs_prediction_loss_weight=cehrgpt_args.age_at_vs_prediction_loss_weight,
             motor_tte_vocab_size=tokenizer.motor_tte_vocab_size,
             motor_time_to_event_weight=cehrgpt_args.motor_time_to_event_weight,
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
             motor_time_bins=tokenizer.get_motor_time_bins(
                 cehrgpt_args.motor_num_time_pieces
             ),
+            motor_task_prevalence_rates=tokenizer.get_motor_task_prevalence_rates(),
             linear_prob_n_layer=cehrgpt_args.linear_prob_n_layer,
             ve_token_id=tokenizer.ve_token_id,
             linear_prob_token_id=tokenizer.linear_token_id,
@@ -244,10 +252,17 @@ def load_and_create_model(
             tokenizer.pretrained_embeddings,
         )
 
+    LOG.info("Model vocab_size: %s", model.config.vocab_size)
+    LOG.info("Model value_vocab_size: %s", getattr(model.config, "value_vocab_size", 0))
+    LOG.info("Model time_token_vocab_size: %s", getattr(model.config, "time_token_vocab_size", 0))
+    LOG.info("Model motor_tte_vocab_size: %s", getattr(model.config, "motor_tte_vocab_size", 0))
+    LOG.info("Model age_at_vs_vocab_size: %s", getattr(model.config, "age_at_vs_vocab_size", 0))
+
     if model.config.torch_dtype == torch.bfloat16:
         return model.bfloat16()
     elif model.config.torch_dtype == torch.float16:
         return model.half()
+
     return model
 
 
@@ -650,6 +665,8 @@ def main():
                 if "validation" in processed_dataset
                 else processed_dataset["test"]
             )["num_of_concepts"],
+            aux_loss_warmup_steps=cehrgpt_args.aux_loss_warmup_steps,
+            aux_loss_start_step=cehrgpt_args.aux_loss_start_step,
         )
         training_args.per_device_train_batch_size = 1
         training_args.per_device_eval_batch_size = 1
@@ -659,7 +676,11 @@ def main():
             model_args.max_position_embeddings,
         )
     else:
-        trainer_class = Trainer
+        trainer_class = partial(
+            CehrGptTrainer,
+            aux_loss_warmup_steps=cehrgpt_args.aux_loss_warmup_steps,
+            aux_loss_start_step=cehrgpt_args.aux_loss_start_step,
+        )
         data_collator_fn = CehrGptDataCollator
 
     trainer = trainer_class(
@@ -678,6 +699,7 @@ def main():
             include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
             motor_sampling_probability=cehrgpt_args.motor_sampling_probability,
             is_data_in_meds=data_args.is_data_in_meds,
+            include_age_at_vs_prediction=cehrgpt_args.include_age_at_vs_prediction,
         ),
         train_dataset=processed_dataset["train"],
         eval_dataset=(

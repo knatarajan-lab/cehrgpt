@@ -115,6 +115,8 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "silu",
             "--decoder_mlp",
             "LlamaMLP",
+            "--include_age_at_vs_prediction",
+            "true"
         ]
         train_main()
         # Teacher force the prompt to consist of [year][age][gender][race][VS] then inject the random vector before [VS]

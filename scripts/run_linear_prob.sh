@@ -19,6 +19,8 @@ usage() {
     echo "  --add_random_token             Enable adding random token (disabled by default)"
     echo "  --tokenized_full_dataset_path=PATH Path to a pre-tokenized full dataset (optional)"
     echo "  --observation_window=NUM       Observation window in days (optional, default: None)"
+    echo "  --refresh_processed_dataset    Delete and rebuild the cached prepared dataset (disabled by default)
+  --is_data_in_meds              Indicate that the data is in MEDS format (disabled by default)"
     echo ""
     echo "Example:"
     echo "  $0 --base_dir=/path/to/cohorts --dataset_prepared_path=/path/to/dataset_prepared \\"
@@ -34,6 +36,8 @@ TORCH_TYPE="bfloat16"
 DISABLE_SAMPLE_PACKING="false"
 DISABLE_COMBINE_GLOBAL_LOCAL="false"
 ADD_RANDOM_TOKEN="false"
+REFRESH_PROCESSED_DATASET="false"
+IS_DATA_IN_MEDS="false"
 TOKENIZED_FULL_DATASET_PATH=""
 OBSERVATION_WINDOW=""
 
@@ -81,6 +85,12 @@ for arg in "$@"; do
             ;;
         --observation_window=*)
             OBSERVATION_WINDOW="${arg#*=}"
+            ;;
+        --refresh_processed_dataset)
+            REFRESH_PROCESSED_DATASET="true"
+            ;;
+        --is_data_in_meds)
+            IS_DATA_IN_MEDS="true"
             ;;
         --help|-h)
             usage
@@ -191,6 +201,8 @@ log "  --disable_combine_global_local=$DISABLE_COMBINE_GLOBAL_LOCAL"
 log "  --add_random_token=$ADD_RANDOM_TOKEN"
 log "  --tokenized_full_dataset_path=$TOKENIZED_FULL_DATASET_PATH"
 log "  --observation_window=$OBSERVATION_WINDOW"
+log "  --refresh_processed_dataset=$REFRESH_PROCESSED_DATASET"
+log "  --is_data_in_meds=$IS_DATA_IN_MEDS"
 
 # Find valid cohorts and write to a temp file
 TEMP_COHORT_LIST="$LOG_DIR/cohort_list_${TIMESTAMP}.txt"
@@ -282,6 +294,14 @@ while read -r cohort_name; do
 
     if [ -n "$OBSERVATION_WINDOW" ]; then
         FEATURE_CMD="$FEATURE_CMD --observation_window \"$OBSERVATION_WINDOW\""
+    fi
+
+    if [ "$REFRESH_PROCESSED_DATASET" = "true" ]; then
+        FEATURE_CMD="$FEATURE_CMD --refresh_processed_dataset"
+    fi
+
+    if [ "$IS_DATA_IN_MEDS" = "true" ]; then
+        FEATURE_CMD="$FEATURE_CMD --is_data_in_meds"
     fi
 
     # Step 1: Feature extraction
