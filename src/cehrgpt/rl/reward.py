@@ -15,13 +15,12 @@ where
 """
 
 import math
+from collections import Counter
 from typing import Dict, List, Optional, Set, Tuple
 
 from transformers.utils import logging
 
 LOG = logging.get_logger("transformers")
-
-_SECONDS_PER_DAY = 86400.0
 
 
 # ---------------------------------------------------------------------------
@@ -185,10 +184,16 @@ def compute_prevalence_stats(
     target_concept_ids: Set[str],
     windows: List[int],
     prediction_split_fraction: float = 0.5,
+    num_proc: int = 1,
+    batch_size: int = 1000,
 ) -> Dict[Tuple[str, int], float]:
     """
     Estimate π_{c,w} = P(condition c within window w days of a random split point)
     by scanning a HuggingFace Dataset of tokenized CEHR-GPT sequences.
+
+    Uses ``dataset.map`` for parallel processing.  Each example emits a list of
+    ``"concept_id:window"`` hit strings; these are aggregated with a Counter after
+    the map pass.
 
     Args:
         dataset: HuggingFace Dataset with ``concept_ids`` (List[str]) column.
@@ -196,45 +201,75 @@ def compute_prevalence_stats(
         windows: Prediction horizon windows in days.
         prediction_split_fraction: Where to place the split point in each sequence
             (0.5 = midpoint).
+        num_proc: Number of parallel workers for ``dataset.map``.
+        batch_size: Batch size passed to ``dataset.map``.
 
     Returns:
         Dict mapping (concept_id, window_days) → estimated prevalence.
     """
+    from tqdm import tqdm
+
     from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token
 
     _DEMOGRAPHICS_SIZE = 4
-    counts: Dict[Tuple[str, int], int] = {
-        (c, w): 0 for c in target_concept_ids for w in windows
-    }
-    n_patients = 0
     max_window = max(windows)
+    sorted_windows = sorted(windows)
 
-    for example in dataset:
-        concept_ids = example["concept_ids"]
-        if len(concept_ids) <= _DEMOGRAPHICS_SIZE:
-            continue
+    def _map_hits(examples):
+        """Return a ``_hits`` column: list-of-strings per example."""
+        from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token
 
-        split_idx = max(_DEMOGRAPHICS_SIZE, int(len(concept_ids) * prediction_split_fraction))
-        cumulative_days = 0.0
-        found: Dict[int, Set[str]] = {w: set() for w in windows}
+        result = []
+        for concept_ids in examples["concept_ids"]:
+            hits = []
+            if len(concept_ids) <= _DEMOGRAPHICS_SIZE:
+                result.append(hits)
+                continue
 
-        for token in concept_ids[split_idx:]:
-            if is_att_token(token):
-                try:
-                    cumulative_days += extract_time_interval_in_days(token)
-                except ValueError:
-                    pass
-                if cumulative_days > max_window:
-                    break
-            elif token in target_concept_ids:
-                for w in windows:
-                    if cumulative_days <= w:
-                        found[w].add(token)
+            split_idx = max(
+                _DEMOGRAPHICS_SIZE,
+                int(len(concept_ids) * prediction_split_fraction),
+            )
+            cumulative_days = 0.0
+            found: Dict[int, Set[str]] = {w: set() for w in sorted_windows}
 
-        for concept_id in target_concept_ids:
-            for w in windows:
-                if concept_id in found[w]:
-                    counts[(concept_id, w)] += 1
+            for token in concept_ids[split_idx:]:
+                if is_att_token(token):
+                    try:
+                        cumulative_days += extract_time_interval_in_days(token)
+                    except ValueError:
+                        pass
+                    if cumulative_days > max_window:
+                        break
+                elif token in target_concept_ids:
+                    for w in sorted_windows:
+                        if cumulative_days <= w:
+                            found[w].add(token)
+
+            for w in sorted_windows:
+                for c in found[w]:
+                    hits.append(f"{c}:{w}")
+            result.append(hits)
+        return {"_hits": result}
+
+    LOG.info(
+        "Computing prevalence stats over %d examples (num_proc=%d)…",
+        len(dataset),
+        num_proc,
+    )
+    mapped = dataset.map(
+        _map_hits,
+        batched=True,
+        batch_size=batch_size,
+        num_proc=num_proc,
+        remove_columns=[c for c in dataset.column_names if c != "_hits"],
+        desc="prevalence stats",
+    )
+
+    counter: Counter = Counter()
+    n_patients = 0
+    for hits in tqdm(mapped["_hits"], desc="aggregating prevalence", unit="patient"):
+        counter.update(hits)
         n_patients += 1
 
     if n_patients == 0:
@@ -242,4 +277,8 @@ def compute_prevalence_stats(
         return {(c, w): 0.0 for c in target_concept_ids for w in windows}
 
     LOG.info("Computed prevalence stats over %d patients.", n_patients)
-    return {key: count / n_patients for key, count in counts.items()}
+    return {
+        (c, w): counter[f"{c}:{w}"] / n_patients
+        for c in target_concept_ids
+        for w in windows
+    }

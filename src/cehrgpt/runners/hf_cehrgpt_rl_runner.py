@@ -111,6 +111,8 @@ def _load_prevalence_stats(
         dataset=train_dataset,
         target_concept_ids=target_concept_ids,
         windows=rl_args.prediction_windows,
+        num_proc=rl_args.prevalence_num_proc,
+        batch_size=rl_args.prevalence_batch_size,
     )
     # Optionally persist for reuse
     if rl_args.prevalence_stats_path:

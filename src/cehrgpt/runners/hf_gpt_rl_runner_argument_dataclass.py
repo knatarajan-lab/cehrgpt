@@ -82,3 +82,11 @@ class RLArguments:
         default=1024,
         metadata={"help": "Maximum prefix length in tokens (right-truncated if longer)."},
     )
+    prevalence_num_proc: int = field(
+        default=1,
+        metadata={"help": "Number of parallel workers for prevalence stats computation."},
+    )
+    prevalence_batch_size: int = field(
+        default=1000,
+        metadata={"help": "Batch size for prevalence stats dataset.map pass."},
+    )
