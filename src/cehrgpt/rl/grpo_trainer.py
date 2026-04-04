@@ -207,7 +207,10 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             torch.distributed.all_reduce(metrics_t, op=torch.distributed.ReduceOp.AVG)
 
-        if self.is_world_process_zero():
+        if (
+            self.is_world_process_zero()
+            and self.state.global_step % self.args.logging_steps == 0
+        ):
             pg_v, kl_v, rew_v, base_v = metrics_t.tolist()
             self.log({
                 "rl_pg_loss":     pg_v,
