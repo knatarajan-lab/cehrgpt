@@ -172,7 +172,7 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
         # 4 & 5. PG loss + KL loss
         # ---------------------------------------------------------------
         pg_loss, kl_loss = self._compute_pg_and_kl_loss(
-            model,
+            raw_model,
             prefix_input_ids,
             prefix_ages,
             prefix_epoch_times,
@@ -282,24 +282,36 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
         K: int,
         advantages: torch.Tensor,                       # (B,)
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Batched PG + KL computation.
+
+        All valid (i, k) full sequences (prefix + rollout) are left-padded to the
+        same length and forwarded through the current model and the reference model
+        in two single batched calls.  With left-padding the generated token logits
+        are always the last ``rollout_len`` positions:
+            logits[n, -(rollout_len+1):-1, :]
+        """
         B = prefix_ids.shape[0]
-        pg_terms: List[torch.Tensor] = []
-        kl_terms: List[torch.Tensor] = []
+        dev = prefix_ids.device
+
+        # ------------------------------------------------------------------
+        # Step 1: Build per-(i, k) full sequences and metadata
+        # ------------------------------------------------------------------
+        # Each entry: (patient_idx, full_ids_1d, full_ages_1d, full_times_1d,
+        #              full_vals_1d_or_None, full_valmask_1d_or_None,
+        #              rollout_len, new_ids_t)
+        entries: List[Tuple] = []
 
         for i in range(B):
             prefix_len_i = int(prefix_lengths[i].item())
-            # Non-padded prefix slices
-            prefix_ids_i = prefix_ids[i, -prefix_len_i:]      # (prefix_len,)
-            prefix_ages_i = prefix_ages[i, -prefix_len_i:]
+            prefix_ids_i   = prefix_ids[i, -prefix_len_i:]
+            prefix_ages_i  = prefix_ages[i, -prefix_len_i:]
             prefix_times_i = prefix_times[i, -prefix_len_i:]
-            prefix_vals_i = prefix_values[i, -prefix_len_i:] if prefix_values is not None else None
+            prefix_vals_i    = prefix_values[i, -prefix_len_i:]         if prefix_values is not None else None
             prefix_valmask_i = prefix_value_indicators[i, -prefix_len_i:] if prefix_value_indicators is not None else None
 
-            prefix_end_age = int(prefix_ages_i[-1].item())
+            prefix_end_age  = int(prefix_ages_i[-1].item())
             prefix_end_time = float(prefix_times_i[-1].item())
-
-            pg_per_rollout: List[torch.Tensor] = []
-            kl_per_rollout: List[torch.Tensor] = []
 
             for k in range(K):
                 bk_idx = i * K + k
@@ -309,78 +321,127 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
                 if not new_tokens:
                     continue
 
-                # Encode new tokens → IDs
                 new_ids = self.cehrgpt_tokenizer.convert_tokens_to_ids(new_tokens)
                 if not new_ids:
                     continue
-                rollout_len = len(new_ids)
-                new_ids_t = torch.tensor(new_ids, dtype=torch.long, device=prefix_ids.device)
 
-                # Reconstruct ages & epoch_times for the generated portion
+                rollout_len = len(new_ids)
+                new_ids_t = torch.tensor(new_ids, dtype=torch.long, device=dev)
+
                 rollout_ages, rollout_times = self._reconstruct_rollout_context(
                     new_tokens, prefix_end_age, prefix_end_time
                 )
-                rollout_ages_t = torch.tensor(rollout_ages, dtype=torch.long, device=prefix_ids.device)
-                rollout_times_t = torch.tensor(rollout_times, dtype=torch.float32, device=prefix_ids.device)
+                rollout_ages_t  = torch.tensor(rollout_ages,  dtype=torch.long,    device=dev)
+                rollout_times_t = torch.tensor(rollout_times, dtype=torch.float32,  device=dev)
 
-                # Value tokens for the generated portion (from generation output if available)
                 if rollout_seq_vals is not None:
-                    gen_vals_t = rollout_seq_vals[bk_idx, prefix_len_i: prefix_len_i + rollout_len].to(prefix_ids.device)
-                    gen_valmask_t = rollout_seq_val_masks[bk_idx, prefix_len_i: prefix_len_i + rollout_len].to(prefix_ids.device)
+                    gen_vals_t    = rollout_seq_vals[bk_idx, prefix_len_i: prefix_len_i + rollout_len].to(dev)
+                    gen_valmask_t = rollout_seq_val_masks[bk_idx, prefix_len_i: prefix_len_i + rollout_len].to(dev)
                 else:
-                    gen_vals_t = torch.zeros(rollout_len, dtype=torch.long, device=prefix_ids.device)
-                    gen_valmask_t = torch.zeros(rollout_len, dtype=torch.bool, device=prefix_ids.device)
+                    gen_vals_t    = torch.zeros(rollout_len, dtype=torch.long, device=dev)
+                    gen_valmask_t = torch.zeros(rollout_len, dtype=torch.bool,  device=dev)
 
-                # Full (prefix + rollout) tensors — shape (1, full_len)
-                full_ids = torch.cat([prefix_ids_i, new_ids_t]).unsqueeze(0)
-                full_ages = torch.cat([prefix_ages_i, rollout_ages_t]).unsqueeze(0)
-                full_times = torch.cat([prefix_times_i, rollout_times_t]).unsqueeze(0)
+                full_ids_1d   = torch.cat([prefix_ids_i,   new_ids_t])
+                full_ages_1d  = torch.cat([prefix_ages_i,  rollout_ages_t])
+                full_times_1d = torch.cat([prefix_times_i, rollout_times_t])
 
-                fwd_kwargs: Dict[str, Any] = {}
                 if prefix_vals_i is not None:
-                    full_vals = torch.cat([prefix_vals_i, gen_vals_t]).unsqueeze(0)
-                    full_valmask = torch.cat([prefix_valmask_i, gen_valmask_t]).unsqueeze(0)
-                    fwd_kwargs["values"] = full_vals
-                    fwd_kwargs["value_indicators"] = full_valmask
+                    full_vals_1d    = torch.cat([prefix_vals_i,    gen_vals_t])
+                    full_valmask_1d = torch.cat([prefix_valmask_i, gen_valmask_t])
+                else:
+                    full_vals_1d    = None
+                    full_valmask_1d = None
 
-                # ---- Current model (gradient flows) ----
-                curr_logits = model(
-                    input_ids=full_ids,
-                    ages=full_ages,
-                    epoch_times=full_times,
-                    **fwd_kwargs,
-                ).logits  # (1, full_len, vocab)
+                entries.append((
+                    i, full_ids_1d, full_ages_1d, full_times_1d,
+                    full_vals_1d, full_valmask_1d, rollout_len, new_ids_t,
+                ))
 
-                # Autoregressive shift: logits[t] predicts token[t+1]
-                # Rollout starts at position prefix_len_i in the sequence
-                gen_logits = curr_logits[0, prefix_len_i - 1 : -1, :]  # (rollout_len, vocab)
-                curr_lp = F.log_softmax(gen_logits, dim=-1)
-                token_lp = curr_lp.gather(1, new_ids_t.unsqueeze(1)).squeeze(1)  # (rollout_len,)
-                seq_lp = token_lp.mean()
-                pg_per_rollout.append(seq_lp)
+        if not entries:
+            zero = prefix_ids.new_zeros(1, dtype=torch.float32).squeeze().requires_grad_(True)
+            return zero, zero
 
-                # ---- Reference model (no gradient) ----
-                with torch.no_grad():
-                    ref_logits = self.ref_model(
-                        input_ids=full_ids,
-                        ages=full_ages,
-                        epoch_times=full_times,
-                        **fwd_kwargs,
-                    ).logits
-                ref_gen_logits = ref_logits[0, prefix_len_i - 1 : -1, :]
-                ref_lp = F.log_softmax(ref_gen_logits, dim=-1)
-                ref_token_lp = ref_lp.gather(1, new_ids_t.unsqueeze(1)).squeeze(1)
+        # ------------------------------------------------------------------
+        # Step 2: Left-pad all sequences to max_full_len
+        # ------------------------------------------------------------------
+        N = len(entries)
+        max_full_len = max(e[1].shape[0] for e in entries)
+        pad_id = self.cehrgpt_tokenizer.pad_token_id
+        has_values = entries[0][4] is not None  # consistent across all entries
 
-                # Token-level KL approximation: E[log π_θ - log π_ref]
-                kl_approx = (token_lp - ref_token_lp).mean()
-                kl_per_rollout.append(kl_approx)
+        batch_ids    = torch.full((N, max_full_len), pad_id, dtype=torch.long,    device=dev)
+        batch_ages   = torch.zeros((N, max_full_len),          dtype=torch.long,    device=dev)
+        batch_times  = torch.zeros((N, max_full_len),          dtype=torch.float32, device=dev)
+        batch_vals   = torch.zeros((N, max_full_len),          dtype=torch.long,    device=dev)
+        batch_vmask  = torch.zeros((N, max_full_len),          dtype=torch.bool,    device=dev)
+        batch_attn   = torch.zeros((N, max_full_len),          dtype=torch.long,    device=dev)
 
-            if not pg_per_rollout:
-                continue
+        for n, (_, fids, fages, ftimes, fvals, fvmask, _, _) in enumerate(entries):
+            slen = fids.shape[0]
+            batch_ids[n,   -slen:] = fids
+            batch_ages[n,  -slen:] = fages
+            batch_times[n, -slen:] = ftimes
+            if fvals is not None:
+                batch_vals[n,  -slen:] = fvals
+                batch_vmask[n, -slen:] = fvmask
+            batch_attn[n, -slen:] = 1
 
-            mean_seq_lp = torch.stack(pg_per_rollout).mean()
+        # ------------------------------------------------------------------
+        # Step 3: Two batched forward passes (current model + ref model)
+        # ------------------------------------------------------------------
+        fwd_kwargs: Dict[str, Any] = {}
+        if has_values:
+            fwd_kwargs["values"]           = batch_vals
+            fwd_kwargs["value_indicators"] = batch_vmask
+
+        # Current model — gradients flow
+        curr_logits = model(
+            input_ids=batch_ids,
+            ages=batch_ages,
+            epoch_times=batch_times,
+            attention_mask=batch_attn,
+            **fwd_kwargs,
+        ).logits  # (N, max_full_len, vocab)
+
+        # Reference model — no gradients
+        with torch.no_grad():
+            ref_logits = self.ref_model(
+                input_ids=batch_ids,
+                ages=batch_ages,
+                epoch_times=batch_times,
+                attention_mask=batch_attn,
+                **fwd_kwargs,
+            ).logits  # (N, max_full_len, vocab)
+
+        # ------------------------------------------------------------------
+        # Step 4: Extract per-token log-probs and aggregate per patient
+        # ------------------------------------------------------------------
+        # With left-padding, rollout tokens occupy the last `rollout_len`
+        # positions; the preceding logit (autoregressive shift) is at
+        #   logits[n, -(rollout_len+1):-1, :]
+        pg_per_patient: Dict[int, List[torch.Tensor]] = {}
+        kl_per_patient: Dict[int, List[torch.Tensor]] = {}
+
+        for n, (i, _, _, _, _, _, rollout_len, new_ids_t) in enumerate(entries):
+            gen_logits     = curr_logits[n, -(rollout_len + 1):-1, :]  # (rollout_len, vocab)
+            curr_lp        = F.log_softmax(gen_logits, dim=-1)
+            token_lp       = curr_lp.gather(1, new_ids_t.unsqueeze(1)).squeeze(1)
+            seq_lp         = token_lp.mean()
+
+            ref_gen_logits = ref_logits[n, -(rollout_len + 1):-1, :]
+            ref_lp         = F.log_softmax(ref_gen_logits, dim=-1)
+            ref_token_lp   = ref_lp.gather(1, new_ids_t.unsqueeze(1)).squeeze(1)
+            kl_approx      = (token_lp - ref_token_lp).mean()
+
+            pg_per_patient.setdefault(i, []).append(seq_lp)
+            kl_per_patient.setdefault(i, []).append(kl_approx)
+
+        pg_terms: List[torch.Tensor] = []
+        kl_terms: List[torch.Tensor] = []
+        for i in sorted(pg_per_patient):
+            mean_seq_lp = torch.stack(pg_per_patient[i]).mean()
             pg_terms.append(-advantages[i] * mean_seq_lp)
-            kl_terms.append(torch.stack(kl_per_rollout).mean())
+            kl_terms.append(torch.stack(kl_per_patient[i]).mean())
 
         if not pg_terms:
             zero = prefix_ids.new_zeros(1, dtype=torch.float32).squeeze().requires_grad_(True)
