@@ -1,0 +1,387 @@
+"""
+GRPO (Group Relative Policy Optimization / REINFORCE + KL) trainer for CEHR-GPT.
+
+Algorithm per patient i
+-----------------------
+1. Sample K rollout trajectories τ_1…τ_K ~ π_θ(· | prefix_i)
+2. Compute reward R_i using the weighted condition-recovery objective
+3. Compute advantage  A_i = R_i - b  (b = moving-average baseline)
+4. Policy-gradient loss:
+       L_PG = - A_i · (1/K) Σ_k Σ_t log π_θ(τ_k[t] | prefix_i + τ_k[:t])
+5. KL regularisation (token-level log-ratio approximation):
+       L_KL = (1/K) Σ_k mean_t [log π_θ(τ_k[t]|·) - log π_ref(τ_k[t]|·)]
+6. Total loss: L = L_PG + β · L_KL
+"""
+
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import torch
+import torch.nn.functional as F
+from transformers.utils import logging
+
+from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token
+from cehrgpt.rl.reward import compute_patient_reward, extract_conditions_from_rollout
+from cehrgpt.runners.hf_gpt_rl_runner_argument_dataclass import RLArguments
+from cehrgpt.runners.sample_packing_trainer import CehrGptTrainer
+
+LOG = logging.get_logger("transformers")
+
+_SECONDS_PER_DAY = 86400.0
+
+
+class CehrGptGRPOTrainer(CehrGptTrainer):
+    """
+    REINFORCE + KL trainer for CEHR-GPT.
+
+    Args:
+        ref_model: Frozen reference model π_ref (same architecture as the policy).
+        rl_args: ``RLArguments`` hyperparameter container.
+        prevalence_stats: Dict mapping (concept_id, window_days) → π_{c,w}.
+        target_concept_ids: Set of condition concept ID strings used for rewards.
+        cehrgpt_tokenizer: ``CehrGptTokenizer`` instance (stored separately from the
+            HF ``tokenizer`` slot which may not be set for GPT-style models).
+        All remaining kwargs are forwarded to ``CehrGptTrainer``.
+    """
+
+    def __init__(
+        self,
+        ref_model,
+        rl_args: RLArguments,
+        prevalence_stats: Dict[Tuple[str, int], float],
+        target_concept_ids: Set[str],
+        cehrgpt_tokenizer,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.ref_model = ref_model
+        self.ref_model.eval()
+        for p in self.ref_model.parameters():
+            p.requires_grad_(False)
+
+        self.rl_args = rl_args
+        self.prevalence_stats = prevalence_stats
+        self.target_concept_ids = target_concept_ids
+        self.cehrgpt_tokenizer = cehrgpt_tokenizer
+        self._baseline: float = 0.0
+
+    # ------------------------------------------------------------------
+    # Main loss entry point
+    # ------------------------------------------------------------------
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        # RL batches contain "prefix_input_ids"; fall back to standard CE otherwise
+        if "prefix_input_ids" not in inputs:
+            return super().compute_loss(model, inputs, return_outputs, **kwargs)
+
+        prefix_input_ids: torch.Tensor = inputs["prefix_input_ids"]           # (B, L)
+        prefix_ages: torch.Tensor = inputs["prefix_ages"]                   # (B, L)
+        prefix_epoch_times: torch.Tensor = inputs["prefix_epoch_times"]     # (B, L)
+        prefix_attention_mask: torch.Tensor = inputs["prefix_attention_mask"]  # (B, L)
+        prefix_values: Optional[torch.Tensor] = inputs.get("prefix_values")  # (B, L)
+        prefix_value_indicators: Optional[torch.Tensor] = inputs.get("prefix_value_indicators")  # (B, L)
+        future_conditions: List[List[Tuple[str, float]]] = inputs["future_conditions"]
+        prefix_lengths: torch.Tensor = inputs["prefix_lengths"]              # (B,)
+
+        B = prefix_input_ids.shape[0]
+        K = self.rl_args.num_rollouts
+
+        # ---------------------------------------------------------------
+        # 1. Sample K rollouts per patient
+        # ---------------------------------------------------------------
+        # Expand prefix K-fold: (B*K, L)
+        rep_ids = prefix_input_ids.repeat_interleave(K, dim=0)
+        rep_ages = prefix_ages.repeat_interleave(K, dim=0)
+        rep_mask = prefix_attention_mask.repeat_interleave(K, dim=0)
+        rep_values = prefix_values.repeat_interleave(K, dim=0) if prefix_values is not None else None
+        rep_val_masks = prefix_value_indicators.repeat_interleave(K, dim=0) if prefix_value_indicators is not None else None
+
+        model.eval()
+        with torch.no_grad():
+            gen_output = self._generate_rollouts(model, rep_ids, rep_ages, rep_mask, rep_values, rep_val_masks)
+        model.train()
+
+        rollout_token_strs: List[List[str]] = gen_output["sequences"]           # B*K items
+        rollout_seq_vals: Optional[torch.Tensor] = gen_output.get("sequence_vals")     # (B*K, full_len) or None
+        rollout_seq_val_masks: Optional[torch.Tensor] = gen_output.get("sequence_val_masks")  # (B*K, full_len) or None
+
+        # ---------------------------------------------------------------
+        # 2. Compute rewards
+        # ---------------------------------------------------------------
+        rewards: List[float] = []
+        for i in range(B):
+            prefix_len_i = int(prefix_lengths[i].item())
+            rollout_conds_i = [
+                extract_conditions_from_rollout(
+                    rollout_token_strs[i * K + k],
+                    prefix_len_i,
+                    self.target_concept_ids,
+                    self.rl_args.prediction_windows,
+                )
+                for k in range(K)
+            ]
+            R_i = compute_patient_reward(
+                future_conditions[i],
+                rollout_conds_i,
+                self.prevalence_stats,
+                self.rl_args.prediction_windows,
+                self.rl_args.rarity_gamma,
+                self.rl_args.alpha_max,
+                self.rl_args.window_eta,
+                self.rl_args.window_ref_days,
+                self.rl_args.prevalence_epsilon,
+                self.rl_args.false_positive_lambda,
+            )
+            rewards.append(R_i)
+
+        rewards_t = torch.tensor(rewards, dtype=torch.float32, device=prefix_input_ids.device)
+
+        # ---------------------------------------------------------------
+        # 3. Baseline-adjusted advantage
+        # ---------------------------------------------------------------
+        advantages = rewards_t - self._baseline
+        m = self.rl_args.baseline_momentum
+        self._baseline = m * self._baseline + (1.0 - m) * rewards_t.mean().item()
+
+        # ---------------------------------------------------------------
+        # 4 & 5. PG loss + KL loss
+        # ---------------------------------------------------------------
+        pg_loss, kl_loss = self._compute_pg_and_kl_loss(
+            model,
+            prefix_input_ids,
+            prefix_ages,
+            prefix_epoch_times,
+            prefix_values,
+            prefix_value_indicators,
+            prefix_lengths,
+            rollout_token_strs,
+            rollout_seq_vals,
+            rollout_seq_val_masks,
+            K,
+            advantages,
+        )
+
+        total_loss = pg_loss + self.rl_args.kl_beta * kl_loss
+
+        # Log sub-losses
+        if not hasattr(self, "_rl_loss_sums"):
+            self._rl_loss_sums: Dict[str, float] = {}
+            self._rl_loss_counts: Dict[str, int] = {}
+        for name, val in [
+            ("rl_pg_loss", pg_loss),
+            ("rl_kl_loss", kl_loss),
+            ("rl_reward_mean", rewards_t.mean()),
+        ]:
+            v = val.item() if isinstance(val, torch.Tensor) else val
+            self._rl_loss_sums[name] = self._rl_loss_sums.get(name, 0.0) + v
+            self._rl_loss_counts[name] = self._rl_loss_counts.get(name, 0) + 1
+
+        return total_loss
+
+    # ------------------------------------------------------------------
+    # Rollout generation
+    # ------------------------------------------------------------------
+
+    def _generate_rollouts(
+        self,
+        model,
+        rep_ids: torch.Tensor,
+        rep_ages: torch.Tensor,
+        rep_attention_mask: torch.Tensor,
+        rep_values: Optional[torch.Tensor] = None,
+        rep_val_masks: Optional[torch.Tensor] = None,
+    ) -> Dict:
+        """
+        Sample rollout trajectories with an explicit attention mask to avoid
+        the 'bool has no .view()' error that occurs when pad_token_id == eos_token_id.
+
+        Returns a dict with:
+          - "sequences": List[List[str]] — decoded concept token strings (prefix + generated)
+          - "sequence_vals": (B*K, full_len) LongTensor of value bin IDs, or None
+          - "sequence_val_masks": (B*K, full_len) BoolTensor, or None
+        """
+        kwargs: Dict[str, Any] = {}
+        if rep_values is not None:
+            kwargs["values"] = rep_values
+        if rep_val_masks is not None:
+            kwargs["value_indicators"] = rep_val_masks
+
+        outputs = model.generate(
+            input_ids=rep_ids,
+            attention_mask=rep_attention_mask,
+            ages=rep_ages,
+            max_new_tokens=self.rl_args.max_new_tokens,
+            do_sample=True,
+            top_p=self.rl_args.rollout_top_p,
+            temperature=self.rl_args.rollout_temperature,
+            pad_token_id=self.cehrgpt_tokenizer.pad_token_id,
+            return_dict_in_generate=True,
+            cehrgpt_tokenizer=self.cehrgpt_tokenizer,
+            **kwargs,
+        )
+        sequences = [
+            self.cehrgpt_tokenizer.convert_ids_to_tokens(seq.cpu().tolist())
+            for seq in outputs.sequences
+        ]
+        return {
+            "sequences": sequences,
+            # Custom fields present in CehrGptGenerateDecoderOnlyOutput; None for standard output
+            "sequence_vals": getattr(outputs, "sequence_vals", None),
+            "sequence_val_masks": getattr(outputs, "sequence_val_masks", None),
+        }
+
+    # ------------------------------------------------------------------
+    # PG + KL loss computation
+    # ------------------------------------------------------------------
+
+    def _compute_pg_and_kl_loss(
+        self,
+        model,
+        prefix_ids: torch.Tensor,                       # (B, L)
+        prefix_ages: torch.Tensor,                      # (B, L)
+        prefix_times: torch.Tensor,                     # (B, L)
+        prefix_values: Optional[torch.Tensor],          # (B, L) or None
+        prefix_value_indicators: Optional[torch.Tensor],  # (B, L) or None
+        prefix_lengths: torch.Tensor,                   # (B,)
+        rollout_token_strs: List[List[str]],
+        rollout_seq_vals: Optional[torch.Tensor],       # (B*K, full_len) or None
+        rollout_seq_val_masks: Optional[torch.Tensor],  # (B*K, full_len) or None
+        K: int,
+        advantages: torch.Tensor,                       # (B,)
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        B = prefix_ids.shape[0]
+        pg_terms: List[torch.Tensor] = []
+        kl_terms: List[torch.Tensor] = []
+
+        for i in range(B):
+            prefix_len_i = int(prefix_lengths[i].item())
+            # Non-padded prefix slices
+            prefix_ids_i = prefix_ids[i, -prefix_len_i:]      # (prefix_len,)
+            prefix_ages_i = prefix_ages[i, -prefix_len_i:]
+            prefix_times_i = prefix_times[i, -prefix_len_i:]
+            prefix_vals_i = prefix_values[i, -prefix_len_i:] if prefix_values is not None else None
+            prefix_valmask_i = prefix_value_indicators[i, -prefix_len_i:] if prefix_value_indicators is not None else None
+
+            prefix_end_age = int(prefix_ages_i[-1].item())
+            prefix_end_time = float(prefix_times_i[-1].item())
+
+            pg_per_rollout: List[torch.Tensor] = []
+            kl_per_rollout: List[torch.Tensor] = []
+
+            for k in range(K):
+                bk_idx = i * K + k
+                rollout_tokens = rollout_token_strs[bk_idx]
+                new_tokens = rollout_tokens[prefix_len_i:]
+
+                if not new_tokens:
+                    continue
+
+                # Encode new tokens → IDs
+                new_ids = self.cehrgpt_tokenizer.convert_tokens_to_ids(new_tokens)
+                if not new_ids:
+                    continue
+                rollout_len = len(new_ids)
+                new_ids_t = torch.tensor(new_ids, dtype=torch.long, device=prefix_ids.device)
+
+                # Reconstruct ages & epoch_times for the generated portion
+                rollout_ages, rollout_times = self._reconstruct_rollout_context(
+                    new_tokens, prefix_end_age, prefix_end_time
+                )
+                rollout_ages_t = torch.tensor(rollout_ages, dtype=torch.long, device=prefix_ids.device)
+                rollout_times_t = torch.tensor(rollout_times, dtype=torch.float32, device=prefix_ids.device)
+
+                # Value tokens for the generated portion (from generation output if available)
+                if rollout_seq_vals is not None:
+                    gen_vals_t = rollout_seq_vals[bk_idx, prefix_len_i: prefix_len_i + rollout_len].to(prefix_ids.device)
+                    gen_valmask_t = rollout_seq_val_masks[bk_idx, prefix_len_i: prefix_len_i + rollout_len].to(prefix_ids.device)
+                else:
+                    gen_vals_t = torch.zeros(rollout_len, dtype=torch.long, device=prefix_ids.device)
+                    gen_valmask_t = torch.zeros(rollout_len, dtype=torch.bool, device=prefix_ids.device)
+
+                # Full (prefix + rollout) tensors — shape (1, full_len)
+                full_ids = torch.cat([prefix_ids_i, new_ids_t]).unsqueeze(0)
+                full_ages = torch.cat([prefix_ages_i, rollout_ages_t]).unsqueeze(0)
+                full_times = torch.cat([prefix_times_i, rollout_times_t]).unsqueeze(0)
+
+                fwd_kwargs: Dict[str, Any] = {}
+                if prefix_vals_i is not None:
+                    full_vals = torch.cat([prefix_vals_i, gen_vals_t]).unsqueeze(0)
+                    full_valmask = torch.cat([prefix_valmask_i, gen_valmask_t]).unsqueeze(0)
+                    fwd_kwargs["values"] = full_vals
+                    fwd_kwargs["value_indicators"] = full_valmask
+
+                # ---- Current model (gradient flows) ----
+                curr_logits = model(
+                    input_ids=full_ids,
+                    ages=full_ages,
+                    epoch_times=full_times,
+                    **fwd_kwargs,
+                ).logits  # (1, full_len, vocab)
+
+                # Autoregressive shift: logits[t] predicts token[t+1]
+                # Rollout starts at position prefix_len_i in the sequence
+                gen_logits = curr_logits[0, prefix_len_i - 1 : -1, :]  # (rollout_len, vocab)
+                curr_lp = F.log_softmax(gen_logits, dim=-1)
+                token_lp = curr_lp.gather(1, new_ids_t.unsqueeze(1)).squeeze(1)  # (rollout_len,)
+                seq_lp = token_lp.mean()
+                pg_per_rollout.append(seq_lp)
+
+                # ---- Reference model (no gradient) ----
+                with torch.no_grad():
+                    ref_logits = self.ref_model(
+                        input_ids=full_ids,
+                        ages=full_ages,
+                        epoch_times=full_times,
+                        **fwd_kwargs,
+                    ).logits
+                ref_gen_logits = ref_logits[0, prefix_len_i - 1 : -1, :]
+                ref_lp = F.log_softmax(ref_gen_logits, dim=-1)
+                ref_token_lp = ref_lp.gather(1, new_ids_t.unsqueeze(1)).squeeze(1)
+
+                # Token-level KL approximation: E[log π_θ - log π_ref]
+                kl_approx = (token_lp - ref_token_lp).mean()
+                kl_per_rollout.append(kl_approx)
+
+            if not pg_per_rollout:
+                continue
+
+            mean_seq_lp = torch.stack(pg_per_rollout).mean()
+            pg_terms.append(-advantages[i] * mean_seq_lp)
+            kl_terms.append(torch.stack(kl_per_rollout).mean())
+
+        if not pg_terms:
+            zero = prefix_ids.new_zeros(1, dtype=torch.float32).squeeze().requires_grad_(True)
+            return zero, zero
+
+        return torch.stack(pg_terms).mean(), torch.stack(kl_terms).mean()
+
+    # ------------------------------------------------------------------
+    # Context reconstruction for generated tokens
+    # ------------------------------------------------------------------
+
+    def _reconstruct_rollout_context(
+        self,
+        new_tokens: List[str],
+        prefix_end_age: int,
+        prefix_end_time_sec: float,
+    ) -> Tuple[List[int], List[float]]:
+        """
+        Approximate ages and epoch_times for each generated token by tracking
+        elapsed days via ATT tokens in the rollout.
+        """
+        ages: List[int] = []
+        times: List[float] = []
+        cumulative_days = 0.0
+
+        for token in new_tokens:
+            if is_att_token(token):
+                try:
+                    cumulative_days += extract_time_interval_in_days(token)
+                except ValueError:
+                    pass
+            current_time = prefix_end_time_sec + cumulative_days * _SECONDS_PER_DAY
+            current_age = int(prefix_end_age + cumulative_days / 365.25)
+            ages.append(current_age)
+            times.append(current_time)
+
+        return ages, times

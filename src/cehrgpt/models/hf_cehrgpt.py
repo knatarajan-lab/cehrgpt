@@ -1403,9 +1403,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         linear_prob_hidden_states = None
         # We don't process this during the generation phase, indicated by
-        # attention_mask.shape[1] != hidden_states.shape[1]
+        # attention_mask.shape[1] != hidden_states.shape[1].  When attention_mask
+        # is None (e.g. called from RL PG/KL forward pass without a mask) we treat
+        # the full sequence as non-generation context.
         if (
             self.config.include_motor_time_to_event
+            and attention_mask is not None
             and attention_mask.shape[1] == input_ids.shape[1]
         ):
             # all hidden states also contains the first embedding layer outputs so we remove the first layer
@@ -1716,16 +1719,28 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         logits_warper = (
             logits_warper if logits_warper is not None else LogitsProcessorList()
         )
+        # HuggingFace >= 4.44 passes generation settings via a `generation_config`
+        # kwarg rather than explicit scalar arguments.  Extract pad/eos token IDs
+        # from it so that the attention-mask and stopping logic work correctly.
+        _gen_cfg = model_kwargs.get("generation_config", None)
         pad_token_id = (
             pad_token_id
             if pad_token_id is not None
+            else getattr(_gen_cfg, "pad_token_id", None)
+            if _gen_cfg is not None
             else self.generation_config.pad_token_id
         )
+        if pad_token_id is None:
+            pad_token_id = self.generation_config.pad_token_id
         eos_token_id = (
             eos_token_id
             if eos_token_id is not None
+            else getattr(_gen_cfg, "eos_token_id", None)
+            if _gen_cfg is not None
             else self.generation_config.eos_token_id
         )
+        if eos_token_id is None:
+            eos_token_id = self.generation_config.eos_token_id
         if isinstance(eos_token_id, int):
             eos_token_id = [eos_token_id]
         eos_token_id_tensor = (
@@ -1783,7 +1798,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         # keep track of which sequences are already finished
         batch_size, cur_len = input_ids.shape
-        model_kwargs["attention_mask"] = input_ids != pad_token_id
+        if pad_token_id is not None:
+            model_kwargs["attention_mask"] = (input_ids != pad_token_id).long()
+        else:
+            model_kwargs["attention_mask"] = torch.ones(
+                batch_size, cur_len, dtype=torch.long, device=input_ids.device
+            )
         if "inputs_embeds" in model_kwargs:
             cur_len = model_kwargs["inputs_embeds"].shape[1]
         this_peer_finished = False
