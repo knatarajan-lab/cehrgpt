@@ -35,6 +35,8 @@ prediction_windows: [30, 90, 180, 365, 730, 1095, 1460, 1825]
 # Path to precomputed prevalence stats JSON (computed from train split if absent)
 # Set this after a first run to avoid recomputing on every restart
 prevalence_stats_path: "/mnt/ssd2/cehrgpt2024/cehrgpt_without_value/motor_rl/prevalence_stats.json"
+prevalence_num_proc: 16
+prevalence_batch_size: 5000
 
 # Reward weight hyperparameters
 rarity_gamma: 0.5          # exponent on (1/prevalence)^γ
@@ -67,9 +69,9 @@ num_train_epochs: 3
 evaluation_strategy: "epoch"
 save_strategy: "epoch"
 
-per_device_train_batch_size: 4
-per_device_eval_batch_size: 8
-gradient_accumulation_steps: 4   # effective batch = 4 × 4 = 16 patients/step
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 4
+gradient_accumulation_steps: 8   # effective batch = 2 × 8 = 16 patients/step
 
 learning_rate: 0.00001            # lower LR than pretraining — policy is already good
 warmup_ratio: 0.05
@@ -80,9 +82,15 @@ early_stopping_threshold: 0.001
 
 # ── Precision & performance ───────────────────────────────────────────────────
 bf16: true
+gradient_checkpointing: true   # recompute activations during backward to save memory
 
 dataloader_num_workers: 8
 dataloader_prefetch_factor: 4
+
+# ── DDP (torchrun) ────────────────────────────────────────────────────────────
+# PG/KL loss is computed on raw_model (unwrapped); all parameters still receive
+# gradients via the full forward pass so unused-parameter detection can be off.
+ddp_find_unused_parameters: false
 
 # ── Logging & checkpointing ───────────────────────────────────────────────────
 logging_dir: "./logs"

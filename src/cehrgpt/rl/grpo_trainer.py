@@ -124,6 +124,11 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
         rollout_seq_vals: Optional[torch.Tensor] = gen_output.get("sequence_vals")     # (B*K, full_len) or None
         rollout_seq_val_masks: Optional[torch.Tensor] = gen_output.get("sequence_val_masks")  # (B*K, full_len) or None
 
+        # Free the generation KV-cache and any intermediate tensors before the
+        # PG/KL forward pass, which materialises large (N, full_len, vocab) logits.
+        del gen_output, rep_ids, rep_ages, rep_mask, rep_values, rep_val_masks
+        torch.cuda.empty_cache()
+
         # ---------------------------------------------------------------
         # 2. Compute rewards
         # ---------------------------------------------------------------
