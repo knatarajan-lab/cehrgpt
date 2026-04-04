@@ -207,9 +207,13 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             torch.distributed.all_reduce(metrics_t, op=torch.distributed.ReduceOp.AVG)
 
+        # sync_gradients is True only on the last accumulation step (when the
+        # optimizer will actually step).  global_step is incremented after
+        # compute_loss returns, so +1 aligns with the Trainer's own log check.
         if (
             self.is_world_process_zero()
-            and self.state.global_step % self.args.logging_steps == 0
+            and self.accelerator.sync_gradients
+            and (self.state.global_step + 1) % self.args.logging_steps == 0
         ):
             pg_v, kl_v, rew_v, base_v = metrics_t.tolist()
             self.log({
