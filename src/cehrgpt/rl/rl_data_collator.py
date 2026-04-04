@@ -125,7 +125,16 @@ class RLDataCollator:
     ) -> Optional[Tuple]:
         concept_ids: List[str] = example["concept_ids"]
         epoch_times: List[float] = example["epoch_times"]
-        ages: List[int] = example["ages"]
+        # Ages may be stored as float32 in Arrow (allowing NaN); forward-fill NaN
+        # from the previous valid value, defaulting remaining leading NaNs to 0.
+        import pandas as pd
+        ages: List[int] = (
+            pd.Series(example["ages"], dtype="float64")
+            .ffill()
+            .fillna(0)
+            .astype(int)
+            .tolist()
+        )
 
         # Value columns are optional (absent when include_values=False)
         raw_vals: Optional[List[int]] = example.get("values")
