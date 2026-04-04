@@ -64,6 +64,22 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
         self.target_concept_ids = target_concept_ids
         self.cehrgpt_tokenizer = cehrgpt_tokenizer
         self._baseline: float = 0.0
+        # _signature_columns is normally set by _remove_unused_columns, which is
+        # skipped when remove_unused_columns=False.  Initialise it here so that
+        # the empty-batch error message in _prepare_inputs doesn't crash.
+        if self._signature_columns is None:
+            self._signature_columns = []
+
+    # ------------------------------------------------------------------
+    # Training step — skip empty batches from the collator
+    # ------------------------------------------------------------------
+
+    def training_step(self, model, inputs, **kwargs):
+        # The RL collator returns {} when no example in the batch has enough
+        # prefix visits.  Skip gracefully rather than crashing in _prepare_inputs.
+        if not inputs:
+            return torch.zeros(1, device=self.args.device, requires_grad=False).squeeze()
+        return super().training_step(model, inputs, **kwargs)
 
     # ------------------------------------------------------------------
     # Main loss entry point
@@ -170,18 +186,12 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
 
         total_loss = pg_loss + self.rl_args.kl_beta * kl_loss
 
-        # Log sub-losses
-        if not hasattr(self, "_rl_loss_sums"):
-            self._rl_loss_sums: Dict[str, float] = {}
-            self._rl_loss_counts: Dict[str, int] = {}
-        for name, val in [
-            ("rl_pg_loss", pg_loss),
-            ("rl_kl_loss", kl_loss),
-            ("rl_reward_mean", rewards_t.mean()),
-        ]:
-            v = val.item() if isinstance(val, torch.Tensor) else val
-            self._rl_loss_sums[name] = self._rl_loss_sums.get(name, 0.0) + v
-            self._rl_loss_counts[name] = self._rl_loss_counts.get(name, 0) + 1
+        self.log({
+            "rl_pg_loss":     pg_loss.item() if isinstance(pg_loss, torch.Tensor) else float(pg_loss),
+            "rl_kl_loss":     kl_loss.item() if isinstance(kl_loss, torch.Tensor) else float(kl_loss),
+            "rl_reward_mean": rewards_t.mean().item(),
+            "rl_baseline":    self._baseline,
+        })
 
         return total_loss
 
