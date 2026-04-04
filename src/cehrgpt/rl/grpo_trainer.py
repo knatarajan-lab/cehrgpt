@@ -143,6 +143,13 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
         m = self.rl_args.baseline_momentum
         self._baseline = m * self._baseline + (1.0 - m) * rewards_t.mean().item()
 
+        # Synchronise baseline across DDP processes so all GPUs share the
+        # same EMA value and produce consistent advantages.
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            b_t = torch.tensor(self._baseline, dtype=torch.float32, device=prefix_input_ids.device)
+            torch.distributed.all_reduce(b_t, op=torch.distributed.ReduceOp.AVG)
+            self._baseline = b_t.item()
+
         # ---------------------------------------------------------------
         # 4 & 5. PG loss + KL loss
         # ---------------------------------------------------------------
