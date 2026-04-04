@@ -112,10 +112,12 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
         rep_values = prefix_values.repeat_interleave(K, dim=0) if prefix_values is not None else None
         rep_val_masks = prefix_value_indicators.repeat_interleave(K, dim=0) if prefix_value_indicators is not None else None
 
-        model.eval()
+        # Unwrap DataParallel / DistributedDataParallel so we can call .generate()
+        raw_model = self.accelerator.unwrap_model(model)
+        raw_model.eval()
         with torch.no_grad():
-            gen_output = self._generate_rollouts(model, rep_ids, rep_ages, rep_mask, rep_values, rep_val_masks)
-        model.train()
+            gen_output = self._generate_rollouts(raw_model, rep_ids, rep_ages, rep_mask, rep_values, rep_val_masks)
+        raw_model.train()
 
         rollout_token_strs: List[List[str]] = gen_output["sequences"]           # B*K items
         rollout_seq_vals: Optional[torch.Tensor] = gen_output.get("sequence_vals")     # (B*K, full_len) or None
@@ -186,12 +188,26 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
 
         total_loss = pg_loss + self.rl_args.kl_beta * kl_loss
 
-        self.log({
-            "rl_pg_loss":     pg_loss.item() if isinstance(pg_loss, torch.Tensor) else float(pg_loss),
-            "rl_kl_loss":     kl_loss.item() if isinstance(kl_loss, torch.Tensor) else float(kl_loss),
-            "rl_reward_mean": rewards_t.mean().item(),
-            "rl_baseline":    self._baseline,
-        })
+        # Gather metrics as a tensor so we can all-reduce across DDP ranks
+        # before logging, ensuring the main process logs the global average.
+        metrics_t = torch.stack([
+            pg_loss if isinstance(pg_loss, torch.Tensor) else torch.tensor(pg_loss),
+            kl_loss if isinstance(kl_loss, torch.Tensor) else torch.tensor(kl_loss),
+            rewards_t.mean(),
+            torch.tensor(self._baseline),
+        ]).to(prefix_input_ids.device).float()
+
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(metrics_t, op=torch.distributed.ReduceOp.AVG)
+
+        if self.is_world_process_zero():
+            pg_v, kl_v, rew_v, base_v = metrics_t.tolist()
+            self.log({
+                "rl_pg_loss":     pg_v,
+                "rl_kl_loss":     kl_v,
+                "rl_reward_mean": rew_v,
+                "rl_baseline":    base_v,
+            })
 
         return total_loss
 
