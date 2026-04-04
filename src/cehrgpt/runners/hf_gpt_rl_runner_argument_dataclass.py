@@ -54,7 +54,7 @@ class RLArguments:
         metadata={"help": "Maximum number of new tokens to generate per rollout trajectory."},
     )
     prediction_windows: List[int] = field(
-        default_factory=lambda: [30, 90, 180, 365, 730],
+        default_factory=lambda: [30, 90, 180, 365, 730, 1095, 1460, 1825],
         metadata={"help": "Prediction horizon windows in days for reward bucketing."},
     )
     prevalence_stats_path: Optional[str] = field(
