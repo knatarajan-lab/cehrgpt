@@ -22,7 +22,7 @@ from typing import Optional, Set
 import torch
 from cehrbert.runners.hf_runner_argument_dataclass import ModelArguments
 from datasets import load_from_disk
-from transformers import HfArgumentParser, TrainingArguments, set_seed
+from transformers import TrainingArguments, set_seed
 from transformers.utils import logging
 
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
@@ -130,15 +130,16 @@ def _load_prevalence_stats(
 
 
 def main():
-    parser = HfArgumentParser(
-        (ModelArguments, CehrGPTArguments, RLArguments, TrainingArguments)
-    )
+    from cehrgpt.runners.gpt_runner_util import parse_dynamic_arguments
+
     (
         model_args,
         cehrgpt_args,
         rl_args,
         training_args,
-    ) = parser.parse_args_into_dataclasses()
+    ) = parse_dynamic_arguments(
+        (ModelArguments, CehrGPTArguments, RLArguments, TrainingArguments)
+    )
 
     set_seed(training_args.seed)
     # The RL collator needs concept_ids / epoch_times / ages which are not in the

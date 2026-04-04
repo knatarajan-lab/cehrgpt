@@ -1,0 +1,95 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CEHR-GPT RL Fine-tuning Config (REINFORCE + KL)
+#
+# Warm-starts from a pretrained MOTOR model and fine-tunes the policy
+# using a weighted condition-recovery reward over clinical prediction windows.
+#
+# Runner: python -m cehrgpt.runners.hf_cehrgpt_rl_runner
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Model & tokenizer (pretrained MOTOR checkpoint) ──────────────────────────
+model_name_or_path: "/mnt/ssd2/cehrgpt2024/cehrgpt_without_value/motor"
+tokenizer_name_or_path: "/mnt/ssd2/cehrgpt2024/cehrgpt_without_value/motor"
+
+# ── Dataset (pre-tokenized DatasetDict saved during pretraining) ──────────────
+# Point to the DatasetDict folder produced by the pretrain runner
+# (typically inside dataset_prepared_path from the pretrain config)
+tokenized_full_dataset_path: "/mnt/ssd2/cehrgpt2024/cehrgpt_without_value/motor/dataset_prepared/patient_sequence_disconnect_problem_list_tokenized_dataset"
+
+# ── OMOP ontology (for Condition-domain concept identification) ───────────────
+vocab_dir: "/mnt/ssd2/ohdsi_cumc_2024q4r1_deid/"
+
+# ── RL hyperparameters ────────────────────────────────────────────────────────
+# Number of rollout trajectories sampled per patient per training step
+num_rollouts: 4
+
+# Maximum new tokens generated per rollout
+max_new_tokens: 512
+
+# KL regularisation coefficient β (keeps policy close to reference)
+kl_beta: 0.05
+
+# Prediction horizon windows in days
+prediction_windows: [30, 90, 180, 365, 730, 1095, 1460, 1825]
+
+# Path to precomputed prevalence stats JSON (computed from train split if absent)
+# Set this after a first run to avoid recomputing on every restart
+prevalence_stats_path: "/mnt/ssd2/cehrgpt2024/cehrgpt_without_value/motor_rl/prevalence_stats.json"
+
+# Reward weight hyperparameters
+rarity_gamma: 0.5          # exponent on (1/prevalence)^γ
+alpha_max: 10.0             # cap on rarity weight
+window_eta: 0.5             # weight for longer prediction windows
+window_ref_days: 365.0      # reference window size in days
+prevalence_epsilon: 0.0001  # smoothing to avoid division by zero
+false_positive_lambda: 0.0  # penalty for false-positive predictions (0 = disabled)
+
+# Baseline momentum for variance reduction (EMA of mean reward)
+baseline_momentum: 0.99
+
+# Rollout sampling parameters
+rollout_top_p: 0.95
+rollout_temperature: 1.0
+
+# Prefix length constraints
+min_prefix_visits: 2     # minimum [VS] tokens required in prefix
+max_prefix_length: 1024  # prefix right-truncated to this length
+
+# ── Output ────────────────────────────────────────────────────────────────────
+output_dir: "/mnt/ssd2/cehrgpt2024/cehrgpt_without_value/motor_rl"
+
+# ── Training schedule ─────────────────────────────────────────────────────────
+do_train: true
+overwrite_output_dir: false
+seed: 42
+
+num_train_epochs: 3
+evaluation_strategy: "epoch"
+save_strategy: "epoch"
+
+per_device_train_batch_size: 4
+per_device_eval_batch_size: 8
+gradient_accumulation_steps: 4   # effective batch = 4 × 4 = 16 patients/step
+
+learning_rate: 0.00001            # lower LR than pretraining — policy is already good
+warmup_ratio: 0.05
+weight_decay: 0.01
+
+use_early_stopping: true
+early_stopping_threshold: 0.001
+
+# ── Precision & performance ───────────────────────────────────────────────────
+bf16: true
+
+dataloader_num_workers: 8
+dataloader_prefetch_factor: 4
+
+# ── Logging & checkpointing ───────────────────────────────────────────────────
+logging_dir: "./logs"
+logging_steps: 10
+save_total_limit: 3
+load_best_model_at_end: true
+metric_for_best_model: "eval_loss"
+greater_is_better: false
+
+report_to: "none"
