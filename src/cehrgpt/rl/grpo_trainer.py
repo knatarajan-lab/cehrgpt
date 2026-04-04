@@ -76,10 +76,6 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
     # ------------------------------------------------------------------
 
     def training_step(self, model, inputs, **kwargs):
-        # The RL collator returns {} when no example in the batch has enough
-        # prefix visits.  Skip gracefully rather than crashing in _prepare_inputs.
-        if not inputs:
-            return torch.zeros(1, device=self.args.device, requires_grad=False).squeeze()
         return super().training_step(model, inputs, **kwargs)
 
     # ------------------------------------------------------------------
@@ -87,9 +83,11 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
     # ------------------------------------------------------------------
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        # RL batches contain "prefix_input_ids"; fall back to standard CE otherwise
-        if "prefix_input_ids" not in inputs:
-            return super().compute_loss(model, inputs, return_outputs, **kwargs)
+        # Empty batch (all examples filtered by collator) or non-RL batch
+        if not inputs or "prefix_input_ids" not in inputs:
+            zero = torch.zeros(1, dtype=torch.float32,
+                               device=self.args.device, requires_grad=True)
+            return zero.squeeze()
 
         prefix_input_ids: torch.Tensor = inputs["prefix_input_ids"]           # (B, L)
         prefix_ages: torch.Tensor = inputs["prefix_ages"]                   # (B, L)
@@ -167,12 +165,8 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
         m = self.rl_args.baseline_momentum
         self._baseline = m * self._baseline + (1.0 - m) * rewards_t.mean().item()
 
-        # Synchronise baseline across DDP processes so all GPUs share the
-        # same EMA value and produce consistent advantages.
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            b_t = torch.tensor(self._baseline, dtype=torch.float32, device=prefix_input_ids.device)
-            torch.distributed.all_reduce(b_t, op=torch.distributed.ReduceOp.AVG)
-            self._baseline = b_t.item()
+        # Baseline EMA is maintained per-rank; slight divergence across DDP
+        # ranks is acceptable for an approximation baseline.
 
         # ---------------------------------------------------------------
         # 4 & 5. PG loss + KL loss
@@ -194,33 +188,16 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
 
         total_loss = pg_loss + self.rl_args.kl_beta * kl_loss
 
-        # Gather metrics as a tensor so we can all-reduce across DDP ranks
-        # before logging, ensuring the main process logs the global average.
-        _dev = prefix_input_ids.device
-        metrics_t = torch.stack([
-            pg_loss.to(_dev) if isinstance(pg_loss, torch.Tensor) else torch.tensor(pg_loss, device=_dev),
-            kl_loss.to(_dev) if isinstance(kl_loss, torch.Tensor) else torch.tensor(kl_loss, device=_dev),
-            rewards_t.mean().to(_dev),
-            torch.tensor(self._baseline, device=_dev),
-        ]).float()
-
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            torch.distributed.all_reduce(metrics_t, op=torch.distributed.ReduceOp.AVG)
-
-        # sync_gradients is True only on the last accumulation step (when the
-        # optimizer will actually step).  global_step is incremented after
-        # compute_loss returns, so +1 aligns with the Trainer's own log check.
         if (
             self.is_world_process_zero()
             and self.accelerator.sync_gradients
-            and (self.state.global_step + 1) % self.args.logging_steps == 0
+            and self.state.global_step % self.args.logging_steps == 0
         ):
-            pg_v, kl_v, rew_v, base_v = metrics_t.tolist()
             self.log({
-                "rl_pg_loss":     pg_v,
-                "rl_kl_loss":     kl_v,
-                "rl_reward_mean": rew_v,
-                "rl_baseline":    base_v,
+                "rl_pg_loss":     pg_loss.item() if isinstance(pg_loss, torch.Tensor) else pg_loss,
+                "rl_kl_loss":     kl_loss.item() if isinstance(kl_loss, torch.Tensor) else kl_loss,
+                "rl_reward_mean": rewards_t.mean().item(),
+                "rl_baseline":    self._baseline,
             })
 
         return total_loss
