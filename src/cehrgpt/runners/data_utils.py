@@ -452,6 +452,7 @@ def extract_cohort_sequences(
             transform.batch_transform,
             batched=True,
             batch_size=data_args.preprocessing_batch_size,
+            writer_batch_size=data_args.preprocessing_batch_size,
             num_proc=_clamp_num_proc(len(ds), data_args.preprocessing_num_workers, data_args.preprocessing_batch_size),
             remove_columns=ds.column_names,
         )
