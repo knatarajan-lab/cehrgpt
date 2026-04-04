@@ -190,12 +190,13 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
 
         # Gather metrics as a tensor so we can all-reduce across DDP ranks
         # before logging, ensuring the main process logs the global average.
+        _dev = prefix_input_ids.device
         metrics_t = torch.stack([
-            pg_loss if isinstance(pg_loss, torch.Tensor) else torch.tensor(pg_loss),
-            kl_loss if isinstance(kl_loss, torch.Tensor) else torch.tensor(kl_loss),
-            rewards_t.mean(),
-            torch.tensor(self._baseline),
-        ]).to(prefix_input_ids.device).float()
+            pg_loss.to(_dev) if isinstance(pg_loss, torch.Tensor) else torch.tensor(pg_loss, device=_dev),
+            kl_loss.to(_dev) if isinstance(kl_loss, torch.Tensor) else torch.tensor(kl_loss, device=_dev),
+            rewards_t.mean().to(_dev),
+            torch.tensor(self._baseline, device=_dev),
+        ]).float()
 
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             torch.distributed.all_reduce(metrics_t, op=torch.distributed.ReduceOp.AVG)
