@@ -59,10 +59,6 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
         for p in self.ref_model.parameters():
             p.requires_grad_(False)
 
-        # Mirror DataParallel wrapping used by Trainer for the policy model so
-        # the ref-model forward pass also benefits from all available GPUs.
-        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-            self.ref_model = torch.nn.DataParallel(self.ref_model)
 
         self.rl_args = rl_args
         self.prevalence_stats = prevalence_stats
@@ -177,7 +173,7 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
         # 4 & 5. PG loss + KL loss
         # ---------------------------------------------------------------
         pg_loss, kl_loss = self._compute_pg_and_kl_loss(
-            model,
+            raw_model,
             prefix_input_ids,
             prefix_ages,
             prefix_epoch_times,
