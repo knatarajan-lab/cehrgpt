@@ -17,19 +17,19 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.nn.functional as F
+from transformers import Trainer
 from transformers.utils import logging
 
 from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token
 from cehrgpt.rl.reward import compute_patient_reward, extract_conditions_from_rollout
 from cehrgpt.runners.hf_gpt_rl_runner_argument_dataclass import RLArguments
-from cehrgpt.runners.sample_packing_trainer import CehrGptTrainer
 
 LOG = logging.get_logger("transformers")
 
 _SECONDS_PER_DAY = 86400.0
 
 
-class CehrGptGRPOTrainer(CehrGptTrainer):
+class CehrGptGRPOTrainer(Trainer):
     """
     REINFORCE + KL trainer for CEHR-GPT.
 
