@@ -76,6 +76,15 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
     # ------------------------------------------------------------------
 
     def training_step(self, model, inputs, **kwargs):
+        # The RL collator returns {} when no example passes min_prefix_visits.
+        # _prepare_inputs raises ValueError on empty dict before compute_loss
+        # is reached, so intercept here.  Still flow a zero loss through all
+        # parameters so DDP's gradient reducer marks every bucket ready.
+        if not inputs:
+            raw = self.accelerator.unwrap_model(model)
+            loss = sum(p.sum() * 0.0 for p in raw.parameters() if p.requires_grad)
+            self.accelerator.backward(loss)
+            return loss.detach() / self.args.gradient_accumulation_steps
         return super().training_step(model, inputs, **kwargs)
 
     # ------------------------------------------------------------------
