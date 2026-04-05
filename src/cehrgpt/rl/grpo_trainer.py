@@ -65,11 +65,27 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
         self.target_concept_ids = target_concept_ids
         self.cehrgpt_tokenizer = cehrgpt_tokenizer
         self._baseline: float = 0.0
+        # Accumulators for RL metrics — flushed and averaged in log()
+        self._rl_metric_sums: Dict[str, float] = {}
+        self._rl_metric_counts: Dict[str, int] = {}
         # _signature_columns is normally set by _remove_unused_columns, which is
         # skipped when remove_unused_columns=False.  Initialise it here so that
         # the empty-batch error message in _prepare_inputs doesn't crash.
         if self._signature_columns is None:
             self._signature_columns = []
+
+    # ------------------------------------------------------------------
+    # Logging — flush accumulated RL metrics at each logging step
+    # ------------------------------------------------------------------
+
+    def log(self, logs: Dict[str, Any], *args, **kwargs):
+        if self._rl_metric_sums:
+            for name, total in self._rl_metric_sums.items():
+                count = self._rl_metric_counts.get(name, 1)
+                logs[name] = round(total / count, 6)
+            self._rl_metric_sums = {}
+            self._rl_metric_counts = {}
+        super().log(logs, *args, **kwargs)
 
     # ------------------------------------------------------------------
     # Training step — skip empty batches from the collator
@@ -198,17 +214,16 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
 
         total_loss = pg_loss + self.rl_args.kl_beta * kl_loss
 
-        if (
-            self.is_world_process_zero()
-            and self.accelerator.sync_gradients
-            and self.state.global_step % self.args.logging_steps == 0
+        # Accumulate RL metrics; they are averaged and injected into the log
+        # dict by the log() override, which the Trainer calls at the right step.
+        for name, value in (
+            ("rl_pg_loss",     pg_loss.item() if isinstance(pg_loss, torch.Tensor) else float(pg_loss)),
+            ("rl_kl_loss",     kl_loss.item() if isinstance(kl_loss, torch.Tensor) else float(kl_loss)),
+            ("rl_reward_mean", rewards_t.mean().item()),
+            ("rl_baseline",    self._baseline),
         ):
-            self.log({
-                "rl_pg_loss":     pg_loss.item() if isinstance(pg_loss, torch.Tensor) else pg_loss,
-                "rl_kl_loss":     kl_loss.item() if isinstance(kl_loss, torch.Tensor) else kl_loss,
-                "rl_reward_mean": rewards_t.mean().item(),
-                "rl_baseline":    self._baseline,
-            })
+            self._rl_metric_sums[name] = self._rl_metric_sums.get(name, 0.0) + value
+            self._rl_metric_counts[name] = self._rl_metric_counts.get(name, 0) + 1
 
         return total_loss
 
