@@ -90,3 +90,7 @@ class RLArguments:
         default=1000,
         metadata={"help": "Batch size for prevalence stats dataset.map pass."},
     )
+    eval_sample_size: int = field(
+        default=100,
+        metadata={"help": "Number of examples randomly sampled from the eval set each evaluation call."},
+    )

@@ -50,10 +50,12 @@ class CehrGptGRPOTrainer(Trainer):
         prevalence_stats: Dict[Tuple[str, int], float],
         target_concept_ids: Set[str],
         cehrgpt_tokenizer,
+        eval_sample_size: int = 100,
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        self._eval_sample_size = eval_sample_size
         self.ref_model = ref_model
         self.ref_model.eval()
         for p in self.ref_model.parameters():
@@ -86,6 +88,18 @@ class CehrGptGRPOTrainer(Trainer):
             self._rl_metric_sums = {}
             self._rl_metric_counts = {}
         super().log(logs, *args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Evaluation — subsample eval set each time to keep eval fast
+    # ------------------------------------------------------------------
+
+    def get_eval_dataloader(self, eval_dataset=None):
+        import random
+        dataset = eval_dataset if eval_dataset is not None else self.eval_dataset
+        if dataset is not None and len(dataset) > self._eval_sample_size:
+            indices = random.sample(range(len(dataset)), self._eval_sample_size)
+            dataset = dataset.select(indices)
+        return super().get_eval_dataloader(dataset)
 
     # ------------------------------------------------------------------
     # Evaluation step — route through compute_loss instead of model(**inputs)

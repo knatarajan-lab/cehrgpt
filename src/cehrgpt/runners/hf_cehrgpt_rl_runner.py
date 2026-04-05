@@ -263,6 +263,7 @@ def main():
         prevalence_stats=prevalence_stats,
         target_concept_ids=target_concept_ids,
         cehrgpt_tokenizer=cehrgpt_tokenizer,
+        eval_sample_size=rl_args.eval_sample_size,
         # Standard Trainer kwargs
         model=model,
         args=training_args,
