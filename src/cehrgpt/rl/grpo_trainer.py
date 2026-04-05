@@ -83,11 +83,12 @@ class CehrGptGRPOTrainer(CehrGptTrainer):
     # ------------------------------------------------------------------
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        # Empty batch (all examples filtered by collator) or non-RL batch
+        # Empty batch (all examples filtered by collator) or non-RL batch.
+        # With DDP, we must still flow through all model parameters so the
+        # gradient reducer sees every bucket and does not hang waiting for them.
         if not inputs or "prefix_input_ids" not in inputs:
-            zero = torch.zeros(1, dtype=torch.float32,
-                               device=self.args.device, requires_grad=True)
-            return zero.squeeze()
+            raw = self.accelerator.unwrap_model(model)
+            return sum(p.sum() * 0.0 for p in raw.parameters() if p.requires_grad)
 
         prefix_input_ids: torch.Tensor = inputs["prefix_input_ids"]           # (B, L)
         prefix_ages: torch.Tensor = inputs["prefix_ages"]                   # (B, L)
