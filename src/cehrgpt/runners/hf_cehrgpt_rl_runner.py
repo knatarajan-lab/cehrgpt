@@ -189,25 +189,18 @@ def main():
     def _has_enough_visits(example):
         return sum(1 for t in example["concept_ids"] if t == "[VS]") >= min_vs
 
-    # Main process filters first and writes the Arrow cache; other processes
-    # wait at the barrier then run the same filter (instant cache hit).
+    # filter() is safe to run on all ranks simultaneously — HuggingFace datasets
+    # uses file locking on the Arrow cache so the first rank writes it and
+    # subsequent ranks get an instant cache hit.
+    before = len(train_dataset)
+    train_dataset = train_dataset.filter(_has_enough_visits)
     if is_main_process(training_args.local_rank):
-        before = len(train_dataset)
-        train_dataset = train_dataset.filter(_has_enough_visits)
         LOG.info(
             "Filtered train dataset: %d → %d examples (kept %.1f%% with >= %d visits)",
             before, len(train_dataset), 100 * len(train_dataset) / before, min_vs,
         )
-        if eval_dataset is not None:
-            eval_dataset = eval_dataset.filter(_has_enough_visits)
-
-    if dist.is_available() and dist.is_initialized():
-        dist.barrier()
-
-    if not is_main_process(training_args.local_rank):
-        train_dataset = train_dataset.filter(_has_enough_visits)
-        if eval_dataset is not None:
-            eval_dataset = eval_dataset.filter(_has_enough_visits)
+    if eval_dataset is not None:
+        eval_dataset = eval_dataset.filter(_has_enough_visits)
 
     # ------------------------------------------------------------------
     # Prevalence statistics (main process computes/saves; others wait)
