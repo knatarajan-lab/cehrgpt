@@ -88,6 +88,16 @@ class CehrGptGRPOTrainer(Trainer):
         super().log(logs, *args, **kwargs)
 
     # ------------------------------------------------------------------
+    # Evaluation step — route through compute_loss instead of model(**inputs)
+    # ------------------------------------------------------------------
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        inputs = self._prepare_inputs(inputs)
+        with torch.no_grad():
+            loss = self.compute_loss(model, inputs)
+        return (loss.detach(), None, None)
+
+    # ------------------------------------------------------------------
     # Training step — skip empty batches from the collator
     # ------------------------------------------------------------------
 
