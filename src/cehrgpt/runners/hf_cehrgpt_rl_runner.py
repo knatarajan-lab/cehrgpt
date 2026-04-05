@@ -83,6 +83,8 @@ def _load_target_concept_ids(
             LOG.warning("Failed to load ontology from %s (%s); falling back.", vocab_dir, exc)
 
     fallback = set(cehrgpt_tokenizer._motor_time_to_event_codes)
+    LOG.info("Discarding 0 from the set if it's found")
+    fallback.discard("0")
     LOG.info(
         "Using %d _motor_time_to_event_codes as RL targets.", len(fallback)
     )
