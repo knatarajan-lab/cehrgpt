@@ -182,19 +182,20 @@ def main():
     # Pre-filter sequences that have too few visits for the RL collator to
     # produce a valid prefix/future split, so the collator never returns an
     # empty batch and causes DDP deadlocks.
+    # Run on the main process first; other ranks wait and load from cache.
     min_vs = rl_args.min_prefix_visits + 1  # prefix visits + at least 1 future visit
     def _has_enough_visits(example):
-        return (
-            sum(1 for t in example["concept_ids"] if t == "[VS]") >= min_vs
+        return sum(1 for t in example["concept_ids"] if t == "[VS]") >= min_vs
+
+    with training_args.main_process_first(desc="filtering short sequences"):
+        before = len(train_dataset)
+        train_dataset = train_dataset.filter(_has_enough_visits)
+        LOG.info(
+            "Filtered train dataset: %d → %d examples (kept %.1f%% with >= %d visits)",
+            before, len(train_dataset), 100 * len(train_dataset) / before, min_vs,
         )
-    before = len(train_dataset)
-    train_dataset = train_dataset.filter(_has_enough_visits, num_proc=rl_args.prevalence_num_proc)
-    LOG.info(
-        "Filtered train dataset: %d → %d examples (kept %.1f%% with >= %d visits)",
-        before, len(train_dataset), 100 * len(train_dataset) / before, min_vs,
-    )
-    if eval_dataset is not None:
-        eval_dataset = eval_dataset.filter(_has_enough_visits, num_proc=rl_args.prevalence_num_proc)
+        if eval_dataset is not None:
+            eval_dataset = eval_dataset.filter(_has_enough_visits)
 
     # ------------------------------------------------------------------
     # Prevalence statistics
