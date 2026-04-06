@@ -1,16 +1,15 @@
 """
 Compute per-(concept, window) reward summary statistics from the training set
-and plot average reward weight for a target concept (default: pancreatic cancer)
-across prediction horizons.
+and plot reward weight for a user-specified concept_id across prediction horizons.
 
 Usage
 -----
-python scripts/summarize_rl_reward_stats.py \
+python -m cehrgpt.rl.summarize_rl_reward_stats \
     --tokenized_dataset_path /path/to/tokenized_dataset \
     --tokenizer_path /path/to/tokenizer \
     --output_dir /path/to/output \
     [--vocab_dir /path/to/athena_parquet] \
-    [--concept_name "pancreatic cancer"] \
+    [--plot_concept_ids 4021791 443454] \
     [--prediction_windows 30 90 180 365 730 1095 1460 1825] \
     [--rarity_gamma 0.5] \
     [--alpha_max 10.0] \
@@ -23,17 +22,16 @@ python scripts/summarize_rl_reward_stats.py \
 
 import argparse
 import json
-import math
 import os
-from collections import Counter
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 from datasets import load_from_disk
-from tqdm import tqdm
+
+from cehrgpt.rl.reward import compute_event_weight, compute_prevalence_stats
 
 
 # ---------------------------------------------------------------------------
@@ -47,8 +45,8 @@ def parse_args():
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--vocab_dir", default=None,
                         help="Path to Athena parquet folder (concept/, concept_ancestor/, etc.)")
-    parser.add_argument("--concept_name", default="pancreatic cancer",
-                        help="Concept name to highlight in the scatter plot (case-insensitive substring match)")
+    parser.add_argument("--plot_concept_ids", nargs="+", default=None,
+                        help="One or more concept IDs to plot reward weight vs prediction horizon for")
     parser.add_argument("--prediction_windows", nargs="+", type=int,
                         default=[30, 90, 180, 365, 730, 1095, 1460, 1825])
     parser.add_argument("--rarity_gamma", type=float, default=0.5)
@@ -61,24 +59,6 @@ def parse_args():
     parser.add_argument("--num_proc", type=int, default=16)
     parser.add_argument("--batch_size", type=int, default=5000)
     return parser.parse_args()
-
-
-# ---------------------------------------------------------------------------
-# Reward weight (mirrors reward.py)
-# ---------------------------------------------------------------------------
-
-def compute_event_weight(
-    prevalence: float,
-    window_days: int,
-    gamma: float,
-    alpha_max: float,
-    eta: float,
-    w_ref: float,
-    epsilon: float,
-) -> float:
-    rarity = min(alpha_max, (1.0 / (prevalence + epsilon)) ** gamma)
-    window_factor = 1.0 + eta * math.log(1.0 + window_days / w_ref)
-    return rarity * window_factor
 
 
 # ---------------------------------------------------------------------------
@@ -111,100 +91,16 @@ def load_target_concept_ids(tokenizer, vocab_dir) -> Set[str]:
 
 
 # ---------------------------------------------------------------------------
-# Prevalence stats via dataset.map
-# ---------------------------------------------------------------------------
-
-def compute_prevalence_stats(
-    dataset,
-    target_concept_ids: Set[str],
-    windows: List[int],
-    prediction_split_fraction: float,
-    num_proc: int,
-    batch_size: int,
-) -> Tuple[Dict[Tuple[str, int], float], int]:
-    """
-    Returns (prevalence_dict, n_patients) where
-    prevalence_dict maps (concept_id, window_days) -> fraction of patients
-    who have that concept within that window after the split point.
-    """
-    from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token
-
-    _DEMOGRAPHICS_SIZE = 4
-    max_window = max(windows)
-    sorted_windows = sorted(windows)
-    target_set = target_concept_ids  # closure for map fn
-
-    def _map_hits(examples):
-        from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token
-        result = []
-        for concept_ids in examples["concept_ids"]:
-            hits = []
-            if len(concept_ids) <= _DEMOGRAPHICS_SIZE:
-                result.append(hits)
-                continue
-            split_idx = max(
-                _DEMOGRAPHICS_SIZE,
-                int(len(concept_ids) * prediction_split_fraction),
-            )
-            cumulative_days = 0.0
-            found: Dict[int, Set[str]] = {w: set() for w in sorted_windows}
-            for token in concept_ids[split_idx:]:
-                if is_att_token(token):
-                    try:
-                        cumulative_days += extract_time_interval_in_days(token)
-                    except ValueError:
-                        pass
-                    if cumulative_days > max_window:
-                        break
-                elif token in target_set:
-                    for w in sorted_windows:
-                        if cumulative_days <= w:
-                            found[w].add(token)
-            for w in sorted_windows:
-                for c in found[w]:
-                    hits.append(f"{c}:{w}")
-            result.append(hits)
-        return {"_hits": result}
-
-    print(f"Running dataset.map over {len(dataset)} examples (num_proc={num_proc})...")
-    mapped = dataset.map(
-        _map_hits,
-        batched=True,
-        batch_size=batch_size,
-        num_proc=num_proc,
-        remove_columns=[c for c in dataset.column_names if c != "_hits"],
-        desc="computing reward stats",
-    )
-
-    counter: Counter = Counter()
-    n_patients = 0
-    for hits in tqdm(mapped["_hits"], desc="aggregating", unit="patient"):
-        counter.update(hits)
-        n_patients += 1
-
-    if n_patients == 0:
-        return {}, 0
-
-    prevalence = {
-        (c, w): counter[f"{c}:{w}"] / n_patients
-        for c in target_concept_ids
-        for w in windows
-    }
-    return prevalence, n_patients
-
-
-# ---------------------------------------------------------------------------
 # Concept name lookup
 # ---------------------------------------------------------------------------
 
-def find_concept_ids_by_name(vocab_dir: str, name_query: str) -> Dict[str, str]:
-    """Return {concept_id: concept_name} where name contains name_query (case-insensitive)."""
+def load_concept_name_map(vocab_dir: str) -> Dict[str, str]:
+    """Return {concept_id: concept_name} for all concepts in the Athena parquet."""
     concept_parquet = os.path.join(vocab_dir, "concept")
     if not os.path.isdir(concept_parquet):
         return {}
     df = pd.read_parquet(concept_parquet, columns=["concept_id", "concept_name"])
-    mask = df["concept_name"].str.contains(name_query, case=False, na=False)
-    return {str(row.concept_id): row.concept_name for row in df[mask].itertuples()}
+    return {str(row.concept_id): row.concept_name for row in df.itertuples(index=False)}
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +127,8 @@ def main():
     target_concept_ids = load_target_concept_ids(tokenizer, args.vocab_dir)
 
     # Compute prevalence stats
-    prevalence_stats, n_patients = compute_prevalence_stats(
+    n_patients = len(train_dataset)
+    prevalence_stats = compute_prevalence_stats(
         train_dataset,
         target_concept_ids,
         args.prediction_windows,
@@ -241,7 +138,14 @@ def main():
     )
     print(f"Computed prevalence stats over {n_patients} patients.")
 
-    # Build summary DataFrame: (concept_id, window, count, prevalence, reward_weight)
+    # Load concept names from vocab if available
+    concept_name_map: Dict[str, str] = {}
+    if args.vocab_dir:
+        print("Loading concept names from vocab...")
+        concept_name_map = load_concept_name_map(os.path.expanduser(args.vocab_dir))
+        print(f"Loaded {len(concept_name_map)} concept names.")
+
+    # Build summary DataFrame: (concept_id, concept_name, window, count, prevalence, reward_weight)
     rows = []
     for (concept_id, window), prev in prevalence_stats.items():
         weight = compute_event_weight(
@@ -255,6 +159,7 @@ def main():
         )
         rows.append({
             "concept_id": concept_id,
+            "concept_name": concept_name_map.get(concept_id, ""),
             "window_days": window,
             "n_patients": n_patients,
             "count": round(prev * n_patients),
@@ -280,42 +185,40 @@ def main():
     print(f"Saved prevalence JSON to {json_path}")
 
     # -----------------------------------------------------------------------
-    # Scatter plot: reward weight for target concept across prediction windows
+    # Scatter plot: reward weight for user-specified concept IDs
     # -----------------------------------------------------------------------
-    target_concept_map: Dict[str, str] = {}
+    if not args.plot_concept_ids:
+        print("No --plot_concept_ids specified; skipping plot.")
+        return
 
-    if args.vocab_dir:
-        vocab_dir = os.path.expanduser(args.vocab_dir)
-        target_concept_map = find_concept_ids_by_name(vocab_dir, args.concept_name)
-        # Restrict to concepts that are actually in target_concept_ids
-        target_concept_map = {k: v for k, v in target_concept_map.items() if k in target_concept_ids}
-        if not target_concept_map:
-            print(f"No concepts matching '{args.concept_name}' found in vocab/target set.")
-    else:
-        print("No --vocab_dir provided; cannot look up concept names for the plot.")
+    fig, ax = plt.subplots(figsize=(9, 5))
+    plotted = 0
+    for concept_id in args.plot_concept_ids:
+        sub = df[df["concept_id"] == concept_id].sort_values("window_days")
+        if sub.empty:
+            print(f"Warning: concept_id {concept_id} not found in stats; skipping.")
+            continue
+        name = concept_name_map.get(concept_id, concept_id)
+        label = f"{concept_id}: {name[:60]}"
+        ax.scatter(sub["window_days"], sub["reward_weight"], label=label, s=80)
+        ax.plot(sub["window_days"], sub["reward_weight"], alpha=0.5)
+        plotted += 1
 
-    if target_concept_map:
-        fig, ax = plt.subplots(figsize=(8, 5))
-        for concept_id, concept_name in sorted(target_concept_map.items()):
-            sub = df[df["concept_id"] == concept_id].sort_values("window_days")
-            if sub.empty:
-                continue
-            ax.scatter(sub["window_days"], sub["reward_weight"], label=f"{concept_id}: {concept_name[:50]}", s=80)
-            ax.plot(sub["window_days"], sub["reward_weight"], alpha=0.5)
+    if plotted == 0:
+        print("No valid concept IDs found in stats; skipping plot.")
+        return
 
-        ax.set_xlabel("Prediction Window (days)")
-        ax.set_ylabel("Reward Weight α(c, w)")
-        ax.set_title(f"Reward Weight vs Prediction Horizon\n({args.concept_name})")
-        ax.legend(fontsize=7, loc="upper left")
-        ax.grid(True, alpha=0.3)
+    ax.set_xlabel("Prediction Window (days)")
+    ax.set_ylabel("Reward Weight α(c, w)")
+    ax.set_title("Reward Weight vs Prediction Horizon")
+    ax.legend(fontsize=7, loc="upper left")
+    ax.grid(True, alpha=0.3)
 
-        plot_path = os.path.join(args.output_dir, "reward_weight_plot.png")
-        plt.tight_layout()
-        plt.savefig(plot_path, dpi=150)
-        plt.close()
-        print(f"Saved plot to {plot_path}")
-    else:
-        print("Skipping plot (no matching concepts found).")
+    plot_path = os.path.join(args.output_dir, "reward_weight_plot.png")
+    plt.tight_layout()
+    plt.savefig(plot_path, dpi=150)
+    plt.close()
+    print(f"Saved plot to {plot_path}")
 
 
 if __name__ == "__main__":
