@@ -338,30 +338,108 @@ class CehrGptGRPOTrainer(Trainer):
         B = prefix_ids.shape[0]
         dev = prefix_ids.device
 
-        # ------------------------------------------------------------------
-        # Step 1: Build per-(i, k) full sequences and metadata
-        # ------------------------------------------------------------------
-        # Each entry: (patient_idx, full_ids_1d, full_ages_1d, full_times_1d,
-        #              full_vals_1d_or_None, full_valmask_1d_or_None,
-        #              rollout_len, new_ids_t)
-        entries: List[Tuple] = []
+        entries = self._build_entries(
+            B, K, prefix_ids, prefix_ages, prefix_times,
+            prefix_values, prefix_value_indicators, prefix_lengths,
+            rollout_token_strs, rollout_seq_vals, rollout_seq_val_masks, dev,
+        )
+        if not entries:
+            zero = prefix_ids.new_zeros(1, dtype=torch.float32).squeeze().requires_grad_(True)
+            return zero, zero
 
+        batch_ids, batch_ages, batch_times, batch_vals, batch_vmask, batch_attn, has_values = \
+            self._left_pad_entries(entries, dev)
+
+        fwd_kwargs: Dict[str, Any] = {}
+        if has_values:
+            fwd_kwargs["values"]           = batch_vals
+            fwd_kwargs["value_indicators"] = batch_vmask
+
+        # Current model — gradients flow
+        curr_logits = model(
+            input_ids=batch_ids, ages=batch_ages, epoch_times=batch_times,
+            attention_mask=batch_attn, **fwd_kwargs,
+        ).logits  # (N, max_full_len, vocab)
+
+        # Reference model — no gradients
+        with torch.no_grad():
+            ref_logits = self.ref_model(
+                input_ids=batch_ids, ages=batch_ages, epoch_times=batch_times,
+                attention_mask=batch_attn, **fwd_kwargs,
+            ).logits  # (N, max_full_len, vocab)
+
+        # With left-padding, rollout tokens occupy the last `rollout_len`
+        # positions; the preceding logit (autoregressive shift) is at
+        #   logits[n, -(rollout_len+1):-1, :]
+        pg_per_patient: Dict[int, List[torch.Tensor]] = {}
+        kl_per_patient: Dict[int, List[torch.Tensor]] = {}
+
+        for n, (i, _, _, _, _, _, rollout_len, new_ids_t) in enumerate(entries):
+            token_lp, ref_token_lp = self._extract_token_lp(
+                curr_logits, ref_logits, n, rollout_len, new_ids_t
+            )
+            seq_lp    = token_lp.mean()
+            log_ratio = token_lp - ref_token_lp
+            kl_approx = (torch.exp(-log_ratio) + log_ratio - 1).mean()
+
+            pg_per_patient.setdefault(i, []).append(seq_lp)
+            kl_per_patient.setdefault(i, []).append(kl_approx)
+
+        pg_terms: List[torch.Tensor] = []
+        kl_terms: List[torch.Tensor] = []
+        for i in sorted(pg_per_patient):
+            mean_seq_lp = torch.stack(pg_per_patient[i]).mean()
+            pg_terms.append(-advantages[i] * mean_seq_lp)
+            kl_terms.append(torch.stack(kl_per_patient[i]).mean())
+
+        if not pg_terms:
+            zero = prefix_ids.new_zeros(1, dtype=torch.float32).squeeze().requires_grad_(True)
+            return zero, zero
+
+        return torch.stack(pg_terms).mean(), torch.stack(kl_terms).mean()
+
+    # ------------------------------------------------------------------
+    # Shared helpers used by both GRPO and PPO trainers
+    # ------------------------------------------------------------------
+
+    def _build_entries(
+        self,
+        B: int,
+        K: int,
+        prefix_ids: torch.Tensor,
+        prefix_ages: torch.Tensor,
+        prefix_times: torch.Tensor,
+        prefix_values: Optional[torch.Tensor],
+        prefix_value_indicators: Optional[torch.Tensor],
+        prefix_lengths: torch.Tensor,
+        rollout_token_strs: List[List[str]],
+        rollout_seq_vals: Optional[torch.Tensor],
+        rollout_seq_val_masks: Optional[torch.Tensor],
+        dev: torch.device,
+    ) -> List[Tuple]:
+        """
+        Build per-(patient, rollout) full-sequence tensors.
+
+        Each entry: (patient_idx, full_ids_1d, full_ages_1d, full_times_1d,
+                     full_vals_1d_or_None, full_valmask_1d_or_None,
+                     rollout_len, new_ids_t)
+        """
+        entries: List[Tuple] = []
         for i in range(B):
-            prefix_len_i = int(prefix_lengths[i].item())
-            prefix_ids_i   = prefix_ids[i, -prefix_len_i:]
-            prefix_ages_i  = prefix_ages[i, -prefix_len_i:]
-            prefix_times_i = prefix_times[i, -prefix_len_i:]
-            prefix_vals_i    = prefix_values[i, -prefix_len_i:]         if prefix_values is not None else None
-            prefix_valmask_i = prefix_value_indicators[i, -prefix_len_i:] if prefix_value_indicators is not None else None
+            prefix_len_i     = int(prefix_lengths[i].item())
+            prefix_ids_i     = prefix_ids[i, -prefix_len_i:]
+            prefix_ages_i    = prefix_ages[i, -prefix_len_i:]
+            prefix_times_i   = prefix_times[i, -prefix_len_i:]
+            prefix_vals_i    = prefix_values[i, -prefix_len_i:]             if prefix_values is not None else None
+            prefix_valmask_i = prefix_value_indicators[i, -prefix_len_i:]   if prefix_value_indicators is not None else None
 
             prefix_end_age  = int(prefix_ages_i[-1].item())
             prefix_end_time = float(prefix_times_i[-1].item())
 
             for k in range(K):
-                bk_idx = i * K + k
+                bk_idx        = i * K + k
                 rollout_tokens = rollout_token_strs[bk_idx]
-                new_tokens = rollout_tokens[prefix_len_i:]
-
+                new_tokens     = rollout_tokens[prefix_len_i:]
                 if not new_tokens:
                     continue
 
@@ -369,9 +447,8 @@ class CehrGptGRPOTrainer(Trainer):
                 if not new_ids:
                     continue
 
-                rollout_len = len(new_ids)
-                new_ids_t = torch.tensor(new_ids, dtype=torch.long, device=dev)
-
+                rollout_len     = len(new_ids)
+                new_ids_t       = torch.tensor(new_ids, dtype=torch.long, device=dev)
                 rollout_ages, rollout_times = self._reconstruct_rollout_context(
                     new_tokens, prefix_end_age, prefix_end_time
                 )
@@ -400,25 +477,30 @@ class CehrGptGRPOTrainer(Trainer):
                     i, full_ids_1d, full_ages_1d, full_times_1d,
                     full_vals_1d, full_valmask_1d, rollout_len, new_ids_t,
                 ))
+        return entries
 
-        if not entries:
-            zero = prefix_ids.new_zeros(1, dtype=torch.float32).squeeze().requires_grad_(True)
-            return zero, zero
+    def _left_pad_entries(
+        self,
+        entries: List[Tuple],
+        dev: torch.device,
+    ) -> Tuple:
+        """
+        Left-pad all (prefix + rollout) sequences to a common length.
 
-        # ------------------------------------------------------------------
-        # Step 2: Left-pad all sequences to max_full_len
-        # ------------------------------------------------------------------
-        N = len(entries)
+        Returns (batch_ids, batch_ages, batch_times, batch_vals,
+                 batch_vmask, batch_attn, has_values).
+        """
+        N            = len(entries)
         max_full_len = max(e[1].shape[0] for e in entries)
-        pad_id = self.cehrgpt_tokenizer.pad_token_id
-        has_values = entries[0][4] is not None  # consistent across all entries
+        pad_id       = self.cehrgpt_tokenizer.pad_token_id
+        has_values   = entries[0][4] is not None
 
-        batch_ids    = torch.full((N, max_full_len), pad_id, dtype=torch.long,    device=dev)
-        batch_ages   = torch.zeros((N, max_full_len),          dtype=torch.long,    device=dev)
-        batch_times  = torch.zeros((N, max_full_len),          dtype=torch.float32, device=dev)
-        batch_vals   = torch.zeros((N, max_full_len),          dtype=torch.long,    device=dev)
-        batch_vmask  = torch.zeros((N, max_full_len),          dtype=torch.bool,    device=dev)
-        batch_attn   = torch.zeros((N, max_full_len),          dtype=torch.long,    device=dev)
+        batch_ids   = torch.full((N, max_full_len), pad_id, dtype=torch.long,    device=dev)
+        batch_ages  = torch.zeros((N, max_full_len),         dtype=torch.long,    device=dev)
+        batch_times = torch.zeros((N, max_full_len),         dtype=torch.float32, device=dev)
+        batch_vals  = torch.zeros((N, max_full_len),         dtype=torch.long,    device=dev)
+        batch_vmask = torch.zeros((N, max_full_len),         dtype=torch.bool,    device=dev)
+        batch_attn  = torch.zeros((N, max_full_len),         dtype=torch.long,    device=dev)
 
         for n, (_, fids, fages, ftimes, fvals, fvmask, _, _) in enumerate(entries):
             slen = fids.shape[0]
@@ -430,71 +512,47 @@ class CehrGptGRPOTrainer(Trainer):
                 batch_vmask[n, -slen:] = fvmask
             batch_attn[n, -slen:] = 1
 
-        # ------------------------------------------------------------------
-        # Step 3: Two batched forward passes (current model + ref model)
-        # ------------------------------------------------------------------
-        fwd_kwargs: Dict[str, Any] = {}
-        if has_values:
-            fwd_kwargs["values"]           = batch_vals
-            fwd_kwargs["value_indicators"] = batch_vmask
+        return batch_ids, batch_ages, batch_times, batch_vals, batch_vmask, batch_attn, has_values
 
-        # Current model — gradients flow
-        curr_logits = model(
-            input_ids=batch_ids,
-            ages=batch_ages,
-            epoch_times=batch_times,
-            attention_mask=batch_attn,
-            **fwd_kwargs,
-        ).logits  # (N, max_full_len, vocab)
+    def _forward(
+        self,
+        model,
+        batch_ids: torch.Tensor,
+        batch_ages: torch.Tensor,
+        batch_times: torch.Tensor,
+        batch_attn: torch.Tensor,
+        fwd_kwargs: Dict[str, Any],
+        no_grad: bool = False,
+    ) -> torch.Tensor:
+        """Single batched forward pass; returns logits (N, seq_len, vocab)."""
+        ctx = torch.no_grad() if no_grad else torch.enable_grad()
+        with ctx:
+            return model(
+                input_ids=batch_ids, ages=batch_ages, epoch_times=batch_times,
+                attention_mask=batch_attn, **fwd_kwargs,
+            ).logits
 
-        # Reference model — no gradients
-        with torch.no_grad():
-            ref_logits = self.ref_model(
-                input_ids=batch_ids,
-                ages=batch_ages,
-                epoch_times=batch_times,
-                attention_mask=batch_attn,
-                **fwd_kwargs,
-            ).logits  # (N, max_full_len, vocab)
+    def _extract_token_lp(
+        self,
+        curr_logits: torch.Tensor,
+        ref_logits: torch.Tensor,
+        n: int,
+        rollout_len: int,
+        new_ids_t: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Extract per-token log-probs for rollout n from batched logit tensors.
 
-        # ------------------------------------------------------------------
-        # Step 4: Extract per-token log-probs and aggregate per patient
-        # ------------------------------------------------------------------
-        # With left-padding, rollout tokens occupy the last `rollout_len`
-        # positions; the preceding logit (autoregressive shift) is at
-        #   logits[n, -(rollout_len+1):-1, :]
-        pg_per_patient: Dict[int, List[torch.Tensor]] = {}
-        kl_per_patient: Dict[int, List[torch.Tensor]] = {}
+        With left-padding the rollout logits live at positions -(rollout_len+1):-1.
+        Returns (token_lp, ref_token_lp) both of shape (rollout_len,).
+        ref_token_lp is detached (no gradient).
+        """
+        idx = new_ids_t.unsqueeze(1)  # (rollout_len, 1)
+        sl  = slice(-(rollout_len + 1), -1)
 
-        for n, (i, _, _, _, _, _, rollout_len, new_ids_t) in enumerate(entries):
-            gen_logits     = curr_logits[n, -(rollout_len + 1):-1, :]  # (rollout_len, vocab)
-            curr_lp        = F.log_softmax(gen_logits, dim=-1)
-            token_lp       = curr_lp.gather(1, new_ids_t.unsqueeze(1)).squeeze(1)
-            seq_lp         = token_lp.mean()
-
-            ref_gen_logits = ref_logits[n, -(rollout_len + 1):-1, :]
-            ref_lp         = F.log_softmax(ref_gen_logits, dim=-1)
-            ref_token_lp   = ref_lp.gather(1, new_ids_t.unsqueeze(1)).squeeze(1)
-            # DeepSeek GRPO KL approximation: exp(-r) + r - 1, r = log π_θ - log π_ref
-            # Always ≥ 0; stable when π_θ >> π_ref (exp(-r) → 0)
-            log_ratio      = token_lp - ref_token_lp
-            kl_approx      = (torch.exp(-log_ratio) + log_ratio - 1).mean()
-
-            pg_per_patient.setdefault(i, []).append(seq_lp)
-            kl_per_patient.setdefault(i, []).append(kl_approx)
-
-        pg_terms: List[torch.Tensor] = []
-        kl_terms: List[torch.Tensor] = []
-        for i in sorted(pg_per_patient):
-            mean_seq_lp = torch.stack(pg_per_patient[i]).mean()
-            pg_terms.append(-advantages[i] * mean_seq_lp)
-            kl_terms.append(torch.stack(kl_per_patient[i]).mean())
-
-        if not pg_terms:
-            zero = prefix_ids.new_zeros(1, dtype=torch.float32).squeeze().requires_grad_(True)
-            return zero, zero
-
-        return torch.stack(pg_terms).mean(), torch.stack(kl_terms).mean()
+        token_lp     = F.log_softmax(curr_logits[n, sl, :], dim=-1).gather(1, idx).squeeze(1)
+        ref_token_lp = F.log_softmax(ref_logits[n,  sl, :], dim=-1).gather(1, idx).squeeze(1).detach()
+        return token_lp, ref_token_lp
 
     # ------------------------------------------------------------------
     # Context reconstruction for generated tokens

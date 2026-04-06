@@ -94,3 +94,11 @@ class RLArguments:
         default=100,
         metadata={"help": "Number of examples randomly sampled from the eval set each evaluation call."},
     )
+    ppo_clip_epsilon: float = field(
+        default=0.2,
+        metadata={"help": "PPO clip epsilon ε: ratio r_t is clipped to [1-ε, 1+ε]. Only used by CehrGptPPOTrainer."},
+    )
+    trainer_type: str = field(
+        default="grpo",
+        metadata={"help": "Which RL trainer to use: 'grpo' (REINFORCE+KL) or 'ppo' (PPO-clip+KL)."},
+    )

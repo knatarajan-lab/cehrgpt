@@ -141,6 +141,46 @@ class HfCehrGptRLRunnerIntegrationTest(unittest.TestCase):
             f"Expected saved model config in {self.rl_output_path}",
         )
 
+    # ------------------------------------------------------------------
+    # Step 3: PPO fine-tuning for 2 steps (reuses pretrained model from step 1)
+    # ------------------------------------------------------------------
+    def test_3_ppo_finetune(self):
+        self.assertTrue(
+            hasattr(self.__class__, "tokenized_dataset_path"),
+            "test_1 must run before test_3",
+        )
+        ppo_output_path = os.path.join(self.temp_dir, "ppo_model")
+        Path(ppo_output_path).mkdir(parents=True, exist_ok=True)
+
+        sys.argv = [
+            "hf_cehrgpt_rl_runner.py",
+            "--model_name_or_path", self.model_folder_path,
+            "--tokenizer_name_or_path", self.model_folder_path,
+            "--tokenized_full_dataset_path", self.__class__.tokenized_dataset_path,
+            "--output_dir", ppo_output_path,
+            # PPO-specific
+            "--trainer_type", "ppo",
+            "--ppo_clip_epsilon", "0.2",
+            # RL hyperparameters kept tiny for speed
+            "--num_rollouts", "2",
+            "--max_new_tokens", "32",
+            "--kl_beta", "0.05",
+            "--max_steps", "2",
+            "--save_steps", "2",
+            "--save_strategy", "steps",
+            "--per_device_train_batch_size", "2",
+            "--use_early_stopping", "false",
+            "--report_to", "none",
+            "--no_cuda", "true",
+        ]
+        rl_main()
+
+        # Verify the PPO model was saved
+        self.assertTrue(
+            any(Path(ppo_output_path).glob("config.json")),
+            f"Expected saved model config in {ppo_output_path}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

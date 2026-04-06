@@ -30,6 +30,7 @@ from transformers.utils import logging
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.rl.grpo_trainer import CehrGptGRPOTrainer
+from cehrgpt.rl.ppo_trainer import CehrGptPPOTrainer
 from cehrgpt.rl.reward import compute_prevalence_stats
 from cehrgpt.rl.rl_data_collator import RLDataCollator
 from cehrgpt.runners.hf_gpt_rl_runner_argument_dataclass import RLArguments
@@ -257,7 +258,9 @@ def main():
     # ------------------------------------------------------------------
     # Trainer
     # ------------------------------------------------------------------
-    trainer = CehrGptGRPOTrainer(
+    trainer_cls = CehrGptPPOTrainer if rl_args.trainer_type == "ppo" else CehrGptGRPOTrainer
+    LOG.info("Using trainer: %s", trainer_cls.__name__)
+    trainer = trainer_cls(
         ref_model=ref_model,
         rl_args=rl_args,
         prevalence_stats=prevalence_stats,
