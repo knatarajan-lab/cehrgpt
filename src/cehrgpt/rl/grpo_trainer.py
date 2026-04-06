@@ -210,14 +210,14 @@ class CehrGptGRPOTrainer(Trainer):
         rewards_t = torch.tensor(rewards, dtype=torch.float32, device=prefix_input_ids.device)
 
         # ---------------------------------------------------------------
-        # 3. Baseline-adjusted advantage
+        # 3. Advantage estimation (baseline subtraction or value network)
         # ---------------------------------------------------------------
-        advantages = rewards_t - self._baseline
-        m = self.rl_args.baseline_momentum
-        self._baseline = m * self._baseline + (1.0 - m) * rewards_t.mean().item()
-
-        # Baseline EMA is maintained per-rank; slight divergence across DDP
-        # ranks is acceptable for an approximation baseline.
+        advantages, value_loss = self._compute_advantages(
+            rewards_t, raw_model,
+            prefix_input_ids, prefix_ages, prefix_epoch_times,
+            prefix_attention_mask, prefix_values, prefix_value_indicators,
+            prefix_lengths,
+        )
 
         # ---------------------------------------------------------------
         # 4. PG loss + KL regularisation (GRPO formulation)
@@ -238,15 +238,20 @@ class CehrGptGRPOTrainer(Trainer):
         )
 
         total_loss = pg_loss + self.rl_args.kl_beta * kl_loss
+        if value_loss is not None:
+            total_loss = total_loss + self.rl_args.value_loss_coef * value_loss
 
         # Accumulate RL metrics; they are averaged and injected into the log
         # dict by the log() override, which the Trainer calls at the right step.
-        for name, value in (
+        metrics = [
             ("rl_pg_loss",     pg_loss.item() if isinstance(pg_loss, torch.Tensor) else float(pg_loss)),
             ("rl_kl_loss",     kl_loss.item() if isinstance(kl_loss, torch.Tensor) else float(kl_loss)),
             ("rl_reward_mean", rewards_t.mean().item()),
             ("rl_baseline",    self._baseline),
-        ):
+        ]
+        if value_loss is not None:
+            metrics.append(("rl_value_loss", value_loss.item()))
+        for name, value in metrics:
             self._rl_metric_sums[name] = self._rl_metric_sums.get(name, 0.0) + value
             self._rl_metric_counts[name] = self._rl_metric_counts.get(name, 0) + 1
 
@@ -303,6 +308,34 @@ class CehrGptGRPOTrainer(Trainer):
             "sequence_vals": getattr(outputs, "sequence_vals", None),
             "sequence_val_masks": getattr(outputs, "sequence_val_masks", None),
         }
+
+    # ------------------------------------------------------------------
+    # Advantage estimation
+    # ------------------------------------------------------------------
+
+    def _compute_advantages(
+        self,
+        rewards_t: torch.Tensor,                          # (B,)
+        raw_model,                                        # unwrapped policy model
+        prefix_input_ids: torch.Tensor,                   # (B, L)
+        prefix_ages: torch.Tensor,                        # (B, L)
+        prefix_epoch_times: torch.Tensor,                 # (B, L)
+        prefix_attention_mask: torch.Tensor,              # (B, L)
+        prefix_values: Optional[torch.Tensor],            # (B, L) or None
+        prefix_value_indicators: Optional[torch.Tensor],  # (B, L) or None
+        prefix_lengths: torch.Tensor,                     # (B,)
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Compute per-patient advantages using an exponential moving-average baseline.
+
+        Returns (advantages, None) — no value loss for GRPO.
+        Subclasses (e.g. CehrGptPPOTrainer) override this to use a learned
+        value network instead.
+        """
+        advantages = rewards_t - self._baseline
+        m = self.rl_args.baseline_momentum
+        self._baseline = m * self._baseline + (1.0 - m) * rewards_t.mean().item()
+        return advantages, None
 
     # ------------------------------------------------------------------
     # PG + KL loss computation

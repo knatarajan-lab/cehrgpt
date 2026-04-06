@@ -98,6 +98,10 @@ class RLArguments:
         default=0.2,
         metadata={"help": "PPO clip epsilon ε: ratio r_t is clipped to [1-ε, 1+ε]. Only used by CehrGptPPOTrainer."},
     )
+    value_loss_coef: float = field(
+        default=0.5,
+        metadata={"help": "Coefficient for the value network MSE loss. Only used by CehrGptPPOTrainer."},
+    )
     trainer_type: str = field(
         default="grpo",
         metadata={"help": "Which RL trainer to use: 'grpo' (REINFORCE+KL) or 'ppo' (PPO-clip+KL)."},

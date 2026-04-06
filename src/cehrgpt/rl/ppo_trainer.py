@@ -2,25 +2,28 @@
 PPO-clip trainer for CEHR-GPT.
 
 Extends CehrGptGRPOTrainer by replacing the REINFORCE policy-gradient term
-with a PPO clipped surrogate objective.  All other components — rollout
-generation, reward computation, KL regularisation, logging, and eval
-subsampling — are inherited unchanged from CehrGptGRPOTrainer.
+with a PPO clipped surrogate objective and a learned value network for
+advantage estimation.
 
 Algorithm per patient i
 -----------------------
-1–3. Same as GRPO (rollouts, rewards, baseline-adjusted advantage A_i).
+1–2. Same as GRPO (rollouts, rewards).
+3.   Value network: V(prefix_i) = value_head(last_hidden(prefix_i))
+         A_i = R_i − V(prefix_i).detach()
 4.   Old log-probs π_old: current model weights evaluated without gradient.
 5.   PPO clipped surrogate (per token, averaged over rollouts and patients):
-         r_t    = π_θ(a_t) / π_old(a_t)  = exp(log π_θ - log π_old)
-         L_PPO  = -mean_t min(r_t · A_i, clip(r_t, 1-ε, 1+ε) · A_i)
+         r_t    = π_θ(a_t) / π_old(a_t)  = exp(log π_θ − log π_old)
+         L_PPO  = −mean_t min(r_t · A_i, clip(r_t, 1−ε, 1+ε) · A_i)
 6.   KL regularisation against π_ref (DeepSeek GRPO estimator, always ≥ 0):
-         D̂_KL(t) = exp(log π_ref(t) - log π_θ(t)) + (log π_θ(t) - log π_ref(t)) - 1
-7.   Total loss: L = L_PPO + β · L_KL
+         D̂_KL(t) = exp(log π_ref(t) − log π_θ(t)) + (log π_θ(t) − log π_ref(t)) − 1
+7.   Value loss: L_V = MSE(V(prefix_i), R_i)
+8.   Total loss: L = L_PPO + β · L_KL + λ_V · L_V
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from cehrgpt.rl.grpo_trainer import CehrGptGRPOTrainer
@@ -28,14 +31,104 @@ from cehrgpt.rl.grpo_trainer import CehrGptGRPOTrainer
 
 class CehrGptPPOTrainer(CehrGptGRPOTrainer):
     """
-    PPO-clip + KL trainer for CEHR-GPT.
+    PPO-clip + value network trainer for CEHR-GPT.
 
-    Inherits all infrastructure from ``CehrGptGRPOTrainer``; only
-    ``_compute_pg_loss`` is overridden to use a clipped surrogate objective
-    instead of plain REINFORCE.
+    Inherits all infrastructure from ``CehrGptGRPOTrainer``.  Two methods
+    are overridden:
 
-    The clip epsilon ``ε`` is read from ``rl_args.ppo_clip_epsilon``.
+    * ``_compute_advantages`` — uses a learned ``value_head`` attached to the
+      policy model to estimate V(prefix) and compute A = R − V.
+    * ``_compute_pg_loss`` — uses PPO clipped surrogate instead of REINFORCE.
+
+    The value head (``nn.Linear(hidden_size, 1)``) is attached to
+    ``self.model`` in ``__init__`` so that:
+      - it is automatically moved to the correct device alongside the model;
+      - its parameters are included in the Trainer's optimizer;
+      - it is saved and loaded with model checkpoints.
+
+    Hyperparameters (from ``RLArguments``):
+      - ``ppo_clip_epsilon``  (ε, default 0.2)
+      - ``value_loss_coef``   (λ_V, default 0.5)
     """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        hidden_size = self.model.config.hidden_size
+        self.model.value_head = nn.Linear(hidden_size, 1)
+
+    # ------------------------------------------------------------------
+    # Advantage estimation via learned value network
+    # ------------------------------------------------------------------
+
+    def _compute_advantages(
+        self,
+        rewards_t: torch.Tensor,
+        raw_model,
+        prefix_input_ids: torch.Tensor,
+        prefix_ages: torch.Tensor,
+        prefix_epoch_times: torch.Tensor,
+        prefix_attention_mask: torch.Tensor,
+        prefix_values: Optional[torch.Tensor],
+        prefix_value_indicators: Optional[torch.Tensor],
+        prefix_lengths: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Estimate V(prefix_i) with a linear value head on the last hidden state,
+        compute A_i = R_i − V(prefix_i), and return the MSE value loss.
+
+        The prefix is left-padded, so the last real token is always at
+        position −1 in the sequence dimension.
+
+        Returns (advantages, value_loss).
+        """
+        values = self._compute_values(
+            raw_model, prefix_input_ids, prefix_ages, prefix_epoch_times,
+            prefix_attention_mask, prefix_values, prefix_value_indicators,
+        )
+        advantages = rewards_t - values.detach()
+        value_loss = F.mse_loss(values, rewards_t)
+        return advantages, value_loss
+
+    def _compute_values(
+        self,
+        raw_model,
+        prefix_input_ids: torch.Tensor,
+        prefix_ages: torch.Tensor,
+        prefix_epoch_times: torch.Tensor,
+        prefix_attention_mask: torch.Tensor,
+        prefix_values: Optional[torch.Tensor],
+        prefix_value_indicators: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """
+        Forward pass through the policy model to obtain V(prefix_i) for each
+        patient in the batch.
+
+        Uses ``output_hidden_states=True`` to retrieve the last transformer
+        layer's hidden states without an extra forward pass.  Since the prefix
+        is left-padded, position −1 is always the last real token.
+
+        Returns a (B,) tensor of value estimates (gradients enabled).
+        """
+        fwd_kwargs: Dict[str, Any] = {}
+        if prefix_values is not None:
+            fwd_kwargs["values"]           = prefix_values
+            fwd_kwargs["value_indicators"] = prefix_value_indicators
+
+        output = raw_model(
+            input_ids=prefix_input_ids,
+            ages=prefix_ages,
+            epoch_times=prefix_epoch_times,
+            attention_mask=prefix_attention_mask,
+            output_hidden_states=True,
+            **fwd_kwargs,
+        )
+        # hidden_states: tuple of (num_layers + 1) tensors, each (B, L, hidden_size)
+        last_hidden = output.hidden_states[-1][:, -1, :]   # (B, hidden_size)
+        return raw_model.value_head(last_hidden).squeeze(-1)  # (B,)
+
+    # ------------------------------------------------------------------
+    # PPO clipped surrogate loss
+    # ------------------------------------------------------------------
 
     def _compute_pg_loss(
         self,
@@ -60,7 +153,7 @@ class CehrGptPPOTrainer(CehrGptGRPOTrainer):
           2. ``model`` with grad     → current log-probs (π_θ)
           3. ``self.ref_model`` with no_grad → reference log-probs (π_ref)
 
-        Returns (ppo_loss, kl_loss) where total_loss = ppo_loss + β · kl_loss.
+        Returns (ppo_loss, kl_loss) where total_loss = ppo_loss + β·kl_loss + λ_V·value_loss.
         """
         B   = prefix_ids.shape[0]
         dev = prefix_ids.device
