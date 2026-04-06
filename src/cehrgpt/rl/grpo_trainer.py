@@ -68,9 +68,12 @@ class CehrGptGRPOTrainer(Trainer):
         self.target_concept_ids = target_concept_ids
         self.cehrgpt_tokenizer = cehrgpt_tokenizer
         self._baseline: float = 0.0
-        # Accumulators for RL metrics — flushed and averaged in log()
+        # Accumulators for train RL metrics — flushed and averaged in log()
         self._rl_metric_sums: Dict[str, float] = {}
         self._rl_metric_counts: Dict[str, int] = {}
+        # Accumulators for eval metrics — flushed in log() when eval_loss is present
+        self._eval_metric_sums: Dict[str, float] = {}
+        self._eval_metric_counts: Dict[str, int] = {}
         # _signature_columns is normally set by _remove_unused_columns, which is
         # skipped when remove_unused_columns=False.  Initialise it here so that
         # the empty-batch error message in _prepare_inputs doesn't crash.
@@ -88,6 +91,13 @@ class CehrGptGRPOTrainer(Trainer):
                 logs[name] = round(total / count, 6)
             self._rl_metric_sums = {}
             self._rl_metric_counts = {}
+        # Flush eval metrics when the Trainer logs eval results.
+        if "eval_loss" in logs and self._eval_metric_sums:
+            for name, total in self._eval_metric_sums.items():
+                count = self._eval_metric_counts.get(name, 1)
+                logs[name] = round(total / count, 6)
+            self._eval_metric_sums = {}
+            self._eval_metric_counts = {}
         super().log(logs, *args, **kwargs)
 
     # ------------------------------------------------------------------
@@ -103,7 +113,7 @@ class CehrGptGRPOTrainer(Trainer):
         return super().get_eval_dataloader(dataset)
 
     # ------------------------------------------------------------------
-    # Evaluation step — route through compute_loss instead of model(**inputs)
+    # Evaluation step — compute reward directly (not PG loss)
     # ------------------------------------------------------------------
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
@@ -150,7 +160,8 @@ class CehrGptGRPOTrainer(Trainer):
         prefix_lengths: torch.Tensor = inputs["prefix_lengths"]              # (B,)
 
         B = prefix_input_ids.shape[0]
-        K = self.rl_args.num_rollouts
+        is_training = model.training
+        K = self.rl_args.num_rollouts if is_training else self.rl_args.eval_num_rollouts
 
         # ---------------------------------------------------------------
         # 1. Sample K rollouts per patient
@@ -167,7 +178,8 @@ class CehrGptGRPOTrainer(Trainer):
         raw_model.eval()
         with torch.no_grad():
             gen_output = self._generate_rollouts(raw_model, rep_ids, rep_ages, rep_mask, rep_values, rep_val_masks)
-        raw_model.train()
+        if is_training:
+            raw_model.train()
 
         rollout_token_strs: List[List[str]] = gen_output["sequences"]           # B*K items
         rollout_seq_vals: Optional[torch.Tensor] = gen_output.get("sequence_vals")     # (B*K, full_len) or None
@@ -209,6 +221,7 @@ class CehrGptGRPOTrainer(Trainer):
 
         rewards_t = torch.tensor(rewards, dtype=torch.float32, device=prefix_input_ids.device)
 
+
         # ---------------------------------------------------------------
         # 3. Advantage estimation (baseline subtraction or value network)
         # ---------------------------------------------------------------
@@ -241,19 +254,28 @@ class CehrGptGRPOTrainer(Trainer):
         if value_loss is not None:
             total_loss = total_loss + self.rl_args.value_loss_coef * value_loss
 
-        # Accumulate RL metrics; they are averaged and injected into the log
-        # dict by the log() override, which the Trainer calls at the right step.
-        metrics = [
+        # Build the shared metric set logged for both train and eval.
+        # Train metrics are flushed by log() at each logging step (no prefix).
+        # Eval metrics are flushed by log() when eval_loss is present (eval_ prefix).
+        base_metrics = [
             ("rl_pg_loss",     pg_loss.item() if isinstance(pg_loss, torch.Tensor) else float(pg_loss)),
             ("rl_kl_loss",     kl_loss.item() if isinstance(kl_loss, torch.Tensor) else float(kl_loss)),
             ("rl_reward_mean", rewards_t.mean().item()),
             ("rl_baseline",    self._baseline),
         ]
         if value_loss is not None:
-            metrics.append(("rl_value_loss", value_loss.item()))
-        for name, value in metrics:
-            self._rl_metric_sums[name] = self._rl_metric_sums.get(name, 0.0) + value
-            self._rl_metric_counts[name] = self._rl_metric_counts.get(name, 0) + 1
+            base_metrics.append(("rl_value_loss", value_loss.item()))
+
+        if is_training:
+            for name, value in base_metrics:
+                self._rl_metric_sums[name] = self._rl_metric_sums.get(name, 0.0) + value
+                self._rl_metric_counts[name] = self._rl_metric_counts.get(name, 0) + 1
+        else:
+            for name, value in base_metrics:
+                # Prefix with eval_; rename rl_reward_mean → eval_reward for model selection.
+                eval_name = "eval_reward" if name == "rl_reward_mean" else f"eval_{name}"
+                self._eval_metric_sums[eval_name] = self._eval_metric_sums.get(eval_name, 0.0) + value
+                self._eval_metric_counts[eval_name] = self._eval_metric_counts.get(eval_name, 0) + 1
 
         return total_loss
 
@@ -333,8 +355,10 @@ class CehrGptGRPOTrainer(Trainer):
         value network instead.
         """
         advantages = rewards_t - self._baseline
-        m = self.rl_args.baseline_momentum
-        self._baseline = m * self._baseline + (1.0 - m) * rewards_t.mean().item()
+        # Only update the EMA baseline during training; keep it frozen for eval.
+        if raw_model.training:
+            m = self.rl_args.baseline_momentum
+            self._baseline = m * self._baseline + (1.0 - m) * rewards_t.mean().item()
         return advantages, None
 
     # ------------------------------------------------------------------

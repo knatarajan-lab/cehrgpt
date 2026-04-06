@@ -99,7 +99,7 @@ logging_dir: "./logs"
 logging_steps: 10
 save_total_limit: 3
 load_best_model_at_end: true
-metric_for_best_model: "eval_loss"
-greater_is_better: false
+metric_for_best_model: "eval_reward"
+greater_is_better: true
 
 report_to: "none"
