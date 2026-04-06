@@ -1,16 +1,17 @@
 """
 GRPO (Group Relative Policy Optimization / REINFORCE + KL) trainer for CEHR-GPT.
 
-Algorithm per patient i
------------------------
+Algorithm per patient i  (DeepSeek GRPO formulation)
+-----------------------------------------------------
 1. Sample K rollout trajectories τ_1…τ_K ~ π_θ(· | prefix_i)
 2. Compute reward R_i using the weighted condition-recovery objective
 3. Compute advantage  A_i = R_i - b  (b = moving-average baseline)
 4. Policy-gradient loss:
-       L_PG = - A_i · (1/K) Σ_k Σ_t log π_θ(τ_k[t] | prefix_i + τ_k[:t])
-5. KL regularisation (token-level log-ratio approximation):
-       L_KL = (1/K) Σ_k mean_t [log π_θ(τ_k[t]|·) - log π_ref(τ_k[t]|·)]
-6. Total loss: L = L_PG + β · L_KL
+       L_PG = - (1/B) Σ_i A_i · (1/K) Σ_k (1/T_k) Σ_t log π_θ(τ_k[t]|·)
+5. Per-token KL estimate (DeepSeek GRPO approximation, always ≥ 0):
+       D̂_KL(t) = exp(log π_ref(t) - log π_θ(t)) + (log π_θ(t) - log π_ref(t)) - 1
+6. Total loss:
+       L = L_PG + β · (1/B) Σ_i (1/K) Σ_k mean_t D̂_KL(t)
 """
 
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -219,9 +220,9 @@ class CehrGptGRPOTrainer(Trainer):
         # ranks is acceptable for an approximation baseline.
 
         # ---------------------------------------------------------------
-        # 4 & 5. PG loss + KL loss
+        # 4. PG loss + KL regularisation (GRPO formulation)
         # ---------------------------------------------------------------
-        pg_loss, kl_loss = self._compute_pg_and_kl_loss(
+        pg_loss, kl_loss = self._compute_pg_loss(
             raw_model,
             prefix_input_ids,
             prefix_ages,
@@ -307,7 +308,7 @@ class CehrGptGRPOTrainer(Trainer):
     # PG + KL loss computation
     # ------------------------------------------------------------------
 
-    def _compute_pg_and_kl_loss(
+    def _compute_pg_loss(
         self,
         model,
         prefix_ids: torch.Tensor,                       # (B, L)
@@ -323,13 +324,16 @@ class CehrGptGRPOTrainer(Trainer):
         advantages: torch.Tensor,                       # (B,)
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Batched PG + KL computation.
+        Batched PG + KL loss (DeepSeek GRPO formulation).
 
-        All valid (i, k) full sequences (prefix + rollout) are left-padded to the
-        same length and forwarded through the current model and the reference model
-        in two single batched calls.  With left-padding the generated token logits
-        are always the last ``rollout_len`` positions:
-            logits[n, -(rollout_len+1):-1, :]
+        The per-token KL estimate follows the DeepSeek GRPO approximation:
+            D̂_KL(t) = exp(log π_ref(t) - log π_θ(t)) + (log π_θ(t) - log π_ref(t)) - 1
+
+        This equals e^(-r) + r - 1  where r = log π_θ - log π_ref, which is always ≥ 0
+        (the identity e^y - y - 1 ≥ 0 applied with y = -r), and is numerically stable
+        when π_θ >> π_ref because exp(-r) → 0 in that direction.
+
+        Returns (pg_loss, kl_loss) where total_loss = pg_loss + β · kl_loss.
         """
         B = prefix_ids.shape[0]
         dev = prefix_ids.device
@@ -471,8 +475,10 @@ class CehrGptGRPOTrainer(Trainer):
             ref_gen_logits = ref_logits[n, -(rollout_len + 1):-1, :]
             ref_lp         = F.log_softmax(ref_gen_logits, dim=-1)
             ref_token_lp   = ref_lp.gather(1, new_ids_t.unsqueeze(1)).squeeze(1)
-            # Clamp to non-negative: penalise divergence from ref, ignore when closer
-            kl_approx      = F.relu(token_lp - ref_token_lp).mean()
+            # DeepSeek GRPO KL approximation: exp(-r) + r - 1, r = log π_θ - log π_ref
+            # Always ≥ 0; stable when π_θ >> π_ref (exp(-r) → 0)
+            log_ratio      = token_lp - ref_token_lp
+            kl_approx      = (torch.exp(-log_ratio) + log_ratio - 1).mean()
 
             pg_per_patient.setdefault(i, []).append(seq_lp)
             kl_per_patient.setdefault(i, []).append(kl_approx)

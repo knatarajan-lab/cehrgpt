@@ -66,8 +66,10 @@ overwrite_output_dir: false
 seed: 42
 
 num_train_epochs: 3
-evaluation_strategy: "epoch"
-save_strategy: "epoch"
+evaluation_strategy: "steps"
+eval_steps: 500
+save_strategy: "steps"
+save_steps: 100
 
 per_device_train_batch_size: 2
 per_device_eval_batch_size: 4
