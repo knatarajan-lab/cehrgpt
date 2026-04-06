@@ -245,6 +245,7 @@ def compute_prevalence_stats(
                     for w in sorted_windows:
                         if cumulative_days <= w:
                             found[w].add(token)
+                            break  # assign to smallest covering window only
 
             for w in sorted_windows:
                 for c in found[w]:
