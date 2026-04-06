@@ -471,9 +471,8 @@ class CehrGptGRPOTrainer(Trainer):
             ref_gen_logits = ref_logits[n, -(rollout_len + 1):-1, :]
             ref_lp         = F.log_softmax(ref_gen_logits, dim=-1)
             ref_token_lp   = ref_lp.gather(1, new_ids_t.unsqueeze(1)).squeeze(1)
-            log_ratio      = token_lp - ref_token_lp
-            # k3 estimator: always >= 0, unbiased for KL(π_θ || π_ref)
-            kl_approx      = (log_ratio.exp() - 1 - log_ratio).mean()
+            # Clamp to non-negative: penalise divergence from ref, ignore when closer
+            kl_approx      = F.relu(token_lp - ref_token_lp).mean()
 
             pg_per_patient.setdefault(i, []).append(seq_lp)
             kl_per_patient.setdefault(i, []).append(kl_approx)
