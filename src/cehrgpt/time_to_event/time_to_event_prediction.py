@@ -180,7 +180,7 @@ def main(args):
                     break
             partial_history = partial_history[start_index:]
 
-        concept_time_to_event = ts_pred_model.predict_time_to_events(
+        concept_time_to_event, trajectories = ts_pred_model.predict_time_to_events(
             partial_history,
             task_config.future_visit_start,
             task_config.future_visit_end,
@@ -208,6 +208,8 @@ def main(args):
                 "trials": (
                     asdict(concept_time_to_event) if concept_time_to_event else None
                 ),
+                "prefix": list(partial_history),
+                "trajectories": trajectories,
             }
         )
         delete_lock_create_processed_flag(
@@ -312,6 +314,8 @@ def flush_to_disk_if_full(
                 "predicted_boolean_value",
                 "time_to_event",
                 "trials",
+                "prefix",
+                "trajectories",
             ],
         ).to_parquet(output_parquet_file)
         tte_outputs.clear()
