@@ -97,6 +97,7 @@ def main(args):
             _ for _ in descendant_concept_ids if _ not in outcome_events
         ]
         outcome_events += descendant_concept_ids
+        LOG.info("Outcome events after including descendants: %s", outcome_events)
 
     prediction_output_folder_name = os.path.join(
         args.output_folder, folder_name, task_name
@@ -105,18 +106,18 @@ def main(args):
     os.makedirs(prediction_output_folder_name, exist_ok=True)
     os.makedirs(temp_folder, exist_ok=True)
 
-    LOG.info(f"Loading tokenizer at {args.model_folder}")
-    LOG.info(f"Loading model at {args.model_folder}")
-    LOG.info(f"Loading dataset_folder at {args.dataset_folder}")
-    LOG.info(f"Write time sensitive predictions to {prediction_output_folder_name}")
-    LOG.info(f"Context window {args.context_window}")
-    LOG.info(f"Number of new tokens {task_config.max_new_tokens}")
-    LOG.info(f"Temperature {args.temperature}")
-    LOG.info(f"Repetition Penalty {args.repetition_penalty}")
-    LOG.info(f"Sampling Strategy {args.sampling_strategy}")
-    LOG.info(f"Epsilon cutoff {args.epsilon_cutoff}")
-    LOG.info(f"Top P {args.top_p}")
-    LOG.info(f"Top K {args.top_k}")
+    LOG.info("Loading tokenizer at %s", args.model_folder)
+    LOG.info("Loading model at %s", args.model_folder)
+    LOG.info("Loading dataset_folder at %s", args.dataset_folder)
+    LOG.info("Write time sensitive predictions to %s", prediction_output_folder_name)
+    LOG.info("Context window %s", args.context_window)
+    LOG.info("Number of new tokens %s", task_config.max_new_tokens)
+    LOG.info("Temperature %s", args.temperature)
+    LOG.info("Repetition Penalty %s", args.repetition_penalty)
+    LOG.info("Sampling Strategy %s", args.sampling_strategy)
+    LOG.info("Epsilon cutoff %s", args.epsilon_cutoff)
+    LOG.info("Top P %s", args.top_p)
+    LOG.info("Top K %s", args.top_k)
 
     # cehrgpt_model.resize_position_embeddings(
     #     cehrgpt_model.config.max_position_embeddings + task_config.max_new_tokens
@@ -249,11 +250,11 @@ def delete_lock_create_processed_flag(output_folder: str, sample_id: str):
 def acquire_lock_or_skip_if_already_exist(output_folder: str, sample_id: str):
     lock_file = os.path.join(output_folder, f"{sample_id}.lock")
     if os.path.exists(lock_file):
-        LOG.info(f"Other process acquired the lock --> %s. Skipping...", sample_id)
+        LOG.info("Other process acquired the lock --> %s. Skipping...", sample_id)
         return True
     processed_flag_file = os.path.join(output_folder, f"{sample_id}.done")
     if os.path.exists(processed_flag_file):
-        LOG.info(f"The sample has been processed --> %s. Skipping...", sample_id)
+        LOG.info("The sample has been processed --> %s. Skipping...", sample_id)
         return True
 
     # Obtain the lock for this example by creating an empty lock file
@@ -262,7 +263,7 @@ def acquire_lock_or_skip_if_already_exist(output_folder: str, sample_id: str):
         with open(lock_file, "x"):
             pass  # The file is created; nothing is written to it
     except FileExistsError:
-        LOG.info(f"Other process acquired the lock --> %s. Skipping...", sample_id)
+        LOG.info("Other process acquired the lock --> %s. Skipping...", sample_id)
         return True
     return False
 
@@ -298,7 +299,7 @@ def flush_to_disk_if_full(
 ) -> None:
     if len(tte_outputs) >= buffer_size:
         LOG.info(
-            f"{datetime.datetime.now()}: Flushing time to visit predictions to disk"
+            "%s: Flushing time to visit predictions to disk", datetime.datetime.now()
         )
         output_parquet_file = os.path.join(
             prediction_output_folder_name, f"{uuid.uuid4()}.parquet"
