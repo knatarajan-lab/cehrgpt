@@ -69,9 +69,10 @@ def extract_conditions_from_rollout(
     """
     from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token
 
-    found: Dict[int, Set[str]] = {w: set() for w in windows}
+    sorted_windows = sorted(windows)
+    found: Dict[int, Set[str]] = {w: set() for w in sorted_windows}
     cumulative_days = 0.0
-    max_window = max(windows)
+    max_window = max(sorted_windows)
 
     for token in rollout_tokens[prefix_len:]:
         if is_att_token(token):
@@ -82,9 +83,10 @@ def extract_conditions_from_rollout(
             if cumulative_days > max_window:
                 break
         elif token in target_concept_ids:
-            for w in windows:
+            for w in sorted_windows:
                 if cumulative_days <= w:
                     found[w].add(token)
+                    break  # assign to smallest covering window, matching prevalence bucketing
 
     return found
 
@@ -161,7 +163,6 @@ def compute_patient_reward(
     # Optional false-positive penalty
     true_set = {cid for cid, _ in future_conditions}
     fp_num = 0.0
-    fp_den = 0.0
     for rollout in rollout_conditions_list:
         for w in windows:
             for found_cid in rollout.get(w, set()):
@@ -169,8 +170,9 @@ def compute_patient_reward(
                     prev = prevalence_stats.get((found_cid, w), epsilon)
                     weight = compute_event_weight(prev, w, gamma, alpha_max, eta, w_ref, epsilon)
                     fp_num += weight
-    fp_den = max(fp_den, 1.0)
-    r_extra = fp_num / fp_den
+    # Normalize by K so r_extra is the average per-rollout false-positive weight,
+    # putting it on a comparable scale to r_true.
+    r_extra = fp_num / K
 
     return r_true - false_positive_lambda * r_extra
 
