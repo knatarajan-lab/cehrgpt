@@ -80,6 +80,16 @@ class CehrGptGRPOTrainer(Trainer):
         if self._signature_columns is None:
             self._signature_columns = []
 
+        # PyTorch >=2.6 changed the default of torch.load to weights_only=True.
+        # Checkpoint RNG state files contain numpy arrays, which are not in the
+        # default safe-globals allowlist.  Register _reconstruct so that
+        # Trainer._load_rng_state can load them without arbitrary-code-execution risk.
+        try:
+            import numpy.core.multiarray as _npcma
+            torch.serialization.add_safe_globals([_npcma._reconstruct])
+        except (AttributeError, ImportError):
+            pass
+
     # ------------------------------------------------------------------
     # Logging — flush accumulated RL metrics at each logging step
     # ------------------------------------------------------------------
@@ -176,6 +186,7 @@ class CehrGptGRPOTrainer(Trainer):
         # Unwrap DataParallel / DistributedDataParallel so we can call .generate()
         raw_model = self.accelerator.unwrap_model(model)
         raw_model.eval()
+        torch.cuda.empty_cache()
         with torch.no_grad():
             gen_output = self._generate_rollouts(raw_model, rep_ids, rep_ages, rep_mask, rep_values, rep_val_masks)
         if is_training:
@@ -293,14 +304,69 @@ class CehrGptGRPOTrainer(Trainer):
         rep_val_masks: Optional[torch.Tensor] = None,
     ) -> Dict:
         """
-        Sample rollout trajectories with an explicit attention mask to avoid
-        the 'bool has no .view()' error that occurs when pad_token_id == eos_token_id.
+        Sample rollout trajectories with an explicit attention mask.
+
+        When ``rl_args.generation_chunk_size`` is set the B*K sequences are
+        generated in sub-batches of that size, with ``torch.cuda.empty_cache()``
+        called between chunks.  This avoids KV-cache OOM when eval_num_rollouts
+        is large (default 50), where generating all B*K sequences at once can
+        exhaust GPU memory.
 
         Returns a dict with:
           - "sequences": List[List[str]] — decoded concept token strings (prefix + generated)
           - "sequence_vals": (B*K, full_len) LongTensor of value bin IDs, or None
           - "sequence_val_masks": (B*K, full_len) BoolTensor, or None
         """
+        chunk = self.rl_args.generation_chunk_size
+        N = rep_ids.shape[0]
+
+        if chunk is None or N <= chunk:
+            return self._generate_rollouts_chunk(model, rep_ids, rep_ages, rep_attention_mask, rep_values, rep_val_masks)
+
+        # Process in sub-batches to bound KV-cache memory
+        all_seqs: List[List[str]] = []
+        all_vals: List[torch.Tensor] = []
+        all_vmasks: List[torch.Tensor] = []
+
+        for start in range(0, N, chunk):
+            end = min(start + chunk, N)
+            result = self._generate_rollouts_chunk(
+                model,
+                rep_ids[start:end],
+                rep_ages[start:end],
+                rep_attention_mask[start:end],
+                rep_values[start:end] if rep_values is not None else None,
+                rep_val_masks[start:end] if rep_val_masks is not None else None,
+            )
+            all_seqs.extend(result["sequences"])
+            sv = result.get("sequence_vals")
+            if sv is not None:
+                all_vals.append(sv)
+                all_vmasks.append(result["sequence_val_masks"])
+            torch.cuda.empty_cache()
+
+        merged_vals = merged_vmasks = None
+        if all_vals:
+            max_len = max(t.shape[1] for t in all_vals)
+            merged_vals = torch.cat(
+                [F.pad(t, (0, max_len - t.shape[1])) for t in all_vals], dim=0
+            )
+            merged_vmasks = torch.cat(
+                [F.pad(t, (0, max_len - t.shape[1])) for t in all_vmasks], dim=0
+            )
+
+        return {"sequences": all_seqs, "sequence_vals": merged_vals, "sequence_val_masks": merged_vmasks}
+
+    def _generate_rollouts_chunk(
+        self,
+        model,
+        rep_ids: torch.Tensor,
+        rep_ages: torch.Tensor,
+        rep_attention_mask: torch.Tensor,
+        rep_values: Optional[torch.Tensor] = None,
+        rep_val_masks: Optional[torch.Tensor] = None,
+    ) -> Dict:
+        """Single-batch rollout generation (no chunking)."""
         kwargs: Dict[str, Any] = {}
         if rep_values is not None:
             kwargs["values"] = rep_values
@@ -326,7 +392,6 @@ class CehrGptGRPOTrainer(Trainer):
         ]
         return {
             "sequences": sequences,
-            # Custom fields present in CehrGptGenerateDecoderOnlyOutput; None for standard output
             "sequence_vals": getattr(outputs, "sequence_vals", None),
             "sequence_val_masks": getattr(outputs, "sequence_val_masks", None),
         }

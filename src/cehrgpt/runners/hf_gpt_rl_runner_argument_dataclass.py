@@ -106,3 +106,14 @@ class RLArguments:
         default="grpo",
         metadata={"help": "Which RL trainer to use: 'grpo' (REINFORCE+KL) or 'ppo' (PPO-clip+KL)."},
     )
+    generation_chunk_size: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Maximum number of sequences to generate at once inside _generate_rollouts. "
+                "Set to a small value (e.g. 4–8) to avoid KV-cache OOM when B*K is large, "
+                "especially during evaluation where eval_num_rollouts can be much larger than "
+                "num_rollouts. None means no chunking (original behaviour)."
+            )
+        },
+    )
