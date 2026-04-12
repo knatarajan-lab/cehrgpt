@@ -487,10 +487,16 @@ class CehrGptGRPOTrainer(Trainer):
             fwd_kwargs["value_indicators"] = batch_vmask
 
         # Current model — gradients flow
+        # Disable dropout for the policy forward pass so that log-probs are
+        # deterministic and consistent with the reference model (eval mode).
+        # Gradients still flow through the parameters since requires_grad is
+        # unaffected by train/eval mode.
+        model.eval()
         curr_logits = model(
             input_ids=batch_ids, ages=batch_ages, epoch_times=batch_times,
             attention_mask=batch_attn, **fwd_kwargs,
         ).logits  # (N, max_full_len, vocab)
+        model.train()
 
         # Reference model — no gradients
         with torch.no_grad():
@@ -668,13 +674,25 @@ class CehrGptGRPOTrainer(Trainer):
         fwd_kwargs: Dict[str, Any],
         no_grad: bool = False,
     ) -> torch.Tensor:
-        """Single batched forward pass; returns logits (N, seq_len, vocab)."""
+        """Single batched forward pass; returns logits (N, seq_len, vocab).
+
+        Always runs in eval mode to disable dropout, ensuring deterministic
+        log-probs consistent with rollout generation.  Gradients still flow
+        when no_grad=False because requires_grad on parameters is unaffected
+        by train/eval mode.
+        """
+        was_training = model.training
+        model.eval()
         ctx = torch.no_grad() if no_grad else torch.enable_grad()
-        with ctx:
-            return model(
-                input_ids=batch_ids, ages=batch_ages, epoch_times=batch_times,
-                attention_mask=batch_attn, **fwd_kwargs,
-            ).logits
+        try:
+            with ctx:
+                return model(
+                    input_ids=batch_ids, ages=batch_ages, epoch_times=batch_times,
+                    attention_mask=batch_attn, **fwd_kwargs,
+                ).logits
+        finally:
+            if was_training:
+                model.train()
 
 
     # ------------------------------------------------------------------
