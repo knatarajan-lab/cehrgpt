@@ -117,3 +117,14 @@ class RLArguments:
             )
         },
     )
+    small_batch_size: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Number of patients processed per forward pass in _compute_pg_loss. "
+                "Each chunk materialises at most small_batch_size * K logit tensors "
+                "(N, L, vocab) at a time, reducing peak GPU memory. Losses are accumulated "
+                "across chunks before the backward pass. None disables chunking."
+            )
+        },
+    )

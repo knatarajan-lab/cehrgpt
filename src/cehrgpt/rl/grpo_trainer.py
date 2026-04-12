@@ -478,55 +478,55 @@ class CehrGptGRPOTrainer(Trainer):
             zero = prefix_ids.new_zeros(1, dtype=torch.float32).squeeze().requires_grad_(True)
             return zero, zero
 
-        batch_ids, batch_ages, batch_times, batch_vals, batch_vmask, batch_attn, has_values = \
-            self._left_pad_entries(entries, dev)
+        # Process entries in chunks of small_batch_size * K to bound the size of
+        # the (chunk, max_len, vocab) logit tensors materialised per forward pass.
+        chunk_size = (self.rl_args.small_batch_size or B) * K
 
-        fwd_kwargs: Dict[str, Any] = {}
-        if has_values:
-            fwd_kwargs["values"]           = batch_vals
-            fwd_kwargs["value_indicators"] = batch_vmask
-
-        # Current model — gradients flow
-        # Disable dropout for the policy forward pass so that log-probs are
-        # deterministic and consistent with the reference model (eval mode).
-        # Gradients still flow through the parameters since requires_grad is
-        # unaffected by train/eval mode.
-        model.eval()
-        curr_logits = model(
-            input_ids=batch_ids, ages=batch_ages, epoch_times=batch_times,
-            attention_mask=batch_attn, **fwd_kwargs,
-        ).logits  # (N, max_full_len, vocab)
-        model.train()
-
-        # Reference model — no gradients
-        with torch.no_grad():
-            ref_logits = self.ref_model(
-                input_ids=batch_ids, ages=batch_ages, epoch_times=batch_times,
-                attention_mask=batch_attn, **fwd_kwargs,
-            ).logits  # (N, max_full_len, vocab)
-
-        # With left-padding, rollout tokens occupy the last `rollout_len`
-        # positions; the preceding logit (autoregressive shift) is at
-        #   logits[n, -(rollout_len+1):-1, :]
         pg_per_patient: Dict[int, List[torch.Tensor]] = {}
         kl_per_patient: Dict[int, List[torch.Tensor]] = {}
 
-        for n, (i, k, _, _, _, _, _, rollout_len, new_ids_t) in enumerate(entries):
-            sl = slice(-(rollout_len + 1), -1)
+        for chunk_start in range(0, len(entries), chunk_size):
+            chunk = entries[chunk_start: chunk_start + chunk_size]
 
-            curr_log_probs = F.log_softmax(curr_logits[n, sl, :], dim=-1)   # (T, vocab)
-            ref_log_probs  = F.log_softmax(ref_logits[n,  sl, :], dim=-1).detach()  # (T, vocab)
+            batch_ids, batch_ages, batch_times, batch_vals, batch_vmask, batch_attn, has_values = \
+                self._left_pad_entries(chunk, dev)
 
-            # PG loss: log-prob of the sampled tokens
-            idx    = new_ids_t.unsqueeze(1)                                   # (T, 1)
-            seq_lp = curr_log_probs.gather(1, idx).squeeze(1).mean()
+            fwd_kwargs: Dict[str, Any] = {}
+            if has_values:
+                fwd_kwargs["values"]           = batch_vals
+                fwd_kwargs["value_indicators"] = batch_vmask
 
-            # Exact per-position KL(π_θ || π_ref) = Σ_v π_θ(v)·(log π_θ(v) − log π_ref(v))
-            # Always ≥ 0; no approximation or clamping needed.
-            kl_approx = (curr_log_probs.exp() * (curr_log_probs - ref_log_probs)).sum(dim=-1).mean()
+            # Current model — dropout disabled for deterministic log-probs;
+            # gradients still flow since requires_grad is unaffected by eval mode.
+            model.eval()
+            curr_logits = model(
+                input_ids=batch_ids, ages=batch_ages, epoch_times=batch_times,
+                attention_mask=batch_attn, **fwd_kwargs,
+            ).logits  # (chunk, max_chunk_len, vocab)
+            model.train()
 
-            pg_per_patient.setdefault(i, []).append((k, seq_lp))
-            kl_per_patient.setdefault(i, []).append(kl_approx)
+            # Reference model — no gradients
+            with torch.no_grad():
+                ref_logits = self.ref_model(
+                    input_ids=batch_ids, ages=batch_ages, epoch_times=batch_times,
+                    attention_mask=batch_attn, **fwd_kwargs,
+                ).logits  # (chunk, max_chunk_len, vocab)
+
+            for n, (i, k, _, _, _, _, _, rollout_len, new_ids_t) in enumerate(chunk):
+                sl = slice(-(rollout_len + 1), -1)
+
+                curr_log_probs = F.log_softmax(curr_logits[n, sl, :], dim=-1)          # (T, vocab)
+                ref_log_probs  = F.log_softmax(ref_logits[n,  sl, :], dim=-1).detach() # (T, vocab)
+
+                # PG loss: log-prob of the sampled tokens
+                idx    = new_ids_t.unsqueeze(1)                                          # (T, 1)
+                seq_lp = curr_log_probs.gather(1, idx).squeeze(1).mean()
+
+                # Exact per-position KL(π_θ || π_ref) = Σ_v π_θ(v)·(log π_θ(v) − log π_ref(v))
+                kl_approx = (curr_log_probs.exp() * (curr_log_probs - ref_log_probs)).sum(dim=-1).mean()
+
+                pg_per_patient.setdefault(i, []).append((k, seq_lp))
+                kl_per_patient.setdefault(i, []).append(kl_approx)
 
         pg_terms: List[torch.Tensor] = []
         kl_terms: List[torch.Tensor] = []
