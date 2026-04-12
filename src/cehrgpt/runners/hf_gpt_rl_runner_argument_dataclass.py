@@ -117,3 +117,17 @@ class RLArguments:
             )
         },
     )
+    small_batch_size: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Mini-batch size for rollout generation and PG loss computation. "
+                "When set, each training/eval step splits the full batch of B patients into "
+                "ceil(B / small_batch_size) mini-batches of small_batch_size patients each. "
+                "Generation, reward computation, and the PG forward pass are all performed "
+                "per mini-batch, keeping peak memory proportional to small_batch_size * K "
+                "rather than B * K. Gradients are accumulated across mini-batches before the "
+                "optimizer step. None disables mini-batching (original behaviour)."
+            )
+        },
+    )
