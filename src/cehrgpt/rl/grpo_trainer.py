@@ -8,10 +8,10 @@ Algorithm per patient i  (DeepSeek GRPO formulation)
 3. Compute advantage  A_i = R_i - b  (b = moving-average baseline)
 4. Policy-gradient loss:
        L_PG = - (1/B) Σ_i A_i · (1/K) Σ_k (1/T_k) Σ_t log π_θ(τ_k[t]|·)
-5. Per-token KL estimate (DeepSeek GRPO approximation, always ≥ 0):
-       D̂_KL(t) = exp(log π_ref(t) - log π_θ(t)) + (log π_θ(t) - log π_ref(t)) - 1
+5. Exact per-position KL divergence (always ≥ 0):
+       KL(π_θ || π_ref)(t) = Σ_v π_θ(v|·) · (log π_θ(v|·) − log π_ref(v|·))
 6. Total loss:
-       L = L_PG + β · (1/B) Σ_i (1/K) Σ_k mean_t D̂_KL(t)
+       L = L_PG + β · (1/B) Σ_i (1/K) Σ_k mean_t KL(π_θ || π_ref)(t)
 """
 
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -449,14 +449,13 @@ class CehrGptGRPOTrainer(Trainer):
         advantages: torch.Tensor,                       # (B,)
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Batched PG + KL loss (DeepSeek GRPO formulation).
+        Batched PG + KL loss.
 
-        The per-token KL estimate follows the DeepSeek GRPO approximation:
-            D̂_KL(t) = exp(log π_ref(t) - log π_θ(t)) + (log π_θ(t) - log π_ref(t)) - 1
+        KL is computed exactly at every rollout position by summing over the full
+        vocabulary:
+            KL(π_θ || π_ref)(t) = Σ_v π_θ(v|·) · (log π_θ(v|·) − log π_ref(v|·))
 
-        This equals e^(-r) + r - 1  where r = log π_θ - log π_ref, which is always ≥ 0
-        (the identity e^y - y - 1 ≥ 0 applied with y = -r), and is numerically stable
-        when π_θ >> π_ref because exp(-r) → 0 in that direction.
+        This is always ≥ 0 and requires no approximation or clamping.
 
         Returns (pg_loss, kl_loss) where total_loss = pg_loss + β · kl_loss.
         """
@@ -500,15 +499,18 @@ class CehrGptGRPOTrainer(Trainer):
         kl_per_patient: Dict[int, List[torch.Tensor]] = {}
 
         for n, (i, _, _, _, _, _, rollout_len, new_ids_t) in enumerate(entries):
-            token_lp, ref_token_lp = self._extract_token_lp(
-                curr_logits, ref_logits, n, rollout_len, new_ids_t
-            )
-            seq_lp    = token_lp.mean()
-            log_ratio = token_lp - ref_token_lp
-            # Clamp before exponentiation to prevent exp(-log_ratio) from
-            # exploding when π_θ(token) << π_ref(token) for a sampled token.
-            log_ratio_clamped = torch.clamp(log_ratio, min=-10.0)
-            kl_approx = (torch.exp(-log_ratio_clamped) + log_ratio_clamped - 1).mean()
+            sl = slice(-(rollout_len + 1), -1)
+
+            curr_log_probs = F.log_softmax(curr_logits[n, sl, :], dim=-1)   # (T, vocab)
+            ref_log_probs  = F.log_softmax(ref_logits[n,  sl, :], dim=-1).detach()  # (T, vocab)
+
+            # PG loss: log-prob of the sampled tokens
+            idx    = new_ids_t.unsqueeze(1)                                   # (T, 1)
+            seq_lp = curr_log_probs.gather(1, idx).squeeze(1).mean()
+
+            # Exact per-position KL(π_θ || π_ref) = Σ_v π_θ(v)·(log π_θ(v) − log π_ref(v))
+            # Always ≥ 0; no approximation or clamping needed.
+            kl_approx = (curr_log_probs.exp() * (curr_log_probs - ref_log_probs)).sum(dim=-1).mean()
 
             pg_per_patient.setdefault(i, []).append(seq_lp)
             kl_per_patient.setdefault(i, []).append(kl_approx)
@@ -666,27 +668,6 @@ class CehrGptGRPOTrainer(Trainer):
                 attention_mask=batch_attn, **fwd_kwargs,
             ).logits
 
-    def _extract_token_lp(
-        self,
-        curr_logits: torch.Tensor,
-        ref_logits: torch.Tensor,
-        n: int,
-        rollout_len: int,
-        new_ids_t: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Extract per-token log-probs for rollout n from batched logit tensors.
-
-        With left-padding the rollout logits live at positions -(rollout_len+1):-1.
-        Returns (token_lp, ref_token_lp) both of shape (rollout_len,).
-        ref_token_lp is detached (no gradient).
-        """
-        idx = new_ids_t.unsqueeze(1)  # (rollout_len, 1)
-        sl  = slice(-(rollout_len + 1), -1)
-
-        token_lp     = F.log_softmax(curr_logits[n, sl, :], dim=-1).gather(1, idx).squeeze(1)
-        ref_token_lp = F.log_softmax(ref_logits[n,  sl, :], dim=-1).gather(1, idx).squeeze(1).detach()
-        return token_lp, ref_token_lp
 
     # ------------------------------------------------------------------
     # Context reconstruction for generated tokens

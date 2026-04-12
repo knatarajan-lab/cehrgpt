@@ -187,13 +187,16 @@ class CehrGptPPOTrainer(CehrGptGRPOTrainer):
         kl_per_patient: Dict[int, List[torch.Tensor]] = {}
 
         for n, (i, _, _, _, _, _, rollout_len, new_ids_t) in enumerate(entries):
-            token_lp, ref_token_lp = self._extract_token_lp(
-                curr_logits, ref_logits, n, rollout_len, new_ids_t
-            )
+            sl  = slice(-(rollout_len + 1), -1)
+            idx = new_ids_t.unsqueeze(1)
+
+            curr_log_probs = F.log_softmax(curr_logits[n, sl, :], dim=-1)          # (T, vocab)
+            ref_log_probs  = F.log_softmax(ref_logits[n,  sl, :], dim=-1).detach() # (T, vocab)
+
+            # Per-token log-probs of sampled tokens under current policy
+            token_lp = curr_log_probs.gather(1, idx).squeeze(1)
 
             # Old log-probs (no gradient)
-            idx          = new_ids_t.unsqueeze(1)
-            sl           = slice(-(rollout_len + 1), -1)
             old_token_lp = F.log_softmax(old_logits[n, sl, :], dim=-1).gather(1, idx).squeeze(1).detach()
 
             # PPO clipped surrogate
@@ -204,9 +207,8 @@ class CehrGptPPOTrainer(CehrGptGRPOTrainer):
             surr2         = torch.clamp(ratio, 1.0 - eps, 1.0 + eps) * A_i
             ppo_term      = -torch.min(surr1, surr2).mean()
 
-            # GRPO KL estimator against π_ref (always ≥ 0)
-            log_ratio_ref = token_lp - ref_token_lp
-            kl_approx     = (torch.exp(-log_ratio_ref) + log_ratio_ref - 1).mean()
+            # Exact per-position KL(π_θ || π_ref) = Σ_v π_θ(v)·(log π_θ(v) − log π_ref(v))
+            kl_approx = (curr_log_probs.exp() * (curr_log_probs - ref_log_probs)).sum(dim=-1).mean()
 
             pg_per_patient.setdefault(i, []).append(ppo_term)
             kl_per_patient.setdefault(i, []).append(kl_approx)
