@@ -453,7 +453,7 @@ class CehrGptGRPOTrainer(Trainer):
         rollout_seq_vals: Optional[torch.Tensor],       # (B*K, full_len) or None
         rollout_seq_val_masks: Optional[torch.Tensor],  # (B*K, full_len) or None
         K: int,
-        advantages: torch.Tensor,                       # (B,)
+        advantages: torch.Tensor,                       # (B, K)
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Batched PG + KL loss.
@@ -478,9 +478,11 @@ class CehrGptGRPOTrainer(Trainer):
             zero = prefix_ids.new_zeros(1, dtype=torch.float32).squeeze().requires_grad_(True)
             return zero, zero
 
-        # Process entries in chunks of small_batch_size * K to bound the size of
+        # Process entries in chunks of small_batch_size to bound the size of
         # the (chunk, max_len, vocab) logit tensors materialised per forward pass.
-        chunk_size = (self.rl_args.small_batch_size or B) * K
+        # Chunking by raw entry count (not by patient) means small_batch_size=2
+        # processes 2 rollouts at a time even when B=1 and K=8.
+        chunk_size = self.rl_args.small_batch_size or (B * K)
 
         pg_per_patient: Dict[int, List[torch.Tensor]] = {}
         kl_per_patient: Dict[int, List[torch.Tensor]] = {}
