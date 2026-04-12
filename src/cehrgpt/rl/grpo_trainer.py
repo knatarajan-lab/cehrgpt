@@ -203,14 +203,17 @@ class CehrGptGRPOTrainer(Trainer):
 
         # ---------------------------------------------------------------
         # 2. Compute rewards
+        # outputs.sequences includes the full left-padded prefix, so generated tokens
+        # start at index max_prefix_len (the padded width), not prefix_lengths[i].
+        max_prefix_len = prefix_input_ids.shape[1]
+
         # ---------------------------------------------------------------
         rewards: List[float] = []
         for i in range(B):
-            prefix_len_i = int(prefix_lengths[i].item())
             rollout_conds_i = [
                 extract_conditions_from_rollout(
                     rollout_token_strs[i * K + k],
-                    prefix_len_i,
+                    max_prefix_len,
                     self.target_concept_ids,
                     self.rl_args.prediction_windows,
                 )
@@ -502,7 +505,10 @@ class CehrGptGRPOTrainer(Trainer):
             )
             seq_lp    = token_lp.mean()
             log_ratio = token_lp - ref_token_lp
-            kl_approx = (torch.exp(-log_ratio) + log_ratio - 1).mean()
+            # Clamp before exponentiation to prevent exp(-log_ratio) from
+            # exploding when π_θ(token) << π_ref(token) for a sampled token.
+            log_ratio_clamped = torch.clamp(log_ratio, min=-10.0)
+            kl_approx = (torch.exp(-log_ratio_clamped) + log_ratio_clamped - 1).mean()
 
             pg_per_patient.setdefault(i, []).append(seq_lp)
             kl_per_patient.setdefault(i, []).append(kl_approx)
@@ -546,6 +552,12 @@ class CehrGptGRPOTrainer(Trainer):
                      full_vals_1d_or_None, full_valmask_1d_or_None,
                      rollout_len, new_ids_t)
         """
+        # outputs.sequences from .generate() is [pad × pad_len, actual_prefix, generated]
+        # with total length = max_prefix_len + num_new.  We must skip max_prefix_len
+        # (the full padded width) to reach the generated tokens, NOT prefix_len_i
+        # (the actual non-padded length), which lands inside the padding / prefix region.
+        max_prefix_len = prefix_ids.shape[1]
+
         entries: List[Tuple] = []
         for i in range(B):
             prefix_len_i     = int(prefix_lengths[i].item())
@@ -561,7 +573,7 @@ class CehrGptGRPOTrainer(Trainer):
             for k in range(K):
                 bk_idx        = i * K + k
                 rollout_tokens = rollout_token_strs[bk_idx]
-                new_tokens     = rollout_tokens[prefix_len_i:]
+                new_tokens     = rollout_tokens[max_prefix_len:]
                 if not new_tokens:
                     continue
 
@@ -578,8 +590,8 @@ class CehrGptGRPOTrainer(Trainer):
                 rollout_times_t = torch.tensor(rollout_times, dtype=torch.float32,  device=dev)
 
                 if rollout_seq_vals is not None:
-                    gen_vals_t    = rollout_seq_vals[bk_idx, prefix_len_i: prefix_len_i + rollout_len].to(dev)
-                    gen_valmask_t = rollout_seq_val_masks[bk_idx, prefix_len_i: prefix_len_i + rollout_len].to(dev)
+                    gen_vals_t    = rollout_seq_vals[bk_idx, max_prefix_len: max_prefix_len + rollout_len].to(dev)
+                    gen_valmask_t = rollout_seq_val_masks[bk_idx, max_prefix_len: max_prefix_len + rollout_len].to(dev)
                 else:
                     gen_vals_t    = torch.zeros(rollout_len, dtype=torch.long, device=dev)
                     gen_valmask_t = torch.zeros(rollout_len, dtype=torch.bool,  device=dev)
