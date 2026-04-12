@@ -528,6 +528,11 @@ class CehrGptGRPOTrainer(Trainer):
                 pg_per_patient.setdefault(i, []).append((k, seq_lp))
                 kl_per_patient.setdefault(i, []).append(kl_approx)
 
+            # ref_logits has no grad and is no longer needed; free it along with
+            # the padded input tensors before the next chunk's forward pass.
+            del ref_logits, batch_ids, batch_ages, batch_times, batch_attn, batch_vals, batch_vmask, fwd_kwargs
+            torch.cuda.empty_cache()
+
         pg_terms: List[torch.Tensor] = []
         kl_terms: List[torch.Tensor] = []
         for i in sorted(pg_per_patient):
