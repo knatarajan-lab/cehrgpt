@@ -8,9 +8,11 @@ Algorithm per patient i  (DeepSeek GRPO formulation)
 3. Compute advantage  A_i = R_i - b  (b = moving-average baseline)
 4. Policy-gradient loss:
        L_PG = - (1/B) Σ_i A_i · (1/K) Σ_k (1/T_k) Σ_t log π_θ(τ_k[t]|·)
-5. Exact per-position KL divergence (always ≥ 0):
+5. Per-rollout advantage normalised within the patient's K rollouts:
+       A_{i,k} = (R_{i,k} − mean_k R_{i,k}) / (std_k R_{i,k} + ε)
+6. Exact per-position KL divergence (always ≥ 0):
        KL(π_θ || π_ref)(t) = Σ_v π_θ(v|·) · (log π_θ(v|·) − log π_ref(v|·))
-6. Total loss:
+7. Total loss:
        L = L_PG + β · (1/B) Σ_i (1/K) Σ_k mean_t KL(π_θ || π_ref)(t)
 """
 
@@ -208,32 +210,33 @@ class CehrGptGRPOTrainer(Trainer):
         max_prefix_len = prefix_input_ids.shape[1]
 
         # ---------------------------------------------------------------
-        rewards: List[float] = []
+        # Per-rollout rewards: rewards_t[i, k] = R_{i,k}
+        rollout_rewards: List[List[float]] = []
         for i in range(B):
-            rollout_conds_i = [
-                extract_conditions_from_rollout(
+            patient_rewards: List[float] = []
+            for k in range(K):
+                conds_k = extract_conditions_from_rollout(
                     rollout_token_strs[i * K + k],
                     max_prefix_len,
                     self.target_concept_ids,
                     self.rl_args.prediction_windows,
                 )
-                for k in range(K)
-            ]
-            R_i = compute_patient_reward(
-                future_conditions[i],
-                rollout_conds_i,
-                self.prevalence_stats,
-                self.rl_args.prediction_windows,
-                self.rl_args.rarity_gamma,
-                self.rl_args.alpha_max,
-                self.rl_args.window_eta,
-                self.rl_args.window_ref_days,
-                self.rl_args.prevalence_epsilon,
-                self.rl_args.false_positive_lambda,
-            )
-            rewards.append(R_i)
+                R_k = compute_patient_reward(
+                    future_conditions[i],
+                    [conds_k],
+                    self.prevalence_stats,
+                    self.rl_args.prediction_windows,
+                    self.rl_args.rarity_gamma,
+                    self.rl_args.alpha_max,
+                    self.rl_args.window_eta,
+                    self.rl_args.window_ref_days,
+                    self.rl_args.prevalence_epsilon,
+                    self.rl_args.false_positive_lambda,
+                )
+                patient_rewards.append(R_k)
+            rollout_rewards.append(patient_rewards)
 
-        rewards_t = torch.tensor(rewards, dtype=torch.float32, device=prefix_input_ids.device)
+        rewards_t = torch.tensor(rollout_rewards, dtype=torch.float32, device=prefix_input_ids.device)  # (B, K)
 
 
         # ---------------------------------------------------------------
@@ -275,7 +278,7 @@ class CehrGptGRPOTrainer(Trainer):
             ("rl_pg_loss",     pg_loss.item() if isinstance(pg_loss, torch.Tensor) else float(pg_loss)),
             ("rl_kl_loss",     kl_loss.item() if isinstance(kl_loss, torch.Tensor) else float(kl_loss)),
             ("rl_reward_mean", rewards_t.mean().item()),
-            ("rl_baseline",    self._baseline),
+            ("rl_reward_std",  rewards_t.std(dim=1).mean().item()),
         ]
         if value_loss is not None:
             base_metrics.append(("rl_value_loss", value_loss.item()))
@@ -405,7 +408,7 @@ class CehrGptGRPOTrainer(Trainer):
 
     def _compute_advantages(
         self,
-        rewards_t: torch.Tensor,                          # (B,)
+        rewards_t: torch.Tensor,                          # (B, K)
         raw_model,                                        # unwrapped policy model
         prefix_input_ids: torch.Tensor,                   # (B, L)
         prefix_ages: torch.Tensor,                        # (B, L)
@@ -416,17 +419,21 @@ class CehrGptGRPOTrainer(Trainer):
         prefix_lengths: torch.Tensor,                     # (B,)
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        Compute per-patient advantages using an exponential moving-average baseline.
+        GRPO per-rollout advantage: normalise within each patient's K rollouts.
 
-        Returns (advantages, None) — no value loss for GRPO.
+            A_{i,k} = (R_{i,k} − mean_k R_{i,k}) / (std_k R_{i,k} + ε)
+
+        Patients where all K rollouts receive the same reward (σ ≈ 0) get zero
+        advantage and contribute nothing to the gradient — correct behaviour when
+        the policy is deterministic for that patient.
+
+        Returns (advantages, None) — shape (B, K), no value loss for GRPO.
         Subclasses (e.g. CehrGptPPOTrainer) override this to use a learned
         value network instead.
         """
-        advantages = rewards_t - self._baseline
-        # Only update the EMA baseline during training; keep it frozen for eval.
-        if raw_model.training:
-            m = self.rl_args.baseline_momentum
-            self._baseline = m * self._baseline + (1.0 - m) * rewards_t.mean().item()
+        mu    = rewards_t.mean(dim=1, keepdim=True)   # (B, 1)
+        sigma = rewards_t.std(dim=1, keepdim=True)    # (B, 1)
+        advantages = (rewards_t - mu) / (sigma + 1e-8)  # (B, K)
         return advantages, None
 
     # ------------------------------------------------------------------
@@ -498,7 +505,7 @@ class CehrGptGRPOTrainer(Trainer):
         pg_per_patient: Dict[int, List[torch.Tensor]] = {}
         kl_per_patient: Dict[int, List[torch.Tensor]] = {}
 
-        for n, (i, _, _, _, _, _, rollout_len, new_ids_t) in enumerate(entries):
+        for n, (i, k, _, _, _, _, _, rollout_len, new_ids_t) in enumerate(entries):
             sl = slice(-(rollout_len + 1), -1)
 
             curr_log_probs = F.log_softmax(curr_logits[n, sl, :], dim=-1)   # (T, vocab)
@@ -512,14 +519,15 @@ class CehrGptGRPOTrainer(Trainer):
             # Always ≥ 0; no approximation or clamping needed.
             kl_approx = (curr_log_probs.exp() * (curr_log_probs - ref_log_probs)).sum(dim=-1).mean()
 
-            pg_per_patient.setdefault(i, []).append(seq_lp)
+            pg_per_patient.setdefault(i, []).append((k, seq_lp))
             kl_per_patient.setdefault(i, []).append(kl_approx)
 
         pg_terms: List[torch.Tensor] = []
         kl_terms: List[torch.Tensor] = []
         for i in sorted(pg_per_patient):
-            mean_seq_lp = torch.stack(pg_per_patient[i]).mean()
-            pg_terms.append(-advantages[i] * mean_seq_lp)
+            pg_terms.append(
+                torch.stack([-advantages[i, k] * seq_lp for k, seq_lp in pg_per_patient[i]]).mean()
+            )
             kl_terms.append(torch.stack(kl_per_patient[i]).mean())
 
         if not pg_terms:
@@ -550,7 +558,7 @@ class CehrGptGRPOTrainer(Trainer):
         """
         Build per-(patient, rollout) full-sequence tensors.
 
-        Each entry: (patient_idx, full_ids_1d, full_ages_1d, full_times_1d,
+        Each entry: (patient_idx, rollout_idx, full_ids_1d, full_ages_1d, full_times_1d,
                      full_vals_1d_or_None, full_valmask_1d_or_None,
                      rollout_len, new_ids_t)
         """
@@ -610,7 +618,7 @@ class CehrGptGRPOTrainer(Trainer):
                     full_valmask_1d = None
 
                 entries.append((
-                    i, full_ids_1d, full_ages_1d, full_times_1d,
+                    i, k, full_ids_1d, full_ages_1d, full_times_1d,
                     full_vals_1d, full_valmask_1d, rollout_len, new_ids_t,
                 ))
         return entries
@@ -627,9 +635,9 @@ class CehrGptGRPOTrainer(Trainer):
                  batch_vmask, batch_attn, has_values).
         """
         N            = len(entries)
-        max_full_len = max(e[1].shape[0] for e in entries)
+        max_full_len = max(e[2].shape[0] for e in entries)
         pad_id       = self.cehrgpt_tokenizer.pad_token_id
-        has_values   = entries[0][4] is not None
+        has_values   = entries[0][5] is not None
 
         batch_ids   = torch.full((N, max_full_len), pad_id, dtype=torch.long,    device=dev)
         batch_ages  = torch.zeros((N, max_full_len),         dtype=torch.long,    device=dev)
@@ -638,7 +646,7 @@ class CehrGptGRPOTrainer(Trainer):
         batch_vmask = torch.zeros((N, max_full_len),         dtype=torch.bool,    device=dev)
         batch_attn  = torch.zeros((N, max_full_len),         dtype=torch.long,    device=dev)
 
-        for n, (_, fids, fages, ftimes, fvals, fvmask, _, _) in enumerate(entries):
+        for n, (_, _, fids, fages, ftimes, fvals, fvmask, _, _) in enumerate(entries):
             slen = fids.shape[0]
             batch_ids[n,   -slen:] = fids
             batch_ages[n,  -slen:] = fages

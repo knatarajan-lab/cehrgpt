@@ -84,9 +84,11 @@ class CehrGptPPOTrainer(CehrGptGRPOTrainer):
         values = self._compute_values(
             raw_model, prefix_input_ids, prefix_ages, prefix_epoch_times,
             prefix_attention_mask, prefix_values, prefix_value_indicators,
-        )
-        advantages = rewards_t - values.detach()
-        value_loss = F.mse_loss(values, rewards_t)
+        )                                                    # (B,)
+        # rewards_t is (B, K); value target is the mean over K rollouts
+        value_targets = rewards_t.mean(dim=1)                # (B,)
+        advantages = rewards_t - values.detach().unsqueeze(1)  # (B, K)
+        value_loss = F.mse_loss(values, value_targets)
         return advantages, value_loss
 
     def _compute_values(
@@ -186,7 +188,7 @@ class CehrGptPPOTrainer(CehrGptGRPOTrainer):
         pg_per_patient: Dict[int, List[torch.Tensor]] = {}
         kl_per_patient: Dict[int, List[torch.Tensor]] = {}
 
-        for n, (i, _, _, _, _, _, rollout_len, new_ids_t) in enumerate(entries):
+        for n, (i, k, _, _, _, _, _, rollout_len, new_ids_t) in enumerate(entries):
             sl  = slice(-(rollout_len + 1), -1)
             idx = new_ids_t.unsqueeze(1)
 
@@ -199,12 +201,12 @@ class CehrGptPPOTrainer(CehrGptGRPOTrainer):
             # Old log-probs (no gradient)
             old_token_lp = F.log_softmax(old_logits[n, sl, :], dim=-1).gather(1, idx).squeeze(1).detach()
 
-            # PPO clipped surrogate
+            # PPO clipped surrogate using per-rollout advantage
             log_ratio_old = token_lp - old_token_lp
             ratio         = torch.exp(log_ratio_old)
-            A_i           = advantages[i]
-            surr1         = ratio * A_i
-            surr2         = torch.clamp(ratio, 1.0 - eps, 1.0 + eps) * A_i
+            A_ik          = advantages[i, k]
+            surr1         = ratio * A_ik
+            surr2         = torch.clamp(ratio, 1.0 - eps, 1.0 + eps) * A_ik
             ppo_term      = -torch.min(surr1, surr2).mean()
 
             # Exact per-position KL(π_θ || π_ref) = Σ_v π_θ(v)·(log π_θ(v) − log π_ref(v))
