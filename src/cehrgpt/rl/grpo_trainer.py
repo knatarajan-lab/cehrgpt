@@ -138,19 +138,6 @@ class CehrGptGRPOTrainer(Trainer):
     # Training step — skip empty batches from the collator
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _slice_batch(inputs: Dict, start: int, end: int) -> Dict:
-        """Return a slice [start:end] of a batch dict (tensors and lists)."""
-        sliced = {}
-        for k, v in inputs.items():
-            if isinstance(v, torch.Tensor):
-                sliced[k] = v[start:end]
-            elif isinstance(v, list):
-                sliced[k] = v[start:end]
-            else:
-                sliced[k] = v
-        return sliced
-
     def training_step(self, model, inputs, **kwargs):
         # The RL collator returns {} when no example passes min_prefix_visits.
         # _prepare_inputs raises ValueError on empty dict before compute_loss
@@ -161,28 +148,7 @@ class CehrGptGRPOTrainer(Trainer):
             loss = sum(p.sum() * 0.0 for p in raw.parameters() if p.requires_grad)
             self.accelerator.backward(loss)
             return loss.detach() / self.args.gradient_accumulation_steps
-
-        small_batch_size = self.rl_args.small_batch_size
-        if small_batch_size is None:
-            return super().training_step(model, inputs, **kwargs)
-
-        # Mini-batch loop: split B patients into chunks of small_batch_size.
-        # Generation, reward computation, and PG forward pass are all done
-        # per mini-batch, keeping peak memory proportional to small_batch_size*K.
-        # Gradients are accumulated across mini-batches via repeated backward calls.
-        inputs = self._prepare_inputs(inputs)
-        B = inputs["prefix_input_ids"].shape[0]
-        num_mini_batches = max(1, -(-B // small_batch_size))  # ceil division
-
-        model.train()
-        total_loss = inputs["prefix_input_ids"].new_zeros(1, dtype=torch.float32).squeeze()
-        for start in range(0, B, small_batch_size):
-            mini_inputs = self._slice_batch(inputs, start, min(start + small_batch_size, B))
-            loss = self.compute_loss(model, mini_inputs) / num_mini_batches
-            self.accelerator.backward(loss)
-            total_loss += loss.detach()
-
-        return total_loss / self.args.gradient_accumulation_steps
+        return super().training_step(model, inputs, **kwargs)
 
     # ------------------------------------------------------------------
     # Main loss entry point
@@ -309,10 +275,12 @@ class CehrGptGRPOTrainer(Trainer):
         # Train metrics are flushed by log() at each logging step (no prefix).
         # Eval metrics are flushed by log() when eval_loss is present (eval_ prefix).
         base_metrics = [
-            ("rl_pg_loss",     pg_loss.item() if isinstance(pg_loss, torch.Tensor) else float(pg_loss)),
-            ("rl_kl_loss",     kl_loss.item() if isinstance(kl_loss, torch.Tensor) else float(kl_loss)),
-            ("rl_reward_mean", rewards_t.mean().item()),
-            ("rl_reward_std",  rewards_t.std(dim=1).mean().item()),
+            ("rl_pg_loss",        pg_loss.item() if isinstance(pg_loss, torch.Tensor) else float(pg_loss)),
+            ("rl_kl_loss",        kl_loss.item() if isinstance(kl_loss, torch.Tensor) else float(kl_loss)),
+            ("rl_reward_mean",    rewards_t.mean().item()),
+            ("rl_reward_std",     rewards_t.std(dim=1).mean().item()),
+            ("rl_advantage_mean", advantages.mean().item()),
+            ("rl_advantage_std",  advantages.std(dim=1).mean().item()),
         ]
         if value_loss is not None:
             base_metrics.append(("rl_value_loss", value_loss.item()))
