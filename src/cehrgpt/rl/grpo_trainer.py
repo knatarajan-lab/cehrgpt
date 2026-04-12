@@ -275,12 +275,10 @@ class CehrGptGRPOTrainer(Trainer):
         # Train metrics are flushed by log() at each logging step (no prefix).
         # Eval metrics are flushed by log() when eval_loss is present (eval_ prefix).
         base_metrics = [
-            ("rl_pg_loss",        pg_loss.item() if isinstance(pg_loss, torch.Tensor) else float(pg_loss)),
-            ("rl_kl_loss",        kl_loss.item() if isinstance(kl_loss, torch.Tensor) else float(kl_loss)),
-            ("rl_reward_mean",    rewards_t.mean().item()),
-            ("rl_reward_std",     rewards_t.std(dim=1).mean().item()),
-            ("rl_advantage_mean", advantages.mean().item()),
-            ("rl_advantage_std",  advantages.std(dim=1).mean().item()),
+            ("rl_pg_loss",     pg_loss.item() if isinstance(pg_loss, torch.Tensor) else float(pg_loss)),
+            ("rl_kl_loss",     kl_loss.item() if isinstance(kl_loss, torch.Tensor) else float(kl_loss)),
+            ("rl_reward_mean", rewards_t.mean().item()),
+            ("rl_reward_std",  rewards_t.std(dim=1).mean().item()),
         ]
         if value_loss is not None:
             base_metrics.append(("rl_value_loss", value_loss.item()))
