@@ -478,11 +478,9 @@ class CehrGptGRPOTrainer(Trainer):
             zero = prefix_ids.new_zeros(1, dtype=torch.float32).squeeze().requires_grad_(True)
             return zero, zero
 
-        # Process entries in chunks of small_batch_size to bound the size of
-        # the (chunk, max_len, vocab) logit tensors materialised per forward pass.
-        # Chunking by raw entry count (not by patient) means small_batch_size=2
-        # processes 2 rollouts at a time even when B=1 and K=8.
-        chunk_size = self.rl_args.small_batch_size or (B * K)
+        # Re-use generation_chunk_size to bound the (chunk, max_len, vocab)
+        # logit tensors per forward pass, the same way it limits generation.
+        chunk_size = self.rl_args.generation_chunk_size or (B * K)
 
         pg_per_patient: Dict[int, List[torch.Tensor]] = {}
         kl_per_patient: Dict[int, List[torch.Tensor]] = {}

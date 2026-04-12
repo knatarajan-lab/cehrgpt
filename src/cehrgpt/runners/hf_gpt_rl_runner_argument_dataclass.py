@@ -117,15 +117,3 @@ class RLArguments:
             )
         },
     )
-    small_batch_size: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": (
-                "Number of rollout entries (sequences) processed per forward pass in "
-                "_compute_pg_loss. Each chunk materialises at most (small_batch_size, L, vocab) "
-                "logit tensors at a time, reducing peak GPU memory. With B=1 and K=8, setting "
-                "small_batch_size=2 processes 2 rollouts per forward pass instead of all 8. "
-                "Losses are accumulated across chunks before the backward pass. None disables chunking."
-            )
-        },
-    )
