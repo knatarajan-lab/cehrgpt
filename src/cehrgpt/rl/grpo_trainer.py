@@ -480,9 +480,25 @@ class CehrGptGRPOTrainer(Trainer):
 
         # Re-use generation_chunk_size to bound the (chunk, max_len, vocab)
         # logit tensors per forward pass, the same way it limits generation.
-        chunk_size = self.rl_args.generation_chunk_size or (B * K)
+        chunk_size = self.rl_args.generation_chunk_size or len(entries)
 
-        pg_per_patient: Dict[int, List[torch.Tensor]] = {}
+        # Precompute per-entry loss weights for correct two-level averaging:
+        #   L = (1/B) Σ_i  (1/K_i) Σ_k  term_{i,k}
+        # Each entry (i, k) contributes with weight 1 / (n_patients * K_i).
+        rollouts_per_patient: Dict[int, int] = {}
+        for entry in entries:
+            rollouts_per_patient[entry[0]] = rollouts_per_patient.get(entry[0], 0) + 1
+        n_patients = len(rollouts_per_patient)
+
+        # During training (grad enabled) we backward immediately after each chunk
+        # so that only one chunk's activation graph is live at a time.  This keeps
+        # peak GPU memory proportional to chunk_size rather than len(entries).
+        # During eval (torch.no_grad) there is no graph, so we just accumulate.
+        use_chunked_bwd = torch.is_grad_enabled()
+
+        pg_running = 0.0  # training path — scalar accumulators
+        kl_running = 0.0
+        pg_per_patient: Dict[int, List[Tuple[int, torch.Tensor]]] = {}  # eval path
         kl_per_patient: Dict[int, List[torch.Tensor]] = {}
 
         for chunk_start in range(0, len(entries), chunk_size):
@@ -512,6 +528,9 @@ class CehrGptGRPOTrainer(Trainer):
                     attention_mask=batch_attn, **fwd_kwargs,
                 ).logits  # (chunk, max_chunk_len, vocab)
 
+            chunk_pg_terms: List[torch.Tensor] = []
+            chunk_kl_terms: List[torch.Tensor] = []
+
             for n, (i, k, _, _, _, _, _, rollout_len, new_ids_t) in enumerate(chunk):
                 sl = slice(-(rollout_len + 1), -1)
 
@@ -525,14 +544,37 @@ class CehrGptGRPOTrainer(Trainer):
                 # Exact per-position KL(π_θ || π_ref) = Σ_v π_θ(v)·(log π_θ(v) − log π_ref(v))
                 kl_approx = (curr_log_probs.exp() * (curr_log_probs - ref_log_probs)).sum(dim=-1).mean()
 
-                pg_per_patient.setdefault(i, []).append((k, seq_lp))
-                kl_per_patient.setdefault(i, []).append(kl_approx)
+                if use_chunked_bwd:
+                    w = 1.0 / (n_patients * rollouts_per_patient[i])
+                    chunk_pg_terms.append(w * (-advantages[i, k] * seq_lp))
+                    chunk_kl_terms.append(w * kl_approx)
+                else:
+                    pg_per_patient.setdefault(i, []).append((k, seq_lp))
+                    kl_per_patient.setdefault(i, []).append(kl_approx)
 
-            # ref_logits has no grad and is no longer needed; free it along with
-            # the padded input tensors before the next chunk's forward pass.
+            if use_chunked_bwd:
+                # Sum weighted contributions from this chunk and backward immediately.
+                # After backward the chunk's activation graph is freed, so the next
+                # chunk's forward pass does not compete with it for GPU memory.
+                chunk_pg = torch.stack(chunk_pg_terms).sum()
+                chunk_kl = torch.stack(chunk_kl_terms).sum()
+                self.accelerator.backward(chunk_pg + self.rl_args.kl_beta * chunk_kl)
+                pg_running += chunk_pg.detach().item()
+                kl_running += chunk_kl.detach().item()
+
             del ref_logits, batch_ids, batch_ages, batch_times, batch_attn, batch_vals, batch_vmask, fwd_kwargs
             torch.cuda.empty_cache()
 
+        if use_chunked_bwd:
+            # Gradients are already accumulated. Return leaf tensors so that the
+            # Trainer's subsequent accelerator.backward(total_loss) is a harmless
+            # no-op (the leaf has no parameter graph).
+            return (
+                torch.tensor(pg_running, device=dev, requires_grad=True),
+                torch.tensor(kl_running, device=dev),
+            )
+
+        # Eval path: standard two-level aggregation (torch.no_grad() — no graph).
         pg_terms: List[torch.Tensor] = []
         kl_terms: List[torch.Tensor] = []
         for i in sorted(pg_per_patient):
