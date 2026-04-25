@@ -4,8 +4,9 @@ GRPO (Group Relative Policy Optimization / REINFORCE + KL) trainer for CEHR-GPT.
 Algorithm per patient i  (DeepSeek GRPO formulation)
 -----------------------------------------------------
 1. Sample K rollout trajectories τ_1…τ_K ~ π_θ(· | prefix_i)
-2. Compute embedding reward R_{i,k} = Σ_v exp(-||e_orig_v − e_gen_v||_2)
-   using the frozen ref model's last-layer hidden states at [VE] positions.
+2. Compute embedding reward R_{i,k} = Σ_v w(t_v)·exp(-||e_orig_v − e_gen_v||_2)
+   using the frozen ref model's last-layer hidden states at [VE] positions,
+   where w(t_v) = 1 + log(1 + t_v/D)/log(D) up-weights visits further in the future.
 3. Per-rollout advantage normalised within the patient's K rollouts:
        A_{i,k} = (R_{i,k} − mean_k R_{i,k}) / (std_k R_{i,k} + ε)
 4. Policy-gradient loss:
@@ -62,6 +63,7 @@ class CehrGptGRPOTrainer(Trainer):
 
         self.rl_args = rl_args
         self.cehrgpt_tokenizer = cehrgpt_tokenizer
+        self._logged_ve_days = False
         # Accumulators for train RL metrics — flushed and averaged in log()
         self._rl_metric_sums: Dict[str, float] = {}
         self._rl_metric_counts: Dict[str, int] = {}
@@ -345,8 +347,8 @@ class CehrGptGRPOTrainer(Trainer):
             full_times = torch.cat([p_times, f_times])
             orig_entries.append((i, full_ids, full_ages, full_times, plen))
 
-        # orig_ve_per_patient[i] = list of (hidden_dim,) tensors on CPU
-        orig_ve_per_patient: List[List[torch.Tensor]] = [[] for _ in range(B)]
+        # orig_ve_per_patient[i] = list of (embedding, days_from_prefix) pairs on CPU
+        orig_ve_per_patient: List[List[Tuple[torch.Tensor, float]]] = [[] for _ in range(B)]
 
         for chunk_start in range(0, len(orig_entries), chunk_size):
             chunk = orig_entries[chunk_start: chunk_start + chunk_size]
@@ -370,14 +372,22 @@ class CehrGptGRPOTrainer(Trainer):
                 )
             last_hs = out.hidden_states[-1]  # (N, max_len, hidden_dim)
 
-            for n, (i, fids, _, _, plen) in enumerate(chunk):
+            for n, (i, fids, _, ftimes_n, plen) in enumerate(chunk):
                 seq_len = fids.shape[0]
                 hs_n = last_hs[n, -seq_len:]       # (seq_len, hidden_dim)
+                prefix_end_time = ftimes_n[plen - 1].item()
                 # VE tokens in the future portion (positions >= plen)
                 fut_ids_list = fids[plen:].tolist()
+                visit_num = 0
                 for j, tid in enumerate(fut_ids_list):
                     if tid in ve_token_ids:
-                        orig_ve_per_patient[i].append(hs_n[plen + j].detach().cpu())
+                        days = (ftimes_n[plen + j].item() - prefix_end_time) / _SECONDS_PER_DAY
+                        if not self._logged_ve_days:
+                            LOG.info(f"[reward] future visit {visit_num}: days from prefix end = {days:.2f}")
+                        orig_ve_per_patient[i].append((hs_n[plen + j].detach().cpu(), days))
+                        visit_num += 1
+                if not self._logged_ve_days:
+                    self._logged_ve_days = True
 
             del out, last_hs, b_ids, b_ages, b_times, b_attn
             torch.cuda.empty_cache()
@@ -462,10 +472,11 @@ class CehrGptGRPOTrainer(Trainer):
         # ------------------------------------------------------------------
         rewards = torch.zeros(B, K, dtype=torch.float32, device=dev)
         for i in range(B):
-            orig_embs = orig_ve_per_patient[i]
+            orig_embs = [e for e, _ in orig_ve_per_patient[i]]
+            orig_days = [d for _, d in orig_ve_per_patient[i]]
             for k in range(K):
                 gen_embs = gen_ve_per_rollout.get((i, k), [])
-                rewards[i, k] = compute_visit_embedding_reward(orig_embs, gen_embs)
+                rewards[i, k] = compute_visit_embedding_reward(orig_embs, gen_embs, orig_days)
         return rewards
 
     # ------------------------------------------------------------------
