@@ -4,15 +4,15 @@ GRPO (Group Relative Policy Optimization / REINFORCE + KL) trainer for CEHR-GPT.
 Algorithm per patient i  (DeepSeek GRPO formulation)
 -----------------------------------------------------
 1. Sample K rollout trajectories τ_1…τ_K ~ π_θ(· | prefix_i)
-2. Compute reward R_i using the weighted condition-recovery objective
-3. Compute advantage  A_i = R_i - b  (b = moving-average baseline)
-4. Policy-gradient loss:
-       L_PG = - (1/B) Σ_i A_i · (1/K) Σ_k (1/T_k) Σ_t log π_θ(τ_k[t]|·)
-5. Per-rollout advantage normalised within the patient's K rollouts:
+2. Compute embedding reward R_{i,k} = Σ_v exp(-||e_orig_v − e_gen_v||_2)
+   using the frozen ref model's last-layer hidden states at [VS] positions.
+3. Per-rollout advantage normalised within the patient's K rollouts:
        A_{i,k} = (R_{i,k} − mean_k R_{i,k}) / (std_k R_{i,k} + ε)
-6. Exact per-position KL divergence (always ≥ 0):
+4. Policy-gradient loss:
+       L_PG = - (1/B) Σ_i (1/K) Σ_k (1/T_k) Σ_t A_{i,k} · log π_θ(τ_k[t]|·)
+5. Exact per-position KL divergence (always ≥ 0):
        KL(π_θ || π_ref)(t) = Σ_v π_θ(v|·) · (log π_θ(v|·) − log π_ref(v|·))
-7. Total loss:
+6. Total loss:
        L = L_PG + β · (1/B) Σ_i (1/K) Σ_k mean_t KL(π_θ || π_ref)(t)
 """
 
@@ -24,7 +24,7 @@ from transformers import Trainer
 from transformers.utils import logging
 
 from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token, is_visit_start
-from cehrgpt.rl.reward import compute_patient_reward, compute_visit_embedding_reward, extract_conditions_from_rollout
+from cehrgpt.rl.reward import compute_visit_embedding_reward
 from cehrgpt.runners.hf_gpt_rl_runner_argument_dataclass import RLArguments
 
 LOG = logging.get_logger("transformers")
@@ -39,19 +39,15 @@ class CehrGptGRPOTrainer(Trainer):
     Args:
         ref_model: Frozen reference model π_ref (same architecture as the policy).
         rl_args: ``RLArguments`` hyperparameter container.
-        prevalence_stats: Dict mapping (concept_id, window_days) → π_{c,w}.
-        target_concept_ids: Set of condition concept ID strings used for rewards.
         cehrgpt_tokenizer: ``CehrGptTokenizer`` instance (stored separately from the
             HF ``tokenizer`` slot which may not be set for GPT-style models).
-        All remaining kwargs are forwarded to ``CehrGptTrainer``.
+        All remaining kwargs are forwarded to ``Trainer``.
     """
 
     def __init__(
         self,
         ref_model,
         rl_args: RLArguments,
-        prevalence_stats: Dict[Tuple[str, int], float],
-        target_concept_ids: Set[str],
         cehrgpt_tokenizer,
         eval_sample_size: int = 100,
         *args,
@@ -64,12 +60,8 @@ class CehrGptGRPOTrainer(Trainer):
         for p in self.ref_model.parameters():
             p.requires_grad_(False)
 
-
         self.rl_args = rl_args
-        self.prevalence_stats = prevalence_stats
-        self.target_concept_ids = target_concept_ids
         self.cehrgpt_tokenizer = cehrgpt_tokenizer
-        self._baseline: float = 0.0
         # Accumulators for train RL metrics — flushed and averaged in log()
         self._rl_metric_sums: Dict[str, float] = {}
         self._rl_metric_counts: Dict[str, int] = {}
@@ -168,12 +160,11 @@ class CehrGptGRPOTrainer(Trainer):
         prefix_attention_mask: torch.Tensor = inputs["prefix_attention_mask"]  # (B, L)
         prefix_values: Optional[torch.Tensor] = inputs.get("prefix_values")  # (B, L)
         prefix_value_indicators: Optional[torch.Tensor] = inputs.get("prefix_value_indicators")  # (B, L)
-        future_conditions: List[List[Tuple[str, float]]] = inputs["future_conditions"]
         prefix_lengths: torch.Tensor = inputs["prefix_lengths"]              # (B,)
-        future_input_ids: Optional[torch.Tensor] = inputs.get("future_input_ids")   # (B, F)
-        future_ages: Optional[torch.Tensor] = inputs.get("future_ages")             # (B, F)
-        future_epoch_times: Optional[torch.Tensor] = inputs.get("future_epoch_times")  # (B, F)
-        future_lengths: Optional[torch.Tensor] = inputs.get("future_lengths")       # (B,)
+        future_input_ids: torch.Tensor = inputs["future_input_ids"]         # (B, F)
+        future_ages: torch.Tensor = inputs["future_ages"]                   # (B, F)
+        future_epoch_times: torch.Tensor = inputs["future_epoch_times"]     # (B, F)
+        future_lengths: torch.Tensor = inputs["future_lengths"]             # (B,)
 
         B = prefix_input_ids.shape[0]
         is_training = model.training
@@ -214,51 +205,14 @@ class CehrGptGRPOTrainer(Trainer):
         max_prefix_len = prefix_input_ids.shape[1]
 
         # ---------------------------------------------------------------
-        # Per-rollout rewards: rewards_t[i, k] = R_{i,k}
-        #
-        # Embedding-based reward: for each patient, compare visit-level hidden-state
-        # representations from the ref model between the true future sequence and each
-        # generated rollout.  R_{i,k} = Σ_v exp(-||e_orig_v − e_gen_v||_2).
-        if (
-            future_input_ids is not None
-            and future_ages is not None
-            and future_epoch_times is not None
-            and future_lengths is not None
-        ):
-            rewards_t = self._compute_embedding_rewards(
-                prefix_input_ids, prefix_ages, prefix_epoch_times,
-                prefix_lengths,
-                future_input_ids, future_ages, future_epoch_times, future_lengths,
-                rollout_token_strs, K,
-                prefix_input_ids.device,
-            )  # (B, K)
-        else:
-            # Fallback: condition-prediction reward (no future token IDs in batch)
-            rollout_rewards: List[List[float]] = []
-            for i in range(B):
-                patient_rewards: List[float] = []
-                for k in range(K):
-                    conds_k = extract_conditions_from_rollout(
-                        rollout_token_strs[i * K + k],
-                        max_prefix_len,
-                        self.target_concept_ids,
-                        self.rl_args.prediction_windows,
-                    )
-                    R_k = compute_patient_reward(
-                        future_conditions[i],
-                        [conds_k],
-                        self.prevalence_stats,
-                        self.rl_args.prediction_windows,
-                        self.rl_args.rarity_gamma,
-                        self.rl_args.alpha_max,
-                        self.rl_args.window_eta,
-                        self.rl_args.window_ref_days,
-                        self.rl_args.prevalence_epsilon,
-                        self.rl_args.false_positive_lambda,
-                    )
-                    patient_rewards.append(R_k)
-                rollout_rewards.append(patient_rewards)
-            rewards_t = torch.tensor(rollout_rewards, dtype=torch.float32, device=prefix_input_ids.device)  # (B, K)
+        # Per-rollout embedding rewards: R_{i,k} = Σ_v exp(-||e_orig_v − e_gen_v||_2)
+        rewards_t = self._compute_embedding_rewards(
+            prefix_input_ids, prefix_ages, prefix_epoch_times,
+            prefix_lengths,
+            future_input_ids, future_ages, future_epoch_times, future_lengths,
+            rollout_token_strs, K,
+            prefix_input_ids.device,
+        )  # (B, K)
 
 
         # ---------------------------------------------------------------

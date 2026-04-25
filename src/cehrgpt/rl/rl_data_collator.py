@@ -6,17 +6,16 @@ Each training example is a tokenized patient sequence.  The collator:
   2. Returns the prefix (history up to the split) as padded tensors,
      including value_indicators and values (lab bin IDs) so the forward
      pass during PG loss computation matches the model's training distribution.
-  3. Returns the true future conditions (concept_id, days_to_event) after the
-     split, capped at max(prediction_windows) days, for use as reward targets.
+  3. Returns the true future token sequence (right-padded) so the trainer
+     can compare visit-level embeddings from the ref model against generated
+     rollouts for the embedding-based reward.
 """
 
 import random
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
-
-from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token
 
 _VISIT_START_TOKEN = "[VS]"
 _DEMOGRAPHICS_SIZE = 4  # year, age, gender, race tokens at the start of every sequence
@@ -29,18 +28,14 @@ class RLDataCollator:
 
     Args:
         tokenizer: ``CehrGptTokenizer`` instance used to encode prefix tokens.
-        target_concept_ids: Set of condition concept ID strings that are reward targets.
-        prediction_windows: Prediction horizon windows in days (e.g. [30, 90, 180, 365, 730]).
         max_prefix_length: Prefix is right-truncated to this many tokens before padding.
         min_prefix_visits: Minimum [VS] tokens required in the prefix; examples with
             fewer visits are skipped.
         max_future_length: Maximum number of future tokens to store for embedding rewards.
-            Defaults to ``max_prefix_length``.  Set to 0 to disable future token storage.
+            Defaults to ``max_prefix_length`` when set to 0.
     """
 
     tokenizer: Any  # CehrGptTokenizer
-    target_concept_ids: Set[str]
-    prediction_windows: List[int]
     max_prefix_length: int = 1024
     min_prefix_visits: int = 2
     max_future_length: int = 0  # 0 → use max_prefix_length
@@ -51,7 +46,6 @@ class RLDataCollator:
         batch_prefix_times: List[List[float]] = []
         batch_prefix_vals: List[List[int]] = []
         batch_prefix_val_masks: List[List[int]] = []
-        batch_future_conditions: List[List[Tuple[str, float]]] = []
         batch_prefix_end_times: List[float] = []
         raw_prefix_lengths: List[int] = []
         batch_future_ids: List[List[int]] = []
@@ -65,7 +59,7 @@ class RLDataCollator:
             (
                 prefix_ids, prefix_ages, prefix_times,
                 prefix_vals, prefix_val_masks,
-                future_conds, prefix_end_time,
+                prefix_end_time,
                 future_ids, future_ages_list, future_times_list,
             ) = result
 
@@ -82,7 +76,6 @@ class RLDataCollator:
             batch_prefix_times.append(prefix_times)
             batch_prefix_vals.append(prefix_vals)
             batch_prefix_val_masks.append(prefix_val_masks)
-            batch_future_conditions.append(future_conds)
             batch_prefix_end_times.append(prefix_end_time)
             raw_prefix_lengths.append(len(prefix_ids))
             batch_future_ids.append(future_ids)
@@ -111,13 +104,12 @@ class RLDataCollator:
             padded_val_masks.append([0] * pad_len + val_masks)
             attention_masks.append([0] * pad_len + [1] * len(ids))
 
-        # Right-pad future sequences (they will be concatenated with the unpadded
-        # prefix in the trainer, so right-padding is the natural choice here).
+        # Right-pad future sequences (concatenated with the unpadded prefix in the
+        # trainer, so right-padding is the natural choice here).
         raw_future_lengths = [len(f) for f in batch_future_ids]
         max_future_len = max(raw_future_lengths) if raw_future_lengths else 0
 
         padded_future_ids, padded_future_ages, padded_future_times = [], [], []
-        future_attn_masks = []
         for fut_ids, fut_ages, fut_times in zip(
             batch_future_ids, batch_future_ages, batch_future_times
         ):
@@ -125,7 +117,6 @@ class RLDataCollator:
             padded_future_ids.append(fut_ids + [pad_id] * pad_len)
             padded_future_ages.append(fut_ages + [0] * pad_len)
             padded_future_times.append(fut_times + [0.0] * pad_len)
-            future_attn_masks.append([1] * len(fut_ids) + [0] * pad_len)
 
         return {
             "prefix_input_ids": torch.tensor(padded_ids, dtype=torch.long),
@@ -138,8 +129,6 @@ class RLDataCollator:
             "prefix_lengths": torch.tensor(raw_prefix_lengths, dtype=torch.long),
             # Unix timestamp of the last prefix token (float64 to preserve precision)
             "prefix_end_times": torch.tensor(batch_prefix_end_times, dtype=torch.float64),
-            # Not a tensor — kept as a Python list of lists for the reward function
-            "future_conditions": batch_future_conditions,
             # Future token sequences (right-padded) for embedding-based reward
             "future_input_ids": torch.tensor(padded_future_ids, dtype=torch.long),
             "future_ages": torch.tensor(padded_future_ages, dtype=torch.long),
@@ -203,34 +192,14 @@ class RLDataCollator:
         # Encode concept ID strings → token IDs (no added special tokens)
         prefix_input_ids = self.tokenizer.convert_tokens_to_ids(prefix_concept_ids)
 
-        # Walk the future tokens to collect:
-        #   (a) conditions with their elapsed days (for backward-compat logging)
-        #   (b) the full future token sequence for embedding-based reward comparison
-        max_window = max(self.prediction_windows)
+        # Collect the future token sequence for embedding-based reward comparison,
+        # up to max_future_length tokens.
         max_fut_len = self.max_future_length if self.max_future_length > 0 else self.max_prefix_length
-        cumulative_days = 0.0
-        future_conditions: List[Tuple[str, float]] = []
-        future_concept_ids: List[str] = []
-        future_ages_list: List[int] = []
-        future_epoch_times_list: List[float] = []
-
-        for j, token in enumerate(concept_ids[split_token_pos:]):
-            if is_att_token(token):
-                try:
-                    cumulative_days += extract_time_interval_in_days(token)
-                except ValueError:
-                    pass
-                if cumulative_days > max_window:
-                    break
-            elif token in self.target_concept_ids:
-                future_conditions.append((token, cumulative_days))
-
-            if len(future_concept_ids) < max_fut_len:
-                abs_idx = split_token_pos + j
-                future_concept_ids.append(token)
-                future_ages_list.append(ages[abs_idx])
-                future_epoch_times_list.append(float(epoch_times[abs_idx]))
-
+        future_concept_ids: List[str] = concept_ids[split_token_pos: split_token_pos + max_fut_len]
+        future_ages_list: List[int] = ages[split_token_pos: split_token_pos + max_fut_len]
+        future_epoch_times_list: List[float] = [
+            float(t) for t in epoch_times[split_token_pos: split_token_pos + max_fut_len]
+        ]
         future_input_ids = self.tokenizer.convert_tokens_to_ids(future_concept_ids)
 
         return (
@@ -239,7 +208,6 @@ class RLDataCollator:
             list(prefix_epoch_times),
             prefix_vals,
             prefix_val_masks,
-            future_conditions,
             prefix_end_time,
             future_input_ids,
             future_ages_list,
