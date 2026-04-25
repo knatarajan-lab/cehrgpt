@@ -34,6 +34,8 @@ class RLDataCollator:
         max_prefix_length: Prefix is right-truncated to this many tokens before padding.
         min_prefix_visits: Minimum [VS] tokens required in the prefix; examples with
             fewer visits are skipped.
+        max_future_length: Maximum number of future tokens to store for embedding rewards.
+            Defaults to ``max_prefix_length``.  Set to 0 to disable future token storage.
     """
 
     tokenizer: Any  # CehrGptTokenizer
@@ -41,6 +43,7 @@ class RLDataCollator:
     prediction_windows: List[int]
     max_prefix_length: int = 1024
     min_prefix_visits: int = 2
+    max_future_length: int = 0  # 0 → use max_prefix_length
 
     def __call__(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
         batch_prefix_ids: List[List[int]] = []
@@ -51,6 +54,9 @@ class RLDataCollator:
         batch_future_conditions: List[List[Tuple[str, float]]] = []
         batch_prefix_end_times: List[float] = []
         raw_prefix_lengths: List[int] = []
+        batch_future_ids: List[List[int]] = []
+        batch_future_ages: List[List[int]] = []
+        batch_future_times: List[List[float]] = []
 
         for example in examples:
             result = self._prepare_single(example)
@@ -60,6 +66,7 @@ class RLDataCollator:
                 prefix_ids, prefix_ages, prefix_times,
                 prefix_vals, prefix_val_masks,
                 future_conds, prefix_end_time,
+                future_ids, future_ages_list, future_times_list,
             ) = result
 
             # Truncate to max_prefix_length (keep the most recent tokens)
@@ -78,11 +85,14 @@ class RLDataCollator:
             batch_future_conditions.append(future_conds)
             batch_prefix_end_times.append(prefix_end_time)
             raw_prefix_lengths.append(len(prefix_ids))
+            batch_future_ids.append(future_ids)
+            batch_future_ages.append(future_ages_list)
+            batch_future_times.append(future_times_list)
 
         if not batch_prefix_ids:
             return {}
 
-        # Left-pad all sequences to the maximum length in the batch
+        # Left-pad prefix sequences to the maximum length in the batch
         max_len = max(raw_prefix_lengths)
         pad_id = self.tokenizer.pad_token_id
 
@@ -101,6 +111,22 @@ class RLDataCollator:
             padded_val_masks.append([0] * pad_len + val_masks)
             attention_masks.append([0] * pad_len + [1] * len(ids))
 
+        # Right-pad future sequences (they will be concatenated with the unpadded
+        # prefix in the trainer, so right-padding is the natural choice here).
+        raw_future_lengths = [len(f) for f in batch_future_ids]
+        max_future_len = max(raw_future_lengths) if raw_future_lengths else 0
+
+        padded_future_ids, padded_future_ages, padded_future_times = [], [], []
+        future_attn_masks = []
+        for fut_ids, fut_ages, fut_times in zip(
+            batch_future_ids, batch_future_ages, batch_future_times
+        ):
+            pad_len = max_future_len - len(fut_ids)
+            padded_future_ids.append(fut_ids + [pad_id] * pad_len)
+            padded_future_ages.append(fut_ages + [0] * pad_len)
+            padded_future_times.append(fut_times + [0.0] * pad_len)
+            future_attn_masks.append([1] * len(fut_ids) + [0] * pad_len)
+
         return {
             "prefix_input_ids": torch.tensor(padded_ids, dtype=torch.long),
             "prefix_ages": torch.tensor(padded_ages, dtype=torch.long),
@@ -114,6 +140,11 @@ class RLDataCollator:
             "prefix_end_times": torch.tensor(batch_prefix_end_times, dtype=torch.float64),
             # Not a tensor — kept as a Python list of lists for the reward function
             "future_conditions": batch_future_conditions,
+            # Future token sequences (right-padded) for embedding-based reward
+            "future_input_ids": torch.tensor(padded_future_ids, dtype=torch.long),
+            "future_ages": torch.tensor(padded_future_ages, dtype=torch.long),
+            "future_epoch_times": torch.tensor(padded_future_times, dtype=torch.float32),
+            "future_lengths": torch.tensor(raw_future_lengths, dtype=torch.long),
         }
 
     # ------------------------------------------------------------------
@@ -172,12 +203,18 @@ class RLDataCollator:
         # Encode concept ID strings → token IDs (no added special tokens)
         prefix_input_ids = self.tokenizer.convert_tokens_to_ids(prefix_concept_ids)
 
-        # Walk the future tokens to collect conditions with their elapsed days
+        # Walk the future tokens to collect:
+        #   (a) conditions with their elapsed days (for backward-compat logging)
+        #   (b) the full future token sequence for embedding-based reward comparison
         max_window = max(self.prediction_windows)
+        max_fut_len = self.max_future_length if self.max_future_length > 0 else self.max_prefix_length
         cumulative_days = 0.0
         future_conditions: List[Tuple[str, float]] = []
+        future_concept_ids: List[str] = []
+        future_ages_list: List[int] = []
+        future_epoch_times_list: List[float] = []
 
-        for token in concept_ids[split_token_pos:]:
+        for j, token in enumerate(concept_ids[split_token_pos:]):
             if is_att_token(token):
                 try:
                     cumulative_days += extract_time_interval_in_days(token)
@@ -188,6 +225,14 @@ class RLDataCollator:
             elif token in self.target_concept_ids:
                 future_conditions.append((token, cumulative_days))
 
+            if len(future_concept_ids) < max_fut_len:
+                abs_idx = split_token_pos + j
+                future_concept_ids.append(token)
+                future_ages_list.append(ages[abs_idx])
+                future_epoch_times_list.append(float(epoch_times[abs_idx]))
+
+        future_input_ids = self.tokenizer.convert_tokens_to_ids(future_concept_ids)
+
         return (
             prefix_input_ids,
             list(prefix_ages_list),
@@ -196,4 +241,7 @@ class RLDataCollator:
             prefix_val_masks,
             future_conditions,
             prefix_end_time,
+            future_input_ids,
+            future_ages_list,
+            future_epoch_times_list,
         )

@@ -23,8 +23,8 @@ import torch.nn.functional as F
 from transformers import Trainer
 from transformers.utils import logging
 
-from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token
-from cehrgpt.rl.reward import compute_patient_reward, extract_conditions_from_rollout
+from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token, is_visit_start
+from cehrgpt.rl.reward import compute_patient_reward, compute_visit_embedding_reward, extract_conditions_from_rollout
 from cehrgpt.runners.hf_gpt_rl_runner_argument_dataclass import RLArguments
 
 LOG = logging.get_logger("transformers")
@@ -170,6 +170,10 @@ class CehrGptGRPOTrainer(Trainer):
         prefix_value_indicators: Optional[torch.Tensor] = inputs.get("prefix_value_indicators")  # (B, L)
         future_conditions: List[List[Tuple[str, float]]] = inputs["future_conditions"]
         prefix_lengths: torch.Tensor = inputs["prefix_lengths"]              # (B,)
+        future_input_ids: Optional[torch.Tensor] = inputs.get("future_input_ids")   # (B, F)
+        future_ages: Optional[torch.Tensor] = inputs.get("future_ages")             # (B, F)
+        future_epoch_times: Optional[torch.Tensor] = inputs.get("future_epoch_times")  # (B, F)
+        future_lengths: Optional[torch.Tensor] = inputs.get("future_lengths")       # (B,)
 
         B = prefix_input_ids.shape[0]
         is_training = model.training
@@ -211,32 +215,50 @@ class CehrGptGRPOTrainer(Trainer):
 
         # ---------------------------------------------------------------
         # Per-rollout rewards: rewards_t[i, k] = R_{i,k}
-        rollout_rewards: List[List[float]] = []
-        for i in range(B):
-            patient_rewards: List[float] = []
-            for k in range(K):
-                conds_k = extract_conditions_from_rollout(
-                    rollout_token_strs[i * K + k],
-                    max_prefix_len,
-                    self.target_concept_ids,
-                    self.rl_args.prediction_windows,
-                )
-                R_k = compute_patient_reward(
-                    future_conditions[i],
-                    [conds_k],
-                    self.prevalence_stats,
-                    self.rl_args.prediction_windows,
-                    self.rl_args.rarity_gamma,
-                    self.rl_args.alpha_max,
-                    self.rl_args.window_eta,
-                    self.rl_args.window_ref_days,
-                    self.rl_args.prevalence_epsilon,
-                    self.rl_args.false_positive_lambda,
-                )
-                patient_rewards.append(R_k)
-            rollout_rewards.append(patient_rewards)
-
-        rewards_t = torch.tensor(rollout_rewards, dtype=torch.float32, device=prefix_input_ids.device)  # (B, K)
+        #
+        # Embedding-based reward: for each patient, compare visit-level hidden-state
+        # representations from the ref model between the true future sequence and each
+        # generated rollout.  R_{i,k} = Σ_v exp(-||e_orig_v − e_gen_v||_2).
+        if (
+            future_input_ids is not None
+            and future_ages is not None
+            and future_epoch_times is not None
+            and future_lengths is not None
+        ):
+            rewards_t = self._compute_embedding_rewards(
+                prefix_input_ids, prefix_ages, prefix_epoch_times,
+                prefix_lengths,
+                future_input_ids, future_ages, future_epoch_times, future_lengths,
+                rollout_token_strs, K,
+                prefix_input_ids.device,
+            )  # (B, K)
+        else:
+            # Fallback: condition-prediction reward (no future token IDs in batch)
+            rollout_rewards: List[List[float]] = []
+            for i in range(B):
+                patient_rewards: List[float] = []
+                for k in range(K):
+                    conds_k = extract_conditions_from_rollout(
+                        rollout_token_strs[i * K + k],
+                        max_prefix_len,
+                        self.target_concept_ids,
+                        self.rl_args.prediction_windows,
+                    )
+                    R_k = compute_patient_reward(
+                        future_conditions[i],
+                        [conds_k],
+                        self.prevalence_stats,
+                        self.rl_args.prediction_windows,
+                        self.rl_args.rarity_gamma,
+                        self.rl_args.alpha_max,
+                        self.rl_args.window_eta,
+                        self.rl_args.window_ref_days,
+                        self.rl_args.prevalence_epsilon,
+                        self.rl_args.false_positive_lambda,
+                    )
+                    patient_rewards.append(R_k)
+                rollout_rewards.append(patient_rewards)
+            rewards_t = torch.tensor(rollout_rewards, dtype=torch.float32, device=prefix_input_ids.device)  # (B, K)
 
 
         # ---------------------------------------------------------------
@@ -295,6 +317,202 @@ class CehrGptGRPOTrainer(Trainer):
                 self._eval_metric_counts[eval_name] = self._eval_metric_counts.get(eval_name, 0) + 1
 
         return total_loss
+
+    # ------------------------------------------------------------------
+    # Embedding-based reward computation
+    # ------------------------------------------------------------------
+
+    def _get_vs_token_ids(self) -> Set[int]:
+        """Return the set of token IDs that represent a visit-start ([VS] / VS)."""
+        vs_ids: Set[int] = set()
+        unk_id = self.cehrgpt_tokenizer.unk_token_id
+        for tok in ["VS", "[VS]"]:
+            tid = self.cehrgpt_tokenizer.convert_tokens_to_ids([tok])[0]
+            if tid != unk_id:
+                vs_ids.add(tid)
+        return vs_ids
+
+    def _compute_embedding_rewards(
+        self,
+        prefix_ids: torch.Tensor,          # (B, L) left-padded
+        prefix_ages: torch.Tensor,          # (B, L) left-padded
+        prefix_times: torch.Tensor,         # (B, L) left-padded
+        prefix_lengths: torch.Tensor,       # (B,)
+        future_ids: torch.Tensor,           # (B, F) right-padded
+        future_ages: torch.Tensor,          # (B, F) right-padded
+        future_times: torch.Tensor,         # (B, F) right-padded
+        future_lengths: torch.Tensor,       # (B,)
+        rollout_token_strs: List[List[str]],
+        K: int,
+        dev: torch.device,
+    ) -> torch.Tensor:
+        """
+        Compute per-rollout embedding rewards (B, K).
+
+        For each patient i:
+          1. Build the full original sequence (unpadded prefix + future tokens) and
+             pass it through the frozen ref model to get last-layer hidden states.
+          2. Identify [VS] positions in the *future* portion and extract their
+             hidden-state vectors → orig_vs_embeddings[i].
+          3. For each rollout k, build (unpadded prefix + generated tokens), run
+             through ref model, identify [VS] positions in the *generated* portion,
+             extract hidden states → gen_vs_embeddings[i, k].
+          4. R_{i,k} = Σ_v exp(-||e_orig_v − e_gen_v||_2) summed over original visits;
+             missing generated visits contribute 0, extra ones are ignored.
+
+        Note: if the model uses causal_sfm, ``output.hidden_states[-1]`` has one
+        extra sequence position inserted at ``demographics_size`` for the random
+        vector; VS position indices would be shifted by 1 after that point.  This
+        is not corrected here and is unlikely to affect models that do not use
+        causal_sfm.
+        """
+        B = prefix_ids.shape[0]
+        max_prefix_len = prefix_ids.shape[1]
+        vs_token_ids = self._get_vs_token_ids()
+        pad_id = self.cehrgpt_tokenizer.pad_token_id
+        chunk_size = self.rl_args.generation_chunk_size or (B + B * K)
+
+        # ------------------------------------------------------------------
+        # Step 1: extract VS embeddings from the original (ground-truth) sequences
+        # ------------------------------------------------------------------
+        # Build one entry per patient: (i, full_ids, full_ages, full_times, prefix_len_i)
+        orig_entries: List[Tuple] = []
+        for i in range(B):
+            plen = int(prefix_lengths[i].item())
+            flen = int(future_lengths[i].item())
+            p_ids   = prefix_ids[i, -plen:].to(dev)
+            p_ages  = prefix_ages[i, -plen:].to(dev)
+            p_times = prefix_times[i, -plen:].to(dev)
+            f_ids   = future_ids[i, :flen].to(dev)
+            f_ages  = future_ages[i, :flen].to(dev)
+            f_times = future_times[i, :flen].to(dev)
+            full_ids   = torch.cat([p_ids,   f_ids])
+            full_ages  = torch.cat([p_ages,  f_ages])
+            full_times = torch.cat([p_times, f_times])
+            orig_entries.append((i, full_ids, full_ages, full_times, plen))
+
+        # orig_vs_per_patient[i] = list of (hidden_dim,) tensors on CPU
+        orig_vs_per_patient: List[List[torch.Tensor]] = [[] for _ in range(B)]
+
+        for chunk_start in range(0, len(orig_entries), chunk_size):
+            chunk = orig_entries[chunk_start: chunk_start + chunk_size]
+            max_len = max(e[1].shape[0] for e in chunk)
+            N = len(chunk)
+            b_ids   = torch.full((N, max_len), pad_id, dtype=torch.long,    device=dev)
+            b_ages  = torch.zeros((N, max_len),         dtype=torch.long,    device=dev)
+            b_times = torch.zeros((N, max_len),         dtype=torch.float32, device=dev)
+            b_attn  = torch.zeros((N, max_len),         dtype=torch.long,    device=dev)
+            for n, (_, fids, fages, ftimes, _) in enumerate(chunk):
+                slen = fids.shape[0]
+                b_ids[n,   -slen:] = fids
+                b_ages[n,  -slen:] = fages
+                b_times[n, -slen:] = ftimes
+                b_attn[n,  -slen:] = 1
+
+            with torch.no_grad():
+                out = self.ref_model(
+                    input_ids=b_ids, ages=b_ages, epoch_times=b_times,
+                    attention_mask=b_attn, output_hidden_states=True,
+                )
+            last_hs = out.hidden_states[-1]  # (N, max_len, hidden_dim)
+
+            for n, (i, fids, _, _, plen) in enumerate(chunk):
+                seq_len = fids.shape[0]
+                hs_n = last_hs[n, -seq_len:]       # (seq_len, hidden_dim)
+                # VS tokens in the future portion (positions >= plen)
+                fut_ids_list = fids[plen:].tolist()
+                for j, tid in enumerate(fut_ids_list):
+                    if tid in vs_token_ids:
+                        orig_vs_per_patient[i].append(hs_n[plen + j].detach().cpu())
+
+            del out, last_hs, b_ids, b_ages, b_times, b_attn
+            torch.cuda.empty_cache()
+
+        # ------------------------------------------------------------------
+        # Step 2: extract VS embeddings from each rollout sequence
+        # ------------------------------------------------------------------
+        # Build one entry per valid (i, k) rollout
+        rollout_entries: List[Tuple] = []  # (i, k, full_ids, full_ages, full_times, plen)
+        for i in range(B):
+            plen = int(prefix_lengths[i].item())
+            p_ids   = prefix_ids[i, -plen:].to(dev)
+            p_ages  = prefix_ages[i, -plen:].to(dev)
+            p_times = prefix_times[i, -plen:].to(dev)
+            prefix_end_age  = int(p_ages[-1].item())
+            prefix_end_time = float(p_times[-1].item())
+
+            for k in range(K):
+                bk_idx     = i * K + k
+                new_tokens = rollout_token_strs[bk_idx][max_prefix_len:]
+                if not new_tokens:
+                    rollout_entries.append((i, k, None, None, None, plen))
+                    continue
+                new_ids = self.cehrgpt_tokenizer.convert_tokens_to_ids(new_tokens)
+                if not new_ids:
+                    rollout_entries.append((i, k, None, None, None, plen))
+                    continue
+                new_ids_t  = torch.tensor(new_ids, dtype=torch.long,    device=dev)
+                r_ages, r_times = self._reconstruct_rollout_context(
+                    new_tokens, prefix_end_age, prefix_end_time
+                )
+                r_ages_t   = torch.tensor(r_ages,  dtype=torch.long,    device=dev)
+                r_times_t  = torch.tensor(r_times, dtype=torch.float32, device=dev)
+                full_ids   = torch.cat([p_ids,   new_ids_t])
+                full_ages  = torch.cat([p_ages,  r_ages_t])
+                full_times = torch.cat([p_times, r_times_t])
+                rollout_entries.append((i, k, full_ids, full_ages, full_times, plen))
+
+        # gen_vs_per_rollout[(i, k)] = list of (hidden_dim,) tensors on CPU
+        gen_vs_per_rollout: Dict[Tuple[int, int], List[torch.Tensor]] = {}
+        valid_entries = [(idx, e) for idx, e in enumerate(rollout_entries) if e[2] is not None]
+
+        for chunk_start in range(0, len(valid_entries), chunk_size):
+            chunk = valid_entries[chunk_start: chunk_start + chunk_size]
+            max_len = max(e[1][2].shape[0] for e in chunk)
+            N = len(chunk)
+            b_ids   = torch.full((N, max_len), pad_id, dtype=torch.long,    device=dev)
+            b_ages  = torch.zeros((N, max_len),         dtype=torch.long,    device=dev)
+            b_times = torch.zeros((N, max_len),         dtype=torch.float32, device=dev)
+            b_attn  = torch.zeros((N, max_len),         dtype=torch.long,    device=dev)
+            for n, (_, (_, _, fids, fages, ftimes, _)) in enumerate(chunk):
+                slen = fids.shape[0]
+                b_ids[n,   -slen:] = fids
+                b_ages[n,  -slen:] = fages
+                b_times[n, -slen:] = ftimes
+                b_attn[n,  -slen:] = 1
+
+            with torch.no_grad():
+                out = self.ref_model(
+                    input_ids=b_ids, ages=b_ages, epoch_times=b_times,
+                    attention_mask=b_attn, output_hidden_states=True,
+                )
+            last_hs = out.hidden_states[-1]  # (N, max_len, hidden_dim)
+
+            for n, (_, (i, k, fids, _, _, plen)) in enumerate(chunk):
+                seq_len = fids.shape[0]
+                hs_n = last_hs[n, -seq_len:]       # (seq_len, hidden_dim)
+                # VS tokens in the generated portion (positions >= plen)
+                bk_idx     = i * K + k
+                gen_tokens = rollout_token_strs[bk_idx][max_prefix_len:]
+                embs: List[torch.Tensor] = []
+                for j, tok in enumerate(gen_tokens):
+                    if is_visit_start(tok):
+                        embs.append(hs_n[plen + j].detach().cpu())
+                gen_vs_per_rollout[(i, k)] = embs
+
+            del out, last_hs, b_ids, b_ages, b_times, b_attn
+            torch.cuda.empty_cache()
+
+        # ------------------------------------------------------------------
+        # Step 3: compute scalar reward per (patient, rollout)
+        # ------------------------------------------------------------------
+        rewards = torch.zeros(B, K, dtype=torch.float32, device=dev)
+        for i in range(B):
+            orig_embs = orig_vs_per_patient[i]
+            for k in range(K):
+                gen_embs = gen_vs_per_rollout.get((i, k), [])
+                rewards[i, k] = compute_visit_embedding_reward(orig_embs, gen_embs)
+        return rewards
 
     # ------------------------------------------------------------------
     # Rollout generation
