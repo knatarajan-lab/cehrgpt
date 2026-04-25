@@ -5,7 +5,7 @@ Algorithm per patient i  (DeepSeek GRPO formulation)
 -----------------------------------------------------
 1. Sample K rollout trajectories τ_1…τ_K ~ π_θ(· | prefix_i)
 2. Compute embedding reward R_{i,k} = Σ_v exp(-||e_orig_v − e_gen_v||_2)
-   using the frozen ref model's last-layer hidden states at [VS] positions.
+   using the frozen ref model's last-layer hidden states at [VE] positions.
 3. Per-rollout advantage normalised within the patient's K rollouts:
        A_{i,k} = (R_{i,k} − mean_k R_{i,k}) / (std_k R_{i,k} + ε)
 4. Policy-gradient loss:
@@ -23,7 +23,7 @@ import torch.nn.functional as F
 from transformers import Trainer
 from transformers.utils import logging
 
-from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token, is_visit_start
+from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token, is_visit_end
 from cehrgpt.rl.reward import compute_visit_embedding_reward
 from cehrgpt.runners.hf_gpt_rl_runner_argument_dataclass import RLArguments
 
@@ -276,15 +276,15 @@ class CehrGptGRPOTrainer(Trainer):
     # Embedding-based reward computation
     # ------------------------------------------------------------------
 
-    def _get_vs_token_ids(self) -> Set[int]:
-        """Return the set of token IDs that represent a visit-start ([VS] / VS)."""
-        vs_ids: Set[int] = set()
+    def _get_ve_token_ids(self) -> Set[int]:
+        """Return the set of token IDs that represent a visit-end ([VE] / VE)."""
+        ve_ids: Set[int] = set()
         unk_id = self.cehrgpt_tokenizer.unk_token_id
-        for tok in ["VS", "[VS]"]:
+        for tok in ["VE", "[VE]"]:
             tid = self.cehrgpt_tokenizer.convert_tokens_to_ids([tok])[0]
             if tid != unk_id:
-                vs_ids.add(tid)
-        return vs_ids
+                ve_ids.add(tid)
+        return ve_ids
 
     def _compute_embedding_rewards(
         self,
@@ -306,11 +306,11 @@ class CehrGptGRPOTrainer(Trainer):
         For each patient i:
           1. Build the full original sequence (unpadded prefix + future tokens) and
              pass it through the frozen ref model to get last-layer hidden states.
-          2. Identify [VS] positions in the *future* portion and extract their
-             hidden-state vectors → orig_vs_embeddings[i].
+          2. Identify [VE] positions in the *future* portion and extract their
+             hidden-state vectors → orig_ve_embeddings[i].
           3. For each rollout k, build (unpadded prefix + generated tokens), run
-             through ref model, identify [VS] positions in the *generated* portion,
-             extract hidden states → gen_vs_embeddings[i, k].
+             through ref model, identify [VE] positions in the *generated* portion,
+             extract hidden states → gen_ve_embeddings[i, k].
           4. R_{i,k} = Σ_v exp(-||e_orig_v − e_gen_v||_2) summed over original visits;
              missing generated visits contribute 0, extra ones are ignored.
 
@@ -322,12 +322,12 @@ class CehrGptGRPOTrainer(Trainer):
         """
         B = prefix_ids.shape[0]
         max_prefix_len = prefix_ids.shape[1]
-        vs_token_ids = self._get_vs_token_ids()
+        ve_token_ids = self._get_ve_token_ids()
         pad_id = self.cehrgpt_tokenizer.pad_token_id
         chunk_size = self.rl_args.generation_chunk_size or (B + B * K)
 
         # ------------------------------------------------------------------
-        # Step 1: extract VS embeddings from the original (ground-truth) sequences
+        # Step 1: extract VE embeddings from the original (ground-truth) sequences
         # ------------------------------------------------------------------
         # Build one entry per patient: (i, full_ids, full_ages, full_times, prefix_len_i)
         orig_entries: List[Tuple] = []
@@ -345,8 +345,8 @@ class CehrGptGRPOTrainer(Trainer):
             full_times = torch.cat([p_times, f_times])
             orig_entries.append((i, full_ids, full_ages, full_times, plen))
 
-        # orig_vs_per_patient[i] = list of (hidden_dim,) tensors on CPU
-        orig_vs_per_patient: List[List[torch.Tensor]] = [[] for _ in range(B)]
+        # orig_ve_per_patient[i] = list of (hidden_dim,) tensors on CPU
+        orig_ve_per_patient: List[List[torch.Tensor]] = [[] for _ in range(B)]
 
         for chunk_start in range(0, len(orig_entries), chunk_size):
             chunk = orig_entries[chunk_start: chunk_start + chunk_size]
@@ -373,17 +373,17 @@ class CehrGptGRPOTrainer(Trainer):
             for n, (i, fids, _, _, plen) in enumerate(chunk):
                 seq_len = fids.shape[0]
                 hs_n = last_hs[n, -seq_len:]       # (seq_len, hidden_dim)
-                # VS tokens in the future portion (positions >= plen)
+                # VE tokens in the future portion (positions >= plen)
                 fut_ids_list = fids[plen:].tolist()
                 for j, tid in enumerate(fut_ids_list):
-                    if tid in vs_token_ids:
-                        orig_vs_per_patient[i].append(hs_n[plen + j].detach().cpu())
+                    if tid in ve_token_ids:
+                        orig_ve_per_patient[i].append(hs_n[plen + j].detach().cpu())
 
             del out, last_hs, b_ids, b_ages, b_times, b_attn
             torch.cuda.empty_cache()
 
         # ------------------------------------------------------------------
-        # Step 2: extract VS embeddings from each rollout sequence
+        # Step 2: extract VE embeddings from each rollout sequence
         # ------------------------------------------------------------------
         # Build one entry per valid (i, k) rollout
         rollout_entries: List[Tuple] = []  # (i, k, full_ids, full_ages, full_times, plen)
@@ -416,8 +416,8 @@ class CehrGptGRPOTrainer(Trainer):
                 full_times = torch.cat([p_times, r_times_t])
                 rollout_entries.append((i, k, full_ids, full_ages, full_times, plen))
 
-        # gen_vs_per_rollout[(i, k)] = list of (hidden_dim,) tensors on CPU
-        gen_vs_per_rollout: Dict[Tuple[int, int], List[torch.Tensor]] = {}
+        # gen_ve_per_rollout[(i, k)] = list of (hidden_dim,) tensors on CPU
+        gen_ve_per_rollout: Dict[Tuple[int, int], List[torch.Tensor]] = {}
         valid_entries = [(idx, e) for idx, e in enumerate(rollout_entries) if e[2] is not None]
 
         for chunk_start in range(0, len(valid_entries), chunk_size):
@@ -445,14 +445,14 @@ class CehrGptGRPOTrainer(Trainer):
             for n, (_, (i, k, fids, _, _, plen)) in enumerate(chunk):
                 seq_len = fids.shape[0]
                 hs_n = last_hs[n, -seq_len:]       # (seq_len, hidden_dim)
-                # VS tokens in the generated portion (positions >= plen)
+                # VE tokens in the generated portion (positions >= plen)
                 bk_idx     = i * K + k
                 gen_tokens = rollout_token_strs[bk_idx][max_prefix_len:]
                 embs: List[torch.Tensor] = []
                 for j, tok in enumerate(gen_tokens):
-                    if is_visit_start(tok):
+                    if is_visit_end(tok):
                         embs.append(hs_n[plen + j].detach().cpu())
-                gen_vs_per_rollout[(i, k)] = embs
+                gen_ve_per_rollout[(i, k)] = embs
 
             del out, last_hs, b_ids, b_ages, b_times, b_attn
             torch.cuda.empty_cache()
@@ -462,9 +462,9 @@ class CehrGptGRPOTrainer(Trainer):
         # ------------------------------------------------------------------
         rewards = torch.zeros(B, K, dtype=torch.float32, device=dev)
         for i in range(B):
-            orig_embs = orig_vs_per_patient[i]
+            orig_embs = orig_ve_per_patient[i]
             for k in range(K):
-                gen_embs = gen_vs_per_rollout.get((i, k), [])
+                gen_embs = gen_ve_per_rollout.get((i, k), [])
                 rewards[i, k] = compute_visit_embedding_reward(orig_embs, gen_embs)
         return rewards
 
@@ -686,12 +686,16 @@ class CehrGptGRPOTrainer(Trainer):
 
             # Current model — dropout disabled for deterministic log-probs;
             # gradients still flow since requires_grad is unaffected by eval mode.
+            # Restore the original training state afterwards so that subsequent
+            # eval batches are not misclassified as training steps.
+            was_training = model.training
             model.eval()
             curr_logits = model(
                 input_ids=batch_ids, ages=batch_ages, epoch_times=batch_times,
                 attention_mask=batch_attn, **fwd_kwargs,
             ).logits  # (chunk, max_chunk_len, vocab)
-            model.train()
+            if was_training:
+                model.train()
 
             # Reference model — no gradients
             with torch.no_grad():
