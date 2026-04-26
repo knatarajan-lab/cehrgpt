@@ -56,6 +56,12 @@ class CehrGptGRPOTrainer(Trainer):
     ):
         super().__init__(*args, **kwargs)
         self._eval_sample_size = eval_sample_size
+        if self.eval_dataset is not None and len(self.eval_dataset) > eval_sample_size:
+            import random
+            indices = random.sample(range(len(self.eval_dataset)), eval_sample_size)
+            self._eval_dataset_sample = self.eval_dataset.select(sorted(indices))
+        else:
+            self._eval_dataset_sample = self.eval_dataset
         self.ref_model = ref_model
         self.ref_model.eval()
         for p in self.ref_model.parameters():
@@ -111,11 +117,7 @@ class CehrGptGRPOTrainer(Trainer):
     # ------------------------------------------------------------------
 
     def get_eval_dataloader(self, eval_dataset=None):
-        import random
-        dataset = eval_dataset if eval_dataset is not None else self.eval_dataset
-        if dataset is not None and len(dataset) > self._eval_sample_size:
-            indices = random.sample(range(len(dataset)), self._eval_sample_size)
-            dataset = dataset.select(indices)
+        dataset = eval_dataset if eval_dataset is not None else self._eval_dataset_sample
         return super().get_eval_dataloader(dataset)
 
     # ------------------------------------------------------------------
