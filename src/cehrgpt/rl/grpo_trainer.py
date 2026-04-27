@@ -170,7 +170,6 @@ class CehrGptGRPOTrainer(Trainer):
         future_epoch_times: torch.Tensor = inputs["future_epoch_times"]     # (B, F)
         future_lengths: torch.Tensor = inputs["future_lengths"]             # (B,)
 
-        B = prefix_input_ids.shape[0]
         is_training = model.training
         K = self.rl_args.num_rollouts if is_training else self.rl_args.eval_num_rollouts
 
@@ -203,13 +202,7 @@ class CehrGptGRPOTrainer(Trainer):
         torch.cuda.empty_cache()
 
         # ---------------------------------------------------------------
-        # 2. Compute rewards
-        # outputs.sequences includes the full left-padded prefix, so generated tokens
-        # start at index max_prefix_len (the padded width), not prefix_lengths[i].
-        max_prefix_len = prefix_input_ids.shape[1]
-
-        # ---------------------------------------------------------------
-        # Per-rollout embedding rewards: R_{i,k} = Σ_v exp(-||e_orig_v − e_gen_v||_2)
+        # 2. Compute rewards — per-rollout embedding rewards: R_{i,k} = Σ_v exp(-||e_orig_v − e_gen_v||_2)
         rewards_t = self._compute_embedding_rewards(
             prefix_input_ids, prefix_ages, prefix_epoch_times,
             prefix_lengths,
@@ -258,7 +251,7 @@ class CehrGptGRPOTrainer(Trainer):
             ("rl_pg_loss",     pg_loss.item() if isinstance(pg_loss, torch.Tensor) else float(pg_loss)),
             ("rl_kl_loss",     kl_loss.item() if isinstance(kl_loss, torch.Tensor) else float(kl_loss)),
             ("rl_reward_mean", rewards_t.mean().item()),
-            ("rl_reward_std",  rewards_t.std(dim=1).mean().item()),
+            ("rl_reward_std",  rewards_t.std(dim=1, correction=0).mean().item()),
         ]
         if value_loss is not None:
             base_metrics.append(("rl_value_loss", value_loss.item()))
@@ -604,21 +597,21 @@ class CehrGptGRPOTrainer(Trainer):
         prefix_lengths: torch.Tensor,                     # (B,)
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        GRPO per-rollout advantage: normalise within each patient's K rollouts.
+        Batch-level advantage normalisation across all B×K rewards.
 
-            A_{i,k} = (R_{i,k} − mean_k R_{i,k}) / (std_k R_{i,k} + ε)
+            A_{i,k} = (R_{i,k} − mean_{B×K} R) / (std_{B×K} R + ε)
 
-        Patients where all K rollouts receive the same reward (σ ≈ 0) get zero
-        advantage and contribute nothing to the gradient — correct behaviour when
-        the policy is deterministic for that patient.
+        Normalising across the full batch rather than within each patient's K
+        rollouts keeps advantages well-defined when K=1 (where per-patient std
+        is always zero) and gives a more stable baseline when K is small.
 
         Returns (advantages, None) — shape (B, K), no value loss for GRPO.
         Subclasses (e.g. CehrGptPPOTrainer) override this to use a learned
         value network instead.
         """
-        mu    = rewards_t.mean(dim=1, keepdim=True)   # (B, 1)
-        sigma = rewards_t.std(dim=1, keepdim=True)    # (B, 1)
-        advantages = (rewards_t - mu) / (sigma + 1e-8)  # (B, K)
+        mu    = rewards_t.mean()                                        # scalar
+        sigma = rewards_t.std(correction=0)                             # scalar
+        advantages = (rewards_t - mu) / (sigma + 1e-8)                 # (B, K)
         return advantages, None
 
     # ------------------------------------------------------------------
