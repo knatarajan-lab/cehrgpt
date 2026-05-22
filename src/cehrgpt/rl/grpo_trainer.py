@@ -377,6 +377,14 @@ class CehrGptGRPOTrainer(Trainer):
                 for j, tid in enumerate(fut_ids_list):
                     if tid in ve_token_ids:
                         days = (ftimes_n[plen + j].item() - prefix_end_time) / _SECONDS_PER_DAY
+                        if days < 0:
+                            LOG.warning(
+                                f"[reward] negative days ({days:.4f}) for patient {i}, "
+                                f"future visit {visit_num} — clamping to 0. "
+                                f"prefix_end_time={prefix_end_time}, "
+                                f"ve_time={ftimes_n[plen + j].item()}"
+                            )
+                            days = 0.0
                         if not self._logged_ve_days:
                             LOG.info(f"[reward] future visit {visit_num}: days from prefix end = {days:.2f}")
                         orig_ve_per_patient[i].append((hs_n[plen + j].detach().cpu(), days))

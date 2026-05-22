@@ -69,7 +69,7 @@ def compute_visit_embedding_reward(
         if v < len(gen_vs_embeddings):
             dist = torch.dist(e_orig.float(), gen_vs_embeddings[v].float()).item()
             sim = math.exp(-dist)
-            if orig_vs_days is not None:
+            if orig_vs_days is not None and time_weight_denom > 1.0:
                 weight = 1.0 + math.log(1.0 + orig_vs_days[v] / time_weight_denom) / math.log(time_weight_denom)
                 sim *= weight
             total += sim
