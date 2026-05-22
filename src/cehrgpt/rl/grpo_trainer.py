@@ -117,7 +117,13 @@ class CehrGptGRPOTrainer(Trainer):
     # ------------------------------------------------------------------
 
     def get_eval_dataloader(self, eval_dataset=None):
-        dataset = eval_dataset if eval_dataset is not None else self._eval_dataset_sample
+        # Trainer.evaluate() always passes self.eval_dataset explicitly, so
+        # eval_dataset is never None here.  Intercept that case and substitute
+        # our fixed random sample so eval stays fast.
+        if eval_dataset is None or eval_dataset is self.eval_dataset:
+            dataset = self._eval_dataset_sample
+        else:
+            dataset = eval_dataset
         return super().get_eval_dataloader(dataset)
 
     # ------------------------------------------------------------------
