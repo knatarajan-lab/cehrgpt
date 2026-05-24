@@ -114,7 +114,9 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "--apply_rotary",
             "true",
             "--include_age_at_vs_prediction",
-            "true"
+            "true",
+            "--load_best_model_at_end",
+            "true",
         ]
         train_main()
         # Teacher force the prompt to consist of [year][age][gender][race][VS] then inject the random vector before [VS]
@@ -184,6 +186,8 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "true",
             "--local_attention_n_prev_visits",
             "2",
+            "--load_best_model_at_end",
+            "true",
         ]
         train_main()
 
