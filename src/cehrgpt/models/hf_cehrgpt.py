@@ -833,6 +833,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             # Convert list back to torch.Size if needed
             input_shape = torch.Size(shape_list)
 
+        is_full_forward = past_key_values is None  # False during KV-cache generation steps
         if past_key_values is None:
             past_key_values = tuple([None] * len(self.h))
         else:
@@ -844,7 +845,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         # skipped during KV-cache generation since input_ids is a single token).
         if (
             getattr(self.config, "use_local_attention", False)
-            and past_key_values is None
+            and is_full_forward
             and getattr(self.config, "_attn_implementation", "eager") != "flash_attention_2"
             and attention_mask is not None
             and getattr(self.config, "vs_token_id", None) is not None
