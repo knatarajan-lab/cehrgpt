@@ -174,7 +174,16 @@ def build_local_attention_mask(
     allowed = causal.unsqueeze(0) & in_window                  # (B, L, L)
     additive = input_ids.new_zeros(B, L, L, dtype=torch.float32)
     additive[~allowed] = torch.finfo(torch.float32).min
-    return additive.unsqueeze(1)  # (B, 1, L, L)
+
+    additive = additive.unsqueeze(1)  # (B, 1, L, L)
+
+    # Mask out padding key positions so flash_attn_func (which receives this
+    # as attn_bias without unpadding) does not attend to padding tokens.
+    if attention_mask is not None:
+        padding_key = (attention_mask == 0).unsqueeze(1).unsqueeze(2)  # (B, 1, 1, L)
+        additive = additive.masked_fill(padding_key, torch.finfo(torch.float32).min)
+
+    return additive
 
 
 class MotorTaskHead(nn.Module):
@@ -841,12 +850,14 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
 
         raw_attention_mask = attention_mask  # save before conversion for local-attention window
         attention_mask = self.prepare_attention_mask(input_ids, attention_mask)
-        # Apply visit-local attention mask when configured (eager attention only;
-        # skipped during KV-cache generation since input_ids is a single token).
+        # Build visit-local attention mask when configured.
+        # Skipped during KV-cache generation (is_full_forward=False).
+        # For eager attention: fold into attention_mask additive bias.
+        # For flash attention: pass separately as attn_bias to each block.
+        local_mask = None
         if (
             getattr(self.config, "use_local_attention", False)
             and is_full_forward
-            and getattr(self.config, "_attn_implementation", "eager") != "flash_attention_2"
             and attention_mask is not None
             and getattr(self.config, "vs_token_id", None) is not None
         ):
@@ -862,8 +873,10 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 self.config.local_attention_n_prev_visits,
                 attention_mask=raw_attention_mask,
                 att_token_ids=att_ids_tensor,
-            ).to(attention_mask.dtype)
-            attention_mask = attention_mask + local_mask
+            )  # (B, 1, L, L) float32
+            if getattr(self.config, "_attn_implementation", "eager") != "flash_attention_2":
+                attention_mask = attention_mask + local_mask.to(attention_mask.dtype)
+                local_mask = None  # eager uses attention_mask directly
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
         # attention_probs has shape bsz x n_heads x N x N
@@ -974,6 +987,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                     None,
                     use_cache,
                     output_attentions,
+                    local_mask,
                 )
             else:
                 outputs = block(
@@ -986,6 +1000,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                     encoder_attention_mask=None,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
+                    local_attention_mask=local_mask,
                 )
 
             hidden_states = outputs[0]
@@ -1331,6 +1346,37 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         attention_mask = kwargs.get("attention_mask", None)
         random_vectors = kwargs.get("random_vectors", None)
+
+        # During KV-cache generation steps, enforce visit-local attention by
+        # zeroing out positions outside the window in the attention_mask.
+        # full_input_ids is the complete sequence (prompt + all generated tokens);
+        # we use it before input_ids is truncated below.
+        if (
+            past_key_values
+            and attention_mask is not None
+            and getattr(self.config, "use_local_attention", False)
+            and getattr(self.config, "vs_token_id", None) is not None
+        ):
+            full_input_ids = input_ids  # (B, full_L) — before KV-cache truncation
+            att_token_ids_list = getattr(self.config, "att_token_ids", [])
+            att_ids_tensor = (
+                torch.tensor(att_token_ids_list, dtype=full_input_ids.dtype, device=full_input_ids.device)
+                if att_token_ids_list else None
+            )
+            # build_local_attention_mask returns (B, 1, full_L, full_L); the last
+            # row [-1] is the window for the new query token (0.0 = allowed, NEG_INF = blocked).
+            local_mask = build_local_attention_mask(
+                full_input_ids,
+                self.config.vs_token_id,
+                getattr(self.config, "local_attention_n_prev_visits", 5),
+                att_token_ids=att_ids_tensor,
+            )  # (B, 1, full_L, full_L)
+            local_window = (local_mask[:, 0, -1, :] == 0).long()  # (B, full_L)
+            # attention_mask may be shorter than full_input_ids if causal_sfm
+            # inserted a random-vector slot; align by taking the last L positions.
+            L = attention_mask.shape[1]
+            attention_mask = attention_mask & local_window[:, -L:]
+
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
         if inputs_embeds is not None and past_key_values is None:
             model_inputs = {"inputs_embeds": inputs_embeds}

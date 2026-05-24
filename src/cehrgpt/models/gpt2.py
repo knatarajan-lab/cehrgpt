@@ -139,6 +139,7 @@ class GPT2AttentionRoPE(GPT2Attention):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
+        local_attention_mask: Optional[torch.FloatTensor] = None,  # unused in eager path
     ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor]], ...]:
 
         if encoder_hidden_states is not None:
@@ -222,6 +223,7 @@ class GPT2FlashAttention(GPT2Attention):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
+        local_attention_mask: Optional[torch.FloatTensor] = None,
     ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor]], ...]:
 
         # Prepare query, key, and value
@@ -274,6 +276,7 @@ class GPT2FlashAttention(GPT2Attention):
                 query.size(-2),
                 self.attn_dropout.p,
                 softmax_scale=None,
+                local_attention_mask=local_attention_mask,
             )
 
         # Merge heads and project back to hidden size
@@ -296,6 +299,7 @@ class GPT2FlashAttention(GPT2Attention):
         query_length,
         dropout=0.0,
         softmax_scale=None,
+        local_attention_mask=None,
     ):
         """
         Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token.
@@ -325,8 +329,23 @@ class GPT2FlashAttention(GPT2Attention):
         key_states = key_states.permute(0, 2, 1, 3).contiguous().to(torch.bfloat16)
         value_states = value_states.permute(0, 2, 1, 3).contiguous().to(torch.bfloat16)
 
+        if local_attention_mask is not None:
+            # Visit-local attention: use flash_attn_func with attn_bias.
+            # local_attention_mask is (B, 1, L, L) with 0.0 for allowed positions
+            # and NEG_INF for blocked ones (including padding key positions).
+            # flash_attn_func adds attn_bias to scores before softmax, so this
+            # correctly enforces the visit window without needing varlen unpadding.
+            attn_output = flash_attn_func(
+                query_states,
+                key_states,
+                value_states,
+                dropout,
+                softmax_scale=softmax_scale,
+                causal=True,
+                attn_bias=local_attention_mask.to(torch.bfloat16),
+            )
         # Contains at least one padding token in the sequence
-        if attention_mask is not None:
+        elif attention_mask is not None:
             batch_size = query_states.shape[0]
 
             (
@@ -502,6 +521,7 @@ class GPT2Block(nn.Module):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
+        local_attention_mask: Optional[torch.FloatTensor] = None,
     ) -> Union[
         Tuple[torch.Tensor],
         Optional[Tuple[torch.Tensor, Tuple[torch.FloatTensor, ...]]],
@@ -516,6 +536,7 @@ class GPT2Block(nn.Module):
             head_mask=head_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
+            local_attention_mask=local_attention_mask,
         )
         attn_output = attn_outputs[0]  # output_attn: a, present, (attentions)
         outputs = attn_outputs[1:]
