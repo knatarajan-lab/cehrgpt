@@ -11,6 +11,13 @@ if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
 
+try:
+    import xformers.ops as xops
+
+    HAS_XFORMERS = True
+except ImportError:
+    HAS_XFORMERS = False
+
 from cehrgpt.models.activations import RMSNorm
 
 logger = logging.get_logger("transformers")
@@ -266,6 +273,38 @@ class GPT2FlashAttention(GPT2Attention):
             attn_output, attn_weights = self._upcast_and_reordered_attn(
                 query, key, value, attention_mask, head_mask
             )
+        elif local_attention_mask is not None:
+            # flash_attn_func / flash_attn_varlen_func do not support attn_bias.
+            # Use xformers memory_efficient_attention when available, which accepts an
+            # arbitrary attn_bias of shape (B, 1, L, L) with 0.0 / NEG_INF values.
+            # local_attention_mask already encodes causal + visit-window + cross-sample blocking.
+            if HAS_XFORMERS:
+                # xformers expects (B, L, H, D); query/key/value are currently (B, H, L, D).
+                query_xa = query.permute(0, 2, 1, 3)
+                key_xa = key.permute(0, 2, 1, 3)
+                value_xa = value.permute(0, 2, 1, 3)
+                attn_output = xops.memory_efficient_attention(
+                    query_xa,
+                    key_xa,
+                    value_xa,
+                    attn_bias=local_attention_mask.to(query.dtype),
+                    p=self.attn_dropout.p if self.training else 0.0,
+                    scale=None,
+                )
+                # Permute back to (B, H, L, D) for _merge_heads.
+                attn_output = attn_output.permute(0, 2, 1, 3)
+                attn_weights = None
+            else:
+                # xformers not installed; fall back to standard scaled dot-product attention.
+                # In the flash path, attention_mask is binary (B, L); convert to additive (B, 1, 1, L).
+                if attention_mask is not None:
+                    additive = (
+                        1.0 - attention_mask[:, None, None, :].to(dtype=query.dtype)
+                    ) * torch.finfo(query.dtype).min
+                    combined_mask = additive + local_attention_mask
+                else:
+                    combined_mask = local_attention_mask
+                attn_output, attn_weights = self._attn(query, key, value, combined_mask, head_mask)
         else:
             # Flash Attention forward pass
             attn_output = self._flash_attention_forward(
@@ -276,8 +315,8 @@ class GPT2FlashAttention(GPT2Attention):
                 query.size(-2),
                 self.attn_dropout.p,
                 softmax_scale=None,
-                local_attention_mask=local_attention_mask,
             )
+            attn_weights = None
 
         # Merge heads and project back to hidden size
         attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
@@ -299,7 +338,6 @@ class GPT2FlashAttention(GPT2Attention):
         query_length,
         dropout=0.0,
         softmax_scale=None,
-        local_attention_mask=None,
     ):
         """
         Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token.
@@ -329,25 +367,8 @@ class GPT2FlashAttention(GPT2Attention):
         key_states = key_states.permute(0, 2, 1, 3).contiguous().to(torch.bfloat16)
         value_states = value_states.permute(0, 2, 1, 3).contiguous().to(torch.bfloat16)
 
-        if local_attention_mask is not None:
-            # Visit-local attention: use flash_attn_func with attn_bias.
-            # local_attention_mask is (B, 1, L, L) with 0.0 for allowed positions
-            # and NEG_INF for blocked ones (including padding key positions).
-            # flash_attn_func adds attn_bias to scores before softmax, so this
-            # correctly enforces the visit window without needing varlen unpadding.
-            attn_output = flash_attn_func(
-                query_states,
-                key_states,
-                value_states,
-                dropout,
-                softmax_scale=softmax_scale,
-                causal=True,
-                attn_bias=local_attention_mask.to(torch.bfloat16),
-            )
-        # Contains at least one padding token in the sequence
-        elif attention_mask is not None:
+        if attention_mask is not None:
             batch_size = query_states.shape[0]
-
             (
                 query_states,
                 key_states,
@@ -358,7 +379,6 @@ class GPT2FlashAttention(GPT2Attention):
             ) = self._upad_input(
                 query_states, key_states, value_states, attention_mask, query_length
             )
-
             cu_seqlens_q, cu_seqlens_k = cu_seq_lens
             max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
 
@@ -374,7 +394,6 @@ class GPT2FlashAttention(GPT2Attention):
                 softmax_scale=softmax_scale,
                 causal=True,
             )
-            # (batch, seq_length, n_heads, head_dim)
             attn_output = pad_input(
                 attn_output_unpad, indices_q, batch_size, query_length
             )
