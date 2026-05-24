@@ -306,3 +306,15 @@ class CehrGPTArguments:
             "rebuild it from scratch, ignoring any previously saved version."
         },
     )
+    use_local_attention: bool = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "Enable visit-local attention: each token attends only to the current visit "
+            "and the previous local_attention_n_prev_visits visits. Only applies to eager "
+            "(non-Flash) attention; no-op during KV-cache generation."
+        },
+    )
+    local_attention_n_prev_visits: int = dataclasses.field(
+        default=5,
+        metadata={"help": "Number of previous visits visible to each token when use_local_attention is True."},
+    )
