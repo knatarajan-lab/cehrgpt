@@ -78,6 +78,43 @@ def create_sample_packing_attention_mask(attention_mask: torch.Tensor) -> torch.
     return attn_matrix
 
 
+def build_local_attention_mask(
+    input_ids: torch.Tensor,
+    vs_token_id: int,
+    n_prev_visits: int,
+) -> torch.Tensor:
+    """
+    Build a local causal attention mask based on visit boundaries.
+
+    Each token may attend to tokens within the current visit and the previous
+    ``n_prev_visits`` visits.  Demographic tokens (before the first [VS]) are
+    always visible to all tokens.
+
+    Args:
+        input_ids: (B, L) token IDs.
+        vs_token_id: Integer ID of the [VS] / VS token.
+        n_prev_visits: Number of prior visits to include in the attention window.
+
+    Returns:
+        Float additive mask of shape (B, 1, L, L) where 0.0 means "attend" and
+        ``torch.finfo(float32).min`` means "mask out".  Add this directly to the
+        existing causal attention bias before softmax.
+    """
+    B, L = input_ids.shape
+    device = input_ids.device
+    # visit_idx[b, j] = number of [VS] tokens seen up to and including position j
+    visit_idx = (input_ids == vs_token_id).cumsum(dim=-1)  # (B, L)
+    vi = visit_idx.unsqueeze(2)  # (B, L, 1)  — query visit index
+    vj = visit_idx.unsqueeze(1)  # (B, 1, L)  — key visit index
+    causal = torch.ones(L, L, dtype=torch.bool, device=device).tril()  # (L, L)
+    # Allow key if it is in the demographic block (visit 0) or within the window
+    in_window = (vj == 0) | (vj >= vi - n_prev_visits)  # (B, L, L)
+    allowed = causal.unsqueeze(0) & in_window            # (B, L, L)
+    additive = input_ids.new_zeros(B, L, L, dtype=torch.float32)
+    additive[~allowed] = torch.finfo(torch.float32).min
+    return additive.unsqueeze(1)  # (B, 1, L, L)
+
+
 class MotorTaskHead(nn.Module):
     def __init__(
         self,
@@ -730,6 +767,21 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             past_key_values[0][0].size(-2)
 
         attention_mask = self.prepare_attention_mask(input_ids, attention_mask)
+        # Apply visit-local attention mask when configured (eager attention only;
+        # skipped during KV-cache generation since input_ids is a single token).
+        if (
+            getattr(self.config, "use_local_attention", False)
+            and past_key_values is None
+            and getattr(self.config, "_attn_implementation", "eager") != "flash_attention_2"
+            and attention_mask is not None
+            and getattr(self.config, "vs_token_id", None) is not None
+        ):
+            local_mask = build_local_attention_mask(
+                input_ids,
+                self.config.vs_token_id,
+                self.config.local_attention_n_prev_visits,
+            ).to(attention_mask.dtype)
+            attention_mask = attention_mask + local_mask
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
         # attention_probs has shape bsz x n_heads x N x N

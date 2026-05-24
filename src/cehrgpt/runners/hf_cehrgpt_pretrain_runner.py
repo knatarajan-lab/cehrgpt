@@ -239,6 +239,7 @@ def load_and_create_model(
             motor_task_prevalence_rates=tokenizer.get_motor_task_prevalence_rates(),
             linear_prob_n_layer=cehrgpt_args.linear_prob_n_layer,
             ve_token_id=tokenizer.ve_token_id,
+            vs_token_id=tokenizer.vs_token_id,
             linear_prob_token_id=tokenizer.linear_token_id,
             n_inner=cehrgpt_args.inner_dim,
             decoder_mlp=cehrgpt_args.decoder_mlp,
