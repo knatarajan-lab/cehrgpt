@@ -125,6 +125,7 @@ class CEHRGPTConfig(PretrainedConfig):
         lab_token_ids=None,
         ve_token_id=None,
         vs_token_id=None,
+        att_token_ids=None,
         use_local_attention=False,
         local_attention_n_prev_visits=5,
         scale_attn_by_inverse_layer_idx=False,
@@ -244,6 +245,7 @@ class CEHRGPTConfig(PretrainedConfig):
             )
         self.ve_token_id = ve_token_id
         self.vs_token_id = vs_token_id
+        self.att_token_ids = att_token_ids if att_token_ids is not None else []
         self.use_local_attention = use_local_attention
         self.local_attention_n_prev_visits = local_attention_n_prev_visits
         self.motor_time_to_event_weight = motor_time_to_event_weight

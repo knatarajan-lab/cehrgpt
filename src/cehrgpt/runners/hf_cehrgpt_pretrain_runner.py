@@ -240,6 +240,7 @@ def load_and_create_model(
             linear_prob_n_layer=cehrgpt_args.linear_prob_n_layer,
             ve_token_id=tokenizer.ve_token_id,
             vs_token_id=tokenizer.vs_token_id,
+            att_token_ids=tokenizer.att_token_ids,
             use_local_attention=cehrgpt_args.use_local_attention,
             local_attention_n_prev_visits=cehrgpt_args.local_attention_n_prev_visits,
             linear_prob_token_id=tokenizer.linear_token_id,

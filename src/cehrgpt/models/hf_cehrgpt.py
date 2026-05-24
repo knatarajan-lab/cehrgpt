@@ -21,6 +21,8 @@ from transformers.pytorch_utils import Conv1D
 from transformers.utils import is_flash_attn_2_available, logging
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 
+logger = logging.get_logger(__name__)
+
 from cehrgpt.gpt_utils import (
     construct_age_sequence,
     encode_demographics,
@@ -82,18 +84,32 @@ def build_local_attention_mask(
     input_ids: torch.Tensor,
     vs_token_id: int,
     n_prev_visits: int,
+    attention_mask: Optional[torch.Tensor] = None,
+    att_token_ids: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Build a local causal attention mask based on visit boundaries.
 
     Each token may attend to tokens within the current visit and the previous
-    ``n_prev_visits`` visits.  Demographic tokens (before the first [VS]) are
-    always visible to all tokens.
+    ``n_prev_visits`` visits.  Demographic tokens (before the first [VS] in
+    each sample) are always visible within the same sample.  ATT (time-interval)
+    tokens at any position are also always visible within the same sample so that
+    every token retains temporal context regardless of window size.
+
+    When ``attention_mask`` is provided and the batch is sample-packed (i.e.
+    contains interleaved zeros), visit indices are computed per-segment so
+    that [VS] tokens from one packed sample do not affect the window of another.
 
     Args:
         input_ids: (B, L) token IDs.
         vs_token_id: Integer ID of the [VS] / VS token.
         n_prev_visits: Number of prior visits to include in the attention window.
+        attention_mask: Optional (B, L) binary mask (1 = real token, 0 = padding).
+            Required for correct behaviour with sample-packed batches.
+        att_token_ids: Optional 1-D tensor of integer IDs for ATT (time-interval)
+            tokens (e.g. D7, W2, i-D3).  When provided, key positions that hold
+            an ATT token are always visible to any later token in the same sample,
+            regardless of the visit window.
 
     Returns:
         Float additive mask of shape (B, 1, L, L) where 0.0 means "attend" and
@@ -102,14 +118,60 @@ def build_local_attention_mask(
     """
     B, L = input_ids.shape
     device = input_ids.device
-    # visit_idx[b, j] = number of [VS] tokens seen up to and including position j
-    visit_idx = (input_ids == vs_token_id).cumsum(dim=-1)  # (B, L)
+
+    vs_cumsum = (input_ids == vs_token_id).cumsum(dim=-1)  # (B, L)
+
+    segment_ids = None  # set only for sample-packed batches
+    if attention_mask is not None and is_sample_pack(attention_mask):
+        # Compute a per-segment visit index that resets at each packed-sample boundary.
+        # A segment starts where a real token (mask=1) follows a padding token (mask=0).
+        is_seg_start = attention_mask.bool().clone()          # (B, L)
+        is_seg_start[:, 1:] &= ~attention_mask[:, :-1].bool()
+
+        # At each segment start (except position 0), record the vs_cumsum accumulated
+        # by all previous segments so we can subtract it out.
+        seg_offset = torch.zeros_like(vs_cumsum)              # (B, L)
+        seg_offset[:, 1:] = torch.where(
+            is_seg_start[:, 1:],
+            vs_cumsum[:, :-1],
+            seg_offset[:, :L - 1],
+        )
+        # Forward-fill the offset within each segment via cummax (offsets are
+        # non-decreasing because vs_cumsum is non-decreasing).
+        seg_offset = seg_offset.cummax(dim=-1).values         # (B, L)
+        visit_idx = vs_cumsum - seg_offset                    # (B, L) — resets per segment
+
+        # Segment IDs: used to restrict the "demographics always visible" rule
+        # to the same packed sample (not across sample boundaries).
+        segment_ids = is_seg_start.int().cumsum(dim=-1)       # (B, L) — 1-indexed per segment
+    else:
+        visit_idx = vs_cumsum                                 # (B, L)
+
     vi = visit_idx.unsqueeze(2)  # (B, L, 1)  — query visit index
     vj = visit_idx.unsqueeze(1)  # (B, 1, L)  — key visit index
     causal = torch.ones(L, L, dtype=torch.bool, device=device).tril()  # (L, L)
-    # Allow key if it is in the demographic block (visit 0) or within the window
-    in_window = (vj == 0) | (vj >= vi - n_prev_visits)  # (B, L, L)
-    allowed = causal.unsqueeze(0) & in_window            # (B, L, L)
+
+    # (B, 1, L) — True where a key position holds an ATT token; always visible.
+    if att_token_ids is not None and att_token_ids.numel() > 0:
+        is_att_j = torch.isin(input_ids, att_token_ids).unsqueeze(1)  # (B, 1, L)
+    else:
+        is_att_j = None
+
+    # Demographics (visit_idx == 0) and ATT tokens are always visible, and the
+    # visit window must stay within the same packed sample.
+    if segment_ids is not None:
+        same_seg = segment_ids.unsqueeze(2) == segment_ids.unsqueeze(1)  # (B, L, L)
+        is_demographics = (vj == 0) & same_seg
+        is_always_visible = is_demographics
+        if is_att_j is not None:
+            is_always_visible = is_always_visible | (is_att_j & same_seg)
+        in_window = is_always_visible | ((vj >= vi - n_prev_visits) & same_seg)
+    else:
+        in_window = (vj == 0) | (vj >= vi - n_prev_visits)
+        if is_att_j is not None:
+            in_window = in_window | is_att_j
+
+    allowed = causal.unsqueeze(0) & in_window                  # (B, L, L)
     additive = input_ids.new_zeros(B, L, L, dtype=torch.float32)
     additive[~allowed] = torch.finfo(torch.float32).min
     return additive.unsqueeze(1)  # (B, 1, L, L)
@@ -579,6 +641,16 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.h = nn.ModuleList(gpt_blocks)
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 
+        if getattr(config, "use_local_attention", False):
+            logger.info(
+                "Local attention enabled: each token attends to the current visit "
+                "and the previous %d visit(s) (vs_token_id=%s).",
+                getattr(config, "local_attention_n_prev_visits", 5),
+                getattr(config, "vs_token_id", None),
+            )
+        else:
+            logger.info("Local attention disabled — using full causal attention.")
+
         # Model parallel
         self.model_parallel = False
         self.device_map = None
@@ -766,6 +838,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         else:
             past_key_values[0][0].size(-2)
 
+        raw_attention_mask = attention_mask  # save before conversion for local-attention window
         attention_mask = self.prepare_attention_mask(input_ids, attention_mask)
         # Apply visit-local attention mask when configured (eager attention only;
         # skipped during KV-cache generation since input_ids is a single token).
@@ -776,10 +849,18 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             and attention_mask is not None
             and getattr(self.config, "vs_token_id", None) is not None
         ):
+            att_ids = getattr(self.config, "att_token_ids", None)
+            att_ids_tensor = (
+                torch.tensor(att_ids, dtype=input_ids.dtype, device=input_ids.device)
+                if att_ids
+                else None
+            )
             local_mask = build_local_attention_mask(
                 input_ids,
                 self.config.vs_token_id,
                 self.config.local_attention_n_prev_visits,
+                attention_mask=raw_attention_mask,
+                att_token_ids=att_ids_tensor,
             ).to(attention_mask.dtype)
             attention_mask = attention_mask + local_mask
         # Prepare head mask if needed

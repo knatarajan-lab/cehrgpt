@@ -257,6 +257,11 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             raise RuntimeError("The tokenizer does not contain either VS or [VS]")
 
     @property
+    def att_token_ids(self) -> List[int]:
+        """Return the list of integer IDs for all ATT (time-interval) tokens in the vocabulary."""
+        return [token_id for token, token_id in self._tokenizer.get_vocab().items() if is_att_token(token)]
+
+    @property
     def ve_token_id(self):
         # We used VE for the historical data, currently, we use the new [VE] for the newer data
         # so we need to check both cases.
