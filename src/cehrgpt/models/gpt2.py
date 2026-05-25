@@ -267,21 +267,25 @@ class GPT2FlashAttention(GPT2Attention):
             present = None
 
         # When use_local_attention is True, attention_mask is a 4D additive tensor
-        # (0.0 / NEG_INF) built by CEHRGPT2Model.forward. Use xformers (or vanilla
-        # _attn as fallback) so that the exact visit-local bias is applied.
-        # flash_attn_func / flash_attn_varlen_func do not support arbitrary attn_bias.
-        # NOTE: local attention only applies to self-attention. In cross-attention
-        # (encoder_hidden_states is not None) the encoder_attention_mask is a standard
-        # 2-D padding mask and must go through the regular flash-attention path.
+        # (0.0 / NEG_INF) built by CEHRGPT2Model.forward (self-attention) or by
+        # CEHRGPT2LMHeadModel.forward for the linear probe (cross-attention).
+        # Use xformers (or torch SDPA as fallback) — flash_attn does not support
+        # arbitrary attn_bias.
+        # For self-attention: a non-4D mask means vs_token_id was not set in the config
+        # so the local mask was never constructed — raise early.
+        # For cross-attention: a 4D mask is provided when use_local_attention=True;
+        # otherwise fall through to the standard flash-attention path.
         if self.reorder_and_upcast_attn:
             attn_output, attn_weights = self._upcast_and_reordered_attn(
                 query, key, value, attention_mask, head_mask
             )
-        elif getattr(self.config, "use_local_attention", False) and encoder_hidden_states is None:
-            # attention_mask must be the 4D additive local mask (B, 1, L, L) built by
-            # CEHRGPT2Model.forward. A non-4D mask means vs_token_id was not set in the
-            # config, so the local mask was never constructed — raise early rather than
-            # silently passing a binary mask to xformers as attn_bias.
+        elif getattr(self.config, "use_local_attention", False):
+            # attention_mask must be the 4D additive local mask (B, 1, L, L).
+            # For self-attention it is built by CEHRGPT2Model.forward; for cross-attention
+            # in the linear probe it is built by CEHRGPT2LMHeadModel.forward via
+            # _build_local_mask_from_config.  A non-4D mask means the local mask was
+            # never constructed — raise early rather than silently passing a binary mask
+            # to xformers as attn_bias.
             if attention_mask is None or attention_mask.dim() != 4:
                 raise RuntimeError(
                     f"use_local_attention=True requires a 4D additive attention mask "

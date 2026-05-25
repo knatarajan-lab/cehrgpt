@@ -190,6 +190,33 @@ def build_local_attention_mask(
     return additive
 
 
+def _build_local_mask_from_config(
+    config,
+    input_ids: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Build a visit-local additive mask (B, 1, L, L) using config-level settings.
+
+    Reads ``vs_token_id``, ``local_attention_n_prev_visits``, and
+    ``att_token_ids`` from *config* and delegates to
+    :func:`build_local_attention_mask`.  Centralises the repeated boilerplate
+    present wherever the local mask is constructed from config fields.
+    """
+    att_ids = getattr(config, "att_token_ids", None)
+    att_ids_tensor = (
+        torch.tensor(att_ids, dtype=input_ids.dtype, device=input_ids.device)
+        if att_ids
+        else None
+    )
+    return build_local_attention_mask(
+        input_ids,
+        config.vs_token_id,
+        getattr(config, "local_attention_n_prev_visits", 5),
+        attention_mask=attention_mask,
+        att_token_ids=att_ids_tensor,
+    )  # (B, 1, L, L) float32
+
+
 class MotorTaskHead(nn.Module):
     def __init__(
         self,
@@ -873,18 +900,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             and getattr(self.config, "vs_token_id", None) is not None
         ):
             if is_full_forward:
-                att_ids = getattr(self.config, "att_token_ids", None)
-                att_ids_tensor = (
-                    torch.tensor(att_ids, dtype=input_ids.dtype, device=input_ids.device)
-                    if att_ids
-                    else None
-                )
-                local_mask = build_local_attention_mask(
-                    input_ids,
-                    self.config.vs_token_id,
-                    self.config.local_attention_n_prev_visits,
-                    attention_mask=raw_attention_mask,
-                    att_token_ids=att_ids_tensor,
+                local_mask = _build_local_mask_from_config(
+                    self.config, input_ids, raw_attention_mask
                 )  # (B, 1, L, L) float32
             else:
                 # Decode: raw_attention_mask encodes visit-window constraint already.
@@ -1378,18 +1395,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             and getattr(self.config, "vs_token_id", None) is not None
         ):
             full_input_ids = input_ids  # (B, full_L) — before KV-cache truncation
-            att_token_ids_list = getattr(self.config, "att_token_ids", [])
-            att_ids_tensor = (
-                torch.tensor(att_token_ids_list, dtype=full_input_ids.dtype, device=full_input_ids.device)
-                if att_token_ids_list else None
-            )
             # build_local_attention_mask returns (B, 1, full_L, full_L); the last
             # row [-1] is the window for the new query token (0.0 = allowed, NEG_INF = blocked).
-            local_mask = build_local_attention_mask(
-                full_input_ids,
-                self.config.vs_token_id,
-                getattr(self.config, "local_attention_n_prev_visits", 5),
-                att_token_ids=att_ids_tensor,
+            local_mask = _build_local_mask_from_config(
+                self.config, full_input_ids
             )  # (B, 1, full_L, full_L)
             local_window = (local_mask[:, 0, -1, :] == 0).long()  # (B, full_L)
             # attention_mask may be shorter than full_input_ids if causal_sfm
@@ -1624,10 +1633,21 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 dtype=input_ids.dtype,
             )
             linear_prob_hidden_states = self.cehrgpt.wte(linear_prob_input_ids)
+            # When use_local_attention is configured, build the same 4D visit-local
+            # additive mask and pass it as encoder_attention_mask so that each probe
+            # token cross-attends only to encoder states within its visit window.
+            linear_prob_encoder_mask = attention_mask
+            if (
+                getattr(self.config, "use_local_attention", False)
+                and getattr(self.config, "vs_token_id", None) is not None
+            ):
+                linear_prob_encoder_mask = _build_local_mask_from_config(
+                    self.config, input_ids, attention_mask
+                ).to(hidden_states.dtype)  # (B, 1, L, L)
             linear_prob_hidden_states = self.linear_prob(
                 linear_prob_hidden_states,
                 all_hidden_states,
-                attention_mask,
+                linear_prob_encoder_mask,
             )
 
         loss = None
