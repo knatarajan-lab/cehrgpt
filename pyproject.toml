@@ -48,3 +48,6 @@ dev = [
 flash_attn = [
     "flash_attn"
 ]
+xformers = [
+    "xformers>=0.0.26,<0.0.28"
+]
