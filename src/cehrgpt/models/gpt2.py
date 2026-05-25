@@ -294,10 +294,29 @@ class GPT2FlashAttention(GPT2Attention):
                 query_xa = query.permute(0, 2, 1, 3)
                 key_xa = key.permute(0, 2, 1, 3)
                 value_xa = value.permute(0, 2, 1, 3)
-                # xformers requires attn_bias shape (B, H, Lq, Lk); expand from (B, 1, L, L).
-                attn_bias = attention_mask.to(query.dtype).expand(
-                    -1, self.num_heads, -1, -1
-                )
+                # xformers cutlass kernel requires attn_bias.stride(-2) % 8 == 0,
+                # which means the last dimension (Lk) of the underlying allocation must
+                # be a multiple of 8. When Lk is not aligned we allocate a padded buffer,
+                # fill it with NEG_INF, copy the mask in, then slice back to Lk — the
+                # slice preserves stride(-2) = Lk_padded (a multiple of 8) while
+                # presenting shape (B, H, Lq, Lk) to xformers.
+                B, _, Lq, Lk = attention_mask.shape
+                pad_len = (-Lk) % 8  # 0 when already aligned
+                if pad_len > 0:
+                    neg_inf = torch.finfo(query.dtype).min
+                    attn_bias = attention_mask.new_full(
+                        (B, self.num_heads, Lq, Lk + pad_len),
+                        fill_value=neg_inf,
+                        dtype=query.dtype,
+                    )
+                    attn_bias[:, :, :, :Lk] = attention_mask.to(query.dtype).expand(
+                        -1, self.num_heads, -1, -1
+                    )
+                    attn_bias = attn_bias[:, :, :, :Lk]  # stride(-2)=Lk+pad_len (aligned)
+                else:
+                    attn_bias = attention_mask.to(query.dtype).expand(
+                        -1, self.num_heads, -1, -1
+                    ).contiguous()
                 attn_output = xops.memory_efficient_attention(
                     query_xa,
                     key_xa,
