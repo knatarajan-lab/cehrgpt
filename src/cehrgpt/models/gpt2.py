@@ -23,6 +23,26 @@ from cehrgpt.models.activations import RMSNorm
 logger = logging.get_logger("transformers")
 
 
+def _xformers_is_available_for(tensor: "torch.Tensor", head_dim: int) -> bool:
+    """Return True only when xformers can handle this query tensor.
+
+    xformers memory-efficient attention requires:
+      - xformers installed
+      - CUDA device
+      - float16 or bfloat16 dtype
+      - head_dim >= 32
+      - head_dim divisible by 8
+    Falls back to torch SDPA otherwise (e.g. CPU integration tests).
+    """
+    return (
+            HAS_XFORMERS
+            and tensor.is_cuda
+            and tensor.dtype in (torch.float16, torch.bfloat16)
+            and head_dim >= 32
+            and head_dim % 8 == 0
+    )
+
+
 def is_sample_pack(attention_mask: torch.Tensor) -> bool:
     """
     Determines whether any sequence in the batch is likely sample-packed.
@@ -296,7 +316,9 @@ class GPT2FlashAttention(GPT2Attention):
                 )
             # Use xformers or torch SDPA — both accept an additive attn_bias/attn_mask.
             # flash_attn_func / flash_attn_varlen_func do not support arbitrary attn_bias.
-            if HAS_XFORMERS:
+            # xformers requires CUDA, float16/bfloat16, head_dim ≥ 32, and head_dim % 8 == 0.
+            # Fall back to SDPA when any of those constraints are not met (e.g. CPU tests).
+            if _xformers_is_available_for(query, self.head_dim):
                 # xformers expects (B, L, H, D); query/key/value are (B, H, L, D).
                 query_xa = query.permute(0, 2, 1, 3)
                 key_xa = key.permute(0, 2, 1, 3)
@@ -340,7 +362,8 @@ class GPT2FlashAttention(GPT2Attention):
                 attn_output = attn_output.permute(0, 2, 1, 3)
                 attn_weights = None
             else:
-                # xformers not installed; use torch SDPA which accepts an additive attn_mask.
+                # xformers not available or not suitable for this device/dtype/head_dim;
+                # use torch SDPA which accepts an additive attn_mask.
                 # attention_mask already encodes causal + local constraints, so is_causal=False
                 # avoids double-applying the causal mask.
                 attn_output = torch.nn.functional.scaled_dot_product_attention(
