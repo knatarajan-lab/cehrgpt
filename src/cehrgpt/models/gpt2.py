@@ -270,11 +270,14 @@ class GPT2FlashAttention(GPT2Attention):
         # (0.0 / NEG_INF) built by CEHRGPT2Model.forward. Use xformers (or vanilla
         # _attn as fallback) so that the exact visit-local bias is applied.
         # flash_attn_func / flash_attn_varlen_func do not support arbitrary attn_bias.
+        # NOTE: local attention only applies to self-attention. In cross-attention
+        # (encoder_hidden_states is not None) the encoder_attention_mask is a standard
+        # 2-D padding mask and must go through the regular flash-attention path.
         if self.reorder_and_upcast_attn:
             attn_output, attn_weights = self._upcast_and_reordered_attn(
                 query, key, value, attention_mask, head_mask
             )
-        elif getattr(self.config, "use_local_attention", False):
+        elif getattr(self.config, "use_local_attention", False) and encoder_hidden_states is None:
             # attention_mask must be the 4D additive local mask (B, 1, L, L) built by
             # CEHRGPT2Model.forward. A non-4D mask means vs_token_id was not set in the
             # config, so the local mask was never constructed — raise early rather than
