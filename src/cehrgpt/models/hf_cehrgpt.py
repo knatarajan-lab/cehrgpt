@@ -32,7 +32,7 @@ from cehrgpt.gpt_utils import (
 )
 from cehrgpt.models.activations import RMSNorm
 from cehrgpt.models.config import CEHRGPTConfig
-from cehrgpt.models.gpt2 import GPT2Block, is_sample_pack
+from cehrgpt.models.gpt2 import GPT2Block, HAS_XFORMERS, is_sample_pack
 from cehrgpt.models.hf_modeling_outputs import (
     CehrGptCausalLMOutput,
     CehrGptGenerateDecoderOnlyOutput,
@@ -215,6 +215,32 @@ def _build_local_mask_from_config(
         attention_mask=attention_mask,
         att_token_ids=att_ids_tensor,
     )  # (B, 1, L, L) float32
+
+
+def _expand_local_mask_for_xformers(
+    local_mask: torch.Tensor,
+    num_heads: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Expand a (B, 1, Lq, Lk) local mask to (B, H, Lq, Lk) for xformers.
+
+    Allocates a single contiguous buffer with the Lk dimension padded to a
+    multiple of 8 (required by the xformers cutlass kernel), copies the mask
+    in, then slices back to the original Lk so that ``stride(-2)`` is aligned
+    while the visible shape is (B, H, Lq, Lk).
+    """
+    local_mask = local_mask.to(dtype)
+    B, _, Lq, Lk = local_mask.shape
+    pad_len = (-Lk) % 8
+    if pad_len > 0:
+        neg_inf = torch.finfo(dtype).min
+        aligned = local_mask.new_full(
+            (B, num_heads, Lq, Lk + pad_len), fill_value=neg_inf
+        )
+        aligned[:, :, :, :Lk] = local_mask.expand(-1, num_heads, -1, -1)
+        return aligned[:, :, :, :Lk]  # stride(-2) = Lk + pad_len (aligned)
+    else:
+        return local_mask.expand(-1, num_heads, -1, -1).contiguous()
 
 
 class MotorTaskHead(nn.Module):
@@ -912,7 +938,20 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             if is_flash:
                 # Replace binary attention_mask with the 4D additive local mask.
                 # GPT2FlashAttention detects dim==4 and routes to xformers/vanilla.
-                attention_mask = local_mask.to(self.dtype)
+                # When xformers is available and this is a full forward pass (not
+                # single-step decode), pre-expand to (B, H, L, L) with alignment
+                # padding once so all layers share a single allocation rather than
+                # each allocating their own (B, H, L, L) buffer.
+                if HAS_XFORMERS and is_full_forward:
+                    # Pre-expand to (B, H, L, L) with alignment once so all layers
+                    # share a single allocation rather than each allocating their own.
+                    attention_mask = _expand_local_mask_for_xformers(
+                        local_mask, self.config.n_head, self.dtype
+                    )
+                else:
+                    # Decode path (B, 1, 1, KV_len) or no xformers: keep as-is;
+                    # GPT2FlashAttention will expand per-layer or route to SDPA.
+                    attention_mask = local_mask.to(self.dtype)
             else:
                 # Eager: add local mask into the existing additive attention_mask.
                 attention_mask = attention_mask + local_mask.to(attention_mask.dtype)
@@ -1633,10 +1672,29 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 dtype=input_ids.dtype,
             )
             linear_prob_hidden_states = self.cehrgpt.wte(linear_prob_input_ids)
+            # Build the visit-local encoder_attention_mask for the linear probe.
+            # When xformers is available, pre-expand to (B, H, L, L) once so all
+            # linear_prob layers share one allocation instead of each allocating
+            # their own (B, H, L, L) buffer.
+            linear_prob_encoder_mask = attention_mask
+            if (
+                getattr(self.config, "use_local_attention", False)
+                and getattr(self.config, "vs_token_id", None) is not None
+            ):
+                local_mask = _build_local_mask_from_config(
+                    self.config, input_ids, attention_mask
+                )  # (B, 1, L, L)
+                linear_prob_encoder_mask = (
+                    _expand_local_mask_for_xformers(
+                        local_mask, self.config.n_head, hidden_states.dtype
+                    )
+                    if HAS_XFORMERS
+                    else local_mask.to(hidden_states.dtype)
+                )
             linear_prob_hidden_states = self.linear_prob(
                 linear_prob_hidden_states,
                 all_hidden_states,
-                attention_mask,
+                linear_prob_encoder_mask,
             )
 
         loss = None
