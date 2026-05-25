@@ -7,7 +7,8 @@ usage() {
     echo "Options:"
     echo "  --base_dir=DIR                 Base directory containing cohorts (required)"
     echo "  --dataset_prepared_path=PATH   Path to prepared dataset (required)"
-    echo "  --model_path=PATH              Path to pre-trained model and tokenizer (required)"
+    echo "  --model_path=PATH              Path to pre-trained model (required)
+  --tokenizer_path=PATH          Path to tokenizer (optional, defaults to model_path)"
     echo "  --preprocessing_workers=NUM    Number of preprocessing workers (required)"
     echo "  --batch_size=NUM               Batch size for evaluation (required)"
     echo "  --output_dir=DIR               Output directory for results (required)"
@@ -40,6 +41,7 @@ REFRESH_PROCESSED_DATASET="false"
 IS_DATA_IN_MEDS="false"
 TOKENIZED_FULL_DATASET_PATH=""
 OBSERVATION_WINDOW=""
+TOKENIZER_PATH=""
 
 # Parse command line arguments
 for arg in "$@"; do
@@ -52,6 +54,9 @@ for arg in "$@"; do
             ;;
         --model_path=*)
             MODEL_PATH="${arg#*=}"
+            ;;
+        --tokenizer_path=*)
+            TOKENIZER_PATH="${arg#*=}"
             ;;
         --preprocessing_workers=*)
             PREPROCESSING_WORKERS="${arg#*=}"
@@ -124,6 +129,14 @@ if [ ! -d "$MODEL_PATH" ]; then
     exit 1
 fi
 
+# Default TOKENIZER_PATH to MODEL_PATH if not provided
+if [ -z "$TOKENIZER_PATH" ]; then
+    TOKENIZER_PATH="$MODEL_PATH"
+elif [ ! -d "$TOKENIZER_PATH" ]; then
+    echo "Error: Tokenizer path does not exist: $TOKENIZER_PATH"
+    exit 1
+fi
+
 if [ -n "$TOKENIZED_FULL_DATASET_PATH" ] && [ ! -d "$TOKENIZED_FULL_DATASET_PATH" ]; then
     echo "Error: Tokenized full dataset path does not exist: $TOKENIZED_FULL_DATASET_PATH"
     exit 1
@@ -190,6 +203,7 @@ log "Configuration:"
 log "  --base_dir=$BASE_DIR"
 log "  --dataset_prepared_path=$DATASET_PREPARED_PATH"
 log "  --model_path=$MODEL_PATH"
+log "  --tokenizer_path=$TOKENIZER_PATH"
 log "  --preprocessing_workers=$PREPROCESSING_WORKERS"
 log "  --batch_size=$BATCH_SIZE"
 log "  --output_dir=$OUTPUT_DIR"
@@ -266,7 +280,7 @@ while read -r cohort_name; do
         --test_data_folder \"$BASE_DIR/$cohort_name/test/\" \
         --dataset_prepared_path \"$DATASET_PREPARED_PATH\" \
         --model_name_or_path \"$MODEL_PATH\" \
-        --tokenizer_name_or_path \"$MODEL_PATH\" \
+        --tokenizer_name_or_path \"$TOKENIZER_PATH\" \
         --output_dir \"$output_dir\" \
         --preprocessing_num_workers \"$PREPROCESSING_WORKERS\" \
         --per_device_eval_batch_size \"$BATCH_SIZE\" \
