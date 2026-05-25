@@ -274,14 +274,20 @@ class GPT2FlashAttention(GPT2Attention):
             attn_output, attn_weights = self._upcast_and_reordered_attn(
                 query, key, value, attention_mask, head_mask
             )
-        elif (
-            getattr(self.config, "use_local_attention", False)
-            and attention_mask is not None
-            and attention_mask.dim() == 4
-        ):
-            # attention_mask is the 4D additive local mask (B, 1, L, L) built by
-            # CEHRGPT2Model.forward. Use xformers or torch SDPA — both accept an
-            # additive attn_bias/attn_mask and do not require it to be causal-only.
+        elif getattr(self.config, "use_local_attention", False):
+            # attention_mask must be the 4D additive local mask (B, 1, L, L) built by
+            # CEHRGPT2Model.forward. A non-4D mask means vs_token_id was not set in the
+            # config, so the local mask was never constructed — raise early rather than
+            # silently passing a binary mask to xformers as attn_bias.
+            if attention_mask is None or attention_mask.dim() != 4:
+                raise RuntimeError(
+                    f"use_local_attention=True requires a 4D additive attention mask "
+                    f"(B, 1, L, L) but received shape "
+                    f"{attention_mask.shape if attention_mask is not None else None}. "
+                    f"Ensure vs_token_id is set in the model config so that "
+                    f"build_local_attention_mask is called in CEHRGPT2Model.forward."
+                )
+            # Use xformers or torch SDPA — both accept an additive attn_bias/attn_mask.
             # flash_attn_func / flash_attn_varlen_func do not support arbitrary attn_bias.
             if HAS_XFORMERS:
                 # xformers expects (B, L, H, D); query/key/value are (B, H, L, D).
@@ -313,9 +319,7 @@ class GPT2FlashAttention(GPT2Attention):
                 )
                 attn_weights = None
         else:
-            # Standard flash attention path: use_local_attention is False, or the 4D
-            # local mask was not built (e.g. vs_token_id not set). Falls back to
-            # flash_attn_varlen_func with binary attention_mask for padding handling.
+            # Standard flash attention path (use_local_attention is False).
             attn_output = self._flash_attention_forward(
                 query,
                 key,
