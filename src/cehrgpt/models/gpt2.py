@@ -294,11 +294,15 @@ class GPT2FlashAttention(GPT2Attention):
                 query_xa = query.permute(0, 2, 1, 3)
                 key_xa = key.permute(0, 2, 1, 3)
                 value_xa = value.permute(0, 2, 1, 3)
+                # xformers requires attn_bias shape (B, H, Lq, Lk); expand from (B, 1, L, L).
+                attn_bias = attention_mask.to(query.dtype).expand(
+                    -1, self.num_heads, -1, -1
+                )
                 attn_output = xops.memory_efficient_attention(
                     query_xa,
                     key_xa,
                     value_xa,
-                    attn_bias=attention_mask.to(query.dtype),
+                    attn_bias=attn_bias,
                     p=self.attn_dropout.p if self.training else 0.0,
                     scale=None,
                 )
