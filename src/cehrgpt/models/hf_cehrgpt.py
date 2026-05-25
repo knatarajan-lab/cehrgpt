@@ -1633,21 +1633,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 dtype=input_ids.dtype,
             )
             linear_prob_hidden_states = self.cehrgpt.wte(linear_prob_input_ids)
-            # When use_local_attention is configured, build the same 4D visit-local
-            # additive mask and pass it as encoder_attention_mask so that each probe
-            # token cross-attends only to encoder states within its visit window.
-            linear_prob_encoder_mask = attention_mask
-            if (
-                getattr(self.config, "use_local_attention", False)
-                and getattr(self.config, "vs_token_id", None) is not None
-            ):
-                linear_prob_encoder_mask = _build_local_mask_from_config(
-                    self.config, input_ids, attention_mask
-                ).to(hidden_states.dtype)  # (B, 1, L, L)
             linear_prob_hidden_states = self.linear_prob(
                 linear_prob_hidden_states,
                 all_hidden_states,
-                linear_prob_encoder_mask,
+                attention_mask,
             )
 
         loss = None
