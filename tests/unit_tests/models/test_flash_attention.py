@@ -121,10 +121,11 @@ class TestGPT2FlashAttentionLocalPath(unittest.TestCase):
     # 3. No attention mask (attn_mask=None)
     # ------------------------------------------------------------------
     def test_output_shape_no_mask(self):
-        """Local-attention path with attention_mask=None still produces correct shape."""
+        """Local-attention path requires a 4D additive mask; verify correct shape with causal mask."""
         hidden_states = self._hidden()
+        attn_mask = _causal_mask(self.B, self.L)
 
-        attn_output, _ = self.attn(hidden_states, attention_mask=None)
+        attn_output, _ = self.attn(hidden_states, attention_mask=attn_mask)
 
         self.assertEqual(attn_output.shape, (self.B, self.L, self.N_EMB))
         self.assertFalse(torch.isnan(attn_output).any())
