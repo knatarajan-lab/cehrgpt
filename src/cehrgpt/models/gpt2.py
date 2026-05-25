@@ -146,7 +146,6 @@ class GPT2AttentionRoPE(GPT2Attention):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
-        local_attention_mask: Optional[torch.FloatTensor] = None,  # unused in eager path
     ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor]], ...]:
 
         if encoder_hidden_states is not None:
@@ -230,7 +229,6 @@ class GPT2FlashAttention(GPT2Attention):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
-        local_attention_mask: Optional[torch.FloatTensor] = None,
     ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor]], ...]:
 
         # Prepare query, key, and value
@@ -268,18 +266,17 @@ class GPT2FlashAttention(GPT2Attention):
         else:
             present = None
 
-        # Apply Flash Attention Forward
+        # When use_local_attention is True, attention_mask is a 4D additive tensor
+        # (0.0 / NEG_INF) built by CEHRGPT2Model.forward. Use xformers (or vanilla
+        # _attn as fallback) so that the exact visit-local bias is applied.
+        # flash_attn_func / flash_attn_varlen_func do not support arbitrary attn_bias.
         if self.reorder_and_upcast_attn:
             attn_output, attn_weights = self._upcast_and_reordered_attn(
                 query, key, value, attention_mask, head_mask
             )
-        elif local_attention_mask is not None:
-            # flash_attn_func / flash_attn_varlen_func do not support attn_bias.
-            # Use xformers memory_efficient_attention when available, which accepts an
-            # arbitrary attn_bias of shape (B, 1, L, L) with 0.0 / NEG_INF values.
-            # local_attention_mask already encodes causal + visit-window + cross-sample blocking.
+        elif getattr(self.config, "use_local_attention", False):
             if HAS_XFORMERS:
-                # xformers expects (B, L, H, D); query/key/value are currently (B, H, L, D).
+                # xformers expects (B, L, H, D); query/key/value are (B, H, L, D).
                 query_xa = query.permute(0, 2, 1, 3)
                 key_xa = key.permute(0, 2, 1, 3)
                 value_xa = value.permute(0, 2, 1, 3)
@@ -287,7 +284,7 @@ class GPT2FlashAttention(GPT2Attention):
                     query_xa,
                     key_xa,
                     value_xa,
-                    attn_bias=local_attention_mask.to(query.dtype),
+                    attn_bias=attention_mask.to(query.dtype) if attention_mask is not None else None,
                     p=self.attn_dropout.p if self.training else 0.0,
                     scale=None,
                 )
@@ -295,18 +292,20 @@ class GPT2FlashAttention(GPT2Attention):
                 attn_output = attn_output.permute(0, 2, 1, 3)
                 attn_weights = None
             else:
-                # xformers not installed; fall back to standard scaled dot-product attention.
-                # In the flash path, attention_mask is binary (B, L); convert to additive (B, 1, 1, L).
-                if attention_mask is not None:
-                    additive = (
-                        1.0 - attention_mask[:, None, None, :].to(dtype=query.dtype)
-                    ) * torch.finfo(query.dtype).min
-                    combined_mask = additive + local_attention_mask
-                else:
-                    combined_mask = local_attention_mask
-                attn_output, attn_weights = self._attn(query, key, value, combined_mask, head_mask)
+                # xformers not installed; use torch SDPA which accepts an additive attn_mask.
+                # attention_mask is already 4D additive (B, 1, L, L) encoding causal + local
+                # constraints, so is_causal=False avoids double-applying the causal mask.
+                attn_output = torch.nn.functional.scaled_dot_product_attention(
+                    query,
+                    key,
+                    value,
+                    attn_mask=attention_mask.to(query.dtype) if attention_mask is not None else None,
+                    dropout_p=self.attn_dropout.p if self.training else 0.0,
+                    is_causal=False,
+                )
+                attn_weights = None
         else:
-            # Flash Attention forward pass
+            # Standard flash attention path (use_local_attention is False).
             attn_output = self._flash_attention_forward(
                 query,
                 key,
@@ -504,7 +503,10 @@ class GPT2Block(nn.Module):
         inner_dim = config.n_inner if config.n_inner is not None else 4 * hidden_size
         attention_class = (
             GPT2FlashAttention
-            if getattr(config, "_attn_implementation", "eager") == "flash_attention_2"
+            if (
+                getattr(config, "_attn_implementation", "eager") == "flash_attention_2"
+                or getattr(config, "use_local_attention", False)
+            )
             else GPT2AttentionRoPE
         )
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
@@ -540,7 +542,6 @@ class GPT2Block(nn.Module):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
-        local_attention_mask: Optional[torch.FloatTensor] = None,
     ) -> Union[
         Tuple[torch.Tensor],
         Optional[Tuple[torch.Tensor, Tuple[torch.FloatTensor, ...]]],
@@ -555,7 +556,6 @@ class GPT2Block(nn.Module):
             head_mask=head_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            local_attention_mask=local_attention_mask,
         )
         attn_output = attn_outputs[0]  # output_attn: a, present, (attentions)
         outputs = attn_outputs[1:]

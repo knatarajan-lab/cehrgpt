@@ -14,7 +14,10 @@ class LinearProbBlock(nn.Module):
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         attention_class = (
             GPT2FlashAttention
-            if getattr(config, "_attn_implementation", "eager") == "flash_attention_2"
+            if (
+                getattr(config, "_attn_implementation", "eager") == "flash_attention_2"
+                or getattr(config, "use_local_attention", False)
+            )
             else GPT2AttentionRoPE
         )
         self.crossattention = attention_class(

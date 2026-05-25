@@ -138,7 +138,11 @@ def build_local_attention_mask(
         )
         # Forward-fill the offset within each segment via cummax (offsets are
         # non-decreasing because vs_cumsum is non-decreasing).
-        seg_offset = seg_offset.cummax(dim=-1).values         # (B, L)
+        # cummax is not supported on MPS; fall back to CPU for that device.
+        if device.type == "mps":
+            seg_offset = seg_offset.cpu().cummax(dim=-1).values.to(device)
+        else:
+            seg_offset = seg_offset.cummax(dim=-1).values          # (B, L)
         visit_idx = vs_cumsum - seg_offset                    # (B, L) — resets per segment
 
         # Segment IDs: used to restrict the "demographics always visible" rule
@@ -850,33 +854,51 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
 
         raw_attention_mask = attention_mask  # save before conversion for local-attention window
         attention_mask = self.prepare_attention_mask(input_ids, attention_mask)
-        # Build visit-local attention mask when configured.
-        # Skipped during KV-cache generation (is_full_forward=False).
-        # For eager attention: fold into attention_mask additive bias.
-        # For flash attention: pass separately as attn_bias to each block.
-        local_mask = None
+        # Build visit-local attention mask when configured and fold it into attention_mask.
+        # When use_local_attention is True, flash attention is never used; xformers (or
+        # vanilla _attn) handles the mask instead.
+        # For the flash/xformers path the local mask is a 4D additive tensor so that
+        # GPT2FlashAttention can detect it (attention_mask.dim() == 4) and route to xformers.
+        # - Prefill: build_local_attention_mask returns (B, 1, L, L); use as attention_mask.
+        # - Decode (flash path): prepare_inputs_for_generation already zeroed out-of-window
+        #   positions; convert binary raw_attention_mask to additive (B, 1, 1, KV_len).
+        # - Decode/prefill (eager path): fold the local mask into the existing additive
+        #   attention_mask so _attn receives a single combined bias.
+        is_flash = (
+            getattr(self.config, "_attn_implementation", "eager") == "flash_attention_2"
+        )
         if (
             getattr(self.config, "use_local_attention", False)
-            and is_full_forward
-            and attention_mask is not None
+            and raw_attention_mask is not None
             and getattr(self.config, "vs_token_id", None) is not None
         ):
-            att_ids = getattr(self.config, "att_token_ids", None)
-            att_ids_tensor = (
-                torch.tensor(att_ids, dtype=input_ids.dtype, device=input_ids.device)
-                if att_ids
-                else None
-            )
-            local_mask = build_local_attention_mask(
-                input_ids,
-                self.config.vs_token_id,
-                self.config.local_attention_n_prev_visits,
-                attention_mask=raw_attention_mask,
-                att_token_ids=att_ids_tensor,
-            )  # (B, 1, L, L) float32
-            if getattr(self.config, "_attn_implementation", "eager") != "flash_attention_2":
+            if is_full_forward:
+                att_ids = getattr(self.config, "att_token_ids", None)
+                att_ids_tensor = (
+                    torch.tensor(att_ids, dtype=input_ids.dtype, device=input_ids.device)
+                    if att_ids
+                    else None
+                )
+                local_mask = build_local_attention_mask(
+                    input_ids,
+                    self.config.vs_token_id,
+                    self.config.local_attention_n_prev_visits,
+                    attention_mask=raw_attention_mask,
+                    att_token_ids=att_ids_tensor,
+                )  # (B, 1, L, L) float32
+            else:
+                # Decode: raw_attention_mask encodes visit-window constraint already.
+                local_mask = (
+                    1.0 - raw_attention_mask[:, None, None, :].to(self.dtype)
+                ) * torch.finfo(self.dtype).min  # (B, 1, 1, KV_len)
+
+            if is_flash:
+                # Replace binary attention_mask with the 4D additive local mask.
+                # GPT2FlashAttention detects dim==4 and routes to xformers/vanilla.
+                attention_mask = local_mask.to(self.dtype)
+            else:
+                # Eager: add local mask into the existing additive attention_mask.
                 attention_mask = attention_mask + local_mask.to(attention_mask.dtype)
-                local_mask = None  # eager uses attention_mask directly
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
         # attention_probs has shape bsz x n_heads x N x N
@@ -987,7 +1009,6 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                     None,
                     use_cache,
                     output_attentions,
-                    local_mask,
                 )
             else:
                 outputs = block(
@@ -1000,7 +1021,6 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                     encoder_attention_mask=None,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
-                    local_attention_mask=local_mask,
                 )
 
             hidden_states = outputs[0]
