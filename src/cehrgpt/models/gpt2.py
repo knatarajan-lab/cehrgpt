@@ -274,7 +274,15 @@ class GPT2FlashAttention(GPT2Attention):
             attn_output, attn_weights = self._upcast_and_reordered_attn(
                 query, key, value, attention_mask, head_mask
             )
-        elif getattr(self.config, "use_local_attention", False):
+        elif (
+            getattr(self.config, "use_local_attention", False)
+            and attention_mask is not None
+            and attention_mask.dim() == 4
+        ):
+            # attention_mask is the 4D additive local mask (B, 1, L, L) built by
+            # CEHRGPT2Model.forward. Use xformers or torch SDPA — both accept an
+            # additive attn_bias/attn_mask and do not require it to be causal-only.
+            # flash_attn_func / flash_attn_varlen_func do not support arbitrary attn_bias.
             if HAS_XFORMERS:
                 # xformers expects (B, L, H, D); query/key/value are (B, H, L, D).
                 query_xa = query.permute(0, 2, 1, 3)
@@ -284,7 +292,7 @@ class GPT2FlashAttention(GPT2Attention):
                     query_xa,
                     key_xa,
                     value_xa,
-                    attn_bias=attention_mask.to(query.dtype) if attention_mask is not None else None,
+                    attn_bias=attention_mask.to(query.dtype),
                     p=self.attn_dropout.p if self.training else 0.0,
                     scale=None,
                 )
@@ -293,19 +301,21 @@ class GPT2FlashAttention(GPT2Attention):
                 attn_weights = None
             else:
                 # xformers not installed; use torch SDPA which accepts an additive attn_mask.
-                # attention_mask is already 4D additive (B, 1, L, L) encoding causal + local
-                # constraints, so is_causal=False avoids double-applying the causal mask.
+                # attention_mask already encodes causal + local constraints, so is_causal=False
+                # avoids double-applying the causal mask.
                 attn_output = torch.nn.functional.scaled_dot_product_attention(
                     query,
                     key,
                     value,
-                    attn_mask=attention_mask.to(query.dtype) if attention_mask is not None else None,
+                    attn_mask=attention_mask.to(query.dtype),
                     dropout_p=self.attn_dropout.p if self.training else 0.0,
                     is_causal=False,
                 )
                 attn_weights = None
         else:
-            # Standard flash attention path (use_local_attention is False).
+            # Standard flash attention path: use_local_attention is False, or the 4D
+            # local mask was not built (e.g. vs_token_id not set). Falls back to
+            # flash_attn_varlen_func with binary attention_mask for padding handling.
             attn_output = self._flash_attention_forward(
                 query,
                 key,
