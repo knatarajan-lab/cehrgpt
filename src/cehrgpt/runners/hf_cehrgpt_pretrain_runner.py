@@ -261,6 +261,12 @@ def load_and_create_model(
     LOG.info("Model time_token_vocab_size: %s", getattr(model.config, "time_token_vocab_size", 0))
     LOG.info("Model motor_tte_vocab_size: %s", getattr(model.config, "motor_tte_vocab_size", 0))
     LOG.info("Model age_at_vs_vocab_size: %s", getattr(model.config, "age_at_vs_vocab_size", 0))
+    LOG.info("Model use_local_attention: %s", getattr(model.config, "use_local_attention", False))
+    if getattr(model.config, "use_local_attention", False):
+        LOG.info(
+            "Model local_attention_n_prev_visits: %s",
+            getattr(model.config, "local_attention_n_prev_visits", None),
+        )
 
     if model.config.torch_dtype == torch.bfloat16:
         return model.bfloat16()

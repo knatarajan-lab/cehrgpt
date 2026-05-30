@@ -273,14 +273,14 @@ class CehrGPTArguments:
     include_age_at_vs_prediction: Optional[bool] = dataclasses.field(
         default=False,
         metadata={
-            "help": "A flag to include the age-at-VE reconstruction learning objective, "
-            "which predicts patient age at each [VE] token using cross-entropy loss. "
+            "help": "A flag to include the age-at-VS reconstruction learning objective, "
+            "which predicts patient age at each [VS] token using cross-entropy loss. "
             "The age vocab size is derived automatically from the tokenizer vocabulary."
         },
     )
     age_at_vs_prediction_loss_weight: Optional[float] = dataclasses.field(
         default=1.0,
-        metadata={"help": "Loss weight for the age-at-VE prediction objective."},
+        metadata={"help": "Loss weight for the age-at-VS prediction objective."},
     )
     aux_loss_warmup_steps: int = dataclasses.field(
         default=0,

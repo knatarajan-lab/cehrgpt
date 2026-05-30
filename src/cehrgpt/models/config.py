@@ -231,9 +231,9 @@ class CEHRGPTConfig(PretrainedConfig):
         self.include_age_at_vs_prediction = include_age_at_vs_prediction
         self.age_at_vs_vocab_size = age_at_vs_vocab_size
         self.age_at_vs_prediction_loss_weight = age_at_vs_prediction_loss_weight
-        if self.include_age_at_vs_prediction and not ve_token_id:
+        if self.include_age_at_vs_prediction and not vs_token_id:
             raise RuntimeError(
-                "ve_token_id must be provided when include_age_at_vs_prediction is True"
+                "vs_token_id must be provided when include_age_at_vs_prediction is True"
             )
         if self.include_motor_time_to_event and not linear_prob_token_id:
             raise RuntimeError(
