@@ -258,6 +258,29 @@ def _expand_local_mask_for_xformers(
         return local_mask.expand(-1, num_heads, -1, -1).contiguous()
 
 
+def _align_local_mask_for_xformers(
+    local_mask: torch.Tensor,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Align a (B, 1, Lq, Lk) local mask for xformers without expanding heads.
+
+    xformers broadcasts the head dimension from 1 to H internally, so there is
+    no need to materialise a full (B, H, Lq, Lk) tensor — keeping (B, 1, Lq, Lk)
+    saves H× memory.  The only requirement is that stride(-2) % 8 == 0 for the
+    xformers cutlass kernel, which is achieved by padding Lk to the next multiple
+    of 8 and slicing back.
+    """
+    local_mask = local_mask.to(dtype)
+    B, _, Lq, Lk = local_mask.shape
+    pad_len = (-Lk) % 8
+    if pad_len > 0:
+        neg_inf = torch.finfo(dtype).min
+        aligned = local_mask.new_full((B, 1, Lq, Lk + pad_len), fill_value=neg_inf)
+        aligned[:, :, :, :Lk] = local_mask
+        return aligned[:, :, :, :Lk]  # stride(-2) = Lk + pad_len (aligned)
+    return local_mask.contiguous()
+
+
 class MotorTaskHead(nn.Module):
     def __init__(
         self,
@@ -958,10 +981,10 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 # padding once so all layers share a single allocation rather than
                 # each allocating their own (B, H, L, L) buffer.
                 if HAS_XFORMERS and is_full_forward:
-                    # Pre-expand to (B, H, L, L) with alignment once so all layers
-                    # share a single allocation rather than each allocating their own.
-                    attention_mask = _expand_local_mask_for_xformers(
-                        local_mask, self.config.n_head, _effective_compute_dtype(self.dtype)
+                    # Align to (B, 1, L, L) once; xformers broadcasts over heads
+                    # internally, saving H× memory vs a full (B, H, L, L) expansion.
+                    attention_mask = _align_local_mask_for_xformers(
+                        local_mask, _effective_compute_dtype(self.dtype)
                     )
                 else:
                     # Decode path (B, 1, 1, KV_len) or no xformers: keep as-is;
@@ -1700,9 +1723,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     self.config, input_ids, attention_mask
                 )  # (B, 1, L, L)
                 linear_prob_encoder_mask = (
-                    _expand_local_mask_for_xformers(
+                    _align_local_mask_for_xformers(
                         local_mask,
-                        self.config.n_head,
                         _effective_compute_dtype(hidden_states.dtype),
                     )
                     if HAS_XFORMERS

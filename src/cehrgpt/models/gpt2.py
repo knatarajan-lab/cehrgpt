@@ -350,25 +350,22 @@ class GPT2FlashAttention(GPT2Attention):
                         else:
                             attn_bias = attention_mask.to(query.dtype).contiguous()
                 else:
-                    # (B, 1, Lq, Lk) — expand with xformers cutlass alignment.
-                    # stride(-2) of the underlying allocation must be a multiple of 8.
+                    # (B, 1, Lq, Lk) — keep head dimension as 1; xformers broadcasts
+                    # over heads internally, avoiding a H× memory allocation per layer.
+                    # Only ensure cutlass alignment: stride(-2) must be a multiple of 8.
                     B, _, Lq, Lk = attention_mask.shape
                     pad_len = (-Lk) % 8  # 0 when already aligned
                     if pad_len > 0:
                         neg_inf = torch.finfo(query.dtype).min
                         attn_bias = attention_mask.new_full(
-                            (B, self.num_heads, Lq, Lk + pad_len),
+                            (B, 1, Lq, Lk + pad_len),
                             fill_value=neg_inf,
                             dtype=query.dtype,
                         )
-                        attn_bias[:, :, :, :Lk] = attention_mask.to(query.dtype).expand(
-                            -1, self.num_heads, -1, -1
-                        )
+                        attn_bias[:, :, :, :Lk] = attention_mask.to(query.dtype)
                         attn_bias = attn_bias[:, :, :, :Lk]  # stride(-2)=Lk+pad_len
                     else:
-                        attn_bias = attention_mask.to(query.dtype).expand(
-                            -1, self.num_heads, -1, -1
-                        ).contiguous()
+                        attn_bias = attention_mask.to(query.dtype)
                 attn_output = xops.memory_efficient_attention(
                     query_xa,
                     key_xa,
