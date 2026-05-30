@@ -115,6 +115,8 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "true",
             "--include_age_at_vs_prediction",
             "true",
+            "--include_year_at_vs_prediction",
+            "true",
             "--load_best_model_at_end",
             "true",
         ]
@@ -181,6 +183,8 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "--apply_rotary",
             "true",
             "--include_age_at_vs_prediction",
+            "true",
+            "--include_year_at_vs_prediction",
             "true",
             "--use_local_attention",
             "true",

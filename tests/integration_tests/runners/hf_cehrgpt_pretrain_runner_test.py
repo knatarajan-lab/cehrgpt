@@ -116,6 +116,8 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "--decoder_mlp",
             "LlamaMLP",
             "--include_age_at_vs_prediction",
+            "true",
+            "--include_year_at_vs_prediction",
             "true"
         ]
         train_main()
