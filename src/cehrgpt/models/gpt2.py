@@ -328,8 +328,27 @@ class GPT2FlashAttention(GPT2Attention):
                 # across all layers).  If so, use it directly.  Otherwise expand here
                 # — this covers the decode path (B, 1, 1, KV_len) and cross-attention.
                 if attention_mask.shape[1] == self.num_heads:
-                    # Already pre-expanded and aligned — cast to query dtype to satisfy xformers.
-                    attn_bias = attention_mask.to(query.dtype)
+                    # Already pre-expanded with cutlass alignment (stride(-2) % 8 == 0).
+                    # A plain .to(dtype) on a non-contiguous slice produces a new
+                    # contiguous tensor with natural strides (stride(-2) = Lk), which
+                    # breaks the cutlass requirement.  Re-align into a fresh buffer when
+                    # dtypes differ (e.g. float32 mask + bfloat16 autocast).
+                    if attention_mask.dtype == query.dtype:
+                        attn_bias = attention_mask
+                    else:
+                        B, H, Lq, Lk = attention_mask.shape
+                        pad_len = (-Lk) % 8
+                        if pad_len > 0:
+                            neg_inf = torch.finfo(query.dtype).min
+                            attn_bias = attention_mask.new_full(
+                                (B, H, Lq, Lk + pad_len),
+                                fill_value=neg_inf,
+                                dtype=query.dtype,
+                            )
+                            attn_bias[:, :, :, :Lk] = attention_mask.to(query.dtype)
+                            attn_bias = attn_bias[:, :, :, :Lk]
+                        else:
+                            attn_bias = attention_mask.to(query.dtype).contiguous()
                 else:
                     # (B, 1, Lq, Lk) — expand with xformers cutlass alignment.
                     # stride(-2) of the underlying allocation must be a multiple of 8.
