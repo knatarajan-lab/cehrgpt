@@ -27,6 +27,7 @@ class CehrGptDataCollator:
         include_demographics: bool = False,
         add_linear_prob_token: bool = False,
         include_age_at_vs_prediction: bool = False,
+        include_year_at_vs_prediction: bool = False,
     ):
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -55,6 +56,24 @@ class CehrGptDataCollator:
         else:
             self._age_to_token_id = {}
             self._valid_age_lookup = torch.zeros(0, dtype=torch.bool)
+
+        self.include_year_at_vs_prediction = include_year_at_vs_prediction
+        if include_year_at_vs_prediction:
+            self._year_to_token_id = {
+                year: tid
+                for year in tokenizer.valid_year_values
+                if (tid := tokenizer.get_year_token_id(year)) is not None
+            }
+            if self._year_to_token_id:
+                _max_valid_year = max(self._year_to_token_id.keys())
+                self._valid_year_lookup = torch.zeros(_max_valid_year + 1, dtype=torch.bool)
+                for year in self._year_to_token_id:
+                    self._valid_year_lookup[year] = True
+            else:
+                self._valid_year_lookup = torch.zeros(0, dtype=torch.bool)
+        else:
+            self._year_to_token_id = {}
+            self._valid_year_lookup = torch.zeros(0, dtype=torch.bool)
 
         self.include_values = include_values
         self.include_ttv_prediction = include_ttv_prediction
@@ -203,6 +222,22 @@ class CehrGptDataCollator:
                 torch.full_like(ages_int, -100),
             )
             batch["age_reconstruction_labels"] = age_reconstruction_labels
+
+        if self.include_year_at_vs_prediction and self._year_to_token_id:
+            vs_mask = batch["input_ids"] == self.vs_token_id
+            # Convert Unix timestamps (seconds) to calendar year.
+            years_int = (
+                (batch["epoch_times"] / (365.25 * 86400)).floor() + 1970
+            ).to(torch.int64)
+            lookup = self._valid_year_lookup.to(years_int.device)
+            in_range = (years_int >= 0) & (years_int < lookup.shape[0])
+            valid_year_mask = lookup[years_int.clamp(0, lookup.shape[0] - 1)] & in_range
+            year_reconstruction_labels = torch.where(
+                vs_mask & valid_year_mask,
+                years_int,
+                torch.full_like(years_int, -100),
+            )
+            batch["year_reconstruction_labels"] = year_reconstruction_labels
 
         if self.use_sub_time_tokenization:
             time_token_indicators = torch.isin(batch["input_ids"], self.time_tokens)

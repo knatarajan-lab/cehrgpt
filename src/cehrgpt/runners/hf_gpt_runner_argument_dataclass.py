@@ -282,6 +282,18 @@ class CehrGPTArguments:
         default=1.0,
         metadata={"help": "Loss weight for the age-at-VS prediction objective."},
     )
+    include_year_at_vs_prediction: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to include the year-at-VS reconstruction learning objective, "
+            "which predicts the calendar year at each [VS] token using cross-entropy loss. "
+            "The year vocab size is derived automatically from the tokenizer vocabulary."
+        },
+    )
+    year_at_vs_prediction_loss_weight: Optional[float] = dataclasses.field(
+        default=1.0,
+        metadata={"help": "Loss weight for the year-at-VS prediction objective."},
+    )
     aux_loss_warmup_steps: int = dataclasses.field(
         default=0,
         metadata={

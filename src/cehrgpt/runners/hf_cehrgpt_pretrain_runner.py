@@ -230,6 +230,13 @@ def load_and_create_model(
                 else None
             ),
             age_at_vs_prediction_loss_weight=cehrgpt_args.age_at_vs_prediction_loss_weight,
+            include_year_at_vs_prediction=cehrgpt_args.include_year_at_vs_prediction,
+            year_at_vs_vocab_size=(
+                tokenizer.year_at_vs_vocab_size
+                if cehrgpt_args.include_year_at_vs_prediction
+                else None
+            ),
+            year_at_vs_prediction_loss_weight=cehrgpt_args.year_at_vs_prediction_loss_weight,
             motor_tte_vocab_size=tokenizer.motor_tte_vocab_size,
             motor_time_to_event_weight=cehrgpt_args.motor_time_to_event_weight,
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
@@ -261,6 +268,7 @@ def load_and_create_model(
     LOG.info("Model time_token_vocab_size: %s", getattr(model.config, "time_token_vocab_size", 0))
     LOG.info("Model motor_tte_vocab_size: %s", getattr(model.config, "motor_tte_vocab_size", 0))
     LOG.info("Model age_at_vs_vocab_size: %s", getattr(model.config, "age_at_vs_vocab_size", 0))
+    LOG.info("Model year_at_vs_vocab_size: %s", getattr(model.config, "year_at_vs_vocab_size", 0))
     LOG.info("Model use_local_attention: %s", getattr(model.config, "use_local_attention", False))
     if getattr(model.config, "use_local_attention", False):
         LOG.info(
@@ -710,6 +718,7 @@ def main():
             motor_sampling_probability=cehrgpt_args.motor_sampling_probability,
             is_data_in_meds=data_args.is_data_in_meds,
             include_age_at_vs_prediction=cehrgpt_args.include_age_at_vs_prediction,
+            include_year_at_vs_prediction=cehrgpt_args.include_year_at_vs_prediction,
         ),
         train_dataset=processed_dataset["train"],
         eval_dataset=(

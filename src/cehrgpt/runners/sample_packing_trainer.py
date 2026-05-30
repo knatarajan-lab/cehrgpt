@@ -21,6 +21,7 @@ _CEHRGPT_SUB_LOSSES = [
     "token_value_loss",
     "motor_tte_loss",
     "age_at_vs_loss",
+    "year_at_vs_loss",
 ]
 
 

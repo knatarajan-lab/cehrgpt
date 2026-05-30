@@ -322,6 +322,38 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         return None
 
     @property
+    def valid_year_values(self) -> frozenset:
+        """Returns the frozenset of integer calendar years that have a corresponding
+        'year:<int>' token in the vocabulary (case-insensitive)."""
+        pattern = re.compile(r"^year:(\d+)$", re.IGNORECASE)
+        return frozenset(
+            int(m.group(1))
+            for token in self._tokenizer.get_vocab()
+            if (m := pattern.match(token))
+        )
+
+    @property
+    def year_at_vs_vocab_size(self) -> int:
+        """Returns max(valid_years) + 1 so that year values used directly as class
+        indices are always in [0, year_at_vs_vocab_size)."""
+        years = self.valid_year_values
+        if not years:
+            raise RuntimeError(
+                "No year tokens matching 'year:<int>' found in the vocabulary. "
+                "Cannot derive year_at_vs_vocab_size."
+            )
+        return max(years) + 1
+
+    def get_year_token_id(self, year: int) -> Optional[int]:
+        """Returns the vocabulary token ID for 'year:<year>' (tries common casings),
+        or None if the token is not found in the vocabulary."""
+        vocab = self._tokenizer.get_vocab()
+        for candidate in (f"year:{year}", f"Year:{year}", f"YEAR:{year}"):
+            if candidate in vocab:
+                return vocab[candidate]
+        return None
+
+    @property
     def numeric_concept_ids(self):
         return self._numeric_concept_ids
 

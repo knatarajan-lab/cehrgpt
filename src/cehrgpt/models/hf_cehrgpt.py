@@ -1316,6 +1316,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             self.age_at_vs_head = nn.Linear(
                 config.n_embd, config.age_at_vs_vocab_size, bias=False
             )
+        if self.config.include_year_at_vs_prediction:
+            self.year_at_vs_head = nn.Linear(
+                config.n_embd, config.year_at_vs_vocab_size, bias=False
+            )
 
         self.motor_time_bins = None
         self.linear_prob = None
@@ -1635,6 +1639,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         ages: Optional[torch.FloatTensor] = None,
         epoch_times: Optional[torch.FloatTensor] = None,
         age_reconstruction_labels: Optional[torch.LongTensor] = None,
+        year_reconstruction_labels: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, CehrGptCausalLMOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -1743,6 +1748,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         token_value_loss = None
         motor_tte_loss = None
         age_at_vs_loss = None
+        year_at_vs_loss = None
 
         if labels is not None:
             # move labels to correct device to enable model parallelism
@@ -1947,6 +1953,22 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     * float(not self.config.freeze_cehrgpt_generation_model)
                 )
 
+            if (
+                self.config.include_year_at_vs_prediction
+                and year_reconstruction_labels is not None
+            ):
+                year_logits = self.year_at_vs_head(hidden_states)
+                year_loss_fct = CrossEntropyLoss(ignore_index=-100, reduction="sum")
+                year_at_vs_loss = year_loss_fct(
+                    year_logits.view(-1, self.config.year_at_vs_vocab_size),
+                    year_reconstruction_labels.view(-1),
+                ) / total_num_tokens
+                loss += (
+                    year_at_vs_loss
+                    * self.config.year_at_vs_prediction_loss_weight
+                    * float(not self.config.freeze_cehrgpt_generation_model)
+                )
+
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]
             return ((loss,) + output) if loss is not None else output
@@ -1966,6 +1988,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             token_value_loss=token_value_loss,
             motor_tte_loss=motor_tte_loss,
             age_at_vs_loss=age_at_vs_loss,
+            year_at_vs_loss=year_at_vs_loss,
         )
 
     @staticmethod

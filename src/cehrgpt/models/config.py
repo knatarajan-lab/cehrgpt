@@ -164,6 +164,9 @@ class CEHRGPTConfig(PretrainedConfig):
         include_age_at_vs_prediction=False,
         age_at_vs_vocab_size=None,
         age_at_vs_prediction_loss_weight=1.0,
+        include_year_at_vs_prediction=False,
+        year_at_vs_vocab_size=None,
+        year_at_vs_prediction_loss_weight=1.0,
         **kwargs,
     ):
         if token_to_time_token_mapping is None:
@@ -234,6 +237,13 @@ class CEHRGPTConfig(PretrainedConfig):
         if self.include_age_at_vs_prediction and not vs_token_id:
             raise RuntimeError(
                 "vs_token_id must be provided when include_age_at_vs_prediction is True"
+            )
+        self.include_year_at_vs_prediction = include_year_at_vs_prediction
+        self.year_at_vs_vocab_size = year_at_vs_vocab_size
+        self.year_at_vs_prediction_loss_weight = year_at_vs_prediction_loss_weight
+        if self.include_year_at_vs_prediction and not vs_token_id:
+            raise RuntimeError(
+                "vs_token_id must be provided when include_year_at_vs_prediction is True"
             )
         if self.include_motor_time_to_event and not linear_prob_token_id:
             raise RuntimeError(
