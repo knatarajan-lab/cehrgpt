@@ -328,8 +328,8 @@ class GPT2FlashAttention(GPT2Attention):
                 # across all layers).  If so, use it directly.  Otherwise expand here
                 # — this covers the decode path (B, 1, 1, KV_len) and cross-attention.
                 if attention_mask.shape[1] == self.num_heads:
-                    # Already pre-expanded and aligned — use as-is.
-                    attn_bias = attention_mask
+                    # Already pre-expanded and aligned — cast to query dtype to satisfy xformers.
+                    attn_bias = attention_mask.to(query.dtype)
                 else:
                     # (B, 1, Lq, Lk) — expand with xformers cutlass alignment.
                     # stride(-2) of the underlying allocation must be a multiple of 8.
