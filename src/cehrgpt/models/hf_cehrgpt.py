@@ -981,10 +981,9 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 # padding once so all layers share a single allocation rather than
                 # each allocating their own (B, H, L, L) buffer.
                 if HAS_XFORMERS and is_full_forward:
-                    # Align to (B, 1, L, L) once; xformers broadcasts over heads
-                    # internally, saving H× memory vs a full (B, H, L, L) expansion.
-                    attention_mask = _align_local_mask_for_xformers(
-                        local_mask, _effective_compute_dtype(self.dtype)
+                    # Pre-expand to (B, H, L, L) once; all layers share this allocation.
+                    attention_mask = _expand_local_mask_for_xformers(
+                        local_mask, self.config.n_head, _effective_compute_dtype(self.dtype)
                     )
                 else:
                     # Decode path (B, 1, 1, KV_len) or no xformers: keep as-is;
@@ -1723,8 +1722,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     self.config, input_ids, attention_mask
                 )  # (B, 1, L, L)
                 linear_prob_encoder_mask = (
-                    _align_local_mask_for_xformers(
+                    _expand_local_mask_for_xformers(
                         local_mask,
+                        self.config.n_head,
                         _effective_compute_dtype(hidden_states.dtype),
                     )
                     if HAS_XFORMERS
