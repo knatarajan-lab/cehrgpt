@@ -217,6 +217,21 @@ def _build_local_mask_from_config(
     )  # (B, 1, L, L) float32
 
 
+def _effective_compute_dtype(fallback: torch.dtype) -> torch.dtype:
+    """Return the active autocast dtype when AMP is enabled, else ``fallback``.
+
+    xformers requires the attn_bias dtype to match the query dtype.  Under
+    bfloat16 AMP the model parameters (and therefore ``self.dtype`` /
+    ``hidden_states.dtype``) stay float32, but matmul outputs (queries, keys,
+    values) are cast to bfloat16.  Building the mask with the autocast dtype
+    avoids a dtype mismatch that would otherwise require a costly re-allocation
+    inside every attention layer.
+    """
+    if torch.is_autocast_enabled():
+        return torch.get_autocast_dtype("cuda")
+    return fallback
+
+
 def _expand_local_mask_for_xformers(
     local_mask: torch.Tensor,
     num_heads: int,
@@ -946,7 +961,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                     # Pre-expand to (B, H, L, L) with alignment once so all layers
                     # share a single allocation rather than each allocating their own.
                     attention_mask = _expand_local_mask_for_xformers(
-                        local_mask, self.config.n_head, self.dtype
+                        local_mask, self.config.n_head, _effective_compute_dtype(self.dtype)
                     )
                 else:
                     # Decode path (B, 1, 1, KV_len) or no xformers: keep as-is;
@@ -1686,10 +1701,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 )  # (B, 1, L, L)
                 linear_prob_encoder_mask = (
                     _expand_local_mask_for_xformers(
-                        local_mask, self.config.n_head, hidden_states.dtype
+                        local_mask,
+                        self.config.n_head,
+                        _effective_compute_dtype(hidden_states.dtype),
                     )
                     if HAS_XFORMERS
-                    else local_mask.to(hidden_states.dtype)
+                    else local_mask.to(_effective_compute_dtype(hidden_states.dtype))
                 )
             linear_prob_hidden_states = self.linear_prob(
                 linear_prob_hidden_states,
