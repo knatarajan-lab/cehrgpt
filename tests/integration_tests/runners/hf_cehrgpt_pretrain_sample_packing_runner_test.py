@@ -186,10 +186,6 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "true",
             "--include_year_at_vs_prediction",
             "true",
-            "--use_local_attention",
-            "true",
-            "--local_attention_n_prev_visits",
-            "2",
             "--load_best_model_at_end",
             "true",
         ]

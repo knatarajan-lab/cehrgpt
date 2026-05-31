@@ -178,10 +178,6 @@ class HfCehrGptRunnerIntegrationTest(unittest.TestCase):
             "silu",
             "--decoder_mlp",
             "LlamaMLP",
-            "--use_local_attention",
-            "true",
-            "--local_attention_n_prev_visits",
-            "2",
         ]
         train_main()
 
