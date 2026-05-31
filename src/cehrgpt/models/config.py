@@ -245,6 +245,11 @@ class CEHRGPTConfig(PretrainedConfig):
             raise RuntimeError(
                 "vs_token_id must be provided when include_year_at_vs_prediction is True"
             )
+        if self.include_year_at_vs_prediction and not self.year_at_vs_vocab_size:
+            raise RuntimeError(
+                "year_at_vs_vocab_size must be provided when include_year_at_vs_prediction is True. "
+                "Ensure the tokenizer vocabulary contains 'year:<int>' tokens and the package is up to date."
+            )
         if self.include_motor_time_to_event and not linear_prob_token_id:
             raise RuntimeError(
                 f"linear_prob_token_id must be provided when include_motor_time_to_event is True"
