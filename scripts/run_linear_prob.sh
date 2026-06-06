@@ -20,6 +20,7 @@ usage() {
     echo "  --add_random_token             Enable adding random token (disabled by default)"
     echo "  --tokenized_full_dataset_path=PATH Path to a pre-tokenized full dataset (optional)"
     echo "  --observation_window=NUM       Observation window in days (optional, default: None)"
+    echo "  --preprocessing_batch_size=NUM Batch size for dataset preprocessing (optional, default: 1000)"
     echo "  --refresh_processed_dataset    Delete and rebuild the cached prepared dataset (disabled by default)
   --is_data_in_meds              Indicate that the data is in MEDS format (disabled by default)"
     echo ""
@@ -42,6 +43,7 @@ IS_DATA_IN_MEDS="false"
 TOKENIZED_FULL_DATASET_PATH=""
 OBSERVATION_WINDOW=""
 TOKENIZER_PATH=""
+PREPROCESSING_BATCH_SIZE="1000"
 
 # Parse command line arguments
 for arg in "$@"; do
@@ -90,6 +92,9 @@ for arg in "$@"; do
             ;;
         --observation_window=*)
             OBSERVATION_WINDOW="${arg#*=}"
+            ;;
+        --preprocessing_batch_size=*)
+            PREPROCESSING_BATCH_SIZE="${arg#*=}"
             ;;
         --refresh_processed_dataset)
             REFRESH_PROCESSED_DATASET="true"
@@ -215,6 +220,7 @@ log "  --disable_combine_global_local=$DISABLE_COMBINE_GLOBAL_LOCAL"
 log "  --add_random_token=$ADD_RANDOM_TOKEN"
 log "  --tokenized_full_dataset_path=$TOKENIZED_FULL_DATASET_PATH"
 log "  --observation_window=$OBSERVATION_WINDOW"
+log "  --preprocessing_batch_size=$PREPROCESSING_BATCH_SIZE"
 log "  --refresh_processed_dataset=$REFRESH_PROCESSED_DATASET"
 log "  --is_data_in_meds=$IS_DATA_IN_MEDS"
 
@@ -283,6 +289,7 @@ while read -r cohort_name; do
         --tokenizer_name_or_path \"$TOKENIZER_PATH\" \
         --output_dir \"$output_dir\" \
         --preprocessing_num_workers \"$PREPROCESSING_WORKERS\" \
+        --preprocessing_batch_size \"$PREPROCESSING_BATCH_SIZE\" \
         --per_device_eval_batch_size \"$BATCH_SIZE\" \
         --max_tokens_per_batch \"$MAX_TOKENS_PER_BATCH\" \
         --torch_dtype \"$TORCH_TYPE\""
