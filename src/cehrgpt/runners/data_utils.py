@@ -452,7 +452,10 @@ def extract_cohort_sequences(
             transform.batch_transform,
             batched=True,
             batch_size=data_args.preprocessing_batch_size,
-            writer_batch_size=data_args.preprocessing_batch_size,
+            # Cap writer_batch_size independently: clinical sequences can be very
+            # long, and matching it to preprocessing_batch_size can exceed the
+            # 2 GB Arrow write limit for large cohorts.
+            writer_batch_size=min(data_args.preprocessing_batch_size, 500),
             num_proc=_clamp_num_proc(len(ds), data_args.preprocessing_num_workers, data_args.preprocessing_batch_size),
             remove_columns=ds.column_names,
         )
