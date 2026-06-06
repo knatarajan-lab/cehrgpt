@@ -105,6 +105,14 @@ def main():
     if not os.path.isdir(data_folder):
         raise FileNotFoundError(f"Data folder not found at: {data_folder}")
 
+    if os.path.exists(os.path.join(output_dir, "dataset_dict.json")):
+        LOG.warning(
+            "Tokenized dataset already exists at %s — skipping to avoid overwriting. "
+            "Delete the directory first if you want to re-tokenize.",
+            output_dir,
+        )
+        return
+
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     LOG.info("Loading tokenizer from %s", tokenizer_path)
