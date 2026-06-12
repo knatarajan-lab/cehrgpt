@@ -593,6 +593,16 @@ def main():
     else:
         processed_dataset = processed_dataset.filter(filter_func, **filter_args)
 
+    # Add [VS] / [VE] tokens if the tokenizer was trained without them (e.g. ablation tokenizers).
+    if cehrgpt_tokenizer.ensure_visit_tokens():
+        tokenizer_save_path = os.path.expanduser(training_args.output_dir)
+        LOG.warning(
+            "[VS]/[VE] tokens were missing and have been added. "
+            "Saving updated tokenizer to %s",
+            tokenizer_save_path,
+        )
+        cehrgpt_tokenizer.save_pretrained(tokenizer_save_path)
+
     model = load_and_create_model(model_args, cehrgpt_args, cehrgpt_tokenizer)
 
     # Try to update motor tte vocab size if the new configuration is different from the existing one

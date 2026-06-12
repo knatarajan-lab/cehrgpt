@@ -496,6 +496,23 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     def encode_race(self, race: str) -> int:
         return self._race_map.get(race, 0)
 
+    def ensure_visit_tokens(self) -> bool:
+        """Add [VS] and [VE] to the vocabulary if they are not already present.
+
+        Returns True if any tokens were added (i.e. the tokenizer was modified and
+        should be re-saved), False if both were already in the vocabulary.
+        """
+        missing = [t for t in ("[VS]", "[VE]") if t not in self.get_vocab()]
+        if not missing:
+            return False
+        LOG.warning(
+            "The following visit tokens are missing from the tokenizer vocabulary "
+            "and will be added: %s. Re-save the tokenizer afterwards.",
+            missing,
+        )
+        self.add_token(missing)
+        return True
+
     def add_token(self, tokens: Union[str, List[str]]) -> None:
         if isinstance(tokens, str):
             tokens = [tokens]
