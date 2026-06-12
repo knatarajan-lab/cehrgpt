@@ -23,6 +23,8 @@ from transformers.utils.model_parallel_utils import assert_device_map, get_devic
 
 logger = logging.get_logger(__name__)
 
+from cehrbert.models.hf_models.hf_cehrbert import TimeEmbeddingLayer
+
 from cehrgpt.gpt_utils import (
     construct_age_sequence,
     encode_demographics,
@@ -736,6 +738,19 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 self.embed_dim
             )
 
+        if getattr(config, "use_time_embedding", False):
+            self.time_embedding_layer = TimeEmbeddingLayer(
+                embedding_size=config.n_time_embd,
+                scaling_factor=config.time_embedding_scaling_factor,
+            )
+            self.age_embedding_layer = TimeEmbeddingLayer(
+                embedding_size=config.n_time_embd,
+                scaling_factor=config.age_embedding_scaling_factor,
+            )
+            self.time_age_proj = nn.Linear(
+                self.embed_dim + 2 * config.n_time_embd, self.embed_dim
+            )
+
         self.drop = nn.Dropout(config.embd_pdrop)
         gpt_blocks = []
         for i in range(config.num_hidden_layers):
@@ -899,6 +914,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
+        ages: Optional[torch.LongTensor] = None,
+        epoch_times: Optional[torch.FloatTensor] = None,
         random_vectors: Optional[torch.FloatTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
@@ -1056,6 +1073,19 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 concept_embeddings=input_embeddings,
                 value_indicators=value_indicators,
                 value_embeddings=value_embeddings,
+            )
+
+        if (
+            getattr(self.config, "use_time_embedding", False)
+            and ages is not None
+            and epoch_times is not None
+        ):
+            age_embeddings = self.age_embedding_layer(ages.to(torch.float))
+            time_embeddings = self.time_embedding_layer(epoch_times)
+            input_embeddings = gelu_new(
+                self.time_age_proj(
+                    torch.cat([input_embeddings, age_embeddings, time_embeddings], dim=-1)
+                )
             )
 
         hidden_states = self.drop(input_embeddings)
@@ -1658,6 +1688,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             past_key_values=past_key_values,
             attention_mask=attention_mask,
             position_ids=ages,
+            ages=ages,
+            epoch_times=epoch_times,
             random_vectors=random_vectors,
             head_mask=head_mask,
             use_cache=use_cache,

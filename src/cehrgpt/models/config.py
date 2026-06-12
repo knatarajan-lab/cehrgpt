@@ -161,6 +161,10 @@ class CEHRGPTConfig(PretrainedConfig):
         entropy_penalty_alpha=0.01,
         sample_packing_max_positions=None,
         class_weights=None,
+        use_time_embedding=False,
+        n_time_embd=16,
+        time_embedding_scaling_factor=86400.0,
+        age_embedding_scaling_factor=100.0,
         include_age_at_vs_prediction=False,
         age_at_vs_vocab_size=None,
         age_at_vs_prediction_loss_weight=1.0,
@@ -231,6 +235,11 @@ class CEHRGPTConfig(PretrainedConfig):
             raise RuntimeError(
                 f"ve_token_id must be provided when include_motor_time_to_event is True"
             )
+        self.use_time_embedding = use_time_embedding
+        self.n_time_embd = n_time_embd
+        self.time_embedding_scaling_factor = time_embedding_scaling_factor
+        self.age_embedding_scaling_factor = age_embedding_scaling_factor
+
         self.include_age_at_vs_prediction = include_age_at_vs_prediction
         self.age_at_vs_vocab_size = age_at_vs_vocab_size
         self.age_at_vs_prediction_loss_weight = age_at_vs_prediction_loss_weight

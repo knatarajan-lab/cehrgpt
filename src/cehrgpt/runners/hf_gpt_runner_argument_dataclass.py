@@ -318,6 +318,32 @@ class CehrGPTArguments:
             "rebuild it from scratch, ignoring any previously saved version."
         },
     )
+    use_time_embedding: bool = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "Add trainable Time2Vec-style embeddings for epoch_times and ages "
+            "(sin(t/scaling_factor * w + phi)), projected back to hidden_size via a linear layer. "
+            "Mirrors the CehrBert embedding approach."
+        },
+    )
+    n_time_embd: int = dataclasses.field(
+        default=16,
+        metadata={"help": "Dimensionality of the time/age embedding vectors (Time2Vec size)."},
+    )
+    time_embedding_scaling_factor: float = dataclasses.field(
+        default=86400.0,
+        metadata={
+            "help": "Scaling factor for epoch_times before Time2Vec encoding. "
+            "Defaults to 86400 (seconds per day), normalising epoch timestamps to days."
+        },
+    )
+    age_embedding_scaling_factor: float = dataclasses.field(
+        default=100.0,
+        metadata={
+            "help": "Scaling factor for ages before Time2Vec encoding. "
+            "Defaults to 100, normalising typical age-in-years values to [0, ~1]."
+        },
+    )
     use_local_attention: bool = dataclasses.field(
         default=False,
         metadata={

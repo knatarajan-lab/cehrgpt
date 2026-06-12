@@ -250,6 +250,10 @@ def load_and_create_model(
             att_token_ids=tokenizer.att_token_ids,
             use_local_attention=cehrgpt_args.use_local_attention,
             local_attention_n_prev_visits=cehrgpt_args.local_attention_n_prev_visits,
+            use_time_embedding=cehrgpt_args.use_time_embedding,
+            n_time_embd=cehrgpt_args.n_time_embd,
+            time_embedding_scaling_factor=cehrgpt_args.time_embedding_scaling_factor,
+            age_embedding_scaling_factor=cehrgpt_args.age_embedding_scaling_factor,
             linear_prob_token_id=tokenizer.linear_token_id,
             n_inner=cehrgpt_args.inner_dim,
             decoder_mlp=cehrgpt_args.decoder_mlp,
@@ -269,6 +273,11 @@ def load_and_create_model(
     LOG.info("Model motor_tte_vocab_size: %s", getattr(model.config, "motor_tte_vocab_size", 0))
     LOG.info("Model age_at_vs_vocab_size: %s", getattr(model.config, "age_at_vs_vocab_size", 0))
     LOG.info("Model year_at_vs_vocab_size: %s", getattr(model.config, "year_at_vs_vocab_size", 0))
+    LOG.info("Model use_time_embedding: %s", getattr(model.config, "use_time_embedding", False))
+    if getattr(model.config, "use_time_embedding", False):
+        LOG.info("Model n_time_embd: %s", getattr(model.config, "n_time_embd", None))
+        LOG.info("Model time_embedding_scaling_factor: %s", getattr(model.config, "time_embedding_scaling_factor", None))
+        LOG.info("Model age_embedding_scaling_factor: %s", getattr(model.config, "age_embedding_scaling_factor", None))
     LOG.info("Model use_local_attention: %s", getattr(model.config, "use_local_attention", False))
     if getattr(model.config, "use_local_attention", False):
         LOG.info(
