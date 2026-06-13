@@ -1668,8 +1668,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         return_dict: Optional[bool] = None,
         ages: Optional[torch.FloatTensor] = None,
         epoch_times: Optional[torch.FloatTensor] = None,
-        age_reconstruction_labels: Optional[torch.LongTensor] = None,
-        year_reconstruction_labels: Optional[torch.LongTensor] = None,
+        age_reconstruction: Optional[torch.LongTensor] = None,
+        year_reconstruction: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, CehrGptCausalLMOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -1971,13 +1971,13 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             if (
                 self.config.include_age_at_vs_prediction
-                and age_reconstruction_labels is not None
+                and age_reconstruction is not None
             ):
                 age_logits = self.age_at_vs_head(hidden_states)
                 age_loss_fct = CrossEntropyLoss(ignore_index=-100, reduction="sum")
                 age_at_vs_loss = age_loss_fct(
                     age_logits.view(-1, self.config.age_at_vs_vocab_size),
-                    age_reconstruction_labels.view(-1),
+                    age_reconstruction.view(-1),
                 ) / total_num_tokens
                 loss += (
                     age_at_vs_loss
@@ -1987,13 +1987,13 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             if (
                 self.config.include_year_at_vs_prediction
-                and year_reconstruction_labels is not None
+                and year_reconstruction is not None
             ):
                 year_logits = self.year_at_vs_head(hidden_states)
                 year_loss_fct = CrossEntropyLoss(ignore_index=-100, reduction="sum")
                 year_at_vs_loss = year_loss_fct(
                     year_logits.view(-1, self.config.year_at_vs_vocab_size),
-                    year_reconstruction_labels.view(-1),
+                    year_reconstruction.view(-1),
                 ) / total_num_tokens
                 loss += (
                     year_at_vs_loss

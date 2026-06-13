@@ -80,12 +80,12 @@ class CehrGptTrainer(Trainer):
 
         return (loss, outputs) if return_outputs else loss
 
-    # Auxiliary label parameters in the model's forward signature (e.g.
-    # age_reconstruction_labels, year_reconstruction_labels) are detected by
-    # HuggingFace's find_labels() and added to self.label_names.  When these
-    # heads are disabled the corresponding tensors are absent from the batch,
-    # making has_labels=False in prediction_step — which skips loss computation
-    # entirely and leaves eval_loss missing from evaluation metrics.
+    # Defensive guard: HuggingFace find_labels() detects any forward parameter
+    # ending in "_labels" and adds it to self.label_names.  When those tensors
+    # are absent from the batch, has_labels=False → loss skipped → eval_loss
+    # missing.  We renamed age_reconstruction_labels → age_reconstruction and
+    # year_reconstruction_labels → year_reconstruction to avoid this, but keep
+    # this override as a safety net for any future auxiliary label parameters.
     # Fix: strip any label_names entries that are absent from the batch so that
     # has_labels only requires the primary "labels" tensor to be present.
     def prediction_step(

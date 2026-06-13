@@ -221,7 +221,7 @@ class CehrGptDataCollator:
                 ages_int,
                 torch.full_like(ages_int, -100),
             )
-            batch["age_reconstruction_labels"] = age_reconstruction_labels
+            batch["age_reconstruction"] = age_reconstruction_labels
 
         if self.include_year_at_vs_prediction and self._year_to_token_id:
             vs_mask = batch["input_ids"] == self.vs_token_id
@@ -237,7 +237,7 @@ class CehrGptDataCollator:
                 years_int,
                 torch.full_like(years_int, -100),
             )
-            batch["year_reconstruction_labels"] = year_reconstruction_labels
+            batch["year_reconstruction"] = year_reconstruction_labels
 
         if self.use_sub_time_tokenization:
             time_token_indicators = torch.isin(batch["input_ids"], self.time_tokens)
