@@ -1,4 +1,4 @@
-from typing import Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 from datasets import Dataset
@@ -79,6 +79,29 @@ class CehrGptTrainer(Trainer):
                 self._sub_loss_counts[name] = self._sub_loss_counts.get(name, 0) + 1
 
         return (loss, outputs) if return_outputs else loss
+
+    # Auxiliary label parameters in the model's forward signature (e.g.
+    # age_reconstruction_labels, year_reconstruction_labels) are detected by
+    # HuggingFace's find_labels() and added to self.label_names.  When these
+    # heads are disabled the corresponding tensors are absent from the batch,
+    # making has_labels=False in prediction_step — which skips loss computation
+    # entirely and leaves eval_loss missing from evaluation metrics.
+    # Fix: strip any label_names entries that are absent from the batch so that
+    # has_labels only requires the primary "labels" tensor to be present.
+    def prediction_step(
+        self,
+        model,
+        inputs: Dict[str, Union[torch.Tensor, any]],
+        prediction_loss_only: bool,
+        ignore_keys: Optional[List[str]] = None,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        # Temporarily narrow label_names to only those keys present in this batch.
+        saved_label_names = self.label_names
+        self.label_names = [k for k in self.label_names if inputs.get(k) is not None]
+        try:
+            return super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
+        finally:
+            self.label_names = saved_label_names
 
     def log(self, logs, *args, **kwargs):
         # Flush averaged sub-losses into the log dict, then reset accumulators.
