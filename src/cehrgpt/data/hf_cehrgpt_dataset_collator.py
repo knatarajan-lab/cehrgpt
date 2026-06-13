@@ -106,6 +106,7 @@ class CehrGptDataCollator:
             motor_sampling_probability=motor_sampling_probability,
             is_data_in_meds=is_data_in_meds,
             pretraining=pretraining,
+            include_demographics=include_demographics,
             add_linear_prob_token=add_linear_prob_token,
         )
 
