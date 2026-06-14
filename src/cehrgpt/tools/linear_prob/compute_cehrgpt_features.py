@@ -349,12 +349,19 @@ def main():
 
                 batch = {k: v.to(device) for k, v in batch.items()}
                 cehrgpt_output = cehrgpt_model(
-                    **batch, output_attentions=False, output_hidden_states=False
+                    **batch, output_attentions=False, output_hidden_states=True
                 )
+                # When the model was trained without MOTOR (include_motor_time_to_event=False),
+                # linear_prob_hidden_states is None.  Fall back to the last transformer
+                # hidden state in that case.
+                linear_prob_hs = cehrgpt_output.linear_prob_hidden_states
+                if linear_prob_hs is None:
+                    linear_prob_hs = cehrgpt_output.hidden_states[-1]
+
                 if cehrgpt_args.sample_packing:
                     features = (
                         extract_features_from_packed_sequence(
-                            cehrgpt_output.linear_prob_hidden_states,
+                            linear_prob_hs,
                             batch["attention_mask"],
                         )
                         .cpu()
@@ -378,7 +385,7 @@ def main():
                         features = np.concatenate([features, last_features], axis=-1)
                 else:
                     features = (
-                        cehrgpt_output.linear_prob_hidden_states[..., -1, :]
+                        linear_prob_hs[..., -1, :]
                         .cpu()
                         .float()
                         .detach()
