@@ -13,7 +13,7 @@ import torch
 import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
 from cehrbert.runners.runner_util import generate_prepared_ds_path
-from datasets import concatenate_datasets, load_from_disk
+from datasets import DatasetDict, concatenate_datasets, load_from_disk
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers.trainer_utils import is_main_process
@@ -136,6 +136,14 @@ def main():
                 data_args, training_args, cehrgpt_args, cehrgpt_tokenizer, cache_file_collector
             )
             if not data_args.streaming:
+                # Drop any splits that ended up empty — save_to_disk raises
+                # SchemaInferenceError when asked to write a zero-example split.
+                empty_splits = [k for k, v in processed_dataset.items() if len(v) == 0]
+                if empty_splits:
+                    LOG.warning("Dropping empty splits before saving: %s", empty_splits)
+                    processed_dataset = DatasetDict(
+                        {k: v for k, v in processed_dataset.items() if len(v) > 0}
+                    )
                 processed_dataset.save_to_disk(prepared_ds_path)
                 stats = processed_dataset.cleanup_cache_files()
                 LOG.info(
