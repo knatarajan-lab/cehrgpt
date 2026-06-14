@@ -15,14 +15,11 @@ Usage:
 """
 
 import argparse
-import dataclasses
 import os
-import sys
 from pathlib import Path
 
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from cehrbert.runners.runner_util import load_parquet_as_dataset
-from cehrbert_data.tools.utils import parse_dynamic_arguments
 from datasets import DatasetDict
 from transformers.utils import logging
 
@@ -53,6 +50,19 @@ def parse_args():
         type=str,
         required=True,
         help="Path where the tokenized HuggingFace DatasetDict will be saved.",
+    )
+    parser.add_argument(
+        "--test_data_folder",
+        type=str,
+        default=None,
+        help="Path to a separate folder of parquet files to use as the test split.",
+    )
+    parser.add_argument(
+        "--tokenized_dataset_name",
+        type=str,
+        default=None,
+        help="Sub-directory name under --output_dir where the dataset is saved "
+             "(e.g. 'my_dataset'). Mirrors the --tokenized_dataset_name used by the training runner.",
     )
     parser.add_argument(
         "--validation_split_percentage",
@@ -99,21 +109,25 @@ def main():
     tokenizer_path = os.path.expanduser(args.tokenizer_name_or_path)
     data_folder = os.path.expanduser(args.data_folder)
     output_dir = os.path.expanduser(args.output_dir)
+    if args.tokenized_dataset_name:
+        save_dir = os.path.join(output_dir, args.tokenized_dataset_name)
+    else:
+        save_dir = output_dir
 
     if not os.path.isdir(tokenizer_path):
         raise FileNotFoundError(f"Tokenizer not found at: {tokenizer_path}")
     if not os.path.isdir(data_folder):
         raise FileNotFoundError(f"Data folder not found at: {data_folder}")
 
-    if os.path.exists(os.path.join(output_dir, "dataset_dict.json")):
+    if os.path.exists(os.path.join(save_dir, "dataset_dict.json")):
         LOG.warning(
             "Tokenized dataset already exists at %s — skipping to avoid overwriting. "
             "Delete the directory first if you want to re-tokenize.",
-            output_dir,
+            save_dir,
         )
         return
 
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    Path(save_dir).mkdir(parents=True, exist_ok=True)
 
     LOG.info("Loading tokenizer from %s", tokenizer_path)
     cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_path)
@@ -142,6 +156,19 @@ def main():
         )
         dataset = DatasetDict({"train": split["train"], "validation": split["test"]})
 
+    # Add a test split from a separate folder if provided
+    if args.test_data_folder:
+        test_data_folder = os.path.expanduser(args.test_data_folder)
+        if not os.path.isdir(test_data_folder):
+            raise FileNotFoundError(f"Test data folder not found at: {test_data_folder}")
+        LOG.info("Loading test dataset from %s", test_data_folder)
+        test_dataset = load_parquet_as_dataset(
+            test_data_folder,
+            split="train",
+            streaming=args.streaming,
+        )
+        dataset["test"] = test_dataset
+
     # Build a minimal DataTrainingArguments for the tokenization pipeline
     data_args = DataTrainingArguments(
         data_folder=data_folder,
@@ -151,9 +178,8 @@ def main():
         streaming=args.streaming,
     )
 
-    LOG.info("Tokenizing dataset (%d train, %d validation)...",
-             len(dataset["train"]) if not args.streaming else -1,
-             len(dataset["validation"]) if not args.streaming else -1)
+    split_sizes = {k: (len(v) if not args.streaming else -1) for k, v in dataset.items()}
+    LOG.info("Tokenizing dataset %s", split_sizes)
 
     tokenized = create_cehrgpt_pretraining_dataset(
         dataset=dataset,
@@ -168,11 +194,11 @@ def main():
         )
         return
 
-    LOG.info("Saving tokenized dataset to %s", output_dir)
-    tokenized.save_to_disk(output_dir)
+    LOG.info("Saving tokenized dataset to %s", save_dir)
+    tokenized.save_to_disk(save_dir)
     stats = tokenized.cleanup_cache_files()
     LOG.info("Cleaned up intermediate cache files: %s", stats)
-    LOG.info("Done. Pass --data_folder %s to the training runner to reuse this dataset.", output_dir)
+    LOG.info("Done. Pass --data_folder %s to the training runner to reuse this dataset.", save_dir)
 
 
 if __name__ == "__main__":
