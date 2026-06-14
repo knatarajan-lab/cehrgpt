@@ -626,14 +626,28 @@ class ExtractTokenizedSequenceDataMapping:
         vs_indices = np.where(concept_ids_arr == "[VS]")[0]
         vs_indices = vs_indices[vs_indices >= DEMOGRAPHIC_PROMPT_SIZE]
         vs_epoch_times = epoch_times[vs_indices]  # sorted because epoch_times is sorted
+        has_vs_tokens = len(vs_indices) > 0
+
+        # epoch_times for non-demographic tokens, used as fallback when [VS] is absent.
+        non_demo_epoch_times = epoch_times[DEMOGRAPHIC_PROMPT_SIZE:]
 
         batched_samples: Dict[str, list] = defaultdict(list)
         for feature_extraction_start, index_date, label in prediction_start_end_times:
-            # O(log k): find the first [VS] whose epoch_time >= feature_extraction_start.
-            vs_pos = int(np.searchsorted(vs_epoch_times, feature_extraction_start, side="left"))
-            if vs_pos >= len(vs_indices):
-                continue  # No visit starts within the observation window.
-            obs_start_idx = int(vs_indices[vs_pos])
+            if has_vs_tokens:
+                # O(log k): find the first [VS] whose epoch_time >= feature_extraction_start.
+                vs_pos = int(np.searchsorted(vs_epoch_times, feature_extraction_start, side="left"))
+                if vs_pos >= len(vs_indices):
+                    continue  # No visit starts within the observation window.
+                obs_start_idx = int(vs_indices[vs_pos])
+            else:
+                # No [VS] tokens in the sequence — fall back to epoch_times to locate
+                # the first token within the observation window.
+                obs_start_idx = (
+                    int(np.searchsorted(non_demo_epoch_times, feature_extraction_start, side="left"))
+                    + DEMOGRAPHIC_PROMPT_SIZE
+                )
+                if obs_start_idx >= seq_length:
+                    continue  # No tokens within the observation window.
 
             # O(log n): find the last token whose epoch_time <= index_date.
             obs_end_idx = int(np.searchsorted(epoch_times, index_date, side="right")) - 1
