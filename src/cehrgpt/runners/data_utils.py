@@ -376,94 +376,48 @@ def extract_cohort_sequences(
         RuntimeError: If any `person_id` in the cohort is missing from the tokenized dataset.
     """
 
-    cohort_folder = data_args.cohort_folder
-
-    # Detect whether the cohort folder contains per-split subdirectories
-    # (e.g. train/ and test/).  If so, load each split separately so that
-    # output splits mirror the cohort's own train/test structure rather than
-    # the tokenized dataset's split structure.
-    _KNOWN_SPLITS = ("train", "validation", "test")
-    cohort_split_dirs = {
-        split: os.path.join(cohort_folder, split)
-        for split in _KNOWN_SPLITS
-        if os.path.isdir(os.path.join(cohort_folder, split))
-    }
-
-    def _load_cohort_df(folder: str) -> pl.DataFrame:
-        lf = pl.scan_parquet(os.path.join(folder, "**", "*.parquet"))
-        is_meds_local = data_args.is_data_in_meds or "subject_id" in set(lf.schema.names())
-        if is_meds_local:
-            id_col_, time_col_, label_col_ = "subject_id", "prediction_time", "boolean_value"
-        else:
-            id_col_, time_col_, label_col_ = "person_id", "index_date", "label"
-        cols = [id_col_, time_col_]
-        if label_col_ in lf.schema:
-            cols.append(label_col_)
-        df = lf.select(cols).collect()
-        if is_meds_local:
-            rename_map = {"subject_id": "person_id", "prediction_time": "index_date"}
-            if "boolean_value" in df.columns:
-                rename_map["boolean_value"] = "label"
-            df = df.rename(rename_map)
-        if "label" not in df.columns:
-            df = df.with_columns(
-                pl.Series("label", np.zeros_like(df["person_id"].to_numpy()))
-            )
-        return df
-
-    if cohort_split_dirs:
-        LOG.info("Cohort has per-split subdirectories: %s", list(cohort_split_dirs.keys()))
-        cohort_split_dfs = {split: _load_cohort_df(d) for split, d in cohort_split_dirs.items()}
-        cohort = pl.concat(list(cohort_split_dfs.values()))
-        # Map each cohort split → set of person_ids for later re-splitting
-        split_person_id_sets: Optional[Dict[str, set]] = {
-            split: set(df["person_id"].unique().to_list())
-            for split, df in cohort_split_dfs.items()
-        }
+    lf = pl.scan_parquet(os.path.join(data_args.cohort_folder, "**", "*.parquet"))
+    # Auto-detect MEDS format from the actual schema, regardless of the is_data_in_meds flag
+    is_meds = data_args.is_data_in_meds or "subject_id" in set(lf.schema.names())
+    if is_meds:
+        id_col, time_col, label_col = "subject_id", "prediction_time", "boolean_value"
     else:
-        cohort = _load_cohort_df(cohort_folder)
-        split_person_id_sets = None
+        id_col, time_col, label_col = "person_id", "index_date", "label"
 
-    LOG.info("Loaded cohort with %s rows from %s", len(cohort), cohort_folder)
+    cols_to_load = [id_col, time_col]
+    if label_col in lf.schema:
+        cols_to_load.append(label_col)
+    cohort = lf.select(cols_to_load).collect()
+    LOG.info("Loaded cohort with %s rows from %s", len(cohort), data_args.cohort_folder)
+
+    if is_meds:
+        rename_map = {"subject_id": "person_id", "prediction_time": "index_date"}
+        if "boolean_value" in cohort.columns:
+            rename_map["boolean_value"] = "label"
+        cohort = cohort.rename(rename_map)
+
+    all_person_ids = cohort["person_id"].unique().to_list()
+    # In case the label column does not exist, we add a fake column to the dataframe so subsequent process can work
+    if "label" not in cohort.columns:
+        cohort = cohort.with_columns(
+            pl.Series(
+                name="label", values=np.zeros_like(cohort["person_id"].to_numpy())
+            )
+        )
 
     # data_args.observation_window
     tokenized_dataset = load_from_disk(cehrgpt_args.tokenized_full_dataset_path)
 
-    # Combine all tokenized splits into one pool, then filter by cohort patients.
-    # This avoids the tokenized dataset's own train/validation/test split structure
-    # bleeding into the output when the cohort has its own split definition.
-    all_person_ids_set = set(cohort["person_id"].unique().to_list())
-    combined_tokenized = concatenate_datasets(list(tokenized_dataset.values()))
-    LOG.info("Combined tokenized dataset has %s rows", len(combined_tokenized))
-    filtered_combined = combined_tokenized.filter(
-        lambda batch: [pid in all_person_ids_set for pid in batch["person_id"]],
-        batched=True,
-        batch_size=data_args.preprocessing_batch_size,
-        num_proc=_clamp_num_proc(
-            len(combined_tokenized),
-            data_args.preprocessing_num_workers,
-            data_args.preprocessing_batch_size,
-        ),
-    )
-    LOG.info("Filtered tokenized dataset has %s rows", len(filtered_combined))
-
-    # Re-split by cohort split membership, or keep as a single "train" split.
-    if split_person_id_sets:
-        filtered_tokenized_dataset = DatasetDict({
-            split: filtered_combined.filter(
-                lambda batch, pid_set=pid_set: [pid in pid_set for pid in batch["person_id"]],
-                batched=True,
-                batch_size=data_args.preprocessing_batch_size,
-                num_proc=_clamp_num_proc(
-                    len(filtered_combined),
-                    data_args.preprocessing_num_workers,
-                    data_args.preprocessing_batch_size,
-                ),
-            )
-            for split, pid_set in split_person_id_sets.items()
-        })
-    else:
-        filtered_tokenized_dataset = DatasetDict({"train": filtered_combined})
+    all_person_ids_set = set(all_person_ids)
+    filtered_tokenized_dataset = DatasetDict({
+        split: ds.filter(
+            lambda batch: [pid in all_person_ids_set for pid in batch["person_id"]],
+            batched=True,
+            batch_size=data_args.preprocessing_batch_size,
+            num_proc=_clamp_num_proc(len(ds), data_args.preprocessing_num_workers, data_args.preprocessing_batch_size),
+        )
+        for split, ds in tokenized_dataset.items()
+    })
 
     person_index_date_agg = cohort.group_by("person_id").agg(
         pl.struct("index_date", "label").alias("index_date_label")
