@@ -41,7 +41,7 @@ from cehrgpt.omop.ontology import Ontology
 from cehrgpt.runners.data_utils import get_torch_dtype, load_patient_splits, filter_by_patient_ids
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
-from cehrgpt.runners.sample_packing_trainer import SamplePackingTrainer
+from cehrgpt.runners.sample_packing_trainer import CehrGptTrainer, SamplePackingTrainer
 
 LOG = logging.get_logger("transformers")
 
@@ -79,10 +79,16 @@ def load_and_create_tokenizer(
     # Try to load the pretrained tokenizer
     tokenizer_abspath = os.path.expanduser(model_args.tokenizer_name_or_path)
     if not tokenizer_exists(tokenizer_abspath):
-        if cehrgpt_args.include_motor_time_to_event and not cehrgpt_args.vocab_dir:
+        if (
+            cehrgpt_args.include_motor_time_to_event
+            and cehrgpt_args.motor_use_ontology
+            and not cehrgpt_args.vocab_dir
+        ):
             raise RuntimeError(
-                "motor_vocab_dir must be specified if include_motor_time_to_event is True"
+                "The argument include_motor_time_to_event and motor_use_ontology are True, "
+                "but vocab_dir is not specified"
             )
+
         ontology: Optional[Ontology] = None
         concept_name_mapping = {}
         if cehrgpt_args.vocab_dir:
@@ -216,9 +222,39 @@ def load_and_create_model(
                 else model_args.max_position_embeddings
             ),
             include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
+            freeze_cehrgpt_generation_model=cehrgpt_args.freeze_cehrgpt_generation_model,
+            include_age_at_vs_prediction=cehrgpt_args.include_age_at_vs_prediction,
+            age_at_vs_vocab_size=(
+                tokenizer.age_at_vs_vocab_size
+                if cehrgpt_args.include_age_at_vs_prediction
+                else None
+            ),
+            age_at_vs_prediction_loss_weight=cehrgpt_args.age_at_vs_prediction_loss_weight,
+            include_year_at_vs_prediction=cehrgpt_args.include_year_at_vs_prediction,
+            year_at_vs_vocab_size=(
+                tokenizer.year_at_vs_vocab_size
+                if cehrgpt_args.include_year_at_vs_prediction
+                else None
+            ),
+            year_at_vs_prediction_loss_weight=cehrgpt_args.year_at_vs_prediction_loss_weight,
             motor_tte_vocab_size=tokenizer.motor_tte_vocab_size,
             motor_time_to_event_weight=cehrgpt_args.motor_time_to_event_weight,
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
+            motor_time_bins=tokenizer.get_motor_time_bins(
+                cehrgpt_args.motor_num_time_pieces
+            ),
+            motor_task_prevalence_rates=tokenizer.get_motor_task_prevalence_rates(),
+            linear_prob_n_layer=cehrgpt_args.linear_prob_n_layer,
+            ve_token_id=tokenizer.ve_token_id,
+            vs_token_id=tokenizer.vs_token_id,
+            att_token_ids=tokenizer.att_token_ids,
+            use_local_attention=cehrgpt_args.use_local_attention,
+            local_attention_n_prev_visits=cehrgpt_args.local_attention_n_prev_visits,
+            use_time_embedding=cehrgpt_args.use_time_embedding,
+            n_time_embd=cehrgpt_args.n_time_embd,
+            time_embedding_scaling_factor=cehrgpt_args.time_embedding_scaling_factor,
+            age_embedding_scaling_factor=cehrgpt_args.age_embedding_scaling_factor,
+            linear_prob_token_id=tokenizer.linear_token_id,
             n_inner=cehrgpt_args.inner_dim,
             decoder_mlp=cehrgpt_args.decoder_mlp,
             **model_args_cehrgpt,
@@ -230,11 +266,166 @@ def load_and_create_model(
             tokenizer.pretrained_token_ids,
             tokenizer.pretrained_embeddings,
         )
+
+    LOG.info("Model vocab_size: %s", model.config.vocab_size)
+    LOG.info("Model value_vocab_size: %s", getattr(model.config, "value_vocab_size", 0))
+    LOG.info("Model time_token_vocab_size: %s", getattr(model.config, "time_token_vocab_size", 0))
+    LOG.info("Model motor_tte_vocab_size: %s", getattr(model.config, "motor_tte_vocab_size", 0))
+    LOG.info("Model age_at_vs_vocab_size: %s", getattr(model.config, "age_at_vs_vocab_size", 0))
+    LOG.info("Model year_at_vs_vocab_size: %s", getattr(model.config, "year_at_vs_vocab_size", 0))
+    LOG.info("Model use_time_embedding: %s", getattr(model.config, "use_time_embedding", False))
+    if getattr(model.config, "use_time_embedding", False):
+        LOG.info("Model n_time_embd: %s", getattr(model.config, "n_time_embd", None))
+        LOG.info("Model time_embedding_scaling_factor: %s", getattr(model.config, "time_embedding_scaling_factor", None))
+        LOG.info("Model age_embedding_scaling_factor: %s", getattr(model.config, "age_embedding_scaling_factor", None))
+    LOG.info("Model use_local_attention: %s", getattr(model.config, "use_local_attention", False))
+    if getattr(model.config, "use_local_attention", False):
+        LOG.info(
+            "Model local_attention_n_prev_visits: %s",
+            getattr(model.config, "local_attention_n_prev_visits", None),
+        )
+
     if model.config.torch_dtype == torch.bfloat16:
         return model.bfloat16()
     elif model.config.torch_dtype == torch.float16:
         return model.half()
+
     return model
+
+
+
+def _load_parquet_dataset(
+    data_args: DataTrainingArguments,
+    cehrgpt_args: CehrGPTArguments,
+    training_args,
+) -> DatasetDict:
+    """Load and split the raw parquet dataset into train/validation/(optional) test splits."""
+    dataset = load_parquet_as_dataset(
+        os.path.expanduser(data_args.data_folder),
+        split="train",
+        streaming=data_args.streaming,
+    )
+
+    # Streaming: split by count
+    if data_args.streaming and data_args.validation_split_num:
+        dataset = dataset.shuffle(buffer_size=10_000, seed=training_args.seed)
+        return DatasetDict({
+            "train": dataset.skip(data_args.validation_split_num),
+            "validation": dataset.take(data_args.validation_split_num),
+        })
+
+    # Split by explicit patient ID lists
+    if cehrgpt_args.patient_splits_path:
+        train_patient_ids, val_patient_ids, test_patient_ids = load_patient_splits(
+            cehrgpt_args.patient_splits_path
+        )
+        if not val_patient_ids:
+            np.random.seed(seed=training_args.seed)
+            np.random.shuffle(train_patient_ids)
+            train_end = int(
+                len(train_patient_ids) * (1 - data_args.validation_split_percentage)
+            )
+            train_patient_ids = train_patient_ids[:train_end]
+            val_patient_ids = train_patient_ids[train_end:]
+
+        # Take the union of data_folder and test_data_folder so all splits can be
+        # filtered uniformly from one combined dataset.
+        if data_args.test_data_folder:
+            test_dataset = load_parquet_as_dataset(
+                os.path.expanduser(data_args.test_data_folder),
+                split="train",
+            )
+            dataset = datasets.concatenate_datasets([dataset, test_dataset])
+
+        train_set = filter_by_patient_ids(
+            dataset=dataset, patient_ids=train_patient_ids, data_args=data_args
+        )
+        val_set = filter_by_patient_ids(
+            dataset=dataset, patient_ids=val_patient_ids, data_args=data_args
+        )
+        splits = {"train": train_set, "validation": val_set}
+        if test_patient_ids:
+            test_set = filter_by_patient_ids(
+                dataset=dataset, patient_ids=test_patient_ids, data_args=data_args
+            )
+            if len(test_set) > 0:
+                splits["test"] = test_set
+        return DatasetDict(splits)
+
+    # Split by percentage
+    if data_args.validation_split_percentage:
+        split = dataset.train_test_split(
+            test_size=data_args.validation_split_percentage, seed=training_args.seed
+        )
+        splits = {"train": split["train"], "validation": split["test"]}
+        if data_args.test_data_folder:
+            test_set = load_parquet_as_dataset(
+                os.path.expanduser(data_args.test_data_folder), split="train"
+            )
+            if len(test_set) > 0:
+                splits["test"] = test_set
+        return DatasetDict(splits)
+
+    raise RuntimeError(
+        f"Can not split the data. If streaming is enabled, validation_split_num needs to be "
+        f"defined, otherwise validation_split_percentage needs to be provided. "
+        f"The current values are:\n"
+        f"validation_split_percentage: {data_args.validation_split_percentage}\n"
+        f"validation_split_num: {data_args.validation_split_num}\n"
+        f"streaming: {data_args.streaming}"
+    )
+
+
+def _load_meds_dataset(
+    data_args: DataTrainingArguments,
+    cehrgpt_args: CehrGPTArguments,
+    training_args,
+    cache_file_collector: CacheFileCollector,
+) -> DatasetDict:
+    """Load (or create and cache) the MEDS-formatted dataset."""
+    meds_extension_path = get_meds_extension_path(
+        data_folder=data_args.data_folder,
+        dataset_prepared_path=data_args.dataset_prepared_path,
+    )
+    try:
+        LOG.info(
+            "Trying to load the MEDS extension from disk at %s...", meds_extension_path
+        )
+        dataset = load_from_disk(meds_extension_path)
+        if data_args.streaming:
+            if isinstance(dataset, DatasetDict):
+                dataset = {
+                    k: v.to_iterable_dataset(
+                        num_shards=training_args.dataloader_num_workers
+                    )
+                    for k, v in dataset.items()
+                }
+            else:
+                dataset = dataset.to_iterable_dataset(
+                    num_shards=training_args.dataloader_num_workers
+                )
+    except FileNotFoundError as e:
+        LOG.warning(e)
+        dataset = create_dataset_from_meds_reader(
+            data_args=data_args,
+            dataset_mappings=[
+                MedToCehrGPTDatasetMapping(
+                    data_args=data_args,
+                    include_inpatient_hour_token=cehrgpt_args.include_inpatient_hour_token,
+                )
+            ],
+            cache_file_collector=cache_file_collector,
+        )
+        if not data_args.streaming:
+            dataset.save_to_disk(str(meds_extension_path))
+            stats = dataset.cleanup_cache_files()
+            LOG.info(
+                "Clean up the cached files for the cehrgpt dataset transformed from the MEDS: %s",
+                stats,
+            )
+            cache_file_collector.remove_cache_files()
+            dataset = load_from_disk(str(meds_extension_path))
+    return dataset
 
 
 def main():
@@ -255,6 +446,7 @@ def main():
 
     processed_dataset: Optional[DatasetDict] = None
     cache_file_collector = CacheFileCollector()
+
     if cehrgpt_args.tokenized_dataset_name:
         prepared_ds_path = Path(
             os.path.join(
@@ -270,28 +462,17 @@ def main():
     else:
         prepared_ds_path = generate_prepared_ds_path(data_args, model_args)
 
+    # Determine if an already-tokenized dataset exists and where it lives
     if os.path.exists(os.path.join(data_args.data_folder, "dataset_dict.json")):
-        LOG.info(f"Loading prepared dataset from disk at {data_args.data_folder}...")
-        processed_dataset = load_from_disk(data_args.data_folder)
-        # If the data has been processed in the past, it's assume the tokenizer has been created before.
-        # we load the CEHR-GPT tokenizer from the output folder, otherwise an exception will be raised.
-        tokenizer_name_or_path = os.path.expanduser(
-            training_args.output_dir
-            if cehrgpt_args.expand_tokenizer
-            else model_args.tokenizer_name_or_path
-        )
-        if not tokenizer_exists(tokenizer_name_or_path):
-            raise RuntimeError(
-                f"The dataset has been tokenized but the corresponding tokenizer: "
-                f"{model_args.tokenizer_name_or_path} does not exist"
-            )
-        cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_name_or_path)
+        already_tokenized_path = data_args.data_folder
     elif any(prepared_ds_path.glob("*")):
-        LOG.info(f"Loading prepared dataset from disk at {prepared_ds_path}...")
-        processed_dataset = load_from_disk(str(prepared_ds_path))
-        LOG.info("Prepared dataset loaded from disk...")
-        # If the data has been processed in the past, it's assume the tokenizer has been created before.
-        # we load the CEHR-GPT tokenizer from the output folder, otherwise an exception will be raised.
+        already_tokenized_path = str(prepared_ds_path)
+    else:
+        already_tokenized_path = None
+
+    if already_tokenized_path is not None:
+        LOG.info("Loading prepared dataset from disk at %s...", already_tokenized_path)
+        processed_dataset = load_from_disk(already_tokenized_path)
         tokenizer_name_or_path = os.path.expanduser(
             training_args.output_dir
             if cehrgpt_args.expand_tokenizer
@@ -307,116 +488,13 @@ def main():
         # Only run tokenization and data transformation in the main process in torch distributed training
         # otherwise the multiple processes will create tokenizers at the same time
         if is_main_process(training_args.local_rank):
-            # If the data is in the MEDS format, we need to convert it to the CEHR-BERT format
             if data_args.is_data_in_meds:
-                meds_extension_path = get_meds_extension_path(
-                    data_folder=data_args.data_folder,
-                    dataset_prepared_path=data_args.dataset_prepared_path,
+                dataset = _load_meds_dataset(
+                    data_args, cehrgpt_args, training_args, cache_file_collector
                 )
-                try:
-                    LOG.info(
-                        "Trying to load the MEDS extension from disk at %s...",
-                        meds_extension_path,
-                    )
-                    dataset = load_from_disk(meds_extension_path)
-                    if data_args.streaming:
-                        if isinstance(dataset, DatasetDict):
-                            dataset = {
-                                k: v.to_iterable_dataset(
-                                    num_shards=training_args.dataloader_num_workers
-                                )
-                                for k, v in dataset.items()
-                            }
-                        else:
-                            dataset = dataset.to_iterable_dataset(
-                                num_shards=training_args.dataloader_num_workers
-                            )
-                except FileNotFoundError as e:
-                    LOG.warning(e)
-                    dataset = create_dataset_from_meds_reader(
-                        data_args=data_args,
-                        dataset_mappings=[
-                            MedToCehrGPTDatasetMapping(
-                                data_args=data_args,
-                                include_inpatient_hour_token=cehrgpt_args.include_inpatient_hour_token,
-                            )
-                        ],
-                        cache_file_collector=cache_file_collector,
-                    )
-                    if not data_args.streaming:
-                        dataset.save_to_disk(str(meds_extension_path))
-                        stats = dataset.cleanup_cache_files()
-                        LOG.info(
-                            "Clean up the cached files for the cehrgpt dataset transformed from the MEDS: %s",
-                            stats,
-                        )
-                        # Clean up the files created from the data generator
-                        cache_file_collector.remove_cache_files()
-                        dataset = load_from_disk(str(meds_extension_path))
             else:
-                # Load the dataset from the parquet files
-                dataset = load_parquet_as_dataset(
-                    os.path.expanduser(data_args.data_folder),
-                    split="train",
-                    streaming=data_args.streaming,
-                )
-                # If streaming is enabled, we need to manually split the data into train/val
-                if data_args.streaming and data_args.validation_split_num:
-                    dataset = dataset.shuffle(
-                        buffer_size=10_000, seed=training_args.seed
-                    )
-                    train_set = dataset.skip(data_args.validation_split_num)
-                    val_set = dataset.take(data_args.validation_split_num)
-                    dataset = DatasetDict({"train": train_set, "validation": val_set})
-                elif cehrgpt_args.patient_splits_path:
-                    unique_patient_ids = dataset.unique("person_id")
-                    train_patient_ids, val_patient_ids, _ = load_patient_splits(
-                        cehrgpt_args.patient_splits_path,
-                        unique_patient_ids,
-                    )
-                    # In case there is no validation set, we split the data into train/val randomly
-                    if not val_patient_ids:
-                        np.random.seed(seed=training_args.seed)
-                        np.random.shuffle(unique_patient_ids)
-                        train_end = int(
-                            len(unique_patient_ids) * (1 - data_args.validation_split_percentage)
-                        )
-                        train_patient_ids = unique_patient_ids[:train_end]
-                        val_patient_ids = unique_patient_ids[train_end:]
+                dataset = _load_parquet_dataset(data_args, cehrgpt_args, training_args)
 
-                    train_set = filter_by_patient_ids(
-                        dataset=dataset,
-                        patient_ids=train_patient_ids,
-                        data_args=data_args,
-                    )
-                    val_set = filter_by_patient_ids(
-                        dataset=dataset,
-                        patient_ids=val_patient_ids,
-                        data_args=data_args,
-                    )
-                    dataset = DatasetDict({
-                        "train": train_set,
-                        "validation" : val_set
-                    })
-                elif data_args.validation_split_percentage:
-                    dataset = dataset.train_test_split(
-                        test_size=data_args.validation_split_percentage,
-                        seed=training_args.seed,
-                    )
-                    dataset = DatasetDict(
-                        {"train": dataset["train"], "validation": dataset["test"]}
-                    )
-                else:
-                    raise RuntimeError(
-                        f"Can not split the data. If streaming is enabled, validation_split_num needs to be "
-                        f"defined, otherwise validation_split_percentage needs to be provided. "
-                        f"The current values are:\n"
-                        f"validation_split_percentage: {data_args.validation_split_percentage}\n"
-                        f"validation_split_num: {data_args.validation_split_num}\n"
-                        f"streaming: {data_args.streaming}"
-                    )
-
-            # Create the CEHR-GPT tokenizer if it's not available in the output folder
             cehrgpt_tokenizer = load_and_create_tokenizer(
                 data_args=data_args,
                 model_args=model_args,
@@ -453,14 +531,14 @@ def main():
                 if "visit_concept_ids" in all_columns:
                     dataset = dataset.remove_columns(["visit_concept_ids"])
 
-            # sort the patient features chronologically and tokenize the data
+            # Sort the patient features chronologically and tokenize the data
             processed_dataset = create_cehrgpt_pretraining_dataset(
                 dataset=dataset,
                 cehrgpt_tokenizer=cehrgpt_tokenizer,
                 data_args=data_args,
                 cache_file_collector=cache_file_collector,
             )
-            # only save the data to the disk if it is not streaming
+            # Only save the data to disk if it is not streaming
             if not data_args.streaming:
                 processed_dataset.save_to_disk(str(prepared_ds_path))
                 stats = processed_dataset.cleanup_cache_files()
@@ -515,11 +593,65 @@ def main():
     else:
         processed_dataset = processed_dataset.filter(filter_func, **filter_args)
 
+    # Add [VS] / [VE] tokens if the tokenizer was trained without them (e.g. ablation tokenizers).
+    if cehrgpt_tokenizer.ensure_visit_tokens():
+        tokenizer_save_path = os.path.expanduser(training_args.output_dir)
+        LOG.warning(
+            "[VS]/[VE] tokens were missing and have been added. "
+            "Saving updated tokenizer to %s",
+            tokenizer_save_path,
+        )
+        cehrgpt_tokenizer.save_pretrained(tokenizer_save_path)
+
     model = load_and_create_model(model_args, cehrgpt_args, cehrgpt_tokenizer)
 
     # Try to update motor tte vocab size if the new configuration is different from the existing one
     if cehrgpt_args.include_motor_time_to_event:
+        # Backward compatibility
+        if getattr(model.config, "linear_prob_token_id", None) is None:
+            setattr(
+                model.config, "linear_prob_token_id", cehrgpt_tokenizer.linear_token_id
+            )
+        # This specify the number of layers used in the linear prob module
+        if (
+            getattr(model.config, "linear_prob_n_layer", None)
+            != cehrgpt_args.linear_prob_n_layer
+        ):
+            setattr(
+                model.config,
+                "linear_prob_n_layer",
+                cehrgpt_args.linear_prob_n_layer,
+            )
+        if getattr(model.config, "motor_time_bins", None) is None:
+            setattr(
+                model.config,
+                "motor_time_bins",
+                cehrgpt_tokenizer.get_motor_time_bins(
+                    model.config.motor_num_time_pieces
+                ),
+            )
+        if (
+            getattr(model.config, "motor_time_to_event_weight", None)
+            != cehrgpt_args.motor_time_to_event_weight
+        ):
+            setattr(
+                model.config,
+                "motor_time_to_event_weight",
+                cehrgpt_args.motor_time_to_event_weight,
+            )
         model.update_motor_tte_vocab_size(cehrgpt_tokenizer.motor_tte_vocab_size)
+
+        if cehrgpt_args.freeze_cehrgpt_generation_model:
+            for param in model.cehrgpt.parameters():
+                param.requires_grad = False
+            # Calculate the total number of trainable parameters
+            trainable_params = sum(
+                p.numel() for p in model.parameters() if p.requires_grad
+            )
+            LOG.info(
+                "Freeze the cehrgpt generation model weights. Total number of trainable parameters: %s",
+                trainable_params,
+            )
 
     # Expand tokenizer to adapt to the new pretraining dataset
     if model.config.vocab_size < cehrgpt_tokenizer.vocab_size:
@@ -570,6 +702,8 @@ def main():
                 if "validation" in processed_dataset
                 else processed_dataset["test"]
             )["num_of_concepts"],
+            aux_loss_warmup_steps=cehrgpt_args.aux_loss_warmup_steps,
+            aux_loss_start_step=cehrgpt_args.aux_loss_start_step,
         )
         training_args.per_device_train_batch_size = 1
         training_args.per_device_eval_batch_size = 1
@@ -579,7 +713,11 @@ def main():
             model_args.max_position_embeddings,
         )
     else:
-        trainer_class = Trainer
+        trainer_class = partial(
+            CehrGptTrainer,
+            aux_loss_warmup_steps=cehrgpt_args.aux_loss_warmup_steps,
+            aux_loss_start_step=cehrgpt_args.aux_loss_start_step,
+        )
         data_collator_fn = CehrGptDataCollator
 
     trainer = trainer_class(
@@ -596,9 +734,10 @@ def main():
             use_sub_time_tokenization=model_args.use_sub_time_tokenization,
             include_values=model_args.include_values,
             include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
-            motor_tte_vocab_size=model.config.motor_tte_vocab_size,
-            motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
             motor_sampling_probability=cehrgpt_args.motor_sampling_probability,
+            is_data_in_meds=data_args.is_data_in_meds,
+            include_age_at_vs_prediction=cehrgpt_args.include_age_at_vs_prediction,
+            include_year_at_vs_prediction=cehrgpt_args.include_year_at_vs_prediction,
         ),
         train_dataset=processed_dataset["train"],
         eval_dataset=(

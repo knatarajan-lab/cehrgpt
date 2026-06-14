@@ -1,9 +1,8 @@
 import glob
 import json
 import os
-import random
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
@@ -21,7 +20,7 @@ from cehrbert.runners.runner_util import (
     generate_prepared_ds_path,
     get_last_hf_checkpoint,
 )
-from datasets import DatasetDict, concatenate_datasets, load_from_disk
+from datasets import load_from_disk
 from peft import LoraConfig, PeftModel, get_peft_model
 from scipy.special import expit as sigmoid
 from torch.utils.data import DataLoader
@@ -204,9 +203,8 @@ def model_init(
             )
 
     # Expand value tokenizer to adapt to the fine-tuning dataset
-    if model.config.include_values:
-        if model.config.value_vocab_size < tokenizer.value_vocab_size:
-            model.resize_value_embeddings(tokenizer.value_vocab_size)
+    if model.config.include_values and model.config.value_vocab_size < tokenizer.value_vocab_size:
+        model.resize_value_embeddings(tokenizer.value_vocab_size)
     # If lora is enabled, we add LORA adapters to the model
     if model_args.use_lora:
         # When LORA is used, the trainer could not automatically find this label,
@@ -234,6 +232,59 @@ def model_init(
     return model
 
 
+def _create_finetune_dataset(
+    data_args,
+    training_args,
+    cehrgpt_args: CehrGPTArguments,
+    tokenizer: CehrGptTokenizer,
+    cache_file_collector: CacheFileCollector,
+):
+    """Process the raw finetuning data into a tokenized DatasetDict and save the tokenizer."""
+    # If the full dataset has been pre-tokenized, slice out the cohort sequences directly
+    if cehrgpt_args.tokenized_full_dataset_path is not None:
+        return extract_cohort_sequences(data_args, cehrgpt_args, tokenizer)
+
+    final_splits = prepare_finetune_dataset(
+        data_args, training_args, cehrgpt_args, cache_file_collector
+    )
+
+    if cehrgpt_args.expand_tokenizer:
+        new_tokenizer_path = os.path.expanduser(training_args.output_dir)
+        if tokenizer_exists(new_tokenizer_path):
+            tokenizer = CehrGptTokenizer.from_pretrained(new_tokenizer_path)
+        else:
+            # Use defined pretrained embeddings if available, otherwise fall back to the
+            # embeddings embedded in the pretrained model
+            pretrained_concept_embedding_model = PretrainedEmbeddings(
+                cehrgpt_args.pretrained_embedding_path
+            )
+            if not pretrained_concept_embedding_model.exists:
+                pretrained_concept_embedding_model = (
+                    tokenizer.pretrained_concept_embedding_model
+                )
+            tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
+                cehrgpt_tokenizer=tokenizer,
+                dataset=final_splits["train"],
+                data_args=data_args,
+                concept_name_mapping={},
+                pretrained_concept_embedding_model=pretrained_concept_embedding_model,
+            )
+            tokenizer.save_pretrained(os.path.expanduser(training_args.output_dir))
+
+    # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
+    if not data_args.streaming:
+        all_columns = final_splits["train"].column_names
+        if "visit_concept_ids" in all_columns:
+            final_splits = final_splits.remove_columns(["visit_concept_ids"])
+
+    return create_cehrgpt_finetuning_dataset(
+        dataset=final_splits,
+        cehrgpt_tokenizer=tokenizer,
+        data_args=data_args,
+        cache_file_collector=cache_file_collector,
+    )
+
+
 def main():
     cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
     tokenizer = load_pretrained_tokenizer(model_args)
@@ -242,10 +293,14 @@ def main():
     )
     cache_file_collector = CacheFileCollector()
     processed_dataset = None
+
+    if cehrgpt_args.refresh_processed_dataset and prepared_ds_path.exists():
+        LOG.info("Refreshing prepared dataset: removing cache at %s", prepared_ds_path)
+        shutil.rmtree(prepared_ds_path)
+
     if any(prepared_ds_path.glob("*")):
-        LOG.info(f"Loading prepared dataset from disk at {prepared_ds_path}...")
+        LOG.info("Loading prepared dataset from disk at %s...", prepared_ds_path)
         processed_dataset = load_from_disk(str(prepared_ds_path))
-        LOG.info("Prepared dataset loaded from disk...")
         if cehrgpt_args.expand_tokenizer:
             if tokenizer_exists(training_args.output_dir):
                 tokenizer = CehrGptTokenizer.from_pretrained(training_args.output_dir)
@@ -260,64 +315,16 @@ def main():
 
     if processed_dataset is None:
         if is_main_process(training_args.local_rank):
-            # If the full dataset has been tokenized, we don't want to tokenize the cohort containing
-            # the subset of the data. We should slice out the portion of the tokenized sequences for each sample
-            if cehrgpt_args.tokenized_full_dataset_path is not None:
-                processed_dataset = extract_cohort_sequences(
-                    data_args, cehrgpt_args, cache_file_collector
-                )
-            else:
-                final_splits = prepare_finetune_dataset(
-                    data_args, training_args, cehrgpt_args, cache_file_collector
-                )
-                if cehrgpt_args.expand_tokenizer:
-                    new_tokenizer_path = os.path.expanduser(training_args.output_dir)
-                    if tokenizer_exists(new_tokenizer_path):
-                        tokenizer = CehrGptTokenizer.from_pretrained(new_tokenizer_path)
-                    else:
-                        # Try to use the defined pretrained embeddings if exists, Otherwise we default to the pretrained model
-                        # embedded in the pretrained model
-                        pretrained_concept_embedding_model = PretrainedEmbeddings(
-                            cehrgpt_args.pretrained_embedding_path
-                        )
-                        if not pretrained_concept_embedding_model.exists:
-                            pretrained_concept_embedding_model = (
-                                tokenizer.pretrained_concept_embedding_model
-                            )
-                        tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
-                            cehrgpt_tokenizer=tokenizer,
-                            dataset=final_splits["train"],
-                            data_args=data_args,
-                            concept_name_mapping={},
-                            pretrained_concept_embedding_model=pretrained_concept_embedding_model,
-                        )
-                        tokenizer.save_pretrained(
-                            os.path.expanduser(training_args.output_dir)
-                        )
-
-                # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
-                if not data_args.streaming:
-                    all_columns = final_splits["train"].column_names
-                    if "visit_concept_ids" in all_columns:
-                        final_splits = final_splits.remove_columns(
-                            ["visit_concept_ids"]
-                        )
-
-                processed_dataset = create_cehrgpt_finetuning_dataset(
-                    dataset=final_splits,
-                    cehrgpt_tokenizer=tokenizer,
-                    data_args=data_args,
-                    cache_file_collector=cache_file_collector,
-                )
+            processed_dataset = _create_finetune_dataset(
+                data_args, training_args, cehrgpt_args, tokenizer, cache_file_collector
+            )
             if not data_args.streaming:
                 processed_dataset.save_to_disk(str(prepared_ds_path))
                 stats = processed_dataset.cleanup_cache_files()
                 LOG.info(
-                    "Clean up the cached files for the  cehrgpt finetuning dataset : %s",
+                    "Clean up the cached files for the cehrgpt finetuning dataset: %s",
                     stats,
                 )
-
-            # Remove any cached files if there are any
             cache_file_collector.remove_cache_files()
 
         # After main-process-only operations, synchronize all processes to ensure consistency
@@ -331,7 +338,7 @@ def main():
             else model_args.tokenizer_name_or_path
         )
         tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_name_or_path)
-        # Load the dataset from disk again to in torch distributed training
+        # Load the dataset from disk again in torch distributed training
         processed_dataset = load_from_disk(str(prepared_ds_path))
 
     # Set seed before initializing model.
@@ -467,111 +474,9 @@ def main():
         do_predict(test_dataloader, model_args, training_args, cehrgpt_args)
 
 
-def do_predict(
-    test_dataloader: DataLoader,
-    model_args: ModelArguments,
-    training_args: TrainingArguments,
-    cehrgpt_args: CehrGPTArguments,
-):
-    """
-    Performs inference on the test dataset using a fine-tuned model, saves predictions and evaluation metrics.
-
-    The reason we created this custom do_predict is that there is a memory leakage for transformers trainer.predict(),
-    for large test sets, it will throw the CPU OOM error
-
-    Args:
-        test_dataloader (DataLoader): DataLoader containing the test dataset, with batches of input features and labels.
-        model_args (ModelArguments): Arguments for configuring and loading the fine-tuned model.
-        training_args (TrainingArguments): Arguments related to training, evaluation, and output directories.
-        cehrgpt_args (CehrGPTArguments):
-    Returns:
-        None. Results are saved to disk.
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Load model and LoRA adapters if applicable
-    model = (
-        load_finetuned_model(model_args, training_args, training_args.output_dir)
-        if not model_args.use_lora
-        else load_lora_model(model_args, training_args, cehrgpt_args)
-    )
-
-    model = model.to(device).eval()
-
-    # Ensure prediction folder exists
-    test_prediction_folder = Path(training_args.output_dir) / "test_predictions"
-    test_prediction_folder.mkdir(parents=True, exist_ok=True)
-
-    LOG.info("Generating predictions for test set at %s", test_prediction_folder)
-
-    test_losses = []
-    with torch.no_grad():
-        for index, batch in enumerate(tqdm(test_dataloader, desc="Predicting")):
-            person_ids = batch.pop("person_id").numpy().astype(int).squeeze()
-            if person_ids.ndim == 0:
-                person_ids = np.asarray([person_ids])
-
-            index_dates = batch.pop("index_date").numpy().squeeze()
-            if index_dates.ndim == 0:
-                index_dates = np.asarray([index_dates])
-
-            index_dates = list(
-                map(
-                    lambda posix_time: datetime.utcfromtimestamp(posix_time).replace(
-                        tzinfo=None
-                    ),
-                    index_dates.tolist(),
-                )
-            )
-
-            batch = {k: v.to(device) for k, v in batch.items()}
-            # Forward pass
-            output = model(**batch, output_attentions=False, output_hidden_states=False)
-            test_losses.append(output.loss.item())
-
-            # Collect logits and labels for prediction
-            logits = output.logits.float().cpu().numpy().squeeze()
-            if logits.ndim == 0:
-                logits = np.asarray([logits])
-            probabilities = sigmoid(logits)
-
-            labels = (
-                batch["classifier_label"].float().cpu().numpy().astype(bool).squeeze()
-            )
-            if labels.ndim == 0:
-                labels = np.asarray([labels])
-
-            # Save predictions to parquet file
-            test_prediction_pd = pd.DataFrame(
-                {
-                    "subject_id": person_ids,
-                    "prediction_time": index_dates,
-                    "predicted_boolean_probability": probabilities,
-                    "predicted_boolean_value": pd.Series(
-                        [None] * len(person_ids), dtype=bool
-                    ),
-                    "boolean_value": labels,
-                }
-            )
-            test_prediction_pd.to_parquet(test_prediction_folder / f"{index}.parquet")
-
-    LOG.info(
-        "Computing metrics using the test set predictions at %s", test_prediction_folder
-    )
-    # Load all predictions
-    test_prediction_pd = pd.read_parquet(test_prediction_folder)
-    # Compute metrics and save results
-    metrics = compute_metrics(
-        references=test_prediction_pd.boolean_value,
-        probs=test_prediction_pd.predicted_boolean_probability,
-    )
-    metrics["test_loss"] = np.mean(test_losses)
-
-    test_results_path = Path(training_args.output_dir) / "test_results.json"
-    with open(test_results_path, "w") as f:
-        json.dump(metrics, f, indent=4)
-
-    LOG.info("Test results: %s", metrics)
+def _ensure_1d(arr: np.ndarray) -> np.ndarray:
+    """Promote a 0-d numpy array to 1-d; leave higher-rank arrays unchanged."""
+    return np.asarray([arr]) if arr.ndim == 0 else arr
 
 
 def load_lora_model(
@@ -598,6 +503,70 @@ def load_lora_model(
             model.resize_value_embeddings(tokenizer.value_vocab_size)
     LOG.info("Loading LoRA adapter from %s", training_args.output_dir)
     return PeftModel.from_pretrained(model, model_id=training_args.output_dir)
+
+
+def do_predict(
+    test_dataloader: DataLoader,
+    model_args: ModelArguments,
+    training_args: TrainingArguments,
+    cehrgpt_args: CehrGPTArguments,
+):
+    """
+    Performs inference on the test dataset using a fine-tuned model, saves predictions and evaluation metrics.
+
+    The reason we created this custom do_predict is that there is a memory leakage for transformers trainer.predict(),
+    for large test sets, it will throw the CPU OOM error.
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model = (
+        load_finetuned_model(model_args, training_args, training_args.output_dir)
+        if not model_args.use_lora
+        else load_lora_model(model_args, training_args, cehrgpt_args)
+    )
+    model = model.to(device).eval()
+
+    test_prediction_folder = Path(training_args.output_dir) / "test_predictions"
+    test_prediction_folder.mkdir(parents=True, exist_ok=True)
+    LOG.info("Generating predictions for test set at %s", test_prediction_folder)
+
+    test_losses = []
+    with torch.no_grad():
+        for index, batch in enumerate(tqdm(test_dataloader, desc="Predicting")):
+            person_ids = _ensure_1d(batch.pop("person_id").numpy().astype(int).squeeze())
+            index_dates = [
+                datetime.fromtimestamp(t, tz=timezone.utc).replace(tzinfo=None)
+                for t in _ensure_1d(batch.pop("index_date").numpy().squeeze()).tolist()
+            ]
+            batch = {k: v.to(device) for k, v in batch.items()}
+            output = model(**batch, output_attentions=False, output_hidden_states=False)
+            test_losses.append(output.loss.item())
+
+            probabilities = sigmoid(_ensure_1d(output.logits.float().cpu().numpy().squeeze()))
+            labels = _ensure_1d(batch["classifier_label"].float().cpu().numpy().astype(bool).squeeze())
+
+            pd.DataFrame(
+                {
+                    "subject_id": person_ids,
+                    "prediction_time": index_dates,
+                    "predicted_boolean_probability": probabilities,
+                    "predicted_boolean_value": pd.Series([None] * len(person_ids), dtype=bool),
+                    "boolean_value": labels,
+                }
+            ).to_parquet(test_prediction_folder / f"{index}.parquet")
+
+    LOG.info("Computing metrics using the test set predictions at %s", test_prediction_folder)
+    all_predictions = pd.read_parquet(test_prediction_folder)
+    metrics = compute_metrics(
+        references=all_predictions.boolean_value,
+        probs=all_predictions.predicted_boolean_probability,
+    )
+    metrics["test_loss"] = np.mean(test_losses)
+
+    test_results_path = Path(training_args.output_dir) / "test_results.json"
+    with open(test_results_path, "w") as f:
+        json.dump(metrics, f, indent=4)
+    LOG.info("Test results: %s", metrics)
 
 
 if __name__ == "__main__":

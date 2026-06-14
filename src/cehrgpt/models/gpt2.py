@@ -11,9 +11,36 @@ if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
 
+try:
+    import xformers.ops as xops
+
+    HAS_XFORMERS = True
+except ImportError:
+    HAS_XFORMERS = False
+
 from cehrgpt.models.activations import RMSNorm
 
 logger = logging.get_logger("transformers")
+
+
+def _xformers_is_available_for(tensor: "torch.Tensor", head_dim: int) -> bool:
+    """Return True only when xformers can handle this query tensor.
+
+    xformers memory-efficient attention requires:
+      - xformers installed
+      - CUDA device
+      - float16 or bfloat16 dtype
+      - head_dim >= 32
+      - head_dim divisible by 8
+    Falls back to torch SDPA otherwise (e.g. CPU integration tests).
+    """
+    return (
+            HAS_XFORMERS
+            and tensor.is_cuda
+            and tensor.dtype in (torch.float16, torch.bfloat16)
+            and head_dim >= 32
+            and head_dim % 8 == 0
+    )
 
 
 def is_sample_pack(attention_mask: torch.Tensor) -> bool:
@@ -259,13 +286,116 @@ class GPT2FlashAttention(GPT2Attention):
         else:
             present = None
 
-        # Apply Flash Attention Forward
+        # When use_local_attention is True, attention_mask is a 4D additive tensor
+        # (0.0 / NEG_INF) built by CEHRGPT2Model.forward (self-attention) or by
+        # CEHRGPT2LMHeadModel.forward for the linear probe (cross-attention).
+        # Use xformers (or torch SDPA as fallback) — flash_attn does not support
+        # arbitrary attn_bias.
+        # For self-attention: a non-4D mask means vs_token_id was not set in the config
+        # so the local mask was never constructed — raise early.
+        # For cross-attention: a 4D mask is provided when use_local_attention=True;
+        # otherwise fall through to the standard flash-attention path.
         if self.reorder_and_upcast_attn:
             attn_output, attn_weights = self._upcast_and_reordered_attn(
                 query, key, value, attention_mask, head_mask
             )
+        elif getattr(self.config, "use_local_attention", False):
+            # attention_mask must be the 4D additive local mask (B, 1, L, L).
+            # For self-attention it is built by CEHRGPT2Model.forward; for cross-attention
+            # in the linear probe it is built by CEHRGPT2LMHeadModel.forward via
+            # _build_local_mask_from_config.  A non-4D mask means the local mask was
+            # never constructed — raise early rather than silently passing a binary mask
+            # to xformers as attn_bias.
+            if attention_mask is None or attention_mask.dim() != 4:
+                raise RuntimeError(
+                    f"use_local_attention=True requires a 4D additive attention mask "
+                    f"(B, 1, L, L) but received shape "
+                    f"{attention_mask.shape if attention_mask is not None else None}. "
+                    f"Ensure vs_token_id is set in the model config so that "
+                    f"build_local_attention_mask is called in CEHRGPT2Model.forward."
+                )
+            # Use xformers or torch SDPA — both accept an additive attn_bias/attn_mask.
+            # flash_attn_func / flash_attn_varlen_func do not support arbitrary attn_bias.
+            # xformers requires CUDA, float16/bfloat16, head_dim ≥ 32, and head_dim % 8 == 0.
+            # Fall back to SDPA when any of those constraints are not met (e.g. CPU tests).
+            if _xformers_is_available_for(query, self.head_dim):
+                # xformers expects (B, L, H, D); query/key/value are (B, H, L, D).
+                query_xa = query.permute(0, 2, 1, 3)
+                key_xa = key.permute(0, 2, 1, 3)
+                value_xa = value.permute(0, 2, 1, 3)
+                # attention_mask may already be pre-expanded to (B, H, Lq, Lk) with
+                # xformers alignment by CEHRGPT2Model.forward (one allocation shared
+                # across all layers).  If so, use it directly.  Otherwise expand here
+                # — this covers the decode path (B, 1, 1, KV_len) and cross-attention.
+                if attention_mask.shape[1] == self.num_heads:
+                    # Already pre-expanded with cutlass alignment (stride(-2) % 8 == 0).
+                    # A plain .to(dtype) on a non-contiguous slice produces a new
+                    # contiguous tensor with natural strides (stride(-2) = Lk), which
+                    # breaks the cutlass requirement.  Re-align into a fresh buffer when
+                    # dtypes differ (e.g. float32 mask + bfloat16 autocast).
+                    if attention_mask.dtype == query.dtype:
+                        attn_bias = attention_mask
+                    else:
+                        B, H, Lq, Lk = attention_mask.shape
+                        pad_len = (-Lk) % 8
+                        if pad_len > 0:
+                            neg_inf = torch.finfo(query.dtype).min
+                            attn_bias = attention_mask.new_full(
+                                (B, H, Lq, Lk + pad_len),
+                                fill_value=neg_inf,
+                                dtype=query.dtype,
+                            )
+                            attn_bias[:, :, :, :Lk] = attention_mask.to(query.dtype)
+                            attn_bias = attn_bias[:, :, :, :Lk]
+                        else:
+                            attn_bias = attention_mask.to(query.dtype).contiguous()
+                else:
+                    # (B, 1, Lq, Lk) — expand with xformers cutlass alignment.
+                    # stride(-2) of the underlying allocation must be a multiple of 8.
+                    B, _, Lq, Lk = attention_mask.shape
+                    pad_len = (-Lk) % 8  # 0 when already aligned
+                    if pad_len > 0:
+                        neg_inf = torch.finfo(query.dtype).min
+                        attn_bias = attention_mask.new_full(
+                            (B, self.num_heads, Lq, Lk + pad_len),
+                            fill_value=neg_inf,
+                            dtype=query.dtype,
+                        )
+                        attn_bias[:, :, :, :Lk] = attention_mask.to(query.dtype).expand(
+                            -1, self.num_heads, -1, -1
+                        )
+                        attn_bias = attn_bias[:, :, :, :Lk]  # stride(-2)=Lk+pad_len
+                    else:
+                        attn_bias = attention_mask.to(query.dtype).expand(
+                            -1, self.num_heads, -1, -1
+                        ).contiguous()
+                attn_output = xops.memory_efficient_attention(
+                    query_xa,
+                    key_xa,
+                    value_xa,
+                    attn_bias=attn_bias,
+                    p=self.attn_dropout.p if self.training else 0.0,
+                    scale=None,
+                )
+                # Permute back to (B, H, L, D) for _merge_heads.
+                attn_output = attn_output.permute(0, 2, 1, 3)
+                attn_weights = None
+            else:
+                # xformers not available or not suitable for this device/dtype/head_dim;
+                # use torch SDPA which accepts an additive attn_mask.
+                # attention_mask already encodes causal + local constraints, so is_causal=False
+                # avoids double-applying the causal mask.
+                attn_output = torch.nn.functional.scaled_dot_product_attention(
+                    query,
+                    key,
+                    value,
+                    attn_mask=attention_mask.to(query.dtype),
+                    dropout_p=self.attn_dropout.p if self.training else 0.0,
+                    is_causal=False,
+                )
+                attn_weights = None
         else:
-            # Flash Attention forward pass
+            # Standard flash attention path (use_local_attention is False).
             attn_output = self._flash_attention_forward(
                 query,
                 key,
@@ -275,6 +405,7 @@ class GPT2FlashAttention(GPT2Attention):
                 self.attn_dropout.p,
                 softmax_scale=None,
             )
+            attn_weights = None
 
         # Merge heads and project back to hidden size
         attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
@@ -325,10 +456,8 @@ class GPT2FlashAttention(GPT2Attention):
         key_states = key_states.permute(0, 2, 1, 3).contiguous().to(torch.bfloat16)
         value_states = value_states.permute(0, 2, 1, 3).contiguous().to(torch.bfloat16)
 
-        # Contains at least one padding token in the sequence
         if attention_mask is not None:
             batch_size = query_states.shape[0]
-
             (
                 query_states,
                 key_states,
@@ -339,7 +468,6 @@ class GPT2FlashAttention(GPT2Attention):
             ) = self._upad_input(
                 query_states, key_states, value_states, attention_mask, query_length
             )
-
             cu_seqlens_q, cu_seqlens_k = cu_seq_lens
             max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
 
@@ -355,7 +483,6 @@ class GPT2FlashAttention(GPT2Attention):
                 softmax_scale=softmax_scale,
                 causal=True,
             )
-            # (batch, seq_length, n_heads, head_dim)
             attn_output = pad_input(
                 attn_output_unpad, indices_q, batch_size, query_length
             )
@@ -466,7 +593,10 @@ class GPT2Block(nn.Module):
         inner_dim = config.n_inner if config.n_inner is not None else 4 * hidden_size
         attention_class = (
             GPT2FlashAttention
-            if getattr(config, "_attn_implementation", "eager") == "flash_attention_2"
+            if (
+                getattr(config, "_attn_implementation", "eager") == "flash_attention_2"
+                or getattr(config, "use_local_attention", False)
+            )
             else GPT2AttentionRoPE
         )
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)

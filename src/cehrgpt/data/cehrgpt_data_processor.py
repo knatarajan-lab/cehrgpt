@@ -37,6 +37,7 @@ class CehrGptDataProcessor(DatasetMapping):
         include_ttv_prediction: bool = False,
         include_motor_time_to_event: bool = False,
         motor_sampling_probability: float = 0.5,
+        is_data_in_meds: bool = False,
         pretraining: bool = True,
         include_demographics: bool = False,
         add_linear_prob_token: bool = False,
@@ -73,6 +74,7 @@ class CehrGptDataProcessor(DatasetMapping):
         self.include_motor_time_to_event = include_motor_time_to_event
         self.motor_sampling_probability = motor_sampling_probability
         self.motor_code_cache: Dict[str, List[str]] = {}
+        self.is_data_in_meds = is_data_in_meds
         # Pre-compute vocab-wide token type mappings
         self._precompute_vocab_mappings()
 
@@ -98,7 +100,7 @@ class CehrGptDataProcessor(DatasetMapping):
                 except (ValueError, AttributeError):
                     self.time_intervals_array[i] = -1
 
-            if is_clinical_event(token):
+            if is_clinical_event(token, self.is_data_in_meds):
                 self.is_clinical_event_array[i] = True
 
         LOG.info(f"Processed {n_vocab} vocabulary tokens")
@@ -164,7 +166,7 @@ class CehrGptDataProcessor(DatasetMapping):
             example["concept_ids"] = self.tokenizer.decode(
                 input_ids, skip_special_tokens=False
             )
-        example["ages"] = pd.Series(example["ages"]).ffill().tolist()
+        example["ages"] = pd.Series(example["ages"]).ffill().bfill().tolist()
         example = self.slice_out_input_sequence(example)
         # Add the motor labels
         if self.include_motor_time_to_event:
@@ -183,7 +185,7 @@ class CehrGptDataProcessor(DatasetMapping):
     ) -> Dict[str, Any]:
 
         last_token_id = (
-            self.tokenizer.linear_token_id
+            self.tokenizer.random_token_id
             if self.add_linear_prob_token
             else self.tokenizer.end_token_id
         )
@@ -447,14 +449,19 @@ class CehrGptDataProcessor(DatasetMapping):
                 previous_time_stamp = time_stamp
             event_times[i] = time_stamp
 
+        # Convert epoch times to days
+        event_times = event_times / (3600 * 24)
+
         # Determine prediction positions
         before_valid_time_tokens = np.roll(valid_time_tokens, -1)
         # We randomly make predictions at 50% of the sequence positions
-        prediction_positions = (
+        random_prediction_positions = (
             np.random.rand(n_concepts) < self.motor_sampling_probability
         )
+        # We make the predictions at the end of the group of events that share the time stamp
+        prediction_positions = np.roll(event_times, -1) != event_times
         # We don't predict at the att time tokens
-        prediction_positions &= ~is_att_tokens
+        prediction_positions &= ~is_att_tokens & random_prediction_positions
         # We disable TTE predictions using the demographics alone
         prediction_positions[:4] = False
         # We take the union of the random prediction positions and the positions right before time token
@@ -465,7 +472,7 @@ class CehrGptDataProcessor(DatasetMapping):
         prediction_indices = np.where(prediction_positions)[0]
         if len(prediction_indices) == 0:
             return {
-                "motor_censor_times": [],
+                "motor_censor_times": [0.0] * n_concepts,
                 "motor_row_indices": [],
                 "motor_col_indices": [],
                 "motor_values": [],
@@ -492,11 +499,9 @@ class CehrGptDataProcessor(DatasetMapping):
 
         # Process sections in REVERSE order but build results in FORWARD order
         section_boundaries = np.concatenate([prediction_indices, [n_concepts]])
-        last_event_time = event_times[-1]
 
         # Pre-allocate arrays with exact size needed
-        num_prediction_positions = len(prediction_indices)
-        motor_censor_times = np.zeros(num_prediction_positions, dtype=float)
+        motor_censor_times = event_times[-1] - event_times
         motor_tte_task_indicators = np.zeros(n_concepts, dtype=bool)
 
         # Store sparse matrix data grouped by row for efficient construction
@@ -542,7 +547,6 @@ class CehrGptDataProcessor(DatasetMapping):
                 ) in global_motor_events.items()
             ]
             motor_tte_task_indicators[start_index] = True
-            motor_censor_times[i] = last_event_time - current_event_time
 
         # Build final sparse matrix lists in forward order (no reversals needed)
         motor_row_indices = []
@@ -554,11 +558,6 @@ class CehrGptDataProcessor(DatasetMapping):
                 motor_row_indices.append(row_idx)
                 motor_col_indices.append(col_idx)
                 motor_values.append(value)
-
-        # Filter out unused positions from motor_censor_times
-        motor_censor_times = [
-            motor_censor_times[i] for i in sorted(sparse_data_by_row.keys())
-        ]
 
         if len(motor_row_indices) == 0:
             LOG.debug(

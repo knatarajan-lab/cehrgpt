@@ -123,10 +123,15 @@ class TimeToEventModel:
         prediction_window_end: int = 365,
         debug: bool = False,
         max_n_trial: int = 2,
-    ) -> Optional[TimeToEvent]:
+    ) -> Tuple[Optional[TimeToEvent], List[List[str]]]:
+        """
+        Returns (TimeToEvent or None, trajectories) where trajectories is a list
+        of generated token sequences (generated portion only, prefix excluded).
+        """
         patient_history_length = len(partial_history)
         time_event_tuples = []
         seqs_failed_to_convert = []
+        all_simulated_seqs: List[List[str]] = []
         n_trial = 0
         num_return_sequences = self.generation_config.num_return_sequences
         max_new_tokens = self.generation_config.max_new_tokens
@@ -139,6 +144,7 @@ class TimeToEventModel:
             )
             # self.generation_config.max_new_tokens = max_new_tokens * (n_trial + 1)
             simulated_seqs = self.simulate(partial_history)
+            all_simulated_seqs.extend(simulated_seqs)
             n_trial += 1
             for seq in simulated_seqs:
                 visit_counter = 0
@@ -175,12 +181,15 @@ class TimeToEventModel:
         if debug:
             print(f"seqs_failed_to_convert: {seqs_failed_to_convert}")
 
-        # Count the occurrences of each time tokens for each concept
-        return (
+        # Generated portions only (prefix excluded) for all simulated sequences
+        trajectories = [seq[patient_history_length:] for seq in all_simulated_seqs]
+
+        tte = (
             create_time_to_event(time_event_tuples, len(time_event_tuples))
             if len(time_event_tuples) > 0
             else None
         )
+        return tte, trajectories
 
     @staticmethod
     def get_generation_config(

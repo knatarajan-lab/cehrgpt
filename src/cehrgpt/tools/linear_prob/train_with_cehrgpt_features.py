@@ -18,6 +18,8 @@ def prepare_dataset(
     age_scaler = feature_processor["age_scaler"]
     gender_encoder = feature_processor["gender_encoder"]
     race_encoder = feature_processor["race_encoder"]
+    feature_scaler = feature_processor["feature_scaler"]
+
     age_scaler.transform(df[["age_at_index"]].to_numpy())
 
     one_hot_gender = gender_encoder.transform(
@@ -28,6 +30,7 @@ def prepare_dataset(
     )
 
     features = np.stack(df["features"].apply(lambda x: np.array(x).flatten()))
+    features = feature_scaler.transform(features)
     # features = np.hstack(
     #     [scaled_age, one_hot_gender.toarray(), one_hot_race.toarray(), features]
     # )
@@ -67,10 +70,14 @@ def main(args):
         with open(feature_processor_path, "rb") as f:
             feature_processor = pickle.load(f)
     else:
-        age_scaler, gender_encoder, race_encoder = (
+        feature_scaler, age_scaler, gender_encoder, race_encoder = (
+            StandardScaler(),
             StandardScaler(),
             OneHotEncoder(handle_unknown="ignore"),
             OneHotEncoder(handle_unknown="ignore"),
+        )
+        feature_scaler = feature_scaler.fit(
+            np.stack(feature_train["features"].apply(lambda x: np.array(x).flatten()))
         )
         age_scaler = age_scaler.fit(feature_train[["age_at_index"]].to_numpy())
         gender_encoder = gender_encoder.fit(
@@ -78,6 +85,7 @@ def main(args):
         )
         race_encoder = race_encoder.fit(feature_train[["race_concept_id"]].to_numpy())
         feature_processor = {
+            "feature_scaler": feature_scaler,
             "age_scaler": age_scaler,
             "gender_encoder": gender_encoder,
             "race_encoder": race_encoder,
@@ -100,12 +108,18 @@ def main(args):
         else:
             train_dataset = prepare_dataset(feature_train, feature_processor)
             # Train logistic regression
-            model = LogisticRegressionCV(scoring="roc_auc", random_state=42)
+            model = LogisticRegressionCV(
+                scoring="roc_auc",
+                random_state=42,
+                max_iter=1000,
+                n_jobs=8,
+            )
             model.fit(train_dataset["features"], train_dataset["boolean_value"])
             with open(logistic_model_file, "wb") as f:
                 pickle.dump(model, f)
 
         test_dataset = prepare_dataset(feature_test, feature_processor)
+
         y_pred = model.predict_proba(test_dataset["features"])[:, 1]
         logistic_predictions = pl.DataFrame(
             {

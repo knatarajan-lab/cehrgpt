@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from transformers import PretrainedConfig
 
@@ -123,6 +123,11 @@ class CEHRGPTConfig(PretrainedConfig):
         bos_token_id=50256,
         eos_token_id=50256,
         lab_token_ids=None,
+        ve_token_id=None,
+        vs_token_id=None,
+        att_token_ids=None,
+        use_local_attention=False,
+        local_attention_n_prev_visits=5,
         scale_attn_by_inverse_layer_idx=False,
         reorder_and_upcast_attn=False,
         apply_rotary=False,
@@ -131,9 +136,14 @@ class CEHRGPTConfig(PretrainedConfig):
         include_ttv_prediction=False,
         use_sub_time_tokenization=True,
         include_motor_time_to_event=True,
+        freeze_cehrgpt_generation_model=False,
+        linear_prob_n_layer=None,
         motor_tte_vocab_size=None,
         motor_time_to_event_weight=1.0,
         motor_num_time_pieces=16,
+        motor_time_bins: Optional[List[float]] = None,
+        motor_task_prevalence_rates: Optional[List[float]] = None,
+        linear_prob_token_id=None,
         token_to_time_token_mapping: Dict[int, List] = None,
         use_pretrained_embeddings=False,
         n_pretrained_embeddings_layers=2,
@@ -151,6 +161,16 @@ class CEHRGPTConfig(PretrainedConfig):
         entropy_penalty_alpha=0.01,
         sample_packing_max_positions=None,
         class_weights=None,
+        use_time_embedding=False,
+        n_time_embd=16,
+        time_embedding_scaling_factor=86400.0,
+        age_embedding_scaling_factor=100.0,
+        include_age_at_vs_prediction=False,
+        age_at_vs_vocab_size=None,
+        age_at_vs_prediction_loss_weight=1.0,
+        include_year_at_vs_prediction=False,
+        year_at_vs_vocab_size=None,
+        year_at_vs_prediction_loss_weight=1.0,
         **kwargs,
     ):
         if token_to_time_token_mapping is None:
@@ -209,8 +229,54 @@ class CEHRGPTConfig(PretrainedConfig):
             and self.motor_tte_vocab_size
             and self.motor_tte_vocab_size > 0
         )
+        self.linear_prob_n_layer = linear_prob_n_layer
+        self.freeze_cehrgpt_generation_model = freeze_cehrgpt_generation_model
+        if self.include_motor_time_to_event and not ve_token_id:
+            raise RuntimeError(
+                f"ve_token_id must be provided when include_motor_time_to_event is True"
+            )
+        self.use_time_embedding = use_time_embedding
+        self.n_time_embd = n_time_embd
+        self.time_embedding_scaling_factor = time_embedding_scaling_factor
+        self.age_embedding_scaling_factor = age_embedding_scaling_factor
+
+        self.include_age_at_vs_prediction = include_age_at_vs_prediction
+        self.age_at_vs_vocab_size = age_at_vs_vocab_size
+        self.age_at_vs_prediction_loss_weight = age_at_vs_prediction_loss_weight
+        if self.include_age_at_vs_prediction and not vs_token_id:
+            raise RuntimeError(
+                "vs_token_id must be provided when include_age_at_vs_prediction is True"
+            )
+        self.include_year_at_vs_prediction = include_year_at_vs_prediction
+        self.year_at_vs_vocab_size = year_at_vs_vocab_size
+        self.year_at_vs_prediction_loss_weight = year_at_vs_prediction_loss_weight
+        if self.include_year_at_vs_prediction and not vs_token_id:
+            raise RuntimeError(
+                "vs_token_id must be provided when include_year_at_vs_prediction is True"
+            )
+        if self.include_year_at_vs_prediction and not self.year_at_vs_vocab_size:
+            raise RuntimeError(
+                "year_at_vs_vocab_size must be provided when include_year_at_vs_prediction is True. "
+                "Ensure the tokenizer vocabulary contains 'year:<int>' tokens and the package is up to date."
+            )
+        if self.include_motor_time_to_event and not linear_prob_token_id:
+            raise RuntimeError(
+                f"linear_prob_token_id must be provided when include_motor_time_to_event is True"
+            )
+        if self.include_motor_time_to_event and not motor_time_bins:
+            raise RuntimeError(
+                "motor_time_bins must be provided when include_motor_time_to_event is True"
+            )
+        self.ve_token_id = ve_token_id
+        self.vs_token_id = vs_token_id
+        self.att_token_ids = att_token_ids if att_token_ids is not None else []
+        self.use_local_attention = use_local_attention
+        self.local_attention_n_prev_visits = local_attention_n_prev_visits
         self.motor_time_to_event_weight = motor_time_to_event_weight
         self.motor_num_time_pieces = motor_num_time_pieces
+        self.linear_prob_token_id = linear_prob_token_id
+        self.motor_time_bins = motor_time_bins
+        self.motor_task_prevalence_rates = motor_task_prevalence_rates
 
         self.causal_sfm = causal_sfm
         self.demographics_size = demographics_size
