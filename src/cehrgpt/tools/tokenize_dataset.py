@@ -60,7 +60,7 @@ def parse_args():
     parser.add_argument(
         "--tokenized_dataset_name",
         type=str,
-        default=None,
+        required=True,
         help="Sub-directory name under --output_dir where the dataset is saved "
              "(e.g. 'my_dataset'). Mirrors the --tokenized_dataset_name used by the training runner.",
     )
@@ -109,10 +109,7 @@ def main():
     tokenizer_path = os.path.expanduser(args.tokenizer_name_or_path)
     data_folder = os.path.expanduser(args.data_folder)
     output_dir = os.path.expanduser(args.output_dir)
-    if args.tokenized_dataset_name:
-        save_dir = os.path.join(output_dir, args.tokenized_dataset_name)
-    else:
-        save_dir = output_dir
+    save_dir = os.path.join(output_dir, args.tokenized_dataset_name)
 
     if not os.path.isdir(tokenizer_path):
         raise FileNotFoundError(f"Tokenizer not found at: {tokenizer_path}")
