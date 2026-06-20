@@ -1,44 +1,45 @@
 #!/usr/bin/env bash
 # =============================================================================
-# LEGEND-HTN Replication: ACEi vs Thiazide
+# LEGEND-HTN Replication: ACEi vs Thiazide (within-patient counterfactual)
 # =============================================================================
-#
-# End-to-end counterfactual comparative effectiveness study comparing
-# ACE inhibitors (ACEi) to thiazide diuretics for cardiovascular outcomes,
-# replicating the primary comparison from LEGEND-HTN (Suchard et al., Lancet 2019).
 #
 # Study design
 # ------------
-#   Population : New users of ACEi OR thiazide diuretics with ≥365 days
-#                of prior observation and a hypertension diagnosis.
-#   Counterfactual approach:
-#     - For each patient who received ACEi: generate trajectories under
-#       (a) ACEi (their actual drug) and (b) thiazide (drug swap → HCTZ).
-#     - For each patient who received thiazide: generate trajectories under
-#       (a) thiazide (actual) and (b) ACEi (drug swap → lisinopril).
-#     - Pool all "ACEi" trajectories vs all "Thiazide" trajectories → HR.
-#   Outcomes : Acute MI, Hospitalized heart failure, Ischemic stroke,
-#              Hemorrhagic stroke (LEGEND-HTN primary outcomes).
+#   Population  : Patients who initiated an ACE inhibitor (new users).
+#   Arm A (ACEi): History up to and including the ACEi initiation visit.
+#                 Model generates the future conditional on ACEi.
+#   Arm B (Thiazide counterfactual):
+#                 Same history, but the ACEi concept is swapped to a
+#                 thiazide concept sampled proportional to the empirical
+#                 frequency of thiazide ingredients in the data.
+#                 Model generates the counterfactual future as if the
+#                 patient had received a thiazide instead.
+#   Each patient produces N trajectories in each arm.
+#   HR is computed by comparing ACEi vs Thiazide generated trajectories.
 #
-# OMOP concept IDs used
-# ---------------------
-#   ACEi class ancestor     : 21600381
-#   Thiazide class ancestor : 21601664
-#   Lisinopril (ACEi swap)  : 1308216
-#   HCTZ (thiazide swap)    :  974166
-#   Acute MI outcome        : 4329847
-#   Heart failure outcome   :  316139
-#   Ischemic stroke outcome : 4110192
-#   Hemorrhagic stroke      :  376713
+# Why we also extract thiazide patients in Step 1
+# -----------------------------------------------
+#   We need the empirical frequency of each thiazide ingredient (HCTZ,
+#   chlorthalidone, indapamide, metolazone) to weight the drug swap in
+#   Step 2.  We obtain this by including thiazide patients in the
+#   extraction so they appear in drug_info.parquet.  Thiazide patients
+#   are NOT used in any other step.
 #
-# Expected LEGEND-HTN published HRs (ACEi vs Thiazide):
-#   AMI           : 0.99 (95% CI 0.87–1.13)
-#   Heart failure : 1.18 (95% CI 1.07–1.30)  [ACEi worse]
-#   Stroke        : 1.09 (95% CI 0.99–1.20)
+# Outcomes (LEGEND-HTN primary, OMOP concept_ids)
+# ------------------------------------------------
+#   4329847  Acute myocardial infarction
+#    316139  Hospitalized heart failure
+#   4110192  Ischemic stroke
+#    376713  Hemorrhagic stroke
+#
+# Published LEGEND-HTN reference HRs (ACEi vs Thiazide):
+#   AMI           : 0.99  (95% CI 0.87–1.13)
+#   Heart failure : 1.18  (95% CI 1.07–1.30)  [ACEi worse]
+#   Stroke        : 1.09  (95% CI 0.99–1.20)
 #
 # Usage
 # -----
-#   Edit the CONFIGURATION section below, then:
+#   Edit the CONFIGURATION section, then:
 #     bash run_legend_htn_acei_vs_thiazide.sh
 #
 # =============================================================================
@@ -48,56 +49,35 @@ set -euo pipefail
 # CONFIGURATION — edit these paths before running
 # =============================================================================
 
-# Pre-tokenised patient sequence parquet file or folder
 PATIENT_SEQUENCE_PATH="/data/patient_sequence"
-
-# OMOP vocabulary root (must contain concept_ancestor/ sub-directory)
 VOCAB_PATH="/data/omop_vocab"
-
-# Pretrained CEHR-GPT model directory
 MODEL_PATH="/models/cehrgpt"
-
-# CehrGptTokenizer directory
 TOKENIZER_PATH="/models/tokenizer"
-
-# Root output directory (sub-directories are created automatically)
 OUTPUT_ROOT="/data/legend_htn_acei_vs_thiazide"
 
-# Number of stochastic trajectories per patient per arm
-# Higher = more stable HR estimates; 50 is a good starting point.
+# Number of stochastic trajectories per patient per arm (50+ recommended)
 NUM_TRAJECTORIES=50
 
-# Batch size for GPU generation (reduce if OOM)
 BATCH_SIZE=8
-
-# Context window length fed to the model
-GENERATION_INPUT_LENGTH=1024
-
-# Max new tokens to generate per trajectory
+GENERATION_INPUT_LENGTH=4096
 GENERATION_MAX_NEW_TOKENS=1024
-
-# Follow-up window in days for outcome ascertainment
 FOLLOW_UP_DAYS=365
-
-# Number of DataLoader workers (0 = main process only; increase if IO-bound)
 NUM_WORKERS=4
 
 # =============================================================================
-# DRUG CONCEPT IDs (user-supplied — verify 1395058 which appears in both lists)
+# DRUG CONCEPT IDs
+# NOTE: 1395058 appears in both lists (Quinapril / Chlorthalidone) — verify.
 # =============================================================================
 
-# ACE inhibitor ingredient concept_ids
 ACEI_CONCEPT_IDS="1308216,1346654,1332418,135376,1395058,1310756,1363749,1328956,1373355,1307046"
 # Lisinopril, Ramipril, Enalapril, Benazepril, Quinapril(*),
 # Captopril, Fosinopril, Moexipril, Perindopril, Trandolapril
-# (*) 1395058 also given for Chlorthalidone below — please verify
 
-# Thiazide / thiazide-like ingredient concept_ids
 THIAZIDE_CONCEPT_IDS="1395058,974166,978555,907013"
 # Chlorthalidone(*), HCTZ, Indapamide, Metolazone
 
 # =============================================================================
-# DERIVED PATHS (no need to edit below this line)
+# DERIVED PATHS
 # =============================================================================
 
 CONTEXT_DIR="${OUTPUT_ROOT}/contexts"
@@ -105,32 +85,31 @@ SWAP_DIR="${OUTPUT_ROOT}/swap_contexts"
 TRAJ_DIR="${OUTPUT_ROOT}/trajectories"
 RESULTS_DIR="${OUTPUT_ROOT}/results"
 
-# Context parquets produced by extract_drug_initiation_sequences.py
 TREATED_CTX="${CONTEXT_DIR}/treated_context.parquet"
 DRUG_INFO="${CONTEXT_DIR}/drug_info.parquet"
 
-# Arm-specific context parquets produced by create_drug_swap_context.py
-ACEI_PTS_ACEI_CTX="${SWAP_DIR}/acei_pts_acei_ctx.parquet"
-ACEI_PTS_THIAZIDE_CTX="${SWAP_DIR}/acei_pts_thiazide_ctx.parquet"
-THIAZIDE_PTS_THIAZIDE_CTX="${SWAP_DIR}/thiazide_pts_thiazide_ctx.parquet"
-THIAZIDE_PTS_ACEI_CTX="${SWAP_DIR}/thiazide_pts_acei_ctx.parquet"
-
-# Pooled arm contexts fed to the generation step
+# ACEi patients — actual ACEi context (arm A input)
 ACEI_ARM_CTX="${SWAP_DIR}/acei_arm_ctx.parquet"
+# ACEi patients — thiazide counterfactual context (arm B input)
 THIAZIDE_ARM_CTX="${SWAP_DIR}/thiazide_arm_ctx.parquet"
 
-# Script paths (relative to repo root)
 EXTRACT_SCRIPT="src/cehrgpt/analysis/counterfactual/extract_drug_initiation_sequences.py"
 SWAP_SCRIPT="src/cehrgpt/analysis/counterfactual/create_drug_swap_context.py"
 GENERATE_SCRIPT="src/cehrgpt/analysis/counterfactual/generate_counterfactual_sequences.py"
 HR_SCRIPT="src/cehrgpt/analysis/counterfactual/hazard_ratio_estimation.py"
 
 # =============================================================================
-# STEP 1 — Extract partial histories up to first ACEi or thiazide exposure
+# STEP 1 — Extract drug initiation sequences
+#
+#   Include BOTH ACEi AND thiazide patients so that drug_info.parquet
+#   contains real thiazide prescriptions.  These are used in Step 2 to
+#   compute the empirical frequency of each thiazide ingredient for
+#   frequency-weighted sampling.  Thiazide patients are not used elsewhere.
 # =============================================================================
 echo "============================================================"
 echo "STEP 1: Extract drug initiation sequences"
-echo "  Population : new users of ACEi (21600381) OR Thiazide (21601664)"
+echo "  ACEi patients   : ${ACEI_CONCEPT_IDS}"
+echo "  Thiazide (freq) : ${THIAZIDE_CONCEPT_IDS}"
 echo "============================================================"
 
 mkdir -p "${CONTEXT_DIR}"
@@ -146,12 +125,19 @@ echo "Step 1 complete."
 echo ""
 
 # =============================================================================
-# STEP 2 — Create drug-swap contexts
-#   2a. ACEi patients  : save actual ACEi context + swap ACEi → HCTZ
-#   2b. Thiazide patients : save actual thiazide context + swap thiazide → lisinopril
+# STEP 2 — Create the two arm contexts for ACEi patients
+#
+#   For each ACEi patient we produce:
+#     Arm A (acei_arm_ctx)     : treated_context as-is (ACEi in context)
+#     Arm B (thiazide_arm_ctx) : treated_context with ACEi concept swapped
+#                                to a thiazide concept sampled proportional
+#                                to the empirical thiazide frequency derived
+#                                from real thiazide patients in drug_info.parquet
 # =============================================================================
 echo "============================================================"
-echo "STEP 2a: ACEi patients — actual ACEi context + swap to HCTZ"
+echo "STEP 2: Create ACEi (actual) and Thiazide (counterfactual) contexts"
+echo "  Source      : ACEi patients"
+echo "  Comparator  : thiazide (frequency-sampled from real thiazide Rx)"
 echo "============================================================"
 
 mkdir -p "${SWAP_DIR}"
@@ -162,71 +148,53 @@ python "${SWAP_SCRIPT}" \
     --vocab_path              "${VOCAB_PATH}" \
     --source_concept_ids      "${ACEI_CONCEPT_IDS}" \
     --comparator_concept_ids  "${THIAZIDE_CONCEPT_IDS}" \
-    --output_path             "${ACEI_PTS_THIAZIDE_CTX}" \
-    --also_write_treated_path "${ACEI_PTS_ACEI_CTX}"
-# Each ACEi patient gets a thiazide concept sampled from the empirical
-# distribution of thiazide ingredients among real thiazide patients.
+    --output_path             "${THIAZIDE_ARM_CTX}" \
+    --also_write_treated_path "${ACEI_ARM_CTX}"
 
 echo ""
-echo "============================================================"
-echo "STEP 2b: Thiazide patients — actual thiazide context + frequency-sampled ACEi swap"
-echo "============================================================"
-
-python "${SWAP_SCRIPT}" \
-    --treated_context_path    "${TREATED_CTX}" \
-    --drug_info_path          "${DRUG_INFO}" \
-    --vocab_path              "${VOCAB_PATH}" \
-    --source_concept_ids      "${THIAZIDE_CONCEPT_IDS}" \
-    --comparator_concept_ids  "${ACEI_CONCEPT_IDS}" \
-    --output_path             "${THIAZIDE_PTS_ACEI_CTX}" \
-    --also_write_treated_path "${THIAZIDE_PTS_THIAZIDE_CTX}"
-# Each thiazide patient gets an ACEi concept sampled from the empirical
-# distribution of ACEi ingredients among real ACEi patients.
-
-echo ""
-echo "============================================================"
-echo "STEP 2c: Pool contexts into two final arms"
-echo "  ACEi arm     = ACEi patients (actual) + Thiazide patients (swapped to ACEi)"
-echo "  Thiazide arm = Thiazide patients (actual) + ACEi patients (swapped to HCTZ)"
-echo "============================================================"
-
+echo "Arm sizes:"
 python - <<'PYEOF'
-import polars as pl, os, sys
-
-swap_dir = os.environ.get("SWAP_DIR", sys.argv[1] if len(sys.argv) > 1 else ".")
-
-acei_arm = pl.concat([
-    pl.read_parquet(f"{swap_dir}/acei_pts_acei_ctx.parquet"),
-    pl.read_parquet(f"{swap_dir}/thiazide_pts_acei_ctx.parquet"),
-])
-acei_arm.write_parquet(f"{swap_dir}/acei_arm_ctx.parquet")
-print(f"ACEi arm: {len(acei_arm):,} patients")
-
-thiazide_arm = pl.concat([
-    pl.read_parquet(f"{swap_dir}/thiazide_pts_thiazide_ctx.parquet"),
-    pl.read_parquet(f"{swap_dir}/acei_pts_thiazide_ctx.parquet"),
-])
-thiazide_arm.write_parquet(f"{swap_dir}/thiazide_arm_ctx.parquet")
-print(f"Thiazide arm: {len(thiazide_arm):,} patients")
+import polars as pl, os
+swap_dir = os.environ["SWAP_DIR"]
+for label, f in [("ACEi arm (actual)", f"{swap_dir}/acei_arm_ctx.parquet"),
+                 ("Thiazide arm (counterfactual)", f"{swap_dir}/thiazide_arm_ctx.parquet")]:
+    n = len(pl.read_parquet(f))
+    print(f"  {label}: {n:,} patients")
 PYEOF
 
 echo "Step 2 complete."
 echo ""
 
 # =============================================================================
-# STEP 3 — Generate trajectories for both arms
+# STEP 3 — Generate trajectories for both arms in parallel on two GPUs
+#
+#   GPU 0: acei/     — N futures per patient conditioned on ACEi receipt
+#   GPU 1: thiazide/ — N counterfactual futures conditioned on thiazide
+#
+#   Both processes run simultaneously; the script waits for both to finish.
 # =============================================================================
 echo "============================================================"
-echo "STEP 3: Generate counterfactual trajectories"
-echo "  ACEi arm     → ${TRAJ_DIR}/acei/"
-echo "  Thiazide arm → ${TRAJ_DIR}/thiazide/"
-echo "  Trajectories per patient: ${NUM_TRAJECTORIES}"
+echo "STEP 3: Generate trajectories  (${NUM_TRAJECTORIES} per patient per arm)"
+echo "  GPU 0 → acei/     (conditioned on ACEi initiation)"
+echo "  GPU 1 → thiazide/ (counterfactual: ACEi concept swapped to thiazide)"
 echo "============================================================"
 
 mkdir -p "${TRAJ_DIR}"
 
-python "${GENERATE_SCRIPT}" \
+CUDA_VISIBLE_DEVICES=0 python "${GENERATE_SCRIPT}" \
     --arm_context "acei:${ACEI_ARM_CTX}" \
+    --model_name_or_path        "${MODEL_PATH}" \
+    --tokenizer_path            "${TOKENIZER_PATH}" \
+    --output_dir                "${TRAJ_DIR}" \
+    --num_trajectories          "${NUM_TRAJECTORIES}" \
+    --batch_size                "${BATCH_SIZE}" \
+    --generation_input_length   "${GENERATION_INPUT_LENGTH}" \
+    --generation_max_new_tokens "${GENERATION_MAX_NEW_TOKENS}" \
+    --num_workers               "${NUM_WORKERS}" \
+    > "${OUTPUT_ROOT}/generate_acei.log" 2>&1 &
+PID_ACEI=$!
+
+CUDA_VISIBLE_DEVICES=1 python "${GENERATE_SCRIPT}" \
     --arm_context "thiazide:${THIAZIDE_ARM_CTX}" \
     --model_name_or_path        "${MODEL_PATH}" \
     --tokenizer_path            "${TOKENIZER_PATH}" \
@@ -235,16 +203,36 @@ python "${GENERATE_SCRIPT}" \
     --batch_size                "${BATCH_SIZE}" \
     --generation_input_length   "${GENERATION_INPUT_LENGTH}" \
     --generation_max_new_tokens "${GENERATION_MAX_NEW_TOKENS}" \
-    --num_workers               "${NUM_WORKERS}"
+    --num_workers               "${NUM_WORKERS}" \
+    > "${OUTPUT_ROOT}/generate_thiazide.log" 2>&1 &
+PID_THIAZIDE=$!
+
+echo "ACEi generation   PID=${PID_ACEI}  (log: ${OUTPUT_ROOT}/generate_acei.log)"
+echo "Thiazide generation PID=${PID_THIAZIDE}  (log: ${OUTPUT_ROOT}/generate_thiazide.log)"
+echo "Waiting for both to complete …"
+
+wait ${PID_ACEI}
+STATUS_ACEI=$?
+wait ${PID_THIAZIDE}
+STATUS_THIAZIDE=$?
+
+if [ ${STATUS_ACEI} -ne 0 ]; then
+    echo "ERROR: ACEi generation failed (exit ${STATUS_ACEI}). Check ${OUTPUT_ROOT}/generate_acei.log"
+    exit ${STATUS_ACEI}
+fi
+if [ ${STATUS_THIAZIDE} -ne 0 ]; then
+    echo "ERROR: Thiazide generation failed (exit ${STATUS_THIAZIDE}). Check ${OUTPUT_ROOT}/generate_thiazide.log"
+    exit ${STATUS_THIAZIDE}
+fi
 
 echo "Step 3 complete."
 echo ""
 
 # =============================================================================
-# STEP 4 — Estimate Hazard Ratios
+# STEP 4 — Estimate Hazard Ratios (ACEi vs Thiazide)
 # =============================================================================
 echo "============================================================"
-echo "STEP 4: Hazard ratio estimation (${FOLLOW_UP_DAYS}-day follow-up)"
+echo "STEP 4: Hazard ratio estimation  (${FOLLOW_UP_DAYS}-day follow-up)"
 echo "  Outcomes:"
 echo "    4329847  Acute myocardial infarction"
 echo "     316139  Hospitalized heart failure"
@@ -268,12 +256,14 @@ echo ""
 # SUMMARY
 # =============================================================================
 echo "============================================================"
-echo "All steps complete.  Results:"
-echo "  HR summary  : ${RESULTS_DIR}/hazard_ratio_summary.csv"
-echo "  KM curves   : ${RESULTS_DIR}/km_<concept_id>.csv"
+echo "Done.  Output directory: ${OUTPUT_ROOT}"
+echo ""
+echo "Key files:"
+echo "  ${RESULTS_DIR}/hazard_ratio_summary.csv"
+echo "  ${RESULTS_DIR}/km_<concept_id>.csv"
 echo ""
 echo "Published LEGEND-HTN reference HRs (ACEi vs Thiazide):"
 echo "  AMI           : 0.99  (95% CI 0.87–1.13)"
-echo "  Heart failure : 1.18  (95% CI 1.07–1.30)  [ACEi worse]"
+echo "  Heart failure : 1.18  (95% CI 1.07–1.30)"
 echo "  Stroke        : 1.09  (95% CI 0.99–1.20)"
 echo "============================================================"
