@@ -83,6 +83,20 @@ FOLLOW_UP_DAYS=365
 NUM_WORKERS=4
 
 # =============================================================================
+# DRUG CONCEPT IDs (user-supplied — verify 1395058 which appears in both lists)
+# =============================================================================
+
+# ACE inhibitor ingredient concept_ids
+ACEI_CONCEPT_IDS="1308216,1346654,1332418,135376,1395058,1310756,1363749,1328956,1373355,1307046"
+# Lisinopril, Ramipril, Enalapril, Benazepril, Quinapril(*),
+# Captopril, Fosinopril, Moexipril, Perindopril, Trandolapril
+# (*) 1395058 also given for Chlorthalidone below — please verify
+
+# Thiazide / thiazide-like ingredient concept_ids
+THIAZIDE_CONCEPT_IDS="1395058,974166,978555,907013"
+# Chlorthalidone(*), HCTZ, Indapamide, Metolazone
+
+# =============================================================================
 # DERIVED PATHS (no need to edit below this line)
 # =============================================================================
 
@@ -124,7 +138,7 @@ mkdir -p "${CONTEXT_DIR}"
 python "${EXTRACT_SCRIPT}" \
     --patient_sequence_path "${PATIENT_SEQUENCE_PATH}" \
     --vocab_path            "${VOCAB_PATH}" \
-    --drug_concept_ids      "21600381,21601664" \
+    --drug_concept_ids      "${ACEI_CONCEPT_IDS},${THIAZIDE_CONCEPT_IDS}" \
     --output_dir            "${CONTEXT_DIR}" \
     --min_context_length    4
 
@@ -146,24 +160,28 @@ python "${SWAP_SCRIPT}" \
     --treated_context_path    "${TREATED_CTX}" \
     --drug_info_path          "${DRUG_INFO}" \
     --vocab_path              "${VOCAB_PATH}" \
-    --source_class_id         21600381 \
-    --comparator_concept_id   974166 \
+    --source_concept_ids      "${ACEI_CONCEPT_IDS}" \
+    --comparator_concept_ids  "${THIAZIDE_CONCEPT_IDS}" \
     --output_path             "${ACEI_PTS_THIAZIDE_CTX}" \
     --also_write_treated_path "${ACEI_PTS_ACEI_CTX}"
+# Each ACEi patient gets a thiazide concept sampled from the empirical
+# distribution of thiazide ingredients among real thiazide patients.
 
 echo ""
 echo "============================================================"
-echo "STEP 2b: Thiazide patients — actual thiazide context + swap to lisinopril"
+echo "STEP 2b: Thiazide patients — actual thiazide context + frequency-sampled ACEi swap"
 echo "============================================================"
 
 python "${SWAP_SCRIPT}" \
     --treated_context_path    "${TREATED_CTX}" \
     --drug_info_path          "${DRUG_INFO}" \
     --vocab_path              "${VOCAB_PATH}" \
-    --source_class_id         21601664 \
-    --comparator_concept_id   1308216 \
+    --source_concept_ids      "${THIAZIDE_CONCEPT_IDS}" \
+    --comparator_concept_ids  "${ACEI_CONCEPT_IDS}" \
     --output_path             "${THIAZIDE_PTS_ACEI_CTX}" \
     --also_write_treated_path "${THIAZIDE_PTS_THIAZIDE_CTX}"
+# Each thiazide patient gets an ACEi concept sampled from the empirical
+# distribution of ACEi ingredients among real ACEi patients.
 
 echo ""
 echo "============================================================"
