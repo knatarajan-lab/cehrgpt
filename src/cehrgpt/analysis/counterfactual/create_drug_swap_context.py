@@ -210,6 +210,7 @@ def create_comparator_context(
     comparator_concept_ids: List[int],
     output_path: Path,
     also_write_treated_path: Optional[Path] = None,
+    max_source_patients: Optional[int] = None,
     seed: int = 42,
 ) -> None:
     """
@@ -238,8 +239,12 @@ def create_comparator_context(
     also_write_treated_path
         If provided, also write the unmodified (actual) treated contexts for
         the filtered patients — ready to use as the source arm in generation.
+    max_source_patients
+        If set, randomly sample this many source-class patients before
+        generating contexts (useful for pilot runs on large cohorts).
     seed
-        Random seed for reproducible frequency-based sampling.
+        Random seed for reproducible frequency-based sampling and patient
+        sub-sampling.
     """
     random.seed(seed)
     output_path = Path(output_path)
@@ -285,6 +290,10 @@ def create_comparator_context(
     df = pl.read_parquet(treated_context_path)
     df_source = df.filter(pl.col("person_id").is_in(list(source_patients)))
     print(f"\n{len(df_source):,} source-class treated contexts to swap")
+
+    if max_source_patients is not None and len(df_source) > max_source_patients:
+        df_source = df_source.sample(n=max_source_patients, seed=seed, shuffle=True)
+        print(f"Randomly sampled {max_source_patients:,} source patients (seed={seed})")
 
     if also_write_treated_path is not None:
         Path(also_write_treated_path).parent.mkdir(parents=True, exist_ok=True)
@@ -379,6 +388,16 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--max_source_patients",
+        type=int,
+        default=None,
+        help=(
+            "Optional: randomly sample this many source-class patients before "
+            "generating contexts (e.g. 10000 for a pilot run). "
+            "Default: use all patients."
+        ),
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -417,6 +436,7 @@ def main() -> None:
         also_write_treated_path=(
             Path(args.also_write_treated_path) if args.also_write_treated_path else None
         ),
+        max_source_patients=args.max_source_patients,
         seed=args.seed,
     )
 
