@@ -42,8 +42,11 @@ from scipy.stats import chi2
 # Constants
 # ---------------------------------------------------------------------------
 
-NON_TREATED_ARM = "non_treated"
-TREATED_ARM = "treated"
+# Default arm names for the ACEi vs Thiazide LEGEND-HTN study.
+# These match the --arm_context names passed to generate_counterfactual_sequences.py.
+# Override via --arm_a / --arm_b if you use different names.
+DEFAULT_ARM_A = "acei"       # the "treated" arm (actual drug received)
+DEFAULT_ARM_B = "thiazide"   # the "comparator" arm (counterfactual)
 EPSILON = 1e-8
 
 
@@ -319,22 +322,30 @@ def kaplan_meier(
 
 def analyse_outcome(
     outcome_concept_id: str,
-    traj_non_treated: pl.DataFrame,
-    traj_treated: pl.DataFrame,
+    traj_arm_a: pl.DataFrame,
+    traj_arm_b: pl.DataFrame,
     drug_info: pl.DataFrame,
     follow_up_days: float,
+    arm_a_label: str,
+    arm_b_label: str,
     output_dir: Path,
 ) -> Dict:
     """
     Run full HR analysis for a single outcome concept.
+
+    HR is reported as arm_a relative to arm_b (e.g. ACEi vs Thiazide).
+    Since both arms share the same patients (within-patient counterfactual),
+    each patient contributes one aggregated time-to-event value per arm.
     """
     print(f"\n  Outcome: {outcome_concept_id}")
 
-    tte_nt = compute_tte(traj_non_treated, drug_info, [outcome_concept_id], follow_up_days)
-    tte_t = compute_tte(traj_treated, drug_info, [outcome_concept_id], follow_up_days)
+    tte_a = compute_tte(traj_arm_a, drug_info, [outcome_concept_id], follow_up_days)
+    tte_b = compute_tte(traj_arm_b, drug_info, [outcome_concept_id], follow_up_days)
 
-    # Average over trajectories per patient (mean time_days, max event)
-    def aggregate_trajectories(tte: pl.DataFrame) -> pl.DataFrame:
+    # Aggregate N trajectories per patient:
+    #   event = 1 if outcome occurred in ANY trajectory
+    #   time  = mean time-to-event across trajectories
+    def aggregate(tte: pl.DataFrame) -> pl.DataFrame:
         return (
             tte
             .group_by("subject_id")
@@ -344,60 +355,53 @@ def analyse_outcome(
             )
         )
 
-    nte_agg = aggregate_trajectories(tte_nt)
-    t_agg = aggregate_trajectories(tte_t)
+    agg_a = aggregate(tte_a)
+    agg_b = aggregate(tte_b)
 
-    time_nt = nte_agg["time_days"].to_numpy()
-    event_nt = nte_agg["event"].to_numpy().astype(int)
-    time_t = t_agg["time_days"].to_numpy()
-    event_t = t_agg["event"].to_numpy().astype(int)
+    time_a  = agg_a["time_days"].to_numpy()
+    event_a = agg_a["event"].to_numpy().astype(int)
+    time_b  = agg_b["time_days"].to_numpy()
+    event_b = agg_b["event"].to_numpy().astype(int)
 
-    n_nt = len(time_nt)
-    n_t = len(time_t)
-    n_events_nt = int(event_nt.sum())
-    n_events_t = int(event_t.sum())
+    print(f"    {arm_a_label}: {len(time_a):,} patients, {int(event_a.sum()):,} events")
+    print(f"    {arm_b_label}: {len(time_b):,} patients, {int(event_b.sum()):,} events")
 
-    print(f"    Non-treated: {n_nt} patients, {n_events_nt} events")
-    print(f"    Treated:     {n_t} patients, {n_events_t} events")
-
-    # Combine for Cox PH
-    time_all = np.concatenate([time_nt, time_t])
-    event_all = np.concatenate([event_nt, event_t])
-    treatment_all = np.concatenate([np.zeros(n_nt), np.ones(n_t)])
+    # Cox PH: treatment=1 for arm_a (ACEi), treatment=0 for arm_b (Thiazide)
+    # HR > 1 means arm_a has higher hazard than arm_b
+    time_all      = np.concatenate([time_a, time_b])
+    event_all     = np.concatenate([event_a, event_b])
+    treatment_all = np.concatenate([np.ones(len(time_a)), np.zeros(len(time_b))])
 
     hr, hr_lower, hr_upper, cox_p = fit_cox(time_all, event_all, treatment_all)
+    lr_stat, lr_p = log_rank_test(time_a, event_a, time_b, event_b)
 
-    # Log-rank test
-    lr_stat, lr_p = log_rank_test(time_nt, event_nt, time_t, event_t)
+    print(f"    HR ({arm_a_label} vs {arm_b_label}) = {hr:.3f}  "
+          f"(95% CI: {hr_lower:.3f}–{hr_upper:.3f})  Cox p={cox_p:.4f}")
+    print(f"    Log-rank stat={lr_stat:.3f}  p={lr_p:.4f}")
 
-    print(f"    HR={hr:.3f} (95% CI: {hr_lower:.3f}–{hr_upper:.3f})  Cox p={cox_p:.4f}")
-    print(f"    Log-rank statistic={lr_stat:.3f}  p={lr_p:.4f}")
+    # Kaplan-Meier survival curves
+    km_t_a, km_s_a = kaplan_meier(time_a, event_a)
+    km_t_b, km_s_b = kaplan_meier(time_b, event_b)
 
-    # Kaplan-Meier data
-    km_t_nt, km_s_nt = kaplan_meier(time_nt, event_nt)
-    km_t_t, km_s_t = kaplan_meier(time_t, event_t)
-
-    km_df = pl.concat(
-        [
-            pl.DataFrame({"time_days": km_t_nt, "survival": km_s_nt, "arm": NON_TREATED_ARM}),
-            pl.DataFrame({"time_days": km_t_t, "survival": km_s_t, "arm": TREATED_ARM}),
-        ]
-    )
-    km_path = output_dir / f"km_{outcome_concept_id}.csv"
-    km_df.write_csv(str(km_path))
+    km_df = pl.concat([
+        pl.DataFrame({"time_days": km_t_a, "survival": km_s_a, "arm": arm_a_label}),
+        pl.DataFrame({"time_days": km_t_b, "survival": km_s_b, "arm": arm_b_label}),
+    ])
+    km_df.write_csv(str(output_dir / f"km_{outcome_concept_id}.csv"))
 
     return {
         "outcome_concept_id": outcome_concept_id,
-        "n_non_treated": n_nt,
-        "n_treated": n_t,
-        "n_events_non_treated": n_events_nt,
-        "n_events_treated": n_events_t,
+        f"n_{arm_a_label}": len(time_a),
+        f"n_{arm_b_label}": len(time_b),
+        f"n_events_{arm_a_label}": int(event_a.sum()),
+        f"n_events_{arm_b_label}": int(event_b.sum()),
         "hr": hr,
         "hr_lower_95": hr_lower,
         "hr_upper_95": hr_upper,
         "cox_p_value": cox_p,
         "log_rank_stat": lr_stat,
         "log_rank_p_value": lr_p,
+        "hr_interpretation": f"HR of {arm_a_label} vs {arm_b_label} (>1 = higher hazard in {arm_a_label})",
     }
 
 
@@ -409,38 +413,31 @@ def main() -> None:
 
     outcome_ids = [x.strip() for x in args.outcome_concept_ids.split(",")]
 
-    # ------------------------------------------------------------------ #
-    # Load trajectories                                                   #
-    # ------------------------------------------------------------------ #
-    print("Loading non-treated trajectories …")
-    traj_nt = load_trajectories(args.trajectories_dir, NON_TREATED_ARM)
-    print(f"  {len(traj_nt):,} events")
+    print(f"Loading {args.arm_a} trajectories …")
+    traj_a = load_trajectories(args.trajectories_dir, args.arm_a)
+    print(f"  {len(traj_a):,} events")
 
-    print("Loading treated trajectories …")
-    traj_t = load_trajectories(args.trajectories_dir, TREATED_ARM)
-    print(f"  {len(traj_t):,} events")
+    print(f"Loading {args.arm_b} trajectories …")
+    traj_b = load_trajectories(args.trajectories_dir, args.arm_b)
+    print(f"  {len(traj_b):,} events")
 
     print("Loading drug info …")
     drug_info = pl.read_parquet(args.drug_info_path)
 
-    # ------------------------------------------------------------------ #
-    # Analyse each outcome                                                #
-    # ------------------------------------------------------------------ #
     results = []
     for outcome_id in outcome_ids:
         result = analyse_outcome(
             outcome_concept_id=outcome_id,
-            traj_non_treated=traj_nt,
-            traj_treated=traj_t,
+            traj_arm_a=traj_a,
+            traj_arm_b=traj_b,
             drug_info=drug_info,
             follow_up_days=args.follow_up_days,
+            arm_a_label=args.arm_a,
+            arm_b_label=args.arm_b,
             output_dir=output_dir,
         )
         results.append(result)
 
-    # ------------------------------------------------------------------ #
-    # Write summary                                                       #
-    # ------------------------------------------------------------------ #
     summary = pl.DataFrame(results)
     summary_path = output_dir / "hazard_ratio_summary.csv"
     summary.write_csv(str(summary_path))
@@ -456,25 +453,35 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--trajectories_dir",
         required=True,
-        help="Root directory of generated trajectories "
-             "(output of generate_counterfactual_sequences.py)",
+        help="Root directory of generated trajectories",
     )
     parser.add_argument(
         "--drug_info_path",
         required=True,
-        help="Path to drug_info.parquet (output of extract_drug_initiation_sequences.py)",
+        help="drug_info.parquet from extract_drug_initiation_sequences.py",
     )
     parser.add_argument(
         "--outcome_concept_ids",
         required=True,
-        help="Comma-separated OMOP concept_ids for the outcomes of interest, "
-             "e.g. 4329847,312327",
+        help="Comma-separated OMOP concept_ids for outcomes, e.g. 4329847,316139,4110192,376713",
     )
     parser.add_argument(
         "--follow_up_days",
         type=float,
         default=365.0,
         help="Maximum follow-up window in days (default: 365)",
+    )
+    parser.add_argument(
+        "--arm_a",
+        default=DEFAULT_ARM_A,
+        help=f"Name of arm A (the 'treated' arm); must match sub-directory under "
+             f"trajectories_dir (default: {DEFAULT_ARM_A})",
+    )
+    parser.add_argument(
+        "--arm_b",
+        default=DEFAULT_ARM_B,
+        help=f"Name of arm B (the 'comparator' arm); must match sub-directory under "
+             f"trajectories_dir (default: {DEFAULT_ARM_B})",
     )
     parser.add_argument(
         "--output_dir",
