@@ -292,14 +292,64 @@ def run_generation(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate counterfactual (non-treated) and treated trajectories"
+        description="Generate counterfactual trajectories for one or more named arms.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples
+--------
+# Original drug-vs-no-drug pipeline (uses context_dir convention):
+  generate_counterfactual_sequences.py \\
+      --context_dir /data/contexts \\
+      --model_name_or_path /models/cehrgpt \\
+      --tokenizer_path /models/tokenizer \\
+      --output_dir /data/trajectories
+
+# Active-comparator pipeline (ACEi vs Thiazide); explicit arm paths:
+  generate_counterfactual_sequences.py \\
+      --arm_context acei:/data/ce/acei_ctx.parquet \\
+      --arm_context thiazide:/data/ce/thiazide_ctx.parquet \\
+      --model_name_or_path /models/cehrgpt \\
+      --tokenizer_path /models/tokenizer \\
+      --output_dir /data/ce/trajectories
+""",
     )
-    parser.add_argument(
+
+    # --- arm specification (two mutually exclusive modes) -----------------
+    arm_group = parser.add_mutually_exclusive_group(required=True)
+    arm_group.add_argument(
         "--context_dir",
-        required=True,
-        help="Directory containing non_treated_context.parquet and treated_context.parquet "
-             "(output of extract_drug_initiation_sequences.py)",
+        default=None,
+        help=(
+            "Directory containing non_treated_context.parquet and "
+            "treated_context.parquet (original pipeline convention)."
+        ),
     )
+    arm_group.add_argument(
+        "--arm_context",
+        dest="arm_contexts",
+        action="append",
+        metavar="NAME:PATH",
+        default=None,
+        help=(
+            "Explicit arm specification as NAME:PATH.  Repeat for each arm. "
+            "NAME becomes the sub-directory under --output_dir and the 'arm' "
+            "label in generated trajectories. "
+            "E.g. --arm_context acei:/data/acei_ctx.parquet "
+            "     --arm_context thiazide:/data/thiazide_ctx.parquet"
+        ),
+    )
+
+    # --- arms filter (only relevant when using --context_dir) -------------
+    parser.add_argument(
+        "--arms",
+        default="non_treated,treated",
+        help=(
+            "Comma-separated arms to run when using --context_dir. "
+            "Ignored when --arm_context is used. (default: non_treated,treated)"
+        ),
+    )
+
+    # --- model / generation -----------------------------------------------
     parser.add_argument(
         "--model_name_or_path",
         required=True,
@@ -340,18 +390,53 @@ def _parse_args() -> argparse.Namespace:
         help="Maximum number of new tokens to generate (default: 1024)",
     )
     parser.add_argument(
-        "--arms",
-        default="non_treated,treated",
-        help="Comma-separated list of arms to generate; choices: non_treated, treated "
-             "(default: non_treated,treated)",
-    )
-    parser.add_argument(
         "--num_workers",
         type=int,
         default=0,
         help="Number of DataLoader worker processes (default: 0)",
     )
     return parser.parse_args()
+
+
+def _resolve_arm_map(args: argparse.Namespace) -> Dict[str, Path]:
+    """
+    Return an ordered dict of {arm_name: context_parquet_path} from CLI args.
+    Supports both --context_dir (original convention) and --arm_context NAME:PATH.
+    """
+    if args.arm_contexts:
+        arm_map: Dict[str, Path] = {}
+        for spec in args.arm_contexts:
+            if ":" not in spec:
+                raise ValueError(
+                    f"--arm_context must be NAME:PATH, got: '{spec}'"
+                )
+            name, path = spec.split(":", 1)
+            name = name.strip()
+            p = Path(path.strip())
+            if not p.exists():
+                raise FileNotFoundError(f"Context parquet not found: {p}")
+            arm_map[name] = p
+        return arm_map
+
+    # Fallback: context_dir convention
+    context_dir = Path(args.context_dir)
+    convention = {
+        NON_TREATED_ARM: context_dir / "non_treated_context.parquet",
+        TREATED_ARM:     context_dir / "treated_context.parquet",
+    }
+    arms_to_run = [a.strip() for a in args.arms.split(",")]
+    arm_map = {}
+    for arm in arms_to_run:
+        if arm not in convention:
+            raise ValueError(
+                f"Unknown arm '{arm}' for --context_dir mode. "
+                f"Choose from: {list(convention)}"
+            )
+        p = convention[arm]
+        if not p.exists():
+            raise FileNotFoundError(f"Context parquet not found: {p}")
+        arm_map[arm] = p
+    return arm_map
 
 
 def main() -> None:
@@ -381,22 +466,15 @@ def main() -> None:
     include_values = model.config.include_values
     max_length = args.generation_input_length + args.generation_max_new_tokens
 
-    context_dir = Path(args.context_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    arms_to_run = [a.strip() for a in args.arms.split(",")]
+    arm_map = _resolve_arm_map(args)
+    print(f"\nArms to generate: {list(arm_map)}")
 
-    arm_to_file = {
-        NON_TREATED_ARM: context_dir / "non_treated_context.parquet",
-        TREATED_ARM: context_dir / "treated_context.parquet",
-    }
-
-    for arm in arms_to_run:
-        if arm not in arm_to_file:
-            raise ValueError(f"Unknown arm '{arm}'. Choose from: {list(arm_to_file)}")
+    for arm, context_parquet in arm_map.items():
         run_generation(
-            context_parquet=str(arm_to_file[arm]),
+            context_parquet=str(context_parquet),
             arm=arm,
             cehrgpt_tokenizer=tokenizer,
             cehrgpt_model=model,
