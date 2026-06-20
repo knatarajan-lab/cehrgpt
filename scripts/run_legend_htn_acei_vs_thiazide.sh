@@ -58,6 +58,9 @@ OUTPUT_ROOT="/data/legend_htn_acei_vs_thiazide"
 # Number of stochastic trajectories per patient per arm
 NUM_TRAJECTORIES=10
 
+# Maximum ACEi patients to use (random sample); set to "" to use all patients
+MAX_ACEI_PATIENTS=10000
+
 BATCH_SIZE=8
 GENERATION_INPUT_LENGTH=4096
 GENERATION_MAX_NEW_TOKENS=1024
@@ -142,6 +145,11 @@ echo "============================================================"
 
 mkdir -p "${SWAP_DIR}"
 
+_SWAP_EXTRA_ARGS=()
+if [ -n "${MAX_ACEI_PATIENTS:-}" ]; then
+    _SWAP_EXTRA_ARGS+=(--max_source_patients "${MAX_ACEI_PATIENTS}")
+fi
+
 python "${SWAP_SCRIPT}" \
     --treated_context_path    "${TREATED_CTX}" \
     --drug_info_path          "${DRUG_INFO}" \
@@ -149,7 +157,8 @@ python "${SWAP_SCRIPT}" \
     --source_concept_ids      "${ACEI_CONCEPT_IDS}" \
     --comparator_concept_ids  "${THIAZIDE_CONCEPT_IDS}" \
     --output_path             "${THIAZIDE_ARM_CTX}" \
-    --also_write_treated_path "${ACEI_ARM_CTX}"
+    --also_write_treated_path "${ACEI_ARM_CTX}" \
+    "${_SWAP_EXTRA_ARGS[@]}"
 
 echo ""
 echo "Arm sizes:"
