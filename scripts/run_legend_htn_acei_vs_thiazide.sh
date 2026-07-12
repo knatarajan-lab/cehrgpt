@@ -162,7 +162,7 @@ python "${SWAP_SCRIPT}" \
 
 echo ""
 echo "Arm sizes:"
-python - <<'PYEOF'
+SWAP_DIR="${SWAP_DIR}" python - <<'PYEOF'
 import polars as pl, os
 swap_dir = os.environ["SWAP_DIR"]
 for label, f in [("ACEi arm (actual)", f"{swap_dir}/acei_arm_ctx.parquet"),
