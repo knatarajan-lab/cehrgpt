@@ -42,6 +42,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import polars as pl
+from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -293,7 +294,7 @@ def process(
     drug_info_records: List[Dict[str, Any]] = []
     n_skipped = 0
 
-    for row in df.iter_rows(named=True):
+    for row in tqdm(df.iter_rows(named=True), total=len(df), desc="Extracting drug initiations", unit="pt"):
         concept_ids = _to_list(row["concept_ids"])
         epoch_times = _to_list(row["epoch_times"])
 
