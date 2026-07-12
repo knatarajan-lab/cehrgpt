@@ -122,6 +122,7 @@ python "${EXTRACT_SCRIPT}" \
     --vocab_path            "${VOCAB_PATH}" \
     --drug_concept_ids      "${ACEI_CONCEPT_IDS},${THIAZIDE_CONCEPT_IDS}" \
     --output_dir            "${CONTEXT_DIR}" \
+    --tokenizer_path        "${TOKENIZER_PATH}" \
     --min_context_length    4
 
 echo "Step 1 complete."

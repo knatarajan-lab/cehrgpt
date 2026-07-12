@@ -239,19 +239,6 @@ def run_generation(
     df = pl.read_parquet(context_parquet)
     print(f"[{arm}] {len(df):,} patient contexts")
 
-    # Tokenize concept_ids → input_ids if not already present in the parquet
-    if "input_ids" not in df.columns:
-        print(f"[{arm}] input_ids not found — tokenizing concept_ids …")
-        df = df.with_columns(
-            pl.Series(
-                "input_ids",
-                [
-                    cehrgpt_tokenizer.encode(concepts)
-                    for concepts in df["concept_ids"].to_list()
-                ],
-            )
-        )
-
     # Convert to HuggingFace Dataset (keeps all columns)
     dataset = Dataset.from_pandas(df.to_pandas())
 
