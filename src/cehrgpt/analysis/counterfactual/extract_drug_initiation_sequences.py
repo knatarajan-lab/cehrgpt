@@ -271,16 +271,23 @@ def process(
     # ------------------------------------------------------------------ #
     # 0. Skip if outputs already exist                                    #
     # ------------------------------------------------------------------ #
-    non_treated_path = output_dir / "non_treated_context.parquet"
-    treated_path = output_dir / "treated_context.parquet"
-    drug_info_path = output_dir / "drug_info.parquet"
+    non_treated_dir = output_dir / "non_treated_context"
+    treated_dir = output_dir / "treated_context"
+    drug_info_dir = output_dir / "drug_info"
 
-    if not overwrite and non_treated_path.exists() and treated_path.exists() and drug_info_path.exists():
+    def _dir_has_parquets(d: Path) -> bool:
+        return d.is_dir() and any(d.glob("*.parquet"))
+
+    if not overwrite and _dir_has_parquets(non_treated_dir) and _dir_has_parquets(treated_dir) and _dir_has_parquets(drug_info_dir):
         print("Outputs already exist — skipping extraction (use --overwrite to force).")
-        print(f"  {non_treated_path}")
-        print(f"  {treated_path}")
-        print(f"  {drug_info_path}")
+        print(f"  {non_treated_dir}/")
+        print(f"  {treated_dir}/")
+        print(f"  {drug_info_dir}/")
         return
+
+    non_treated_dir.mkdir(exist_ok=True)
+    treated_dir.mkdir(exist_ok=True)
+    drug_info_dir.mkdir(exist_ok=True)
 
     # ------------------------------------------------------------------ #
     # 1. Load tokenizer (optional)                                        #
@@ -318,8 +325,6 @@ def process(
     #    to avoid accumulating all records in memory at once.            #
     # ------------------------------------------------------------------ #
     CHUNK_SIZE = 25_000
-    chunk_dir = output_dir / "_chunks"
-    chunk_dir.mkdir(exist_ok=True)
 
     non_treated_chunk: List[Dict[str, Any]] = []
     treated_chunk: List[Dict[str, Any]] = []
@@ -330,9 +335,9 @@ def process(
 
     def _flush_chunk() -> None:
         nonlocal chunk_idx
-        pl.DataFrame(non_treated_chunk).write_parquet(chunk_dir / f"non_treated_{chunk_idx:05d}.parquet")
-        pl.DataFrame(treated_chunk).write_parquet(chunk_dir / f"treated_{chunk_idx:05d}.parquet")
-        pl.DataFrame(drug_info_chunk).write_parquet(chunk_dir / f"drug_info_{chunk_idx:05d}.parquet")
+        pl.DataFrame(non_treated_chunk).write_parquet(non_treated_dir / f"chunk_{chunk_idx:05d}.parquet")
+        pl.DataFrame(treated_chunk).write_parquet(treated_dir / f"chunk_{chunk_idx:05d}.parquet")
+        pl.DataFrame(drug_info_chunk).write_parquet(drug_info_dir / f"chunk_{chunk_idx:05d}.parquet")
         non_treated_chunk.clear()
         treated_chunk.clear()
         drug_info_chunk.clear()
@@ -398,24 +403,7 @@ def process(
 
     del df
     print(f"  → {n_found:,} patients with drug exposure kept  |  {n_skipped:,} skipped")
-
-    # ------------------------------------------------------------------ #
-    # 4. Merge chunk parquets into final output files                     #
-    # ------------------------------------------------------------------ #
-    print("Writing non_treated_context.parquet …")
-    pl.read_parquet(str(chunk_dir / "non_treated_*.parquet")).write_parquet(non_treated_path)
-
-    print("Writing treated_context.parquet …")
-    pl.read_parquet(str(chunk_dir / "treated_*.parquet")).write_parquet(treated_path)
-
-    print("Writing drug_info.parquet …")
-    pl.read_parquet(str(chunk_dir / "drug_info_*.parquet")).write_parquet(drug_info_path)
-
-    # Clean up chunk files
-    import shutil
-    shutil.rmtree(chunk_dir)
-
-    print(f"Done.  Outputs written to {output_dir}")
+    print(f"Done.  {chunk_idx} chunk(s) written to {output_dir}")
 
 
 # ---------------------------------------------------------------------------

@@ -422,7 +422,7 @@ def main() -> None:
     print(f"  {len(traj_b):,} events")
 
     print("Loading drug info …")
-    drug_info = pl.read_parquet(args.drug_info_path)
+    drug_info = pl.read_parquet(os.path.join(args.drug_info_path, "*.parquet") if os.path.isdir(args.drug_info_path) else args.drug_info_path)
 
     results = []
     for outcome_id in outcome_ids:
