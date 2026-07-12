@@ -301,12 +301,11 @@ def create_comparator_context(
         print(f"Actual treated contexts → {also_write_treated_path}")
 
     # 5. Swap each patient's drug concept with a frequency-sampled comparator
-    records = df_source.to_pandas().to_dict(orient="records")
     swapped_records = []
     n_swapped = 0
     n_failed = 0
 
-    for row in records:
+    for row in df_source.iter_rows(named=True):
         # Sample comparator ingredient proportional to empirical frequency
         comparator_str = random.choices(weight_concepts, weights=weight_values, k=1)[0]
         new_ids = swap_drug_in_concept_ids(
@@ -315,11 +314,11 @@ def create_comparator_context(
         if new_ids is None:
             n_failed += 1
             continue
+        row = dict(row)
         row["concept_ids"] = new_ids
         row["drug_concept_id"] = comparator_str
         # input_ids are stale after the concept swap; drop so collator re-tokenises
-        if "input_ids" in row:
-            row["input_ids"] = None
+        row.pop("input_ids", None)
         swapped_records.append(row)
         n_swapped += 1
 
