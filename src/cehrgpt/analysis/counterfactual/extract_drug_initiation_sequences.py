@@ -44,7 +44,7 @@ import numpy as np
 import polars as pl
 from tqdm import tqdm
 
-from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.models.tokenization_hf_cehrgpt import NONE_BIN, UNKNOWN_BIN, CehrGptTokenizer
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -65,6 +65,9 @@ SEQUENCE_ARRAY_COLS = [
     "ages",
     "visit_concept_orders",
     "concept_value_masks",
+    "number_as_values",
+    "concept_as_values",
+    "is_numeric_types",
     "concept_values",
     "mlm_skip_values",
     "priorities",
@@ -77,6 +80,9 @@ SEQUENCE_ARRAY_COLS = [
     "epoch_times",
 ]
 
+# Columns that contain nulls and must be dropped before writing parquet
+_DROP_BEFORE_WRITE = {"number_as_values", "concept_as_values", "is_numeric_types"}
+
 # Columns the model's data collator requires to be present
 REQUIRED_COLS = {"concept_ids", "input_ids", "ages", "epoch_times", "value_indicators", "values"}
 
@@ -84,6 +90,51 @@ REQUIRED_COLS = {"concept_ids", "input_ids", "ages", "epoch_times", "value_indic
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _encode_values(record: Dict[str, Any], tokenizer: CehrGptTokenizer) -> Dict[str, Any]:
+    """
+    Compute value_indicators and values from raw source columns, mirroring
+    the logic in HFCehrGptTokenizationMapping.transform().
+
+    Sets record["value_indicators"] and record["values"] in-place and removes
+    the intermediate columns that contain nulls (not safe for parquet write).
+    """
+    concept_value_masks = _to_list(record.get("concept_value_masks", []))
+    record["value_indicators"] = concept_value_masks
+
+    n = len(concept_value_masks)
+    number_as_values  = _to_list(record.get("number_as_values",  [None] * n))
+    concept_as_values = _to_list(record.get("concept_as_values", [None] * n))
+    is_numeric_types  = _to_list(record.get("is_numeric_types",  [0]    * n))
+    concept_ids       = _to_list(record["concept_ids"])
+    units             = _to_list(record.get("units", [None] * n))
+
+    if any(m == 1 for m in concept_value_masks):
+        values = []
+        for concept_id, unit, mask, num_val, cat_val, is_num in zip(
+            concept_ids, units, concept_value_masks,
+            number_as_values, concept_as_values, is_numeric_types,
+        ):
+            if mask == 1:
+                value = UNKNOWN_BIN
+                if is_num == 1:
+                    if concept_id in tokenizer.numeric_concept_ids:
+                        value = tokenizer.normalize(concept_id, unit, num_val)
+                elif isinstance(cat_val, str):
+                    value = cat_val
+                values.append(value)
+            else:
+                values.append(NONE_BIN)
+    else:
+        values = [NONE_BIN] * n
+
+    record["values"] = tokenizer.encode_value(values)
+
+    for col in _DROP_BEFORE_WRITE:
+        record.pop(col, None)
+
+    return record
+
 
 def _is_att_token(token: str) -> bool:
     """Return True if *token* is an inter-visit time-delta (ATT) token."""
@@ -378,8 +429,10 @@ def process(
         nt["drug_concept_id"] = drug_concept_id
         nt["drug_epoch_time"] = drug_epoch_time
         nt["num_of_concepts"] = len(nt["concept_ids"])
-        if tokenizer is not None and "input_ids" not in nt:
-            nt["input_ids"] = tokenizer.encode(nt["concept_ids"])
+        if tokenizer is not None:
+            if "input_ids" not in nt:
+                nt["input_ids"] = tokenizer.encode(nt["concept_ids"])
+            nt = _encode_values(nt, tokenizer)
         non_treated_chunk.append(nt)
 
         # ---- treated context --------------------------------------------
@@ -389,8 +442,10 @@ def process(
         t["drug_concept_id"] = drug_concept_id
         t["drug_epoch_time"] = drug_epoch_time
         t["num_of_concepts"] = len(t["concept_ids"])
-        if tokenizer is not None and "input_ids" not in t:
-            t["input_ids"] = tokenizer.encode(t["concept_ids"])
+        if tokenizer is not None:
+            if "input_ids" not in t:
+                t["input_ids"] = tokenizer.encode(t["concept_ids"])
+            t = _encode_values(t, tokenizer)
         treated_chunk.append(t)
 
         # ---- drug info --------------------------------------------------
