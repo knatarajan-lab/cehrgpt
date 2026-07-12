@@ -239,6 +239,7 @@ def process(
     drug_ingredient_ids: List[int],
     output_dir: Path,
     min_context_length: int = 4,
+    overwrite: bool = False,
 ) -> None:
     """
     Full pipeline: load sequences → find drug initiation → write outputs.
@@ -262,6 +263,20 @@ def process(
         corresponds to the four demographic header tokens.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------ #
+    # 0. Skip if outputs already exist                                    #
+    # ------------------------------------------------------------------ #
+    non_treated_path = output_dir / "non_treated_context.parquet"
+    treated_path = output_dir / "treated_context.parquet"
+    drug_info_path = output_dir / "drug_info.parquet"
+
+    if not overwrite and non_treated_path.exists() and treated_path.exists() and drug_info_path.exists():
+        print("Outputs already exist — skipping extraction (use --overwrite to force).")
+        print(f"  {non_treated_path}")
+        print(f"  {treated_path}")
+        print(f"  {drug_info_path}")
+        return
 
     # ------------------------------------------------------------------ #
     # 1. Expand to all descendant drug concepts                           #
@@ -350,13 +365,13 @@ def process(
     # 4. Write outputs                                                    #
     # ------------------------------------------------------------------ #
     print("Writing non_treated_context.parquet …")
-    pl.DataFrame(non_treated_records).write_parquet(output_dir / "non_treated_context.parquet")
+    pl.DataFrame(non_treated_records).write_parquet(non_treated_path)
 
     print("Writing treated_context.parquet …")
-    pl.DataFrame(treated_records).write_parquet(output_dir / "treated_context.parquet")
+    pl.DataFrame(treated_records).write_parquet(treated_path)
 
     print("Writing drug_info.parquet …")
-    pl.DataFrame(drug_info_records).write_parquet(output_dir / "drug_info.parquet")
+    pl.DataFrame(drug_info_records).write_parquet(drug_info_path)
 
     print(f"Done.  Outputs written to {output_dir}")
 
@@ -396,6 +411,12 @@ def _parse_args() -> argparse.Namespace:
         default=4,
         help="Minimum token count required in the non-treated context (default: 4)",
     )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        default=False,
+        help="Overwrite existing output files even if they already exist",
+    )
     return parser.parse_args()
 
 
@@ -408,6 +429,7 @@ def main() -> None:
         drug_ingredient_ids=drug_ingredient_ids,
         output_dir=Path(args.output_dir),
         min_context_length=args.min_context_length,
+        overwrite=args.overwrite,
     )
 
 
