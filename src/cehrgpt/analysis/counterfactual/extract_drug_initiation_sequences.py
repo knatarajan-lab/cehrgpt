@@ -44,6 +44,8 @@ import numpy as np
 import polars as pl
 from tqdm import tqdm
 
+from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -54,6 +56,7 @@ VISIT_END_TOKEN = "[VE]"
 # All columns that are parallel arrays (length == len(concept_ids))
 SEQUENCE_ARRAY_COLS = [
     "concept_ids",
+    "input_ids",
     "visit_segments",
     "orders",
     "dates",
@@ -238,6 +241,7 @@ def process(
     vocab_path: str,
     drug_ingredient_ids: List[int],
     output_dir: Path,
+    tokenizer_path: Optional[str] = None,
     min_context_length: int = 4,
     overwrite: bool = False,
 ) -> None:
@@ -279,7 +283,15 @@ def process(
         return
 
     # ------------------------------------------------------------------ #
-    # 1. Expand to all descendant drug concepts                           #
+    # 1. Load tokenizer (optional)                                        #
+    # ------------------------------------------------------------------ #
+    tokenizer = None
+    if tokenizer_path:
+        print(f"Loading tokenizer from {tokenizer_path} …")
+        tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_path)
+
+    # ------------------------------------------------------------------ #
+    # 2. Expand to all descendant drug concepts                           #
     # ------------------------------------------------------------------ #
     print(f"Drug ingredient concept_ids: {drug_ingredient_ids}")
     print("Expanding to descendants via concept_ancestor …")
@@ -338,6 +350,8 @@ def process(
         nt["drug_concept_id"] = drug_concept_id
         nt["drug_epoch_time"] = drug_epoch_time
         nt["num_of_concepts"] = len(nt["concept_ids"])
+        if tokenizer is not None and "input_ids" not in nt:
+            nt["input_ids"] = tokenizer.encode(nt["concept_ids"])
         non_treated_records.append(nt)
 
         # ---- treated context --------------------------------------------
@@ -347,6 +361,8 @@ def process(
         t["drug_concept_id"] = drug_concept_id
         t["drug_epoch_time"] = drug_epoch_time
         t["num_of_concepts"] = len(t["concept_ids"])
+        if tokenizer is not None and "input_ids" not in t:
+            t["input_ids"] = tokenizer.encode(t["concept_ids"])
         treated_records.append(t)
 
         # ---- drug info --------------------------------------------------
@@ -413,6 +429,12 @@ def _parse_args() -> argparse.Namespace:
         help="Directory where output parquets will be written",
     )
     parser.add_argument(
+        "--tokenizer_path",
+        default=None,
+        help="Path to a CehrGptTokenizer directory. When provided, input_ids are "
+             "generated from concept_ids and written into the output parquets.",
+    )
+    parser.add_argument(
         "--min_context_length",
         type=int,
         default=4,
@@ -435,6 +457,7 @@ def main() -> None:
         vocab_path=args.vocab_path,
         drug_ingredient_ids=drug_ingredient_ids,
         output_dir=Path(args.output_dir),
+        tokenizer_path=args.tokenizer_path,
         min_context_length=args.min_context_length,
         overwrite=args.overwrite,
     )
