@@ -183,18 +183,18 @@ def swap_drug_in_concept_ids(
     concept_ids: List[str],
     source_concepts: Set[str],
     comparator_concept_id: str,
-) -> Optional[List[str]]:
+) -> Optional[tuple]:
     """
     Replace the first occurrence of a source drug concept with
     *comparator_concept_id* in *concept_ids*.
 
-    Returns the modified list, or None if no source concept was found.
+    Returns (swap_pos, modified_list), or None if no source concept was found.
     """
     swapped = list(concept_ids)
     for i, token in enumerate(swapped):
         if token in source_concepts:
             swapped[i] = comparator_concept_id
-            return swapped
+            return i, swapped
     return None
 
 
@@ -300,7 +300,19 @@ def create_comparator_context(
         df_source.write_parquet(str(also_write_treated_path))
         print(f"Actual treated contexts → {also_write_treated_path}")
 
-    # 5. Swap each patient's drug concept with a frequency-sampled comparator
+    # 5. Build concept_str → token_id mapping from the dataset so we can
+    #    update input_ids at the swap position (concept_ids and input_ids
+    #    are parallel arrays; the collator uses input_ids directly).
+    vocab_map: Dict[str, int] = {}
+    if "input_ids" in df_source.columns:
+        for concepts, token_ids in zip(
+            df_source["concept_ids"].to_list(),
+            df_source["input_ids"].to_list(),
+        ):
+            for c, t in zip(concepts, token_ids):
+                vocab_map.setdefault(str(c), int(t))
+
+    # 6. Swap each patient's drug concept with a frequency-sampled comparator
     swapped_records = []
     n_swapped = 0
     n_failed = 0
@@ -308,17 +320,22 @@ def create_comparator_context(
     for row in df_source.iter_rows(named=True):
         # Sample comparator ingredient proportional to empirical frequency
         comparator_str = random.choices(weight_concepts, weights=weight_values, k=1)[0]
-        new_ids = swap_drug_in_concept_ids(
+        result = swap_drug_in_concept_ids(
             list(row["concept_ids"]), source_concepts, comparator_str
         )
-        if new_ids is None:
+        if result is None:
             n_failed += 1
             continue
+        swap_pos, new_concept_ids = result
         row = dict(row)
-        row["concept_ids"] = new_ids
+        row["concept_ids"] = new_concept_ids
         row["drug_concept_id"] = comparator_str
-        # input_ids are stale after the concept swap; drop so collator re-tokenises
-        row.pop("input_ids", None)
+        # Keep input_ids in sync: update the token at the swap position so
+        # the model is conditioned on the comparator drug, not the source drug.
+        if "input_ids" in row and comparator_str in vocab_map:
+            input_ids = list(row["input_ids"])
+            input_ids[swap_pos] = vocab_map[comparator_str]
+            row["input_ids"] = input_ids
         swapped_records.append(row)
         n_swapped += 1
 
