@@ -88,8 +88,8 @@ SWAP_DIR="${OUTPUT_ROOT}/swap_contexts"
 TRAJ_DIR="${OUTPUT_ROOT}/trajectories"
 RESULTS_DIR="${OUTPUT_ROOT}/results"
 
-TREATED_CTX="${CONTEXT_DIR}/treated_context.parquet"
-DRUG_INFO="${CONTEXT_DIR}/drug_info.parquet"
+TREATED_CTX="${CONTEXT_DIR}/treated_context"
+DRUG_INFO="${CONTEXT_DIR}/drug_info"
 
 # ACEi patients — actual ACEi context (arm A input)
 ACEI_ARM_CTX="${SWAP_DIR}/acei_arm_ctx.parquet"

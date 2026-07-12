@@ -250,7 +250,7 @@ def create_comparator_context(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    drug_info = pl.read_parquet(drug_info_path)
+    drug_info = pl.read_parquet(os.path.join(drug_info_path, "*.parquet") if os.path.isdir(drug_info_path) else drug_info_path)
 
     # 1. Expand source ingredients to all descendants
     print(f"[source]     Expanding {len(source_concept_ids)} ingredient(s) via concept_ancestor …")
@@ -287,7 +287,7 @@ def create_comparator_context(
     weight_values   = [weights[c] for c in weight_concepts]
 
     # 4. Load and filter treated contexts for source patients
-    df = pl.read_parquet(treated_context_path)
+    df = pl.read_parquet(os.path.join(treated_context_path, "*.parquet") if os.path.isdir(treated_context_path) else treated_context_path)
     df_source = df.filter(pl.col("person_id").is_in(list(source_patients)))
     print(f"\n{len(df_source):,} source-class treated contexts to swap")
 
