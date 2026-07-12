@@ -56,10 +56,10 @@ TOKENIZER_PATH="/models/tokenizer"
 OUTPUT_ROOT="/data/legend_htn_acei_vs_thiazide"
 
 # Number of stochastic trajectories per patient per arm
-NUM_TRAJECTORIES=10
+NUM_TRAJECTORIES=2
 
 # Maximum ACEi patients to use (random sample); set to "" to use all patients
-MAX_ACEI_PATIENTS=10000
+MAX_ACEI_PATIENTS=50
 
 BATCH_SIZE=8
 GENERATION_INPUT_LENGTH=4096
