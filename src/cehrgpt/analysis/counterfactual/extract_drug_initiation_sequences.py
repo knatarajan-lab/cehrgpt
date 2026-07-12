@@ -361,14 +361,21 @@ def process(
     n_found = len(non_treated_records)
     print(f"  → {n_found:,} patients with drug exposure kept  |  {n_skipped:,} skipped")
 
+    # Free the input DataFrame before materialising outputs — the source data
+    # can be several GB and would otherwise overlap in memory with the output
+    # DataFrames, causing OOM during write_parquet.
+    del df
+
     # ------------------------------------------------------------------ #
-    # 4. Write outputs                                                    #
+    # 4. Write outputs (one at a time to limit peak memory)               #
     # ------------------------------------------------------------------ #
     print("Writing non_treated_context.parquet …")
     pl.DataFrame(non_treated_records).write_parquet(non_treated_path)
+    del non_treated_records
 
     print("Writing treated_context.parquet …")
     pl.DataFrame(treated_records).write_parquet(treated_path)
+    del treated_records
 
     print("Writing drug_info.parquet …")
     pl.DataFrame(drug_info_records).write_parquet(drug_info_path)
