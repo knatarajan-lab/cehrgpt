@@ -314,12 +314,29 @@ def process(
     scalar_cols = [c for c in all_cols if c not in SEQUENCE_ARRAY_COLS]
 
     # ------------------------------------------------------------------ #
-    # 3. Process each patient                                             #
+    # 3. Process each patient — flush to disk every CHUNK_SIZE records   #
+    #    to avoid accumulating all records in memory at once.            #
     # ------------------------------------------------------------------ #
-    non_treated_records: List[Dict[str, Any]] = []
-    treated_records: List[Dict[str, Any]] = []
-    drug_info_records: List[Dict[str, Any]] = []
+    CHUNK_SIZE = 25_000
+    chunk_dir = output_dir / "_chunks"
+    chunk_dir.mkdir(exist_ok=True)
+
+    non_treated_chunk: List[Dict[str, Any]] = []
+    treated_chunk: List[Dict[str, Any]] = []
+    drug_info_chunk: List[Dict[str, Any]] = []
+    chunk_idx = 0
+    n_found = 0
     n_skipped = 0
+
+    def _flush_chunk() -> None:
+        nonlocal chunk_idx
+        pl.DataFrame(non_treated_chunk).write_parquet(chunk_dir / f"non_treated_{chunk_idx:05d}.parquet")
+        pl.DataFrame(treated_chunk).write_parquet(chunk_dir / f"treated_{chunk_idx:05d}.parquet")
+        pl.DataFrame(drug_info_chunk).write_parquet(chunk_dir / f"drug_info_{chunk_idx:05d}.parquet")
+        non_treated_chunk.clear()
+        treated_chunk.clear()
+        drug_info_chunk.clear()
+        chunk_idx += 1
 
     for row in tqdm(df.iter_rows(named=True), total=len(df), desc="Extracting drug initiations", unit="pt"):
         concept_ids = _to_list(row["concept_ids"])
@@ -330,7 +347,6 @@ def process(
         )
 
         if drug_pos is None:
-            # Patient never received any of the target drugs
             n_skipped += 1
             continue
 
@@ -340,11 +356,9 @@ def process(
         nt = build_non_treated_context(row, vs_pos if vs_pos is not None else drug_pos, available_array_cols)
 
         if len(nt.get("concept_ids", [])) < min_context_length:
-            # Not enough history before the drug visit
             n_skipped += 1
             continue
 
-        # Propagate scalar columns and add metadata
         for col in scalar_cols:
             nt[col] = row[col]
         nt["drug_concept_id"] = drug_concept_id
@@ -352,7 +366,7 @@ def process(
         nt["num_of_concepts"] = len(nt["concept_ids"])
         if tokenizer is not None and "input_ids" not in nt:
             nt["input_ids"] = tokenizer.encode(nt["concept_ids"])
-        non_treated_records.append(nt)
+        non_treated_chunk.append(nt)
 
         # ---- treated context --------------------------------------------
         t = build_treated_context(row, ve_pos, available_array_cols)
@@ -363,38 +377,43 @@ def process(
         t["num_of_concepts"] = len(t["concept_ids"])
         if tokenizer is not None and "input_ids" not in t:
             t["input_ids"] = tokenizer.encode(t["concept_ids"])
-        treated_records.append(t)
+        treated_chunk.append(t)
 
         # ---- drug info --------------------------------------------------
-        drug_info_records.append(
+        drug_info_chunk.append(
             {
                 "person_id": row["person_id"],
                 "drug_concept_id": drug_concept_id,
                 "drug_epoch_time": drug_epoch_time,
             }
         )
+        n_found += 1
 
-    n_found = len(non_treated_records)
+        if n_found % CHUNK_SIZE == 0:
+            _flush_chunk()
+
+    # Flush remaining records
+    if non_treated_chunk:
+        _flush_chunk()
+
+    del df
     print(f"  → {n_found:,} patients with drug exposure kept  |  {n_skipped:,} skipped")
 
-    # Free the input DataFrame before materialising outputs — the source data
-    # can be several GB and would otherwise overlap in memory with the output
-    # DataFrames, causing OOM during write_parquet.
-    del df
-
     # ------------------------------------------------------------------ #
-    # 4. Write outputs (one at a time to limit peak memory)               #
+    # 4. Merge chunk parquets into final output files                     #
     # ------------------------------------------------------------------ #
     print("Writing non_treated_context.parquet …")
-    pl.DataFrame(non_treated_records).write_parquet(non_treated_path)
-    del non_treated_records
+    pl.read_parquet(str(chunk_dir / "non_treated_*.parquet")).write_parquet(non_treated_path)
 
     print("Writing treated_context.parquet …")
-    pl.DataFrame(treated_records).write_parquet(treated_path)
-    del treated_records
+    pl.read_parquet(str(chunk_dir / "treated_*.parquet")).write_parquet(treated_path)
 
     print("Writing drug_info.parquet …")
-    pl.DataFrame(drug_info_records).write_parquet(drug_info_path)
+    pl.read_parquet(str(chunk_dir / "drug_info_*.parquet")).write_parquet(drug_info_path)
+
+    # Clean up chunk files
+    import shutil
+    shutil.rmtree(chunk_dir)
 
     print(f"Done.  Outputs written to {output_dir}")
 
