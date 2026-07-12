@@ -57,6 +57,8 @@ VISIT_END_TOKEN = "[VE]"
 SEQUENCE_ARRAY_COLS = [
     "concept_ids",
     "input_ids",
+    "value_indicators",
+    "values",
     "visit_segments",
     "orders",
     "dates",
@@ -74,6 +76,9 @@ SEQUENCE_ARRAY_COLS = [
     "event_group_ids",
     "epoch_times",
 ]
+
+# Columns the model's data collator requires to be present
+REQUIRED_COLS = {"concept_ids", "input_ids", "ages", "epoch_times", "value_indicators", "values"}
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +324,10 @@ def process(
     all_cols = df.columns
     available_array_cols = [c for c in SEQUENCE_ARRAY_COLS if c in all_cols]
     scalar_cols = [c for c in all_cols if c not in SEQUENCE_ARRAY_COLS]
+
+    missing_required = REQUIRED_COLS - {"input_ids"} - set(all_cols)  # input_ids generated later
+    if missing_required:
+        print(f"  WARNING: required columns missing from source data: {sorted(missing_required)}")
 
     # ------------------------------------------------------------------ #
     # 3. Process each patient — flush to disk every CHUNK_SIZE records   #
