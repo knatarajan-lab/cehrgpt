@@ -284,14 +284,15 @@ echo "============================================================"
 mkdir -p "${RESULTS_DIR}"
 
 python "${HR_SCRIPT}" \
-    --trajectories_dir    "${TRAJ_DIR}" \
-    --drug_info_path      "${DRUG_INFO}" \
-    --outcome_concept_ids "4329847,316139,4110192,376713" \
-    --follow_up_days      "${FOLLOW_UP_DAYS}" \
-    --output_dir          "${RESULTS_DIR}" \
-    --vocab_path          "${VOCAB_PATH}" \
-    --arm_a_concept_ids   "${ACEI_CONCEPT_IDS}" \
-    --arm_b_concept_ids   "${THIAZIDE_CONCEPT_IDS}"
+    --trajectories_dir        "${TRAJ_DIR}" \
+    --drug_info_path          "${DRUG_INFO}" \
+    --observed_outcomes_path  "${CONTEXT_DIR}/observed_outcomes" \
+    --outcome_concept_ids     "4329847,316139,4110192,376713" \
+    --follow_up_days          "${FOLLOW_UP_DAYS}" \
+    --output_dir              "${RESULTS_DIR}" \
+    --vocab_path              "${VOCAB_PATH}" \
+    --arm_a_concept_ids       "${ACEI_CONCEPT_IDS}" \
+    --arm_b_concept_ids       "${THIAZIDE_CONCEPT_IDS}"
 
 echo "Step 4 complete."
 echo ""
@@ -303,7 +304,9 @@ echo "============================================================"
 echo "Done.  Output directory: ${OUTPUT_ROOT}"
 echo ""
 echo "Key files:"
-echo "  ${RESULTS_DIR}/hazard_ratio_summary.csv"
+echo "  ${RESULTS_DIR}/observed_hazard_ratio_summary.csv  (Step 1.5: observed ACEi vs observed Thiazide)"
+echo "  ${RESULTS_DIR}/faithfulness_summary.csv           (Step 4:   generated Thiazide vs observed Thiazide, expect HR≈1)"
+echo "  ${RESULTS_DIR}/hazard_ratio_summary.csv           (Step 4:   generated ACEi vs generated Thiazide)"
 echo "  ${RESULTS_DIR}/km_<concept_id>.csv"
 echo ""
 echo "Published LEGEND-HTN reference HRs (ACEi vs Thiazide):"
