@@ -123,6 +123,7 @@ python "${EXTRACT_SCRIPT}" \
     --drug_concept_ids      "${ACEI_CONCEPT_IDS},${THIAZIDE_CONCEPT_IDS}" \
     --output_dir            "${CONTEXT_DIR}" \
     --tokenizer_path        "${TOKENIZER_PATH}" \
+    --outcome_concept_ids   "4329847,316139,4110192,376713" \
     --min_context_length    4
 
 echo "Step 1 complete."

@@ -136,6 +136,49 @@ def _encode_values(record: Dict[str, Any], tokenizer: CehrGptTokenizer) -> Dict[
     return record
 
 
+def find_outcomes_after_drug(
+    concept_ids: List[str],
+    epoch_times: List[float],
+    start_pos: int,
+    outcome_concept_groups: Dict[str, Set[str]],
+) -> Dict[str, Optional[float]]:
+    """
+    Scan *concept_ids[start_pos:]* for the first occurrence of each outcome
+    concept group.
+
+    Parameters
+    ----------
+    concept_ids
+        Full token sequence for the patient.
+    epoch_times
+        Parallel epoch timestamps (seconds since epoch) for each token.
+    start_pos
+        Index to start scanning from (typically ve_pos + 1, i.e. after the
+        drug-initiation visit closing token).
+    outcome_concept_groups
+        Mapping of {outcome_label: set_of_descendant_concept_ids}.
+
+    Returns
+    -------
+    Dict mapping each outcome_label to the epoch_time of its first occurrence
+    after *start_pos*, or None if not observed.
+    """
+    result: Dict[str, Optional[float]] = {k: None for k in outcome_concept_groups}
+    remaining = set(outcome_concept_groups.keys())
+
+    for i in range(start_pos, len(concept_ids)):
+        if not remaining:
+            break
+        token = concept_ids[i]
+        for label in list(remaining):
+            if token in outcome_concept_groups[label]:
+                result[label] = float(epoch_times[i])
+                remaining.discard(label)
+                break
+
+    return result
+
+
 def _is_att_token(token: str) -> bool:
     """Return True if *token* is an inter-visit time-delta (ATT) token."""
     if token in (VISIT_START_TOKEN, VISIT_END_TOKEN):
@@ -298,6 +341,7 @@ def process(
     drug_ingredient_ids: List[int],
     output_dir: Path,
     tokenizer_path: Optional[str] = None,
+    outcome_concept_ids: Optional[List[int]] = None,
     min_context_length: int = 4,
     overwrite: bool = False,
 ) -> None:
@@ -330,6 +374,7 @@ def process(
     non_treated_dir = output_dir / "non_treated_context"
     treated_dir = output_dir / "treated_context"
     drug_info_dir = output_dir / "drug_info"
+    observed_outcomes_dir = output_dir / "observed_outcomes"
 
     def _dir_has_parquets(d: Path) -> bool:
         return d.is_dir() and any(d.glob("*.parquet"))
@@ -344,6 +389,7 @@ def process(
     non_treated_dir.mkdir(exist_ok=True)
     treated_dir.mkdir(exist_ok=True)
     drug_info_dir.mkdir(exist_ok=True)
+    observed_outcomes_dir.mkdir(exist_ok=True)
 
     # ------------------------------------------------------------------ #
     # 1. Load tokenizer (optional)                                        #
@@ -362,7 +408,19 @@ def process(
     print(f"  → {len(drug_concepts):,} drug concepts (ingredients + descendants)")
 
     # ------------------------------------------------------------------ #
-    # 2. Load patient sequences                                           #
+    # 2b. Expand outcome concept IDs to descendants                       #
+    # ------------------------------------------------------------------ #
+    # outcome_concept_groups: {str(concept_id): set_of_descendants}
+    outcome_concept_groups: Dict[str, Set[str]] = {}
+    if outcome_concept_ids:
+        print(f"Expanding {len(outcome_concept_ids)} outcome concept(s) to descendants …")
+        for oc_id in outcome_concept_ids:
+            descendants = load_drug_descendant_concepts(vocab_path, [oc_id])
+            outcome_concept_groups[str(oc_id)] = descendants
+            print(f"  → outcome {oc_id}: {len(descendants):,} descendants")
+
+    # ------------------------------------------------------------------ #
+    # 3. Load patient sequences                                           #
     # ------------------------------------------------------------------ #
     print("Loading patient sequences …")
     if os.path.isdir(patient_sequence_path):
@@ -389,6 +447,7 @@ def process(
     non_treated_chunk: List[Dict[str, Any]] = []
     treated_chunk: List[Dict[str, Any]] = []
     drug_info_chunk: List[Dict[str, Any]] = []
+    observed_outcomes_chunk: List[Dict[str, Any]] = []
     chunk_idx = 0
     n_found = 0
     n_skipped = 0
@@ -398,9 +457,12 @@ def process(
         pl.DataFrame(non_treated_chunk).write_parquet(non_treated_dir / f"chunk_{chunk_idx:05d}.parquet")
         pl.DataFrame(treated_chunk).write_parquet(treated_dir / f"chunk_{chunk_idx:05d}.parquet")
         pl.DataFrame(drug_info_chunk).write_parquet(drug_info_dir / f"chunk_{chunk_idx:05d}.parquet")
+        if observed_outcomes_chunk:
+            pl.DataFrame(observed_outcomes_chunk).write_parquet(observed_outcomes_dir / f"chunk_{chunk_idx:05d}.parquet")
         non_treated_chunk.clear()
         treated_chunk.clear()
         drug_info_chunk.clear()
+        observed_outcomes_chunk.clear()
         chunk_idx += 1
 
     for row in tqdm(df.iter_rows(named=True), total=len(df), desc="Extracting drug initiations", unit="pt"):
@@ -456,6 +518,24 @@ def process(
                 "drug_epoch_time": drug_epoch_time,
             }
         )
+
+        # ---- observed outcomes (scan post-initiation sequence) ----------
+        if outcome_concept_groups:
+            scan_start = (ve_pos + 1) if ve_pos is not None else (drug_pos + 1)
+            outcome_times = find_outcomes_after_drug(
+                concept_ids, epoch_times, scan_start, outcome_concept_groups
+            )
+            for outcome_id, outcome_epoch_time in outcome_times.items():
+                observed_outcomes_chunk.append(
+                    {
+                        "person_id": row["person_id"],
+                        "drug_concept_id": drug_concept_id,
+                        "drug_epoch_time": drug_epoch_time,
+                        "outcome_concept_id": outcome_id,
+                        "outcome_epoch_time": outcome_epoch_time,
+                    }
+                )
+
         n_found += 1
 
         if n_found % CHUNK_SIZE == 0:
@@ -506,6 +586,13 @@ def _parse_args() -> argparse.Namespace:
              "generated from concept_ids and written into the output parquets.",
     )
     parser.add_argument(
+        "--outcome_concept_ids",
+        default=None,
+        help="Comma-separated OMOP concept_ids for outcomes to extract from the "
+             "post-initiation sequence (e.g. 4329847,316139,4110192,376713). "
+             "Each is expanded to descendants. Writes observed_outcomes/ chunks.",
+    )
+    parser.add_argument(
         "--min_context_length",
         type=int,
         default=4,
@@ -523,12 +610,17 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     drug_ingredient_ids = [int(x.strip()) for x in args.drug_concept_ids.split(",")]
+    outcome_concept_ids = (
+        [int(x.strip()) for x in args.outcome_concept_ids.split(",")]
+        if args.outcome_concept_ids else None
+    )
     process(
         patient_sequence_path=args.patient_sequence_path,
         vocab_path=args.vocab_path,
         drug_ingredient_ids=drug_ingredient_ids,
         output_dir=Path(args.output_dir),
         tokenizer_path=args.tokenizer_path,
+        outcome_concept_ids=outcome_concept_ids,
         min_context_length=args.min_context_length,
         overwrite=args.overwrite,
     )
