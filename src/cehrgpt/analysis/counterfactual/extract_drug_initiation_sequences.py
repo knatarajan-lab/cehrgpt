@@ -407,7 +407,14 @@ def _process_shard(
                 os.path.join(drug_info_dir, f"{prefix}.parquet")
             )
         if observed_outcomes_chunk:
-            pl.DataFrame(observed_outcomes_chunk).write_parquet(
+            # Explicit schema prevents Polars from inferring Null type for
+            # outcome columns when the first rows all have None values.
+            oc_schema = {
+                "person_id": pl.Int64,
+                "drug_epoch_time": pl.Float64,
+                **{k: pl.Float64 for k in outcome_concept_groups},
+            }
+            pl.DataFrame(observed_outcomes_chunk, schema=oc_schema).write_parquet(
                 os.path.join(observed_outcomes_dir, f"{prefix}.parquet")
             )
         non_treated_chunk.clear()
