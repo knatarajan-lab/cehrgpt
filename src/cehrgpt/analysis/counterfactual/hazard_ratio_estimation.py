@@ -370,6 +370,142 @@ def kaplan_meier(
 
 
 # ---------------------------------------------------------------------------
+# Observed-outcome baseline analysis
+# ---------------------------------------------------------------------------
+
+def analyse_observed_outcomes(
+    observed_outcomes_path: str,
+    drug_info_path: str,
+    outcome_concept_ids: List[str],
+    follow_up_days: float,
+    output_dir: Path,
+    source_arm_label: str = "acei",
+    comparator_arm_label: str = "thiazide",
+) -> None:
+    """
+    Compute hazard ratios from observed (real) patient outcomes extracted
+    during Step 1.  These serve as a baseline to compare against the
+    model-generated counterfactual HRs.
+
+    Parameters
+    ----------
+    observed_outcomes_path
+        Directory or parquet with columns:
+        person_id, drug_epoch_time, <one column per outcome_concept_id>
+        (each outcome column contains the epoch_time of the first event or null).
+    drug_info_path
+        Directory or parquet with columns:
+        person_id, drug_concept_id, drug_epoch_time, arm  ('source'/'comparator').
+    outcome_concept_ids
+        Strings of OMOP concept_ids to analyse.
+    follow_up_days
+        Maximum follow-up in days; patients without an event are censored here.
+    output_dir
+        Directory for output CSVs.
+    source_arm_label / comparator_arm_label
+        Labels used in output files (default: acei / thiazide).
+    """
+    print("\n" + "=" * 60)
+    print("Observed baseline HR (real patient outcomes)")
+    print("=" * 60)
+
+    # Load data
+    def _read(path: str) -> pl.DataFrame:
+        return pl.read_parquet(
+            os.path.join(path, "*.parquet") if os.path.isdir(path) else path
+        )
+
+    obs  = _read(observed_outcomes_path)
+    info = _read(drug_info_path).select(["person_id", "arm"])
+
+    # Join arm label onto observed outcomes
+    df = obs.join(info, on="person_id", how="left")
+
+    source_df     = df.filter(pl.col("arm") == "source")
+    comparator_df = df.filter(pl.col("arm") == "comparator")
+    print(f"  Source ({source_arm_label}):     {len(source_df):,} patients")
+    print(f"  Comparator ({comparator_arm_label}): {len(comparator_df):,} patients")
+
+    results = []
+    for oc_id in outcome_concept_ids:
+        if oc_id not in df.columns:
+            print(f"  Outcome {oc_id}: column not found in observed_outcomes — skipping")
+            continue
+
+        print(f"\n  Outcome: {oc_id}")
+
+        def _tte(arm_df: pl.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
+            """Compute (time_days, event) arrays for one arm."""
+            times, events = [], []
+            for row in arm_df.select(["drug_epoch_time", oc_id]).iter_rows():
+                drug_t, outcome_t = row
+                if outcome_t is not None and drug_t is not None:
+                    t_days = (float(outcome_t) - float(drug_t)) / 86_400
+                    if 0 < t_days <= follow_up_days:
+                        times.append(t_days)
+                        events.append(1)
+                        continue
+                times.append(follow_up_days)
+                events.append(0)
+            return np.array(times, dtype=float), np.array(events, dtype=int)
+
+        time_a, event_a = _tte(source_df)
+        time_b, event_b = _tte(comparator_df)
+
+        n_ev_a = int(event_a.sum())
+        n_ev_b = int(event_b.sum())
+        print(f"    {source_arm_label}: {len(time_a):,} patients, {n_ev_a:,} events")
+        print(f"    {comparator_arm_label}: {len(time_b):,} patients, {n_ev_b:,} events")
+
+        if n_ev_a + n_ev_b == 0:
+            print("    Skipping: no events in either arm.")
+            continue
+
+        time_all      = np.concatenate([time_a, time_b])
+        event_all     = np.concatenate([event_a, event_b])
+        treatment_all = np.concatenate([np.ones(len(time_a)), np.zeros(len(time_b))])
+
+        hr, hr_lower, hr_upper, cox_p = fit_cox(time_all, event_all, treatment_all)
+        lr_stat, lr_p = log_rank_test(time_a, event_a, time_b, event_b)
+
+        print(f"    HR ({source_arm_label} vs {comparator_arm_label}) = {hr:.3f}  "
+              f"(95% CI: {hr_lower:.3f}–{hr_upper:.3f})  Cox p={cox_p:.4f}")
+        print(f"    Log-rank stat={lr_stat:.3f}  p={lr_p:.4f}")
+
+        # KM curves
+        km_t_a, km_s_a = kaplan_meier(time_a, event_a)
+        km_t_b, km_s_b = kaplan_meier(time_b, event_b)
+        km_df = pl.concat([
+            pl.DataFrame({"time_days": km_t_a, "survival": km_s_a, "arm": source_arm_label}),
+            pl.DataFrame({"time_days": km_t_b, "survival": km_s_b, "arm": comparator_arm_label}),
+        ])
+        km_df.write_csv(str(output_dir / f"observed_km_{oc_id}.csv"))
+
+        results.append({
+            "outcome_concept_id": oc_id,
+            f"n_{source_arm_label}": len(time_a),
+            f"n_{comparator_arm_label}": len(time_b),
+            f"n_events_{source_arm_label}": n_ev_a,
+            f"n_events_{comparator_arm_label}": n_ev_b,
+            "hr": hr,
+            "hr_lower_95": hr_lower,
+            "hr_upper_95": hr_upper,
+            "cox_p_value": cox_p,
+            "log_rank_stat": lr_stat,
+            "log_rank_p_value": lr_p,
+            "hr_interpretation": (
+                f"Observed HR of {source_arm_label} vs {comparator_arm_label} "
+                f"(>1 = higher hazard in {source_arm_label})"
+            ),
+        })
+
+    if results:
+        out_path = output_dir / "observed_hazard_ratio_summary.csv"
+        pl.DataFrame(results).write_csv(str(out_path))
+        print(f"\nObserved HR summary written to {out_path}")
+
+
+# ---------------------------------------------------------------------------
 # Main analysis
 # ---------------------------------------------------------------------------
 
@@ -472,6 +608,27 @@ def main() -> None:
 
     outcome_ids = [x.strip() for x in args.outcome_concept_ids.split(",")]
 
+    # ------------------------------------------------------------------
+    # Observed baseline HR (runs when --observed_outcomes_path is given)
+    # ------------------------------------------------------------------
+    if args.observed_outcomes_path:
+        analyse_observed_outcomes(
+            observed_outcomes_path=args.observed_outcomes_path,
+            drug_info_path=args.drug_info_path,
+            outcome_concept_ids=outcome_ids,
+            follow_up_days=args.follow_up_days,
+            output_dir=output_dir,
+            source_arm_label=args.arm_a,
+            comparator_arm_label=args.arm_b,
+        )
+
+    # ------------------------------------------------------------------
+    # Generated-trajectory HR
+    # ------------------------------------------------------------------
+    if args.trajectories_dir is None:
+        print("\nNo --trajectories_dir provided; skipping generated-trajectory HR.")
+        return
+
     # Expand drug concept IDs to descendants for contamination filtering
     arm_a_forbidden: Set[str] = set()
     arm_b_forbidden: Set[str] = set()
@@ -481,9 +638,7 @@ def main() -> None:
         print("Expanding drug concepts for contamination filtering …")
         arm_a_concepts = expand_to_descendants(args.vocab_path, arm_a_ids)
         arm_b_concepts = expand_to_descendants(args.vocab_path, arm_b_ids)
-        # arm A trajectories must not contain arm B (comparator) drug codes
         arm_a_forbidden = arm_b_concepts
-        # arm B trajectories must not contain arm A (source) drug codes
         arm_b_forbidden = arm_a_concepts
         print(f"  Arm A forbidden concepts (comparator drugs): {len(arm_a_forbidden):,}")
         print(f"  Arm B forbidden concepts (source drugs):     {len(arm_b_forbidden):,}")
@@ -499,7 +654,11 @@ def main() -> None:
     print(f"  {len(traj_b):,} events")
 
     print("Loading drug info …")
-    drug_info = pl.read_parquet(os.path.join(args.drug_info_path, "*.parquet") if os.path.isdir(args.drug_info_path) else args.drug_info_path)
+    drug_info = pl.read_parquet(
+        os.path.join(args.drug_info_path, "*.parquet")
+        if os.path.isdir(args.drug_info_path)
+        else args.drug_info_path
+    )
 
     results = []
     for outcome_id in outcome_ids:
@@ -530,8 +689,16 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--trajectories_dir",
-        required=True,
-        help="Root directory of generated trajectories",
+        default=None,
+        help="Root directory of generated trajectories. "
+             "Optional when --observed_outcomes_path is provided.",
+    )
+    parser.add_argument(
+        "--observed_outcomes_path",
+        default=None,
+        help="Directory or parquet of observed outcomes from Step 1 "
+             "(observed_outcomes/). When provided, computes baseline "
+             "HR from real patient data before the generated-trajectory HR.",
     )
     parser.add_argument(
         "--drug_info_path",
