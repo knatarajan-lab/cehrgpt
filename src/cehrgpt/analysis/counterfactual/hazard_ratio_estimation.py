@@ -514,7 +514,6 @@ def faithfulness_check_outcome(
     traj_comparator: pl.DataFrame,
     observed_outcomes: pl.DataFrame,
     drug_info_generated: pl.DataFrame,
-    drug_info_observed: pl.DataFrame,
     follow_up_days: float,
     comparator_label: str,
     output_dir: Path,
@@ -556,14 +555,9 @@ def faithfulness_check_outcome(
         print(f"    Outcome column {outcome_concept_id} not in observed_outcomes — skipping.")
         return None
 
-    obs_with_anchor = observed_outcomes.join(
-        drug_info_observed.select(["person_id", "drug_epoch_time"]),
-        on="person_id",
-        how="left",
-    )
-
+    # observed_outcomes already carries drug_epoch_time from Step 1 — no join needed
     obs_times, obs_events = [], []
-    for row in obs_with_anchor.select(["drug_epoch_time", outcome_concept_id]).iter_rows():
+    for row in observed_outcomes.select(["drug_epoch_time", outcome_concept_id]).iter_rows():
         drug_t, outcome_t = row
         if outcome_t is not None and drug_t is not None:
             t_days = (float(outcome_t) - float(drug_t)) / 86_400
@@ -795,13 +789,11 @@ def main() -> None:
         print("=" * 60)
 
         observed_outcomes = _read_parquet(args.observed_outcomes_path)
-        # Observed comparator patients only
-        drug_info_obs_comparator = drug_info.filter(pl.col("arm") == "comparator")
-        obs_comparator = observed_outcomes.join(
-            drug_info_obs_comparator.select("person_id"),
-            on="person_id",
-            how="inner",
+        # Keep only observed comparator patients (e.g. Thiazide initiators)
+        comparator_person_ids = (
+            drug_info.filter(pl.col("arm") == "comparator").select("person_id")
         )
+        obs_comparator = observed_outcomes.join(comparator_person_ids, on="person_id", how="inner")
 
         faithfulness_results = []
         for outcome_id in outcome_ids:
@@ -810,7 +802,6 @@ def main() -> None:
                 traj_comparator=traj_b,
                 observed_outcomes=obs_comparator,
                 drug_info_generated=drug_info,
-                drug_info_observed=drug_info_obs_comparator,
                 follow_up_days=args.follow_up_days,
                 comparator_label=args.arm_b,
                 output_dir=output_dir,
