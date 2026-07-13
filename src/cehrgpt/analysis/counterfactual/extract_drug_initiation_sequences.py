@@ -391,20 +391,29 @@ def _process_shard(
     n_skipped = 0
     chunk_idx = 0
 
+    def _write_atomic(df: pl.DataFrame, final_path: str) -> None:
+        """Write parquet to a .tmp file then rename — avoids corrupt files on kill."""
+        tmp_path = final_path + ".tmp"
+        df.write_parquet(tmp_path)
+        os.replace(tmp_path, final_path)  # atomic on Linux (same filesystem)
+
     def _flush_chunks() -> None:
         nonlocal chunk_idx
         prefix = f"shard_{shard_id:03d}_chunk_{chunk_idx:05d}"
         if non_treated_chunk:
-            pl.DataFrame(non_treated_chunk).write_parquet(
-                os.path.join(non_treated_dir, f"{prefix}.parquet")
+            _write_atomic(
+                pl.DataFrame(non_treated_chunk),
+                os.path.join(non_treated_dir, f"{prefix}.parquet"),
             )
         if treated_chunk:
-            pl.DataFrame(treated_chunk).write_parquet(
-                os.path.join(treated_dir, f"{prefix}.parquet")
+            _write_atomic(
+                pl.DataFrame(treated_chunk),
+                os.path.join(treated_dir, f"{prefix}.parquet"),
             )
         if drug_info_chunk:
-            pl.DataFrame(drug_info_chunk).write_parquet(
-                os.path.join(drug_info_dir, f"{prefix}.parquet")
+            _write_atomic(
+                pl.DataFrame(drug_info_chunk),
+                os.path.join(drug_info_dir, f"{prefix}.parquet"),
             )
         if observed_outcomes_chunk:
             # Explicit schema prevents Polars from inferring Null type for
@@ -414,8 +423,9 @@ def _process_shard(
                 "drug_epoch_time": pl.Float64,
                 **{k: pl.Float64 for k in outcome_concept_groups},
             }
-            pl.DataFrame(observed_outcomes_chunk, schema=oc_schema).write_parquet(
-                os.path.join(observed_outcomes_dir, f"{prefix}.parquet")
+            _write_atomic(
+                pl.DataFrame(observed_outcomes_chunk, schema=oc_schema),
+                os.path.join(observed_outcomes_dir, f"{prefix}.parquet"),
             )
         non_treated_chunk.clear()
         treated_chunk.clear()
