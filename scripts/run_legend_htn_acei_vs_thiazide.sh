@@ -67,6 +67,9 @@ GENERATION_MAX_NEW_TOKENS=1024
 FOLLOW_UP_DAYS=365
 NUM_WORKERS=4
 
+# Number of parallel workers for Step 1 sequence extraction
+EXTRACTION_NUM_WORKERS=4
+
 # =============================================================================
 # DRUG CONCEPT IDs
 # NOTE: 1395058 appears in both lists (Quinapril / Chlorthalidone) — verify.
@@ -125,7 +128,8 @@ python "${EXTRACT_SCRIPT}" \
     --output_dir              "${CONTEXT_DIR}" \
     --tokenizer_path          "${TOKENIZER_PATH}" \
     --outcome_concept_ids     "4329847,316139,4110192,376713" \
-    --min_context_length      4
+    --min_context_length      4 \
+    --num_workers             "${EXTRACTION_NUM_WORKERS}"
 
 echo "Step 1 complete."
 echo ""
