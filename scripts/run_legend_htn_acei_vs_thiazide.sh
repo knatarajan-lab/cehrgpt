@@ -257,7 +257,10 @@ python "${HR_SCRIPT}" \
     --drug_info_path      "${DRUG_INFO}" \
     --outcome_concept_ids "4329847,316139,4110192,376713" \
     --follow_up_days      "${FOLLOW_UP_DAYS}" \
-    --output_dir          "${RESULTS_DIR}"
+    --output_dir          "${RESULTS_DIR}" \
+    --vocab_path          "${VOCAB_PATH}" \
+    --arm_a_concept_ids   "${ACEI_CONCEPT_IDS}" \
+    --arm_b_concept_ids   "${THIAZIDE_CONCEPT_IDS}"
 
 echo "Step 4 complete."
 echo ""
