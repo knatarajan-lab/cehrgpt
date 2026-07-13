@@ -409,6 +409,8 @@ def _process_shard(
         df_shard.iter_rows(named=True),
         total=len(df_shard),
         desc=f"[shard {shard_id:03d}]",
+        position=shard_id + 1,
+        leave=True,
     ):
         concept_ids = _to_list(row["concept_ids"])
 
@@ -677,8 +679,10 @@ def process(
                 tqdm(
                     pool.imap_unordered(_process_shard_star, shard_args),
                     total=effective_workers,
-                    desc="shards completed",
+                    desc="[overall] shards done",
                     unit="shard",
+                    position=0,
+                    leave=True,
                 )
             )
         total_found   = sum(r[0] for r in results)
