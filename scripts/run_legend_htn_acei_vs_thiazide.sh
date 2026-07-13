@@ -118,13 +118,14 @@ echo "============================================================"
 mkdir -p "${CONTEXT_DIR}"
 
 python "${EXTRACT_SCRIPT}" \
-    --patient_sequence_path "${PATIENT_SEQUENCE_PATH}" \
-    --vocab_path            "${VOCAB_PATH}" \
-    --drug_concept_ids      "${ACEI_CONCEPT_IDS},${THIAZIDE_CONCEPT_IDS}" \
-    --output_dir            "${CONTEXT_DIR}" \
-    --tokenizer_path        "${TOKENIZER_PATH}" \
-    --outcome_concept_ids   "4329847,316139,4110192,376713" \
-    --min_context_length    4
+    --patient_sequence_path   "${PATIENT_SEQUENCE_PATH}" \
+    --vocab_path              "${VOCAB_PATH}" \
+    --source_concept_ids      "${ACEI_CONCEPT_IDS}" \
+    --comparator_concept_ids  "${THIAZIDE_CONCEPT_IDS}" \
+    --output_dir              "${CONTEXT_DIR}" \
+    --tokenizer_path          "${TOKENIZER_PATH}" \
+    --outcome_concept_ids     "4329847,316139,4110192,376713" \
+    --min_context_length      4
 
 echo "Step 1 complete."
 echo ""
