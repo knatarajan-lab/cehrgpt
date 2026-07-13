@@ -61,6 +61,75 @@ from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 NON_TREATED_ARM = "non_treated"
 TREATED_ARM = "treated"
 
+# Parallel array columns that must all be truncated with the same indices
+_SEQUENCE_ARRAY_COLS = [
+    "concept_ids", "input_ids", "value_indicators", "values",
+    "visit_segments", "orders", "dates", "ages", "visit_concept_orders",
+    "concept_value_masks", "concept_values", "mlm_skip_values",
+    "priorities", "visit_concept_ids", "visit_rank_orders",
+    "concept_orders", "record_ranks", "units", "event_group_ids",
+    "epoch_times",
+]
+
+
+# ---------------------------------------------------------------------------
+# Left-truncation with demographics preservation
+# ---------------------------------------------------------------------------
+
+def _left_truncate_with_demographics(
+    df: "pl.DataFrame",
+    max_length: int,
+) -> "pl.DataFrame":
+    """
+    Truncate each patient's sequence to *max_length* tokens using a
+    left-truncation strategy that preserves the demographics header.
+
+    Strategy
+    --------
+    1. Find the demographics section = all tokens before the first ``[VS]``.
+    2. Left-truncate the clinical tokens (after demographics) so that
+       ``n_demo + n_clinical_kept == max_length``.
+    3. Re-assemble: [demographics | most-recent clinical tokens].
+
+    All parallel array columns are truncated with the same index set.
+    """
+    array_cols = [c for c in _SEQUENCE_ARRAY_COLS if c in df.columns]
+
+    rows_out = []
+    for row in df.iter_rows(named=True):
+        concept_ids = list(row.get("concept_ids") or [])
+        n = len(concept_ids)
+
+        if n <= max_length:
+            rows_out.append(row)
+            continue
+
+        # Find end of demographics: index of the first [VS] token
+        demo_end = 0
+        for i, tok in enumerate(concept_ids):
+            if tok == "[VS]":
+                demo_end = i
+                break
+
+        n_clinical_keep = max_length - demo_end
+        if n_clinical_keep <= 0:
+            # Demographics alone exceed budget — fall back to right-truncation
+            keep_indices = list(range(max_length))
+        else:
+            demo_indices     = list(range(demo_end))
+            clinical_indices = list(range(demo_end, n))[-n_clinical_keep:]
+            keep_indices     = demo_indices + clinical_indices
+
+        new_row = dict(row)
+        for col in array_cols:
+            val = row.get(col)
+            if val is not None and hasattr(val, "__len__") and len(val) == n:
+                new_row[col] = [val[i] for i in keep_indices]
+
+        rows_out.append(new_row)
+
+    return pl.DataFrame(rows_out, schema=df.schema)
+
 
 # ---------------------------------------------------------------------------
 # Data collator wrapper
@@ -227,6 +296,7 @@ def run_generation(
     output_dir: Path,
     num_trajectories: int,
     batch_size: int,
+    context_length: int,
     max_length: int,
     include_values: bool,
     num_workers: int,
@@ -234,17 +304,30 @@ def run_generation(
     """
     Load a context parquet, run *num_trajectories* generation passes, and
     write output parquets under ``output_dir/<arm>/<trajectory_id>/``.
+
+    Parameters
+    ----------
+    context_length
+        Maximum number of input tokens fed to the model (= generation_input_length).
+        The collator truncates each context to this length.
+    max_length
+        Total sequence length budget for model.generate()
+        (= context_length + generation_max_new_tokens).
     """
     print(f"\n[{arm}] Loading context from {context_parquet} …")
     df = pl.read_parquet(context_parquet)
     print(f"[{arm}] {len(df):,} patient contexts")
+
+    # Left-truncate to context_length, preserving demographics header tokens
+    df = _left_truncate_with_demographics(df, max_length=context_length)
+    print(f"[{arm}] truncated to max {context_length} tokens (demographics preserved)")
 
     # Convert to HuggingFace Dataset (keeps all columns)
     dataset = Dataset.from_pandas(df.to_pandas())
 
     base_collator = CehrGptDataCollator(
         tokenizer=cehrgpt_tokenizer,
-        max_length=max_length,
+        max_length=context_length,  # truncate input to context window, not total budget
         include_values=include_values,
         pretraining=False,
         include_ttv_prediction=False,
@@ -482,6 +565,7 @@ def main() -> None:
             output_dir=output_dir,
             num_trajectories=args.num_trajectories,
             batch_size=args.batch_size,
+            context_length=args.generation_input_length,
             max_length=max_length,
             include_values=include_values,
             num_workers=args.num_workers,
