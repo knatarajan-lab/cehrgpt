@@ -31,7 +31,7 @@ import argparse
 import math
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import polars as pl
@@ -71,6 +71,58 @@ def load_trajectories(trajectories_dir: str, arm: str) -> pl.DataFrame:
     dfs = [pl.read_parquet(str(f)) for f in sorted(parquet_files)]
     df = pl.concat(dfs)
     return df
+
+
+# ---------------------------------------------------------------------------
+# Drug concept expansion and contamination filtering
+# ---------------------------------------------------------------------------
+
+def expand_to_descendants(vocab_path: str, concept_ids: List[int]) -> Set[str]:
+    """Return all descendant concept_ids (as strings) via concept_ancestor."""
+    ancestor_glob = os.path.join(vocab_path, "concept_ancestor", "*.parquet")
+    descendants: List[str] = (
+        pl.scan_parquet(ancestor_glob)
+        .filter(pl.col("ancestor_concept_id").is_in(concept_ids))
+        .select(pl.col("descendant_concept_id").cast(pl.String))
+        .collect()
+        ["descendant_concept_id"]
+        .to_list()
+    )
+    result = set(descendants)
+    result.update(str(c) for c in concept_ids)
+    return result
+
+
+def filter_contaminated_trajectories(
+    trajectories: pl.DataFrame,
+    forbidden_concepts: Set[str],
+    arm: str,
+) -> pl.DataFrame:
+    """
+    Remove entire trajectories (subject_id, trajectory_id) where any
+    generated event code belongs to *forbidden_concepts*.
+
+    For example, ACEi-arm trajectories that contain thiazide events are
+    invalid counterfactuals and must be excluded before HR estimation.
+    """
+    if not forbidden_concepts:
+        return trajectories
+
+    contaminated = (
+        trajectories
+        .filter(pl.col("code").is_in(list(forbidden_concepts)))
+        .select(["subject_id", "trajectory_id"])
+        .unique()
+    )
+    n_contaminated = len(contaminated)
+    if n_contaminated > 0:
+        n_total = trajectories.select(["subject_id", "trajectory_id"]).n_unique()
+        print(f"  [{arm}] Filtering {n_contaminated:,} / {n_total:,} contaminated trajectories "
+              f"({n_contaminated / n_total:.1%})")
+        trajectories = trajectories.join(
+            contaminated, on=["subject_id", "trajectory_id"], how="anti"
+        )
+    return trajectories
 
 
 # ---------------------------------------------------------------------------
@@ -420,12 +472,30 @@ def main() -> None:
 
     outcome_ids = [x.strip() for x in args.outcome_concept_ids.split(",")]
 
+    # Expand drug concept IDs to descendants for contamination filtering
+    arm_a_forbidden: Set[str] = set()
+    arm_b_forbidden: Set[str] = set()
+    if args.vocab_path and args.arm_a_concept_ids and args.arm_b_concept_ids:
+        arm_a_ids = [int(x.strip()) for x in args.arm_a_concept_ids.split(",")]
+        arm_b_ids = [int(x.strip()) for x in args.arm_b_concept_ids.split(",")]
+        print("Expanding drug concepts for contamination filtering …")
+        arm_a_concepts = expand_to_descendants(args.vocab_path, arm_a_ids)
+        arm_b_concepts = expand_to_descendants(args.vocab_path, arm_b_ids)
+        # arm A trajectories must not contain arm B (comparator) drug codes
+        arm_a_forbidden = arm_b_concepts
+        # arm B trajectories must not contain arm A (source) drug codes
+        arm_b_forbidden = arm_a_concepts
+        print(f"  Arm A forbidden concepts (comparator drugs): {len(arm_a_forbidden):,}")
+        print(f"  Arm B forbidden concepts (source drugs):     {len(arm_b_forbidden):,}")
+
     print(f"Loading {args.arm_a} trajectories …")
     traj_a = load_trajectories(args.trajectories_dir, args.arm_a)
+    traj_a = filter_contaminated_trajectories(traj_a, arm_a_forbidden, args.arm_a)
     print(f"  {len(traj_a):,} events")
 
     print(f"Loading {args.arm_b} trajectories …")
     traj_b = load_trajectories(args.trajectories_dir, args.arm_b)
+    traj_b = filter_contaminated_trajectories(traj_b, arm_b_forbidden, args.arm_b)
     print(f"  {len(traj_b):,} events")
 
     print("Loading drug info …")
@@ -495,6 +565,24 @@ def _parse_args() -> argparse.Namespace:
         "--output_dir",
         required=True,
         help="Directory for output CSV files",
+    )
+    parser.add_argument(
+        "--vocab_path",
+        default=None,
+        help="OMOP vocabulary root (concept_ancestor/ parquets). Required for "
+             "contamination filtering via --arm_a_concept_ids / --arm_b_concept_ids.",
+    )
+    parser.add_argument(
+        "--arm_a_concept_ids",
+        default=None,
+        help="Comma-separated ingredient concept_ids for arm A drug class. "
+             "Arm B trajectories containing these codes will be removed.",
+    )
+    parser.add_argument(
+        "--arm_b_concept_ids",
+        default=None,
+        help="Comma-separated ingredient concept_ids for arm B drug class. "
+             "Arm A trajectories containing these codes will be removed.",
     )
     return parser.parse_args()
 
