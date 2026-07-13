@@ -38,6 +38,7 @@ python extract_drug_initiation_sequences.py \\
 """
 
 import argparse
+import glob as glob_module
 import math
 import multiprocessing as mp
 import os
@@ -329,9 +330,7 @@ def build_treated_context(
 
 def _process_shard(
     shard_id: int,
-    patient_sequence_path: str,
-    shard_start: int,
-    shard_length: int,
+    shard_files: List[str],
     source_concepts: Set[str],
     comparator_concepts: Set[str],
     drug_concepts: Set[str],
@@ -349,8 +348,8 @@ def _process_shard(
     """
     Process one shard of patient rows and write chunked parquet files.
 
-    Each worker reads only its own row range from disk so the parent process
-    never holds all shards in memory simultaneously.
+    Each worker receives a list of parquet files assigned exclusively to it,
+    so there is no I/O contention between workers.
 
     Chunk files are named ``shard_{shard_id:03d}_chunk_{chunk_idx:05d}.parquet``
     so that outputs from parallel shards never collide.
@@ -359,13 +358,8 @@ def _process_shard(
     -------
     (n_found, n_skipped)
     """
-    # Load only this shard's rows from disk
-    glob = (
-        os.path.join(patient_sequence_path, "*.parquet")
-        if os.path.isdir(patient_sequence_path)
-        else patient_sequence_path
-    )
-    df_shard = pl.scan_parquet(glob).slice(shard_start, shard_length).collect()
+    # Read only the files assigned to this shard — no overlap with other workers
+    df_shard = pl.read_parquet(shard_files)
 
     # Load tokenizer in the worker process (not picklable across processes)
     tokenizer: Optional[CehrGptTokenizer] = None
@@ -608,15 +602,18 @@ def process(
             print(f"  → outcome {oc_id}: {len(descendants):,} descendants")
 
     # ------------------------------------------------------------------ #
-    # 3. Inspect patient sequences without loading all rows into memory   #
+    # 3. Enumerate parquet files and inspect schema without loading data  #
     # ------------------------------------------------------------------ #
-    print("Scanning patient sequences …")
-    seq_glob = (
-        os.path.join(patient_sequence_path, "*.parquet")
-        if os.path.isdir(patient_sequence_path)
-        else patient_sequence_path
-    )
-    lf = pl.scan_parquet(seq_glob)
+    if os.path.isdir(patient_sequence_path):
+        all_files = sorted(glob_module.glob(os.path.join(patient_sequence_path, "*.parquet")))
+    else:
+        all_files = [patient_sequence_path]
+
+    if not all_files:
+        raise FileNotFoundError(f"No parquet files found in {patient_sequence_path}")
+
+    print(f"Scanning patient sequences ({len(all_files)} parquet file(s)) …")
+    lf = pl.scan_parquet(all_files)
     schema = lf.collect_schema()
     all_cols = list(schema.keys())
     n_rows = lf.select(pl.len()).collect().item()
@@ -631,24 +628,25 @@ def process(
 
     # ------------------------------------------------------------------ #
     # 4. Dispatch shards to worker processes                              #
-    #    Workers read their own slice from disk — no large data passed    #
-    #    through the Pool queue, so the parent stays memory-lean.        #
+    #    Files are distributed round-robin so each worker reads only     #
+    #    its assigned files — no I/O contention, no data serialisation   #
+    #    through the Pool queue.                                         #
     # ------------------------------------------------------------------ #
     CHUNK_SIZE = 25_000
-    effective_workers = min(num_workers, n_rows)
-    shard_size = math.ceil(n_rows / effective_workers)
+    effective_workers = min(num_workers, len(all_files))
+
+    # Round-robin file assignment: worker i gets files [i, i+N, i+2N, ...]
+    file_groups = [all_files[i::effective_workers] for i in range(effective_workers)]
 
     print(
-        f"Processing {n_rows:,} patients with {effective_workers} worker(s), "
-        f"shard size ≈ {shard_size:,} …"
+        f"Processing {n_rows:,} patients with {effective_workers} worker(s) "
+        f"({len(all_files)} files distributed round-robin) …"
     )
 
     shard_args = [
         (
             shard_id,
-            patient_sequence_path,   # path, not data — each worker reads its own slice
-            shard_id * shard_size,   # shard_start
-            shard_size,              # shard_length
+            file_groups[shard_id],   # list of parquet files for this worker
             source_concepts,
             comparator_concepts,
             drug_concepts,
