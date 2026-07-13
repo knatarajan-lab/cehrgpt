@@ -146,18 +146,6 @@ def find_outcomes_after_drug(
     Scan *concept_ids[start_pos:]* for the first occurrence of each outcome
     concept group.
 
-    Parameters
-    ----------
-    concept_ids
-        Full token sequence for the patient.
-    epoch_times
-        Parallel epoch timestamps (seconds since epoch) for each token.
-    start_pos
-        Index to start scanning from (typically ve_pos + 1, i.e. after the
-        drug-initiation visit closing token).
-    outcome_concept_groups
-        Mapping of {outcome_label: set_of_descendant_concept_ids}.
-
     Returns
     -------
     Dict mapping each outcome_label to the epoch_time of its first occurrence
@@ -338,7 +326,8 @@ def build_treated_context(
 def process(
     patient_sequence_path: str,
     vocab_path: str,
-    drug_ingredient_ids: List[int],
+    source_ingredient_ids: List[int],
+    comparator_ingredient_ids: List[int],
     output_dir: Path,
     tokenizer_path: Optional[str] = None,
     outcome_concept_ids: Optional[List[int]] = None,
@@ -400,12 +389,18 @@ def process(
         tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_path)
 
     # ------------------------------------------------------------------ #
-    # 2. Expand to all descendant drug concepts                           #
+    # 2. Expand source and comparator drug concepts to descendants        #
     # ------------------------------------------------------------------ #
-    print(f"Drug ingredient concept_ids: {drug_ingredient_ids}")
+    drug_ingredient_ids = source_ingredient_ids + comparator_ingredient_ids
+    print(f"Source ingredient concept_ids:     {source_ingredient_ids}")
+    print(f"Comparator ingredient concept_ids: {comparator_ingredient_ids}")
     print("Expanding to descendants via concept_ancestor …")
-    drug_concepts = load_drug_descendant_concepts(vocab_path, drug_ingredient_ids)
-    print(f"  → {len(drug_concepts):,} drug concepts (ingredients + descendants)")
+    source_concepts     = load_drug_descendant_concepts(vocab_path, source_ingredient_ids)
+    comparator_concepts = load_drug_descendant_concepts(vocab_path, comparator_ingredient_ids)
+    drug_concepts       = source_concepts | comparator_concepts
+    print(f"  → {len(source_concepts):,} source concepts, "
+          f"{len(comparator_concepts):,} comparator concepts, "
+          f"{len(drug_concepts):,} combined")
 
     # ------------------------------------------------------------------ #
     # 2b. Expand outcome concept IDs to descendants                       #
@@ -478,6 +473,15 @@ def process(
             continue
 
         drug_epoch_time = float(epoch_times[drug_pos])
+
+        # ---- exclude patients with opposite drug in post-initiation seq --
+        scan_start = (ve_pos + 1) if ve_pos is not None else (drug_pos + 1)
+        opposite_concepts = (
+            comparator_concepts if drug_concept_id in source_concepts else source_concepts
+        )
+        if any(concept_ids[i] in opposite_concepts for i in range(scan_start, len(concept_ids))):
+            n_skipped += 1
+            continue
 
         # ---- non-treated context ----------------------------------------
         nt = build_non_treated_context(row, vs_pos if vs_pos is not None else drug_pos, available_array_cols)
@@ -570,9 +574,14 @@ def _parse_args() -> argparse.Namespace:
              "(must contain concept_ancestor/ sub-folder with parquet files)",
     )
     parser.add_argument(
-        "--drug_concept_ids",
+        "--source_concept_ids",
         required=True,
-        help="Comma-separated OMOP concept_ids for drug ingredients, e.g. 1308216,1367500",
+        help="Comma-separated OMOP ingredient concept_ids for the source drug class (e.g. ACEi)",
+    )
+    parser.add_argument(
+        "--comparator_concept_ids",
+        required=True,
+        help="Comma-separated OMOP ingredient concept_ids for the comparator drug class (e.g. thiazide)",
     )
     parser.add_argument(
         "--output_dir",
@@ -609,7 +618,8 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    drug_ingredient_ids = [int(x.strip()) for x in args.drug_concept_ids.split(",")]
+    source_ingredient_ids     = [int(x.strip()) for x in args.source_concept_ids.split(",")]
+    comparator_ingredient_ids = [int(x.strip()) for x in args.comparator_concept_ids.split(",")]
     outcome_concept_ids = (
         [int(x.strip()) for x in args.outcome_concept_ids.split(",")]
         if args.outcome_concept_ids else None
@@ -617,7 +627,8 @@ def main() -> None:
     process(
         patient_sequence_path=args.patient_sequence_path,
         vocab_path=args.vocab_path,
-        drug_ingredient_ids=drug_ingredient_ids,
+        source_ingredient_ids=source_ingredient_ids,
+        comparator_ingredient_ids=comparator_ingredient_ids,
         output_dir=Path(args.output_dir),
         tokenizer_path=args.tokenizer_path,
         outcome_concept_ids=outcome_concept_ids,
