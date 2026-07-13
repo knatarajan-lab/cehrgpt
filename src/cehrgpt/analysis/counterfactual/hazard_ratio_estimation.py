@@ -215,9 +215,10 @@ def fit_cox(
     var_beta = 1.0 / (hess + EPSILON)
     se_beta = math.sqrt(abs(var_beta))
 
-    hr = math.exp(beta_hat)
-    hr_lower = math.exp(beta_hat - 1.96 * se_beta)
-    hr_upper = math.exp(beta_hat + 1.96 * se_beta)
+    MAX_EXP = 700  # math.exp overflows above ~709
+    hr = math.exp(max(-MAX_EXP, min(MAX_EXP, beta_hat)))
+    hr_lower = math.exp(max(-MAX_EXP, min(MAX_EXP, beta_hat - 1.96 * se_beta)))
+    hr_upper = math.exp(max(-MAX_EXP, min(MAX_EXP, beta_hat + 1.96 * se_beta)))
 
     # Wald test p-value
     z = beta_hat / (se_beta + EPSILON)
@@ -363,8 +364,14 @@ def analyse_outcome(
     time_b  = agg_b["time_days"].to_numpy()
     event_b = agg_b["event"].to_numpy().astype(int)
 
-    print(f"    {arm_a_label}: {len(time_a):,} patients, {int(event_a.sum()):,} events")
-    print(f"    {arm_b_label}: {len(time_b):,} patients, {int(event_b.sum()):,} events")
+    n_events_a = int(event_a.sum())
+    n_events_b = int(event_b.sum())
+    print(f"    {arm_a_label}: {len(time_a):,} patients, {n_events_a:,} events")
+    print(f"    {arm_b_label}: {len(time_b):,} patients, {n_events_b:,} events")
+
+    if n_events_a + n_events_b == 0:
+        print("    Skipping: no events observed in either arm.")
+        return None
 
     # Cox PH: treatment=1 for arm_a (ACEi), treatment=0 for arm_b (Thiazide)
     # HR > 1 means arm_a has higher hazard than arm_b
@@ -436,7 +443,8 @@ def main() -> None:
             arm_b_label=args.arm_b,
             output_dir=output_dir,
         )
-        results.append(result)
+        if result is not None:
+            results.append(result)
 
     summary = pl.DataFrame(results)
     summary_path = output_dir / "hazard_ratio_summary.csv"
