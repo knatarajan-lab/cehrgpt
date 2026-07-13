@@ -689,7 +689,11 @@ def process(
     if effective_workers == 1:
         total_found, total_skipped = _process_shard(*shard_args[0])
     else:
-        with mp.Pool(processes=effective_workers) as pool:
+        # Use 'spawn' (not the default 'fork') to avoid deadlocks caused by
+        # forking a process that already has background threads from Polars /
+        # NumPy / HuggingFace.  With spawn each worker starts clean.
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(processes=effective_workers) as pool:
             results = list(
                 tqdm(
                     pool.imap_unordered(_process_shard_star, shard_args),
