@@ -68,7 +68,7 @@ FOLLOW_UP_DAYS=365
 NUM_WORKERS=4
 
 # Number of parallel workers for Step 1 sequence extraction
-EXTRACTION_NUM_WORKERS=4
+EXTRACTION_NUM_WORKERS=10
 
 # =============================================================================
 # DRUG CONCEPT IDs
