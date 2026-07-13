@@ -21,21 +21,25 @@ For each patient in the patient_sequence dataset this script:
                               the future *conditional on* having received the
                               drug.
 
-  4. Writes three parquet files to <output_dir>:
-       non_treated_context.parquet
-       treated_context.parquet
-       drug_info.parquet           (person_id, drug_concept_id, drug_epoch_time)
+  4. Writes chunked parquet files to sub-directories of <output_dir>:
+       non_treated_context/
+       treated_context/
+       drug_info/           (person_id, drug_concept_id, drug_epoch_time, arm)
+       observed_outcomes/   (person_id, drug_epoch_time, <one col per outcome>)
 
 Usage
 -----
 python extract_drug_initiation_sequences.py \\
-    --patient_sequence_path /path/to/patient_sequence.parquet \\
+    --patient_sequence_path /path/to/patient_sequence \\
     --vocab_path            /path/to/omop_vocab_dir \\
-    --drug_concept_ids      1308216,1367500 \\
+    --source_concept_ids    1308216,1346654 \\
+    --comparator_concept_ids 974166,978555 \\
     --output_dir            /path/to/output
 """
 
 import argparse
+import math
+import multiprocessing as mp
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -320,6 +324,172 @@ def build_treated_context(
 
 
 # ---------------------------------------------------------------------------
+# Shard processor (top-level for multiprocessing pickling)
+# ---------------------------------------------------------------------------
+
+def _process_shard(
+    shard_id: int,
+    df_shard: pl.DataFrame,
+    source_concepts: Set[str],
+    comparator_concepts: Set[str],
+    drug_concepts: Set[str],
+    available_array_cols: List[str],
+    scalar_cols: List[str],
+    outcome_concept_groups: Dict[str, Set[str]],
+    non_treated_dir: str,
+    treated_dir: str,
+    drug_info_dir: str,
+    observed_outcomes_dir: str,
+    tokenizer_path: Optional[str],
+    min_context_length: int,
+    chunk_size: int,
+) -> Tuple[int, int]:
+    """
+    Process one shard of patient rows and write chunked parquet files.
+
+    Chunk files are named ``shard_{shard_id:03d}_chunk_{chunk_idx:05d}.parquet``
+    so that outputs from parallel shards never collide.
+
+    Returns
+    -------
+    (n_found, n_skipped)
+    """
+    # Load tokenizer in the worker process (not picklable across processes)
+    tokenizer: Optional[CehrGptTokenizer] = None
+    if tokenizer_path:
+        tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_path)
+
+    non_treated_chunk: List[Dict[str, Any]] = []
+    treated_chunk: List[Dict[str, Any]] = []
+    drug_info_chunk: List[Dict[str, Any]] = []
+    observed_outcomes_chunk: List[Dict[str, Any]] = []
+
+    n_found = 0
+    n_skipped = 0
+    chunk_idx = 0
+
+    def _flush_chunks() -> None:
+        nonlocal chunk_idx
+        prefix = f"shard_{shard_id:03d}_chunk_{chunk_idx:05d}"
+        if non_treated_chunk:
+            pl.DataFrame(non_treated_chunk).write_parquet(
+                os.path.join(non_treated_dir, f"{prefix}.parquet")
+            )
+        if treated_chunk:
+            pl.DataFrame(treated_chunk).write_parquet(
+                os.path.join(treated_dir, f"{prefix}.parquet")
+            )
+        if drug_info_chunk:
+            pl.DataFrame(drug_info_chunk).write_parquet(
+                os.path.join(drug_info_dir, f"{prefix}.parquet")
+            )
+        if observed_outcomes_chunk:
+            pl.DataFrame(observed_outcomes_chunk).write_parquet(
+                os.path.join(observed_outcomes_dir, f"{prefix}.parquet")
+            )
+        non_treated_chunk.clear()
+        treated_chunk.clear()
+        drug_info_chunk.clear()
+        observed_outcomes_chunk.clear()
+        chunk_idx += 1
+
+    for row in tqdm(
+        df_shard.iter_rows(named=True),
+        total=len(df_shard),
+        desc=f"[shard {shard_id:03d}]",
+    ):
+        concept_ids = _to_list(row["concept_ids"])
+
+        # ---- Find first drug initiation (source or comparator) ----
+        drug_pos, vs_pos, ve_pos, drug_concept_id = find_first_drug_initiation(
+            concept_ids, drug_concepts
+        )
+
+        if drug_pos is None or vs_pos is None:
+            n_skipped += 1
+            continue
+
+        # ---- Opposite-drug contamination check ----
+        # Skip patients whose sequences contain concepts from BOTH drug classes
+        concept_set = set(concept_ids)
+        has_source     = bool(concept_set & source_concepts)
+        has_comparator = bool(concept_set & comparator_concepts)
+        if has_source and has_comparator:
+            n_skipped += 1
+            continue
+
+        # ---- Build truncated context rows ----
+        non_treated_row = build_non_treated_context(row, vs_pos, available_array_cols)
+        treated_row     = build_treated_context(row, ve_pos, available_array_cols)
+
+        # Skip if non-treated context is too short
+        if len(_to_list(non_treated_row.get("concept_ids", []))) < min_context_length:
+            n_skipped += 1
+            continue
+
+        # ---- Copy scalar metadata into context rows ----
+        for col in scalar_cols:
+            val = row.get(col)
+            non_treated_row[col] = val
+            treated_row[col] = val
+
+        # ---- Encode values and input_ids via tokenizer ----
+        epoch_times = _to_list(row.get("epoch_times", []))
+        drug_epoch_time = float(epoch_times[drug_pos]) if drug_pos < len(epoch_times) else None
+
+        if tokenizer is not None:
+            non_treated_row = _encode_values(non_treated_row, tokenizer)
+            treated_row     = _encode_values(treated_row, tokenizer)
+
+            non_treated_row["input_ids"] = tokenizer.encode(
+                _to_list(non_treated_row["concept_ids"])
+            )
+            treated_row["input_ids"] = tokenizer.encode(
+                _to_list(treated_row["concept_ids"])
+            )
+
+        # ---- Attach drug metadata to context rows ----
+        person_id = row.get("person_id")
+        for ctx_row in (non_treated_row, treated_row):
+            ctx_row["person_id"]       = person_id
+            ctx_row["drug_epoch_time"] = drug_epoch_time
+            ctx_row["drug_concept_id"] = str(drug_concept_id)
+
+        non_treated_chunk.append(non_treated_row)
+        treated_chunk.append(treated_row)
+
+        # ---- Drug info row ----
+        arm_label = "source" if drug_concept_id in source_concepts else "comparator"
+        drug_info_chunk.append({
+            "person_id":      person_id,
+            "drug_concept_id": str(drug_concept_id),
+            "drug_epoch_time": drug_epoch_time,
+            "arm":             arm_label,
+        })
+
+        # ---- Observed outcomes (post-initiation) ----
+        if outcome_concept_groups:
+            oc_times = find_outcomes_after_drug(
+                concept_ids, epoch_times, drug_pos + 1, outcome_concept_groups
+            )
+            observed_outcomes_chunk.append(
+                {"person_id": person_id, "drug_epoch_time": drug_epoch_time, **oc_times}
+            )
+
+        n_found += 1
+
+        # Flush accumulated records to disk to avoid OOM
+        if n_found % chunk_size == 0:
+            _flush_chunks()
+
+    # Final flush of any remaining records
+    if non_treated_chunk or treated_chunk or drug_info_chunk or observed_outcomes_chunk:
+        _flush_chunks()
+
+    return n_found, n_skipped
+
+
+# ---------------------------------------------------------------------------
 # Main processing
 # ---------------------------------------------------------------------------
 
@@ -333,6 +503,7 @@ def process(
     outcome_concept_ids: Optional[List[int]] = None,
     min_context_length: int = 4,
     overwrite: bool = False,
+    num_workers: int = 1,
 ) -> None:
     """
     Full pipeline: load sequences → find drug initiation → write outputs.
@@ -345,30 +516,47 @@ def process(
     vocab_path
         Root directory of the OMOP vocabulary download (must contain
         ``concept_ancestor/`` sub-directory with parquet files).
-    drug_ingredient_ids
-        OMOP concept_ids for the drug *ingredients* of interest.  All
-        descendants are automatically expanded.
+    source_ingredient_ids
+        OMOP concept_ids for the source drug *ingredients* (e.g. ACEi).
+        All descendants are automatically expanded.
+    comparator_ingredient_ids
+        OMOP concept_ids for the comparator drug *ingredients* (e.g. thiazide).
+        All descendants are automatically expanded.
     output_dir
-        Directory where the three output parquets will be written.
+        Directory where chunked output parquets will be written.
+    tokenizer_path
+        Optional path to a CehrGptTokenizer.  When provided, ``input_ids``,
+        ``value_indicators``, and ``values`` are computed and written.
+    outcome_concept_ids
+        Optional list of OMOP concept_ids for outcomes to scan for after
+        drug initiation.  Each is expanded to descendants.
     min_context_length
         Minimum number of tokens required in the non-treated context
-        (patients with fewer tokens are skipped).  The default of 4
-        corresponds to the four demographic header tokens.
+        (patients with fewer tokens are skipped).  Default 4.
+    overwrite
+        If False (default), skip extraction when output dirs already exist.
+    num_workers
+        Number of parallel worker processes.  Default 1 (single-process).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ #
     # 0. Skip if outputs already exist                                    #
     # ------------------------------------------------------------------ #
-    non_treated_dir = output_dir / "non_treated_context"
-    treated_dir = output_dir / "treated_context"
-    drug_info_dir = output_dir / "drug_info"
+    non_treated_dir      = output_dir / "non_treated_context"
+    treated_dir          = output_dir / "treated_context"
+    drug_info_dir        = output_dir / "drug_info"
     observed_outcomes_dir = output_dir / "observed_outcomes"
 
     def _dir_has_parquets(d: Path) -> bool:
         return d.is_dir() and any(d.glob("*.parquet"))
 
-    if not overwrite and _dir_has_parquets(non_treated_dir) and _dir_has_parquets(treated_dir) and _dir_has_parquets(drug_info_dir):
+    if (
+        not overwrite
+        and _dir_has_parquets(non_treated_dir)
+        and _dir_has_parquets(treated_dir)
+        and _dir_has_parquets(drug_info_dir)
+    ):
         print("Outputs already exist — skipping extraction (use --overwrite to force).")
         print(f"  {non_treated_dir}/")
         print(f"  {treated_dir}/")
@@ -381,31 +569,23 @@ def process(
     observed_outcomes_dir.mkdir(exist_ok=True)
 
     # ------------------------------------------------------------------ #
-    # 1. Load tokenizer (optional)                                        #
+    # 1. Expand source and comparator drug concepts to descendants        #
     # ------------------------------------------------------------------ #
-    tokenizer = None
-    if tokenizer_path:
-        print(f"Loading tokenizer from {tokenizer_path} …")
-        tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_path)
-
-    # ------------------------------------------------------------------ #
-    # 2. Expand source and comparator drug concepts to descendants        #
-    # ------------------------------------------------------------------ #
-    drug_ingredient_ids = source_ingredient_ids + comparator_ingredient_ids
     print(f"Source ingredient concept_ids:     {source_ingredient_ids}")
     print(f"Comparator ingredient concept_ids: {comparator_ingredient_ids}")
     print("Expanding to descendants via concept_ancestor …")
     source_concepts     = load_drug_descendant_concepts(vocab_path, source_ingredient_ids)
     comparator_concepts = load_drug_descendant_concepts(vocab_path, comparator_ingredient_ids)
     drug_concepts       = source_concepts | comparator_concepts
-    print(f"  → {len(source_concepts):,} source concepts, "
-          f"{len(comparator_concepts):,} comparator concepts, "
-          f"{len(drug_concepts):,} combined")
+    print(
+        f"  → {len(source_concepts):,} source concepts, "
+        f"{len(comparator_concepts):,} comparator concepts, "
+        f"{len(drug_concepts):,} combined"
+    )
 
     # ------------------------------------------------------------------ #
-    # 2b. Expand outcome concept IDs to descendants                       #
+    # 2. Expand outcome concept IDs to descendants                        #
     # ------------------------------------------------------------------ #
-    # outcome_concept_groups: {str(concept_id): set_of_descendants}
     outcome_concept_groups: Dict[str, Set[str]] = {}
     if outcome_concept_ids:
         print(f"Expanding {len(outcome_concept_ids)} outcome concept(s) to descendants …")
@@ -424,134 +604,58 @@ def process(
         df = pl.read_parquet(patient_sequence_path)
     print(f"  → {len(df):,} patient sequences loaded")
 
-    # Separate array columns (present in this dataset) from scalar ones
     all_cols = df.columns
     available_array_cols = [c for c in SEQUENCE_ARRAY_COLS if c in all_cols]
     scalar_cols = [c for c in all_cols if c not in SEQUENCE_ARRAY_COLS]
 
-    missing_required = REQUIRED_COLS - {"input_ids"} - set(all_cols)  # input_ids generated later
+    missing_required = REQUIRED_COLS - {"input_ids"} - set(all_cols)
     if missing_required:
         print(f"  WARNING: required columns missing from source data: {sorted(missing_required)}")
 
     # ------------------------------------------------------------------ #
-    # 3. Process each patient — flush to disk every CHUNK_SIZE records   #
-    #    to avoid accumulating all records in memory at once.            #
+    # 4. Dispatch shards to worker processes                              #
     # ------------------------------------------------------------------ #
     CHUNK_SIZE = 25_000
+    effective_workers = min(num_workers, len(df))
+    shard_size = math.ceil(len(df) / effective_workers)
 
-    non_treated_chunk: List[Dict[str, Any]] = []
-    treated_chunk: List[Dict[str, Any]] = []
-    drug_info_chunk: List[Dict[str, Any]] = []
-    observed_outcomes_chunk: List[Dict[str, Any]] = []
-    chunk_idx = 0
-    n_found = 0
-    n_skipped = 0
+    print(
+        f"Processing {len(df):,} patients with {effective_workers} worker(s), "
+        f"shard size ≈ {shard_size:,} …"
+    )
 
-    def _flush_chunk() -> None:
-        nonlocal chunk_idx
-        pl.DataFrame(non_treated_chunk).write_parquet(non_treated_dir / f"chunk_{chunk_idx:05d}.parquet")
-        pl.DataFrame(treated_chunk).write_parquet(treated_dir / f"chunk_{chunk_idx:05d}.parquet")
-        pl.DataFrame(drug_info_chunk).write_parquet(drug_info_dir / f"chunk_{chunk_idx:05d}.parquet")
-        if observed_outcomes_chunk:
-            pl.DataFrame(observed_outcomes_chunk).write_parquet(observed_outcomes_dir / f"chunk_{chunk_idx:05d}.parquet")
-        non_treated_chunk.clear()
-        treated_chunk.clear()
-        drug_info_chunk.clear()
-        observed_outcomes_chunk.clear()
-        chunk_idx += 1
-
-    for row in tqdm(df.iter_rows(named=True), total=len(df), desc="Extracting drug initiations", unit="pt"):
-        concept_ids = _to_list(row["concept_ids"])
-        epoch_times = _to_list(row["epoch_times"])
-
-        drug_pos, vs_pos, ve_pos, drug_concept_id = find_first_drug_initiation(
-            concept_ids, drug_concepts
+    shard_args = [
+        (
+            shard_id,
+            df.slice(shard_id * shard_size, shard_size),
+            source_concepts,
+            comparator_concepts,
+            drug_concepts,
+            available_array_cols,
+            scalar_cols,
+            outcome_concept_groups,
+            str(non_treated_dir),
+            str(treated_dir),
+            str(drug_info_dir),
+            str(observed_outcomes_dir),
+            tokenizer_path,
+            min_context_length,
+            CHUNK_SIZE,
         )
+        for shard_id in range(effective_workers)
+    ]
+    del df  # free memory before spawning workers
 
-        if drug_pos is None:
-            n_skipped += 1
-            continue
+    if effective_workers == 1:
+        total_found, total_skipped = _process_shard(*shard_args[0])
+    else:
+        with mp.Pool(processes=effective_workers) as pool:
+            results = pool.starmap(_process_shard, shard_args)
+        total_found   = sum(r[0] for r in results)
+        total_skipped = sum(r[1] for r in results)
 
-        drug_epoch_time = float(epoch_times[drug_pos])
-
-        # ---- exclude patients with opposite drug in post-initiation seq --
-        scan_start = (ve_pos + 1) if ve_pos is not None else (drug_pos + 1)
-        opposite_concepts = (
-            comparator_concepts if drug_concept_id in source_concepts else source_concepts
-        )
-        if any(concept_ids[i] in opposite_concepts for i in range(scan_start, len(concept_ids))):
-            n_skipped += 1
-            continue
-
-        # ---- non-treated context ----------------------------------------
-        nt = build_non_treated_context(row, vs_pos if vs_pos is not None else drug_pos, available_array_cols)
-
-        if len(nt.get("concept_ids", [])) < min_context_length:
-            n_skipped += 1
-            continue
-
-        for col in scalar_cols:
-            nt[col] = row[col]
-        nt["drug_concept_id"] = drug_concept_id
-        nt["drug_epoch_time"] = drug_epoch_time
-        nt["num_of_concepts"] = len(nt["concept_ids"])
-        if tokenizer is not None:
-            if "input_ids" not in nt:
-                nt["input_ids"] = tokenizer.encode(nt["concept_ids"])
-            nt = _encode_values(nt, tokenizer)
-        non_treated_chunk.append(nt)
-
-        # ---- treated context --------------------------------------------
-        t = build_treated_context(row, ve_pos, available_array_cols)
-        for col in scalar_cols:
-            t[col] = row[col]
-        t["drug_concept_id"] = drug_concept_id
-        t["drug_epoch_time"] = drug_epoch_time
-        t["num_of_concepts"] = len(t["concept_ids"])
-        if tokenizer is not None:
-            if "input_ids" not in t:
-                t["input_ids"] = tokenizer.encode(t["concept_ids"])
-            t = _encode_values(t, tokenizer)
-        treated_chunk.append(t)
-
-        # ---- drug info --------------------------------------------------
-        drug_info_chunk.append(
-            {
-                "person_id": row["person_id"],
-                "drug_concept_id": drug_concept_id,
-                "drug_epoch_time": drug_epoch_time,
-            }
-        )
-
-        # ---- observed outcomes (scan post-initiation sequence) ----------
-        if outcome_concept_groups:
-            scan_start = (ve_pos + 1) if ve_pos is not None else (drug_pos + 1)
-            outcome_times = find_outcomes_after_drug(
-                concept_ids, epoch_times, scan_start, outcome_concept_groups
-            )
-            for outcome_id, outcome_epoch_time in outcome_times.items():
-                observed_outcomes_chunk.append(
-                    {
-                        "person_id": row["person_id"],
-                        "drug_concept_id": drug_concept_id,
-                        "drug_epoch_time": drug_epoch_time,
-                        "outcome_concept_id": outcome_id,
-                        "outcome_epoch_time": outcome_epoch_time,
-                    }
-                )
-
-        n_found += 1
-
-        if n_found % CHUNK_SIZE == 0:
-            _flush_chunk()
-
-    # Flush remaining records
-    if non_treated_chunk:
-        _flush_chunk()
-
-    del df
-    print(f"  → {n_found:,} patients with drug exposure kept  |  {n_skipped:,} skipped")
-    print(f"Done.  {chunk_idx} chunk(s) written to {output_dir}")
+    print(f"  → {total_found:,} patients kept  |  {total_skipped:,} skipped")
+    print(f"Done.  Outputs written to {output_dir}")
 
 
 # ---------------------------------------------------------------------------
@@ -613,6 +717,12 @@ def _parse_args() -> argparse.Namespace:
         default=False,
         help="Overwrite existing output files even if they already exist",
     )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=1,
+        help="Number of parallel worker processes for shard processing (default: 1)",
+    )
     return parser.parse_args()
 
 
@@ -634,6 +744,7 @@ def main() -> None:
         outcome_concept_ids=outcome_concept_ids,
         min_context_length=args.min_context_length,
         overwrite=args.overwrite,
+        num_workers=args.num_workers,
     )
 
 
