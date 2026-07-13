@@ -365,6 +365,10 @@ def _process_shard(
     """
     # Read only the files assigned to this shard — no overlap with other workers
     df_shard = pl.read_parquet(shard_files)
+    print(
+        f"[shard {shard_id:03d}] loaded {len(df_shard):,} rows from {len(shard_files)} file(s)",
+        flush=True,
+    )
 
     # Load tokenizer in the worker process (not picklable across processes)
     tokenizer: Optional[CehrGptTokenizer] = None
