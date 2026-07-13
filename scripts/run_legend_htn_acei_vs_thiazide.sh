@@ -135,31 +135,6 @@ echo "Step 1 complete."
 echo ""
 
 # =============================================================================
-# STEP 1.5 — Observed baseline HR (ACEi vs Thiazide on real outcomes)
-#
-#   Uses the observed_outcomes/ extracted in Step 1 to compute hazard ratios
-#   on actual patient data.  This serves as a sanity-check baseline before
-#   comparing against the model-generated counterfactual HRs.
-# =============================================================================
-echo "============================================================"
-echo "STEP 1.5: Observed baseline HR (real patient outcomes)"
-echo "============================================================"
-
-mkdir -p "${RESULTS_DIR}"
-
-python "${HR_SCRIPT}" \
-    --observed_outcomes_path  "${CONTEXT_DIR}/observed_outcomes" \
-    --drug_info_path          "${DRUG_INFO}" \
-    --outcome_concept_ids     "4329847,316139,4110192,376713" \
-    --follow_up_days          "${FOLLOW_UP_DAYS}" \
-    --output_dir              "${RESULTS_DIR}" \
-    --arm_a                   "acei" \
-    --arm_b                   "thiazide"
-
-echo "Step 1.5 complete."
-echo ""
-
-# =============================================================================
 # STEP 2 — Create the two arm contexts for ACEi patients
 #
 #   For each ACEi patient we produce:
