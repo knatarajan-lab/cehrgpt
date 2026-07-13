@@ -28,7 +28,7 @@ import argparse
 import datetime
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import polars as pl
@@ -76,20 +76,80 @@ _SEQUENCE_ARRAY_COLS = [
 # Left-truncation with demographics preservation
 # ---------------------------------------------------------------------------
 
+def _update_year_age_tokens(
+    concept_ids: List[str],
+    input_ids: Optional[List[int]],
+    first_kept_clinical_epoch: float,
+    tokenizer: Optional["CehrGptTokenizer"],
+) -> Tuple[List[str], Optional[List[int]]]:
+    """
+    Update the year and age tokens in the demographics header to reflect
+    the patient's age/year at *first_kept_clinical_epoch*.
+
+    Demographics layout (indices 0-3 by convention):
+        concept_ids[0] = "year:{start_year}"
+        concept_ids[1] = "age:{start_age}"
+        concept_ids[2] = gender token
+        concept_ids[3] = race token
+
+    The birth year is inferred as ``start_year - start_age``.  From that
+    we compute the new age at *first_kept_clinical_epoch* and overwrite
+    both the concept_ids and (if tokenizer is provided) the input_ids.
+    """
+    if len(concept_ids) < 2:
+        return concept_ids, input_ids
+
+    year_tok = concept_ids[0]
+    age_tok  = concept_ids[1]
+
+    # Parse existing year and age tokens
+    try:
+        orig_year = int(year_tok.split(":")[1])
+        orig_age  = int(age_tok.split(":")[1])
+    except (IndexError, ValueError):
+        return concept_ids, input_ids  # unexpected format — leave unchanged
+
+    birth_year = orig_year - orig_age
+    new_year   = datetime.datetime.utcfromtimestamp(first_kept_clinical_epoch).year
+    new_age    = max(0, new_year - birth_year)
+
+    new_year_tok = f"year:{new_year}"
+    new_age_tok  = f"age:{new_age}"
+
+    new_concept_ids = list(concept_ids)
+    new_concept_ids[0] = new_year_tok
+    new_concept_ids[1] = new_age_tok
+
+    new_input_ids = list(input_ids) if input_ids is not None else None
+    if new_input_ids is not None and tokenizer is not None:
+        try:
+            new_input_ids[0] = tokenizer.encode([new_year_tok])[0]
+            new_input_ids[1] = tokenizer.encode([new_age_tok])[0]
+        except Exception:
+            pass  # leave unchanged if tokenizer doesn't know the token
+
+    return new_concept_ids, new_input_ids
+
+
 def _left_truncate_with_demographics(
     df: "pl.DataFrame",
     max_length: int,
+    tokenizer: Optional["CehrGptTokenizer"] = None,
 ) -> "pl.DataFrame":
     """
     Truncate each patient's sequence to *max_length* tokens using a
-    left-truncation strategy that preserves the demographics header.
+    left-truncation strategy that preserves the demographics header and
+    updates the year/age tokens to match the new temporal reference point.
 
     Strategy
     --------
     1. Find the demographics section = all tokens before the first ``[VS]``.
-    2. Left-truncate the clinical tokens (after demographics) so that
+    2. Left-truncate the clinical tokens so that
        ``n_demo + n_clinical_kept == max_length``.
     3. Re-assemble: [demographics | most-recent clinical tokens].
+    4. Update ``year:`` and ``age:`` tokens in the demographics header to
+       reflect the patient's age/year at the start of the kept clinical
+       tokens (derived from ``epoch_times``).
 
     All parallel array columns are truncated with the same index set.
     """
@@ -125,6 +185,20 @@ def _left_truncate_with_demographics(
             val = row.get(col)
             if val is not None and hasattr(val, "__len__") and len(val) == n:
                 new_row[col] = [val[i] for i in keep_indices]
+
+        # Update year/age tokens to reflect the new temporal reference point
+        epoch_times = list(row.get("epoch_times") or [])
+        first_clinical_orig_idx = keep_indices[demo_end] if len(keep_indices) > demo_end else None
+        if first_clinical_orig_idx is not None and first_clinical_orig_idx < len(epoch_times):
+            new_concept_ids, new_input_ids = _update_year_age_tokens(
+                concept_ids=new_row["concept_ids"],
+                input_ids=new_row.get("input_ids"),
+                first_kept_clinical_epoch=float(epoch_times[first_clinical_orig_idx]),
+                tokenizer=tokenizer,
+            )
+            new_row["concept_ids"] = new_concept_ids
+            if new_input_ids is not None:
+                new_row["input_ids"] = new_input_ids
 
         rows_out.append(new_row)
 
@@ -319,8 +393,9 @@ def run_generation(
     print(f"[{arm}] {len(df):,} patient contexts")
 
     # Left-truncate to context_length, preserving demographics header tokens
-    df = _left_truncate_with_demographics(df, max_length=context_length)
-    print(f"[{arm}] truncated to max {context_length} tokens (demographics preserved)")
+    # and updating the year/age tokens to the new temporal reference point.
+    df = _left_truncate_with_demographics(df, max_length=context_length, tokenizer=cehrgpt_tokenizer)
+    print(f"[{arm}] truncated to max {context_length} tokens (demographics year/age updated)")
 
     # Convert to HuggingFace Dataset (keeps all columns)
     dataset = Dataset.from_pandas(df.to_pandas())
