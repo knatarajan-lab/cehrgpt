@@ -42,6 +42,7 @@ import glob as glob_module
 import math
 import multiprocessing as mp
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -336,6 +337,7 @@ def _process_shard_star(args: tuple) -> Tuple[int, int]:
 def _process_shard(
     shard_id: int,
     shard_files: List[str],
+    needed_cols: List[str],
     source_concepts: Set[str],
     comparator_concepts: Set[str],
     drug_concepts: Set[str],
@@ -364,9 +366,14 @@ def _process_shard(
     (n_found, n_skipped)
     """
     # Read only the files assigned to this shard — no overlap with other workers
-    df_shard = pl.read_parquet(shard_files)
     print(
-        f"[shard {shard_id:03d}] loaded {len(df_shard):,} rows from {len(shard_files)} file(s)",
+        f"[shard {shard_id:03d}] reading {len(shard_files)} file(s) …",
+        flush=True,
+    )
+    t0 = time.time()
+    df_shard = pl.read_parquet(shard_files, columns=needed_cols)
+    print(
+        f"[shard {shard_id:03d}] loaded {len(df_shard):,} rows in {time.time() - t0:.1f}s",
         flush=True,
     )
 
@@ -654,10 +661,14 @@ def process(
         f"({len(all_files)} files distributed round-robin) …"
     )
 
+    # Only read the columns we actually need — skip unrelated columns
+    needed_cols = list(dict.fromkeys(available_array_cols + scalar_cols))
+
     shard_args = [
         (
             shard_id,
             file_groups[shard_id],   # list of parquet files for this worker
+            needed_cols,
             source_concepts,
             comparator_concepts,
             drug_concepts,
