@@ -511,35 +511,33 @@ def analyse_observed_outcomes(
 
 def faithfulness_check_outcome(
     outcome_concept_id: str,
-    traj_comparator: pl.DataFrame,
+    traj_source: pl.DataFrame,
     observed_outcomes: pl.DataFrame,
-    drug_info_generated: pl.DataFrame,
+    drug_info: pl.DataFrame,
     follow_up_days: float,
-    comparator_label: str,
+    source_label: str,
     output_dir: Path,
 ) -> Optional[Dict]:
     """
-    Compare generated comparator trajectories against real observed outcomes
-    for the same drug class.  HR should be ≈ 1.0 if the model faithfully
-    reproduces comparator (e.g. Thiazide) outcomes.
+    Compare generated source-arm trajectories against the same patients'
+    observed outcomes.  HR should be ≈ 1.0 if the model faithfully
+    reproduces what actually happened to the source (e.g. ACEi) patients.
 
     Parameters
     ----------
-    traj_comparator
-        Generated trajectories for the comparator arm (e.g. thiazide/).
+    traj_source
+        Generated trajectories for the source arm (e.g. acei/).
     observed_outcomes
-        Observed outcomes parquet from Step 1 (comparator patients only),
-        with one row per patient and one column per outcome concept_id.
-    drug_info_generated
-        drug_info for the generated arm (anchors drug_epoch_time).
-    drug_info_observed
-        drug_info for the observed comparator patients.
+        Observed outcomes from Step 1, filtered to source patients only.
+        Columns: person_id, drug_epoch_time, <outcome_concept_id>, …
+    drug_info
+        drug_info parquet (anchors drug_epoch_time for generated TTE).
     """
     print(f"\n  [Faithfulness] Outcome: {outcome_concept_id}")
 
-    # --- Generated comparator TTE ---
+    # --- Generated source-arm TTE ---
     tte_gen = compute_tte(
-        traj_comparator, drug_info_generated, [outcome_concept_id], follow_up_days
+        traj_source, drug_info, [outcome_concept_id], follow_up_days
     )
     agg_gen = (
         tte_gen
@@ -550,12 +548,11 @@ def faithfulness_check_outcome(
         )
     )
 
-    # --- Observed comparator TTE (from observed_outcomes parquet) ---
+    # --- Observed source-arm TTE (drug_epoch_time already in observed_outcomes) ---
     if outcome_concept_id not in observed_outcomes.columns:
         print(f"    Outcome column {outcome_concept_id} not in observed_outcomes — skipping.")
         return None
 
-    # observed_outcomes already carries drug_epoch_time from Step 1 — no join needed
     obs_times, obs_events = [], []
     for row in observed_outcomes.select(["drug_epoch_time", outcome_concept_id]).iter_rows():
         drug_t, outcome_t = row
@@ -575,8 +572,8 @@ def faithfulness_check_outcome(
 
     n_ev_gen = int(event_gen.sum())
     n_ev_obs = int(event_obs.sum())
-    print(f"    Generated {comparator_label}: {len(time_gen):,} patients, {n_ev_gen:,} events")
-    print(f"    Observed  {comparator_label}: {len(time_obs):,} patients, {n_ev_obs:,} events")
+    print(f"    Generated {source_label}: {len(time_gen):,} patients, {n_ev_gen:,} events")
+    print(f"    Observed  {source_label}: {len(time_obs):,} patients, {n_ev_obs:,} events")
 
     if n_ev_gen + n_ev_obs == 0:
         print("    Skipping: no events in either group.")
@@ -590,7 +587,7 @@ def faithfulness_check_outcome(
     hr, hr_lower, hr_upper, cox_p = fit_cox(time_all, event_all, treatment_all)
     lr_stat, lr_p = log_rank_test(time_gen, event_gen, time_obs, event_obs)
 
-    print(f"    HR (generated vs observed {comparator_label}) = {hr:.3f}  "
+    print(f"    HR (generated vs observed {source_label}) = {hr:.3f}  "
           f"(95% CI: {hr_lower:.3f}–{hr_upper:.3f})  Cox p={cox_p:.4f}  "
           f"[expect ≈ 1.0]")
     print(f"    Log-rank stat={lr_stat:.3f}  p={lr_p:.4f}")
@@ -600,25 +597,25 @@ def faithfulness_check_outcome(
     km_t_o, km_s_o = kaplan_meier(time_obs, event_obs)
     km_df = pl.concat([
         pl.DataFrame({"time_days": km_t_g, "survival": km_s_g,
-                      "arm": f"generated_{comparator_label}"}),
+                      "arm": f"generated_{source_label}"}),
         pl.DataFrame({"time_days": km_t_o, "survival": km_s_o,
-                      "arm": f"observed_{comparator_label}"}),
+                      "arm": f"observed_{source_label}"}),
     ])
     km_df.write_csv(str(output_dir / f"faithfulness_km_{outcome_concept_id}.csv"))
 
     return {
         "outcome_concept_id": outcome_concept_id,
-        f"n_generated_{comparator_label}": len(time_gen),
-        f"n_observed_{comparator_label}": len(time_obs),
-        f"n_events_generated_{comparator_label}": n_ev_gen,
-        f"n_events_observed_{comparator_label}": n_ev_obs,
+        f"n_generated_{source_label}": len(time_gen),
+        f"n_observed_{source_label}": len(time_obs),
+        f"n_events_generated_{source_label}": n_ev_gen,
+        f"n_events_observed_{source_label}": n_ev_obs,
         "hr_generated_vs_observed": hr,
         "hr_lower_95": hr_lower,
         "hr_upper_95": hr_upper,
         "cox_p_value": cox_p,
         "log_rank_stat": lr_stat,
         "log_rank_p_value": lr_p,
-        "note": f"HR should be ≈ 1.0 if model faithfully reproduces {comparator_label} outcomes",
+        "note": f"HR should be ≈ 1.0 if model faithfully reproduces {source_label} outcomes",
     }
 
 
@@ -784,26 +781,24 @@ def main() -> None:
     # ------------------------------------------------------------------
     if args.observed_outcomes_path:
         print("\n" + "=" * 60)
-        print(f"Faithfulness check: generated {args.arm_b} vs observed {args.arm_b}")
-        print("(HR should be ≈ 1.0 if the model is faithful)")
+        print(f"Faithfulness check: generated {args.arm_a} vs observed {args.arm_a}")
+        print("(Same patients, same drug — HR should be ≈ 1.0 if the model is faithful)")
         print("=" * 60)
 
         observed_outcomes = _read_parquet(args.observed_outcomes_path)
-        # Keep only observed comparator patients (e.g. Thiazide initiators)
-        comparator_person_ids = (
-            drug_info.filter(pl.col("arm") == "comparator").select("person_id")
-        )
-        obs_comparator = observed_outcomes.join(comparator_person_ids, on="person_id", how="inner")
+        # Keep only observed source patients (e.g. ACEi initiators)
+        source_person_ids = drug_info.filter(pl.col("arm") == "source").select("person_id")
+        obs_source = observed_outcomes.join(source_person_ids, on="person_id", how="inner")
 
         faithfulness_results = []
         for outcome_id in outcome_ids:
             res = faithfulness_check_outcome(
                 outcome_concept_id=outcome_id,
-                traj_comparator=traj_b,
-                observed_outcomes=obs_comparator,
-                drug_info_generated=drug_info,
+                traj_source=traj_a,           # generated ACEi trajectories
+                observed_outcomes=obs_source,  # same ACEi patients' real outcomes
+                drug_info=drug_info,
                 follow_up_days=args.follow_up_days,
-                comparator_label=args.arm_b,
+                source_label=args.arm_a,
                 output_dir=output_dir,
             )
             if res is not None:
