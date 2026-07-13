@@ -328,6 +328,11 @@ def build_treated_context(
 # Shard processor (top-level for multiprocessing pickling)
 # ---------------------------------------------------------------------------
 
+def _process_shard_star(args: tuple) -> Tuple[int, int]:
+    """Unpack a single tuple so imap_unordered can call _process_shard."""
+    return _process_shard(*args)
+
+
 def _process_shard(
     shard_id: int,
     shard_files: List[str],
@@ -668,7 +673,14 @@ def process(
         total_found, total_skipped = _process_shard(*shard_args[0])
     else:
         with mp.Pool(processes=effective_workers) as pool:
-            results = pool.starmap(_process_shard, shard_args)
+            results = list(
+                tqdm(
+                    pool.imap_unordered(_process_shard_star, shard_args),
+                    total=effective_workers,
+                    desc="shards completed",
+                    unit="shard",
+                )
+            )
         total_found   = sum(r[0] for r in results)
         total_skipped = sum(r[1] for r in results)
 
