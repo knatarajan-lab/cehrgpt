@@ -67,7 +67,7 @@ MAX_SOURCE_PATIENTS=10000
 BATCH_SIZE=8
 GENERATION_INPUT_LENGTH=2048
 GENERATION_MAX_NEW_TOKENS=1024
-FOLLOW_UP_DAYS=365
+FOLLOW_UP_DAYS=730
 NUM_WORKERS=4
 
 # Number of parallel workers for Step 1 sequence extraction
@@ -77,7 +77,7 @@ EXTRACTION_NUM_WORKERS=10
 # DRUG CONCEPT IDs (OMOP ingredient — VERIFY before running)
 # =============================================================================
 
-DULOXETINE_CONCEPT_IDS="1341243"
+DULOXETINE_CONCEPT_IDS="715259"
 # Duloxetine (SNRI; brand: Cymbalta)
 
 AMITRIPTYLINE_CONCEPT_IDS="710062"
@@ -95,7 +95,7 @@ KOA_CONCEPT_IDS="4079750"
 # OUTCOME CONCEPT IDs (OMOP procedure — VERIFY before running)
 # =============================================================================
 
-TKR_CONCEPT_IDS="4047648"
+TKR_CONCEPT_IDS="43531648,2105103"
 # Total replacement of knee joint (SNOMED 179344004)
 # VERIFY: run  SELECT * FROM concept WHERE concept_name ILIKE '%knee replacement%'
 #              AND standard_concept = 'S'  in your OMOP vocab to confirm
