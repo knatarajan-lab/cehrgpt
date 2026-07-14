@@ -279,6 +279,8 @@ python "${HR_SCRIPT}" \
     --follow_up_days          "${FOLLOW_UP_DAYS}" \
     --output_dir              "${RESULTS_DIR}" \
     --vocab_path              "${VOCAB_PATH}" \
+    --arm_a                   "tnfi" \
+    --arm_b                   "amitriptyline" \
     --arm_a_concept_ids       "${TNFI_CONCEPT_IDS}" \
     --arm_b_concept_ids       "${AMITRIPTYLINE_CONCEPT_IDS}"
 
