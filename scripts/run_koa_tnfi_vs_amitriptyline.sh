@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 # =============================================================================
-# KOA Study: Duloxetine vs Amitriptyline — Total Knee Replacement outcome
+# KOA Study: TNFi vs Amitriptyline — Total Knee Replacement outcome
 # =============================================================================
 #
 # Study design
 # ------------
 #   Population  : Knee osteoarthritis (KOA) patients who newly initiated
-#                 duloxetine (new users with prior KOA diagnosis).
-#   Arm A (Duloxetine):
-#                 History up to and including the duloxetine initiation visit.
-#                 Model generates the future conditional on duloxetine.
+#                 a TNF inhibitor (new users with prior KOA diagnosis).
+#   Arm A (TNFi):
+#                 History up to and including the TNFi initiation visit.
+#                 Model generates the future conditional on TNFi.
 #   Arm B (Amitriptyline counterfactual):
-#                 Same history, but the duloxetine concept is swapped to an
+#                 Same history, but the TNFi concept is swapped to an
 #                 amitriptyline concept sampled proportional to the empirical
 #                 frequency of amitriptyline drugs among real amitriptyline
 #                 initiators.  Model generates the counterfactual future.
 #   Each patient produces N trajectories in each arm.
-#   HR is computed by comparing duloxetine vs amitriptyline generated
+#   HR is computed by comparing TNFi vs amitriptyline generated
 #   trajectories for the TKR outcome.
 #
 # Population filter
@@ -26,24 +26,25 @@
 #   Amitriptyline patients are included in Step 1 only to estimate the
 #   empirical frequency of amitriptyline formulations for the drug swap.
 #
-# Outcome (OMOP concept_ids — VERIFY before running)
-# ---------------------------------------------------
-#   4047648  Total replacement of knee joint  ← VERIFY in your vocabulary
+# Outcome (OMOP concept_ids)
+# --------------------------
+#   43531648  Total knee replacement
+#    2105103  Total knee replacement (additional code)
 #
-# Population concepts (OMOP — VERIFY before running)
-# ---------------------------------------------------
-#   4079750  Primary osteoarthritis of knee   ← VERIFY; add related KOA codes
+# Population concepts (OMOP)
+# --------------------------
+#   4079750  Primary osteoarthritis of knee (SNOMED 57667006)
 #
-# Drug concept IDs (OMOP ingredient — VERIFY before running)
-# ----------------------------------------------------------
-#   Duloxetine    : 1341243
+# Drug concept IDs (OMOP ingredient)
+# -----------------------------------
+#   TNFi          : 1119119, 4299871, 937368, 912263, 19041065
 #   Amitriptyline : 710062
 #
 # Usage
 # -----
 #   Edit the CONFIGURATION section, then:
-#     nohup bash scripts/run_koa_duloxetine_vs_amitriptyline.sh \
-#         > koa_dulox_vs_amitriptyline.log 2>&1 &
+#     nohup bash scripts/run_koa_tnfi_vs_amitriptyline.sh \
+#         > koa_tnfi_vs_amitriptyline.log 2>&1 &
 #
 # =============================================================================
 set -euo pipefail
@@ -56,12 +57,12 @@ PATIENT_SEQUENCE_PATH="/data/patient_sequence"
 VOCAB_PATH="/data/omop_vocab"
 MODEL_PATH="/models/cehrgpt"
 TOKENIZER_PATH="/models/tokenizer"
-OUTPUT_ROOT="/data/koa_duloxetine_vs_amitriptyline"
+OUTPUT_ROOT="/data/koa_tnfi_vs_amitriptyline"
 
 # Number of stochastic trajectories per patient per arm
 NUM_TRAJECTORIES=10
 
-# Maximum duloxetine patients to use (random sample); set to "" to use all
+# Maximum TNFi patients to use (random sample); set to "" to use all
 MAX_SOURCE_PATIENTS=10000
 
 BATCH_SIZE=8
@@ -74,17 +75,17 @@ NUM_WORKERS=4
 EXTRACTION_NUM_WORKERS=10
 
 # =============================================================================
-# DRUG CONCEPT IDs (OMOP ingredient — VERIFY before running)
+# DRUG CONCEPT IDs (OMOP ingredient)
 # =============================================================================
 
-DULOXETINE_CONCEPT_IDS="715259"
-# Duloxetine (SNRI; brand: Cymbalta)
+TNFI_CONCEPT_IDS="1119119,4299871,937368,912263,19041065"
+# TNF inhibitors (Etanercept, Adalimumab, Infliximab, Certolizumab, Golimumab)
 
 AMITRIPTYLINE_CONCEPT_IDS="710062"
 # Amitriptyline (TCA)
 
 # =============================================================================
-# POPULATION CONCEPT IDs (OMOP condition — VERIFY before running)
+# POPULATION CONCEPT IDs (OMOP condition)
 # =============================================================================
 
 KOA_CONCEPT_IDS="4079750"
@@ -92,13 +93,11 @@ KOA_CONCEPT_IDS="4079750"
 # Add additional KOA-related concept_ids separated by commas if needed
 
 # =============================================================================
-# OUTCOME CONCEPT IDs (OMOP procedure — VERIFY before running)
+# OUTCOME CONCEPT IDs (OMOP procedure)
 # =============================================================================
 
 TKR_CONCEPT_IDS="43531648,2105103"
-# Total replacement of knee joint (SNOMED 179344004)
-# VERIFY: run  SELECT * FROM concept WHERE concept_name ILIKE '%knee replacement%'
-#              AND standard_concept = 'S'  in your OMOP vocab to confirm
+# Total knee replacement
 
 # =============================================================================
 # DERIVED PATHS
@@ -112,9 +111,9 @@ RESULTS_DIR="${OUTPUT_ROOT}/results"
 TREATED_CTX="${CONTEXT_DIR}/treated_context"
 DRUG_INFO="${CONTEXT_DIR}/drug_info"
 
-# Duloxetine patients — actual duloxetine context (arm A input)
-DULOX_ARM_CTX="${SWAP_DIR}/duloxetine_arm_ctx.parquet"
-# Duloxetine patients — amitriptyline counterfactual context (arm B input)
+# TNFi patients — actual TNFi context (arm A input)
+TNFI_ARM_CTX="${SWAP_DIR}/tnfi_arm_ctx.parquet"
+# TNFi patients — amitriptyline counterfactual context (arm B input)
 AMITRIPTYLINE_ARM_CTX="${SWAP_DIR}/amitriptyline_arm_ctx.parquet"
 
 EXTRACT_SCRIPT="src/cehrgpt/analysis/counterfactual/extract_drug_initiation_sequences.py"
@@ -125,13 +124,13 @@ HR_SCRIPT="src/cehrgpt/analysis/counterfactual/hazard_ratio_estimation.py"
 # =============================================================================
 # STEP 1 — Extract drug initiation sequences (KOA population only)
 #
-#   Include BOTH duloxetine AND amitriptyline patients so that drug_info/
+#   Include BOTH TNFi AND amitriptyline patients so that drug_info/
 #   contains real amitriptyline prescriptions for frequency estimation in
 #   Step 2.  Population filter requires a KOA diagnosis in pre-drug history.
 # =============================================================================
 echo "============================================================"
 echo "STEP 1: Extract drug initiation sequences (KOA population)"
-echo "  Source      : ${DULOXETINE_CONCEPT_IDS}  (Duloxetine)"
+echo "  Source      : ${TNFI_CONCEPT_IDS}  (TNFi)"
 echo "  Comparator  : ${AMITRIPTYLINE_CONCEPT_IDS}  (Amitriptyline)"
 echo "  Population  : ${KOA_CONCEPT_IDS}  (KOA diagnosis required)"
 echo "  Outcome     : ${TKR_CONCEPT_IDS}  (Total Knee Replacement)"
@@ -142,7 +141,7 @@ mkdir -p "${CONTEXT_DIR}"
 python "${EXTRACT_SCRIPT}" \
     --patient_sequence_path   "${PATIENT_SEQUENCE_PATH}" \
     --vocab_path              "${VOCAB_PATH}" \
-    --source_concept_ids      "${DULOXETINE_CONCEPT_IDS}" \
+    --source_concept_ids      "${TNFI_CONCEPT_IDS}" \
     --comparator_concept_ids  "${AMITRIPTYLINE_CONCEPT_IDS}" \
     --population_concept_ids  "${KOA_CONCEPT_IDS}" \
     --output_dir              "${CONTEXT_DIR}" \
@@ -155,18 +154,18 @@ echo "Step 1 complete."
 echo ""
 
 # =============================================================================
-# STEP 2 — Create duloxetine (actual) and amitriptyline (counterfactual) contexts
+# STEP 2 — Create TNFi (actual) and amitriptyline (counterfactual) contexts
 #
-#   For each duloxetine patient we produce:
-#     Arm A (duloxetine_arm_ctx)    : treated_context as-is
-#     Arm B (amitriptyline_arm_ctx) : treated_context with duloxetine concept
+#   For each TNFi patient we produce:
+#     Arm A (tnfi_arm_ctx)          : treated_context as-is
+#     Arm B (amitriptyline_arm_ctx) : treated_context with TNFi concept
 #                                     swapped to a frequency-sampled amitriptyline
 #                                     concept (empirical distribution from real
 #                                     amitriptyline patients in drug_info/)
 # =============================================================================
 echo "============================================================"
-echo "STEP 2: Create Duloxetine (actual) and Amitriptyline (counterfactual) contexts"
-echo "  Source      : Duloxetine patients"
+echo "STEP 2: Create TNFi (actual) and Amitriptyline (counterfactual) contexts"
+echo "  Source      : TNFi patients"
 echo "  Comparator  : Amitriptyline (frequency-sampled from real Rx)"
 echo "============================================================"
 
@@ -181,10 +180,10 @@ python "${SWAP_SCRIPT}" \
     --treated_context_path    "${TREATED_CTX}" \
     --drug_info_path          "${DRUG_INFO}" \
     --vocab_path              "${VOCAB_PATH}" \
-    --source_concept_ids      "${DULOXETINE_CONCEPT_IDS}" \
+    --source_concept_ids      "${TNFI_CONCEPT_IDS}" \
     --comparator_concept_ids  "${AMITRIPTYLINE_CONCEPT_IDS}" \
     --output_path             "${AMITRIPTYLINE_ARM_CTX}" \
-    --also_write_treated_path "${DULOX_ARM_CTX}" \
+    --also_write_treated_path "${TNFI_ARM_CTX}" \
     "${_SWAP_EXTRA_ARGS[@]}"
 
 echo ""
@@ -192,7 +191,7 @@ echo "Arm sizes:"
 SWAP_DIR="${SWAP_DIR}" python - <<'PYEOF'
 import polars as pl, os
 swap_dir = os.environ["SWAP_DIR"]
-for label, f in [("Duloxetine arm (actual)", f"{swap_dir}/duloxetine_arm_ctx.parquet"),
+for label, f in [("TNFi arm (actual)", f"{swap_dir}/tnfi_arm_ctx.parquet"),
                  ("Amitriptyline arm (counterfactual)", f"{swap_dir}/amitriptyline_arm_ctx.parquet")]:
     n = len(pl.read_parquet(f))
     print(f"  {label}: {n:,} patients")
@@ -204,19 +203,19 @@ echo ""
 # =============================================================================
 # STEP 3 — Generate trajectories for both arms in parallel on two GPUs
 #
-#   GPU 0: duloxetine/     — N futures conditioned on duloxetine receipt
-#   GPU 1: amitriptyline/  — N counterfactual futures (duloxetine→amitriptyline)
+#   GPU 0: tnfi/           — N futures conditioned on TNFi receipt
+#   GPU 1: amitriptyline/  — N counterfactual futures (TNFi→amitriptyline)
 # =============================================================================
 echo "============================================================"
 echo "STEP 3: Generate trajectories  (${NUM_TRAJECTORIES} per patient per arm)"
-echo "  GPU 0 → duloxetine/    (conditioned on duloxetine initiation)"
-echo "  GPU 1 → amitriptyline/ (counterfactual: duloxetine swapped to amitriptyline)"
+echo "  GPU 0 → tnfi/          (conditioned on TNFi initiation)"
+echo "  GPU 1 → amitriptyline/ (counterfactual: TNFi swapped to amitriptyline)"
 echo "============================================================"
 
 mkdir -p "${TRAJ_DIR}"
 
 CUDA_VISIBLE_DEVICES=0 python "${GENERATE_SCRIPT}" \
-    --arm_context "duloxetine:${DULOX_ARM_CTX}" \
+    --arm_context "tnfi:${TNFI_ARM_CTX}" \
     --model_name_or_path        "${MODEL_PATH}" \
     --tokenizer_path            "${TOKENIZER_PATH}" \
     --output_dir                "${TRAJ_DIR}" \
@@ -225,8 +224,8 @@ CUDA_VISIBLE_DEVICES=0 python "${GENERATE_SCRIPT}" \
     --generation_input_length   "${GENERATION_INPUT_LENGTH}" \
     --generation_max_new_tokens "${GENERATION_MAX_NEW_TOKENS}" \
     --num_workers               "${NUM_WORKERS}" \
-    > "${OUTPUT_ROOT}/generate_duloxetine.log" 2>&1 &
-PID_DULOX=$!
+    > "${OUTPUT_ROOT}/generate_tnfi.log" 2>&1 &
+PID_TNFI=$!
 
 CUDA_VISIBLE_DEVICES=1 python "${GENERATE_SCRIPT}" \
     --arm_context "amitriptyline:${AMITRIPTYLINE_ARM_CTX}" \
@@ -241,18 +240,18 @@ CUDA_VISIBLE_DEVICES=1 python "${GENERATE_SCRIPT}" \
     > "${OUTPUT_ROOT}/generate_amitriptyline.log" 2>&1 &
 PID_AMITRIPTYLINE=$!
 
-echo "Duloxetine generation    PID=${PID_DULOX}           (log: ${OUTPUT_ROOT}/generate_duloxetine.log)"
-echo "Amitriptyline generation PID=${PID_AMITRIPTYLINE}   (log: ${OUTPUT_ROOT}/generate_amitriptyline.log)"
+echo "TNFi generation          PID=${PID_TNFI}           (log: ${OUTPUT_ROOT}/generate_tnfi.log)"
+echo "Amitriptyline generation PID=${PID_AMITRIPTYLINE}  (log: ${OUTPUT_ROOT}/generate_amitriptyline.log)"
 echo "Waiting for both to complete …"
 
-wait ${PID_DULOX}
-STATUS_DULOX=$?
+wait ${PID_TNFI}
+STATUS_TNFI=$?
 wait ${PID_AMITRIPTYLINE}
 STATUS_AMITRIPTYLINE=$?
 
-if [ ${STATUS_DULOX} -ne 0 ]; then
-    echo "ERROR: Duloxetine generation failed (exit ${STATUS_DULOX}). Check ${OUTPUT_ROOT}/generate_duloxetine.log"
-    exit ${STATUS_DULOX}
+if [ ${STATUS_TNFI} -ne 0 ]; then
+    echo "ERROR: TNFi generation failed (exit ${STATUS_TNFI}). Check ${OUTPUT_ROOT}/generate_tnfi.log"
+    exit ${STATUS_TNFI}
 fi
 if [ ${STATUS_AMITRIPTYLINE} -ne 0 ]; then
     echo "ERROR: Amitriptyline generation failed (exit ${STATUS_AMITRIPTYLINE}). Check ${OUTPUT_ROOT}/generate_amitriptyline.log"
@@ -263,7 +262,7 @@ echo "Step 3 complete."
 echo ""
 
 # =============================================================================
-# STEP 4 — Estimate Hazard Ratios (Duloxetine vs Amitriptyline)
+# STEP 4 — Estimate Hazard Ratios (TNFi vs Amitriptyline)
 # =============================================================================
 echo "============================================================"
 echo "STEP 4: Hazard ratio estimation  (${FOLLOW_UP_DAYS}-day follow-up)"
@@ -280,7 +279,7 @@ python "${HR_SCRIPT}" \
     --follow_up_days          "${FOLLOW_UP_DAYS}" \
     --output_dir              "${RESULTS_DIR}" \
     --vocab_path              "${VOCAB_PATH}" \
-    --arm_a_concept_ids       "${DULOXETINE_CONCEPT_IDS}" \
+    --arm_a_concept_ids       "${TNFI_CONCEPT_IDS}" \
     --arm_b_concept_ids       "${AMITRIPTYLINE_CONCEPT_IDS}"
 
 echo "Step 4 complete."
@@ -294,11 +293,11 @@ echo "Done.  Output directory: ${OUTPUT_ROOT}"
 echo ""
 echo "Key files:"
 echo "  ${RESULTS_DIR}/faithfulness_summary.csv  (generated Amitriptyline vs observed Amitriptyline, expect HR≈1)"
-echo "  ${RESULTS_DIR}/hazard_ratio_summary.csv  (generated Duloxetine vs generated Amitriptyline)"
+echo "  ${RESULTS_DIR}/hazard_ratio_summary.csv  (generated TNFi vs generated Amitriptyline)"
 echo "  ${RESULTS_DIR}/km_<concept_id>.csv"
 echo ""
-echo "Concept IDs used (VERIFY these against your OMOP vocabulary):"
-echo "  Duloxetine    : ${DULOXETINE_CONCEPT_IDS}"
+echo "Concept IDs used:"
+echo "  TNFi          : ${TNFI_CONCEPT_IDS}"
 echo "  Amitriptyline : ${AMITRIPTYLINE_CONCEPT_IDS}"
 echo "  KOA filter    : ${KOA_CONCEPT_IDS}"
 echo "  TKR outcome   : ${TKR_CONCEPT_IDS}"
