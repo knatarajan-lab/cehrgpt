@@ -276,7 +276,6 @@ mkdir -p "${RESULTS_DIR}"
 python "${HR_SCRIPT}" \
     --trajectories_dir        "${TRAJ_DIR}" \
     --drug_info_path          "${DRUG_INFO}" \
-    --observed_outcomes_path  "${CONTEXT_DIR}/observed_outcomes" \
     --outcome_concept_ids     "${TKR_CONCEPT_IDS}" \
     --follow_up_days          "${FOLLOW_UP_DAYS}" \
     --output_dir              "${RESULTS_DIR}" \
@@ -294,9 +293,8 @@ echo "============================================================"
 echo "Done.  Output directory: ${OUTPUT_ROOT}"
 echo ""
 echo "Key files:"
-echo "  ${RESULTS_DIR}/observed_hazard_ratio_summary.csv  (observed Duloxetine vs observed Amitriptyline)"
-echo "  ${RESULTS_DIR}/faithfulness_summary.csv           (generated Amitriptyline vs observed Amitriptyline, expect HR≈1)"
-echo "  ${RESULTS_DIR}/hazard_ratio_summary.csv           (generated Duloxetine vs generated Amitriptyline)"
+echo "  ${RESULTS_DIR}/faithfulness_summary.csv  (generated Amitriptyline vs observed Amitriptyline, expect HR≈1)"
+echo "  ${RESULTS_DIR}/hazard_ratio_summary.csv  (generated Duloxetine vs generated Amitriptyline)"
 echo "  ${RESULTS_DIR}/km_<concept_id>.csv"
 echo ""
 echo "Concept IDs used (VERIFY these against your OMOP vocabulary):"
