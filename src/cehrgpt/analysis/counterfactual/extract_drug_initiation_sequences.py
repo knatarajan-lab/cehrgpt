@@ -331,7 +331,7 @@ def build_treated_context(
 
 def _process_shard_star(args: tuple) -> Tuple[int, int]:
     """Unpack a single tuple so imap_unordered can call _process_shard."""
-    return _process_shard(*args)
+    return _process_shard(*args)  # population_concepts passed as keyword via last positional slot
 
 
 def _process_shard(
@@ -351,6 +351,7 @@ def _process_shard(
     tokenizer_path: Optional[str],
     min_context_length: int,
     chunk_size: int,
+    population_concepts: Optional[Set[str]] = None,
 ) -> Tuple[int, int]:
     """
     Process one shard of patient rows and write chunked parquet files.
@@ -451,6 +452,13 @@ def _process_shard(
             n_skipped += 1
             continue
 
+        # ---- Population filter (e.g. require KOA diagnosis in pre-drug history) ----
+        if population_concepts:
+            pre_drug_set = set(concept_ids[:drug_pos])
+            if not (pre_drug_set & population_concepts):
+                n_skipped += 1
+                continue
+
         # ---- Opposite-drug contamination check ----
         # Skip patients whose sequences contain concepts from BOTH drug classes
         concept_set = set(concept_ids)
@@ -543,6 +551,7 @@ def process(
     output_dir: Path,
     tokenizer_path: Optional[str] = None,
     outcome_concept_ids: Optional[List[int]] = None,
+    population_concept_ids: Optional[List[int]] = None,
     min_context_length: int = 4,
     overwrite: bool = False,
     num_workers: int = 1,
@@ -559,10 +568,10 @@ def process(
         Root directory of the OMOP vocabulary download (must contain
         ``concept_ancestor/`` sub-directory with parquet files).
     source_ingredient_ids
-        OMOP concept_ids for the source drug *ingredients* (e.g. ACEi).
+        OMOP concept_ids for the source drug *ingredients* (e.g. duloxetine).
         All descendants are automatically expanded.
     comparator_ingredient_ids
-        OMOP concept_ids for the comparator drug *ingredients* (e.g. thiazide).
+        OMOP concept_ids for the comparator drug *ingredients* (e.g. amitriptyline).
         All descendants are automatically expanded.
     output_dir
         Directory where chunked output parquets will be written.
@@ -572,6 +581,11 @@ def process(
     outcome_concept_ids
         Optional list of OMOP concept_ids for outcomes to scan for after
         drug initiation.  Each is expanded to descendants.
+    population_concept_ids
+        Optional list of OMOP concept_ids defining the eligible population
+        (e.g. KOA diagnosis concepts).  Each is expanded to descendants.
+        Only patients who have at least one of these concepts in their
+        pre-drug history are kept.  If None, no population filter is applied.
     min_context_length
         Minimum number of tokens required in the non-treated context
         (patients with fewer tokens are skipped).  Default 4.
@@ -637,6 +651,15 @@ def process(
             print(f"  → outcome {oc_id}: {len(descendants):,} descendants")
 
     # ------------------------------------------------------------------ #
+    # 2b. Expand population concept IDs to descendants (optional filter)  #
+    # ------------------------------------------------------------------ #
+    population_concepts: Optional[Set[str]] = None
+    if population_concept_ids:
+        print(f"Expanding {len(population_concept_ids)} population concept(s) to descendants …")
+        population_concepts = load_drug_descendant_concepts(vocab_path, population_concept_ids)
+        print(f"  → {len(population_concepts):,} population concepts (patients must have ≥1 in pre-drug history)")
+
+    # ------------------------------------------------------------------ #
     # 3. Enumerate parquet files and inspect schema without loading data  #
     # ------------------------------------------------------------------ #
     if os.path.isdir(patient_sequence_path):
@@ -699,6 +722,7 @@ def process(
             tokenizer_path,
             min_context_length,
             CHUNK_SIZE,
+            population_concepts,
         )
         for shard_id in range(effective_workers)
     ]
@@ -776,6 +800,14 @@ def _parse_args() -> argparse.Namespace:
              "Each is expanded to descendants. Writes observed_outcomes/ chunks.",
     )
     parser.add_argument(
+        "--population_concept_ids",
+        default=None,
+        help="Comma-separated OMOP concept_ids defining the eligible population "
+             "(e.g. knee osteoarthritis diagnosis concepts). Each is expanded to "
+             "descendants via concept_ancestor. Only patients whose pre-drug history "
+             "contains at least one matching concept are kept. Default: no filter.",
+    )
+    parser.add_argument(
         "--min_context_length",
         type=int,
         default=4,
@@ -804,6 +836,10 @@ def main() -> None:
         [int(x.strip()) for x in args.outcome_concept_ids.split(",")]
         if args.outcome_concept_ids else None
     )
+    population_concept_ids = (
+        [int(x.strip()) for x in args.population_concept_ids.split(",")]
+        if args.population_concept_ids else None
+    )
     process(
         patient_sequence_path=args.patient_sequence_path,
         vocab_path=args.vocab_path,
@@ -812,6 +848,7 @@ def main() -> None:
         output_dir=Path(args.output_dir),
         tokenizer_path=args.tokenizer_path,
         outcome_concept_ids=outcome_concept_ids,
+        population_concept_ids=population_concept_ids,
         min_context_length=args.min_context_length,
         overwrite=args.overwrite,
         num_workers=args.num_workers,
