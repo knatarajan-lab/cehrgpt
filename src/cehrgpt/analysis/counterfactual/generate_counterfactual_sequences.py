@@ -28,7 +28,7 @@ import argparse
 import datetime
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import polars as pl
@@ -60,6 +60,47 @@ from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
 NON_TREATED_ARM = "non_treated"
 TREATED_ARM = "treated"
+
+
+# ---------------------------------------------------------------------------
+# Concept suppression during generation
+# ---------------------------------------------------------------------------
+
+def build_forbidden_token_ids(
+    vocab_path: str,
+    concept_ids: List[int],
+    tokenizer: CehrGptTokenizer,
+) -> List[int]:
+    """
+    Expand *concept_ids* to all OMOP descendants via concept_ancestor, then
+    map each concept string to its tokenizer token ID.
+
+    Only concepts present in the tokenizer vocabulary are included.
+    Returns a deduplicated list of integer token IDs to suppress.
+    """
+    ancestor_glob = os.path.join(vocab_path, "concept_ancestor", "*.parquet")
+    descendant_strs: List[str] = (
+        pl.scan_parquet(ancestor_glob)
+        .filter(pl.col("ancestor_concept_id").is_in(concept_ids))
+        .select(pl.col("descendant_concept_id").cast(pl.String))
+        .collect()["descendant_concept_id"]
+        .to_list()
+    )
+    all_concepts: Set[str] = set(descendant_strs) | {str(c) for c in concept_ids}
+
+    unk_id = tokenizer.unk_token_id
+    forbidden: Set[int] = set()
+    for concept_str in all_concepts:
+        encoded = tokenizer.encode([concept_str])
+        if encoded and encoded[0] != unk_id:
+            forbidden.add(encoded[0])
+
+    print(
+        f"  Suppressing {len(forbidden):,} token IDs "
+        f"({len(all_concepts):,} concept descendants of {len(concept_ids)} ingredient(s))"
+    )
+    return list(forbidden)
+
 
 # Parallel array columns that must all be truncated with the same indices
 _SEQUENCE_ARRAY_COLS = [
@@ -244,6 +285,7 @@ def generate_trajectories_for_batch(
     arm: str,
     trajectory_id: int,
     max_length: int,
+    forbidden_token_ids: Optional[List[int]] = None,
 ) -> pl.DataFrame:
     """
     Generate one set of trajectories for a single data batch.
@@ -270,6 +312,7 @@ def generate_trajectories_for_batch(
         top_p=1.0,
         top_k=cehrgpt_tokenizer.vocab_size,
         device=device,
+        suppress_token_ids=forbidden_token_ids,
     )
     torch.cuda.empty_cache()
 
@@ -374,6 +417,7 @@ def run_generation(
     max_length: int,
     include_values: bool,
     num_workers: int,
+    forbidden_token_ids: Optional[List[int]] = None,
 ) -> None:
     """
     Load a context parquet, run *num_trajectories* generation passes, and
@@ -440,6 +484,7 @@ def run_generation(
                 arm=arm,
                 trajectory_id=traj_id,
                 max_length=max_length,
+                forbidden_token_ids=forbidden_token_ids,
             )
             df_out.write_parquet(out_path)
 
@@ -553,6 +598,32 @@ Examples
         default=0,
         help="Number of DataLoader worker processes (default: 0)",
     )
+
+    # --- concept suppression (optional) ------------------------------------
+    parser.add_argument(
+        "--vocab_path",
+        default=None,
+        help=(
+            "OMOP vocabulary root (must contain concept_ancestor/ parquets). "
+            "Required when using --arm_suppress_concepts."
+        ),
+    )
+    parser.add_argument(
+        "--arm_suppress_concepts",
+        dest="arm_suppress_concepts",
+        action="append",
+        metavar="NAME:CONCEPT_IDS",
+        default=None,
+        help=(
+            "Suppress specific drug concepts during generation for a named arm. "
+            "Format: NAME:ID1,ID2,... where NAME matches an --arm_context name and "
+            "IDs are comma-separated OMOP ingredient concept_ids to suppress "
+            "(expanded to all descendants via concept_ancestor). "
+            "Repeat for each arm. Example: "
+            "--arm_suppress_concepts tnfi:710062 "
+            "--arm_suppress_concepts amitriptyline:1119119,4299871,937368,912263,19041065"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -630,6 +701,23 @@ def main() -> None:
     arm_map = _resolve_arm_map(args)
     print(f"\nArms to generate: {list(arm_map)}")
 
+    # Build per-arm forbidden token ID sets from --arm_suppress_concepts specs
+    forbidden_map: Dict[str, Optional[List[int]]] = {arm: None for arm in arm_map}
+    if args.arm_suppress_concepts and args.vocab_path:
+        print("\nBuilding concept suppression token IDs …")
+        for spec in args.arm_suppress_concepts:
+            if ":" not in spec:
+                raise ValueError(
+                    f"--arm_suppress_concepts must be NAME:CONCEPT_IDS, got: '{spec}'"
+                )
+            arm_name, ids_str = spec.split(":", 1)
+            arm_name = arm_name.strip()
+            concept_ids = [int(x.strip()) for x in ids_str.split(",")]
+            print(f"  [{arm_name}] suppressing {len(concept_ids)} ingredient(s) …")
+            forbidden_map[arm_name] = build_forbidden_token_ids(
+                args.vocab_path, concept_ids, tokenizer
+            )
+
     for arm, context_parquet in arm_map.items():
         run_generation(
             context_parquet=str(context_parquet),
@@ -644,6 +732,7 @@ def main() -> None:
             max_length=max_length,
             include_values=include_values,
             num_workers=args.num_workers,
+            forbidden_token_ids=forbidden_map[arm],
         )
 
     print("\nAll generation complete.")
