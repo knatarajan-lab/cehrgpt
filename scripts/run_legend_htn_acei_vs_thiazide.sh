@@ -79,10 +79,19 @@ SUPPRESS_CONCEPTS=true
 
 # =============================================================================
 # DRUG CONCEPT IDs
-# NOTE: 1395058 appears in both lists (Quinapril / Chlorthalidone) — verify.
 # =============================================================================
 
-ACEI_CONCEPT_IDS="1308216,1346654,1332418,135376,1395058,1310756,1363749,1328956,1373355,1307046"
+ACEI_CONCEPT_IDS="1308216,1334456,1341927,1335471,1331235,1340128,1363749,1310756,1373225,1342439"
+# 1308216  Lisinopril
+# 1334456  Ramipril
+# 1341927  Enalapril
+# 1335471  Benazepril
+# 1331235  Quinapril
+# 1340128  Captopril
+# 1363749  Fosinopril
+# 1310756  Moexipril
+# 1373225  Perindopril
+# 1342439  Trandolapril
 
 # Outcome concept IDs
 OUTCOME_CONCEPT_IDS="312327,316139,432922,4319452,3655355,437833,434610"
@@ -97,7 +106,10 @@ OUTCOME_CONCEPT_IDS="312327,316139,432922,4319452,3655355,437833,434610"
 # Captopril, Fosinopril, Moexipril, Perindopril, Trandolapril
 
 THIAZIDE_CONCEPT_IDS="1395058,974166,978555,907013"
-# Chlorthalidone(*), HCTZ, Indapamide, Metolazone
+# 1395058  Chlorthalidone
+# 974166   Hydrochlorothiazide
+# 978555   Indapamide
+# 907013   Metolazone
 
 # =============================================================================
 # DERIVED PATHS
