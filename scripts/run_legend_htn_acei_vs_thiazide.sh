@@ -29,9 +29,9 @@
 # ----------------------------
 #    312327  Acute myocardial infarction
 #    316139  Heart failure
-#    432922  Ischemic stroke
-#   4319452  Hemorrhagic stroke
-#   3655355  Impotence
+#   4310996  Ischemic stroke
+#    376713  Cerebral hemorrhage
+#   3655355  Erectile dysfunction
 #    437833  Hypokalemia
 #    434610  Hyperkalemia
 #
@@ -94,12 +94,12 @@ ACEI_CONCEPT_IDS="1308216,1334456,1341927,1335471,1331235,1340128,1363749,131075
 # 1342439  Trandolapril
 
 # Outcome concept IDs
-OUTCOME_CONCEPT_IDS="312327,316139,432922,4319452,3655355,437833,434610"
+OUTCOME_CONCEPT_IDS="312327,316139,4310996,376713,3655355,437833,434610"
 # 312327   Acute myocardial infarction
 # 316139   Heart failure
-# 432922   Ischemic stroke
-# 4319452  Hemorrhagic stroke
-# 3655355  Impotence
+# 4310996  Ischemic stroke
+# 376713   Cerebral hemorrhage
+# 3655355  Erectile dysfunction
 # 437833   Hypokalemia
 # 434610   Hyperkalemia
 # Lisinopril, Ramipril, Enalapril, Benazepril, Quinapril(*),
@@ -290,9 +290,9 @@ echo "STEP 4: Hazard ratio estimation  (${FOLLOW_UP_DAYS}-day follow-up)"
 echo "  Outcomes:"
 echo "     312327  Acute myocardial infarction"
 echo "     316139  Heart failure"
-echo "     432922  Ischemic stroke"
-echo "    4319452  Hemorrhagic stroke"
-echo "    3655355  Impotence"
+echo "    4310996  Ischemic stroke"
+echo "     376713  Cerebral hemorrhage"
+echo "    3655355  Erectile dysfunction"
 echo "     437833  Hypokalemia"
 echo "     434610  Hyperkalemia"
 echo "============================================================"
