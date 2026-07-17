@@ -25,12 +25,15 @@
 #   extraction so they appear in drug_info.parquet.  Thiazide patients
 #   are NOT used in any other step.
 #
-# Outcomes (LEGEND-HTN primary, OMOP concept_ids)
-# ------------------------------------------------
-#   4329847  Acute myocardial infarction
-#    316139  Hospitalized heart failure
-#   4110192  Ischemic stroke
-#    376713  Hemorrhagic stroke
+# Outcomes (OMOP concept_ids)
+# ----------------------------
+#   4329847  Myocardial infarction
+#    316139  Heart failure
+#    432922  Ischemic stroke
+#   4319452  Hemorrhagic stroke
+#   3655355  Impotence
+#    437833  Hypokalemia
+#    434610  Hyperkalemia
 #
 # Published LEGEND-HTN reference HRs (ACEi vs Thiazide):
 #   AMI           : 0.99  (95% CI 0.87–1.13)
@@ -80,6 +83,16 @@ SUPPRESS_CONCEPTS=true
 # =============================================================================
 
 ACEI_CONCEPT_IDS="1308216,1346654,1332418,135376,1395058,1310756,1363749,1328956,1373355,1307046"
+
+# Outcome concept IDs
+OUTCOME_CONCEPT_IDS="4329847,316139,432922,4319452,3655355,437833,434610"
+# 4329847  Myocardial infarction
+# 316139   Heart failure
+# 432922   Ischemic stroke
+# 4319452  Hemorrhagic stroke
+# 3655355  Impotence
+# 437833   Hypokalemia
+# 434610   Hyperkalemia
 # Lisinopril, Ramipril, Enalapril, Benazepril, Quinapril(*),
 # Captopril, Fosinopril, Moexipril, Perindopril, Trandolapril
 
@@ -131,7 +144,7 @@ python "${EXTRACT_SCRIPT}" \
     --comparator_concept_ids  "${THIAZIDE_CONCEPT_IDS}" \
     --output_dir              "${CONTEXT_DIR}" \
     --tokenizer_path          "${TOKENIZER_PATH}" \
-    --outcome_concept_ids     "4329847,316139,4110192,376713" \
+    --outcome_concept_ids     "${OUTCOME_CONCEPT_IDS}" \
     --min_context_length      4 \
     --num_workers             "${EXTRACTION_NUM_WORKERS}"
 
@@ -263,10 +276,13 @@ echo ""
 echo "============================================================"
 echo "STEP 4: Hazard ratio estimation  (${FOLLOW_UP_DAYS}-day follow-up)"
 echo "  Outcomes:"
-echo "    4329847  Acute myocardial infarction"
-echo "     316139  Hospitalized heart failure"
-echo "    4110192  Ischemic stroke"
-echo "     376713  Hemorrhagic stroke"
+echo "    4329847  Myocardial infarction"
+echo "     316139  Heart failure"
+echo "     432922  Ischemic stroke"
+echo "    4319452  Hemorrhagic stroke"
+echo "    3655355  Impotence"
+echo "     437833  Hypokalemia"
+echo "     434610  Hyperkalemia"
 echo "============================================================"
 
 mkdir -p "${RESULTS_DIR}"
@@ -275,7 +291,7 @@ python "${HR_SCRIPT}" \
     --trajectories_dir        "${TRAJ_DIR}" \
     --drug_info_path          "${DRUG_INFO}" \
     --observed_outcomes_path  "${CONTEXT_DIR}/observed_outcomes" \
-    --outcome_concept_ids     "4329847,316139,4110192,376713" \
+    --outcome_concept_ids     "${OUTCOME_CONCEPT_IDS}" \
     --follow_up_days          "${FOLLOW_UP_DAYS}" \
     --output_dir              "${RESULTS_DIR}" \
     --vocab_path              "${VOCAB_PATH}" \
