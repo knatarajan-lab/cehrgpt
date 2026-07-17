@@ -207,6 +207,8 @@ CUDA_VISIBLE_DEVICES=0 python "${GENERATE_SCRIPT}" \
     --generation_input_length   "${GENERATION_INPUT_LENGTH}" \
     --generation_max_new_tokens "${GENERATION_MAX_NEW_TOKENS}" \
     --num_workers               "${NUM_WORKERS}" \
+    --vocab_path                "${VOCAB_PATH}" \
+    --arm_suppress_concepts     "acei:${THIAZIDE_CONCEPT_IDS}" \
     > "${OUTPUT_ROOT}/generate_acei.log" 2>&1 &
 PID_ACEI=$!
 
@@ -220,6 +222,8 @@ CUDA_VISIBLE_DEVICES=1 python "${GENERATE_SCRIPT}" \
     --generation_input_length   "${GENERATION_INPUT_LENGTH}" \
     --generation_max_new_tokens "${GENERATION_MAX_NEW_TOKENS}" \
     --num_workers               "${NUM_WORKERS}" \
+    --vocab_path                "${VOCAB_PATH}" \
+    --arm_suppress_concepts     "thiazide:${ACEI_CONCEPT_IDS}" \
     > "${OUTPUT_ROOT}/generate_thiazide.log" 2>&1 &
 PID_THIAZIDE=$!
 
