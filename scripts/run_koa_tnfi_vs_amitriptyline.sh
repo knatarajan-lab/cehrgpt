@@ -37,7 +37,7 @@
 #
 # Drug concept IDs (OMOP ingredient)
 # -----------------------------------
-#   TNFi          : 1119119, 4299871, 937368, 912263, 19041065
+#   TNFi          : 1119119, 1151789, 937368, 912263, 19041065
 #   Amitriptyline : 710062
 #
 # Usage
@@ -82,8 +82,12 @@ SUPPRESS_CONCEPTS=true
 # DRUG CONCEPT IDs (OMOP ingredient)
 # =============================================================================
 
-TNFI_CONCEPT_IDS="1119119,4299871,937368,912263,19041065"
-# TNF inhibitors (Etanercept, Adalimumab, Infliximab, Certolizumab, Golimumab)
+TNFI_CONCEPT_IDS="1119119,1151789,937368,912263,19041065"
+# 1119119  Adalimumab
+# 1151789  Etanercept  (was 4299871, non-standard SNOMED Substance)
+# 937368   Infliximab
+# 912263   Certolizumab pegol
+# 19041065 Golimumab
 
 AMITRIPTYLINE_CONCEPT_IDS="710062"
 # Amitriptyline (TCA)
