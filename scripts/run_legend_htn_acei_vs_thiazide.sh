@@ -27,7 +27,7 @@
 #
 # Outcomes (OMOP concept_ids)
 # ----------------------------
-#   4329847  Myocardial infarction
+#    312327  Acute myocardial infarction
 #    316139  Heart failure
 #    432922  Ischemic stroke
 #   4319452  Hemorrhagic stroke
@@ -85,8 +85,8 @@ SUPPRESS_CONCEPTS=true
 ACEI_CONCEPT_IDS="1308216,1346654,1332418,135376,1395058,1310756,1363749,1328956,1373355,1307046"
 
 # Outcome concept IDs
-OUTCOME_CONCEPT_IDS="4329847,316139,432922,4319452,3655355,437833,434610"
-# 4329847  Myocardial infarction
+OUTCOME_CONCEPT_IDS="312327,316139,432922,4319452,3655355,437833,434610"
+# 312327   Acute myocardial infarction
 # 316139   Heart failure
 # 432922   Ischemic stroke
 # 4319452  Hemorrhagic stroke
@@ -276,7 +276,7 @@ echo ""
 echo "============================================================"
 echo "STEP 4: Hazard ratio estimation  (${FOLLOW_UP_DAYS}-day follow-up)"
 echo "  Outcomes:"
-echo "    4329847  Myocardial infarction"
+echo "     312327  Acute myocardial infarction"
 echo "     316139  Heart failure"
 echo "     432922  Ischemic stroke"
 echo "    4319452  Hemorrhagic stroke"
