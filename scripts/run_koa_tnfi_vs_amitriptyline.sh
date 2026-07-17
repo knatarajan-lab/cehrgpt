@@ -74,6 +74,10 @@ NUM_WORKERS=4
 # Number of parallel workers for Step 1 sequence extraction
 EXTRACTION_NUM_WORKERS=10
 
+# Set to "true" to suppress opposite-drug tokens during generation (recommended).
+# Set to "false" to disable suppression (e.g. for ablation studies).
+SUPPRESS_CONCEPTS=true
+
 # =============================================================================
 # DRUG CONCEPT IDs (OMOP ingredient)
 # =============================================================================
@@ -214,6 +218,13 @@ echo "============================================================"
 
 mkdir -p "${TRAJ_DIR}"
 
+_SUPPRESS_ARGS_TNFI=()
+_SUPPRESS_ARGS_AMITRIPTYLINE=()
+if [ "${SUPPRESS_CONCEPTS}" = "true" ]; then
+    _SUPPRESS_ARGS_TNFI=(--vocab_path "${VOCAB_PATH}" --arm_suppress_concepts "tnfi:${AMITRIPTYLINE_CONCEPT_IDS}")
+    _SUPPRESS_ARGS_AMITRIPTYLINE=(--vocab_path "${VOCAB_PATH}" --arm_suppress_concepts "amitriptyline:${TNFI_CONCEPT_IDS}")
+fi
+
 CUDA_VISIBLE_DEVICES=0 python "${GENERATE_SCRIPT}" \
     --arm_context "tnfi:${TNFI_ARM_CTX}" \
     --model_name_or_path        "${MODEL_PATH}" \
@@ -224,8 +235,7 @@ CUDA_VISIBLE_DEVICES=0 python "${GENERATE_SCRIPT}" \
     --generation_input_length   "${GENERATION_INPUT_LENGTH}" \
     --generation_max_new_tokens "${GENERATION_MAX_NEW_TOKENS}" \
     --num_workers               "${NUM_WORKERS}" \
-    --vocab_path                "${VOCAB_PATH}" \
-    --arm_suppress_concepts     "tnfi:${AMITRIPTYLINE_CONCEPT_IDS}" \
+    "${_SUPPRESS_ARGS_TNFI[@]}" \
     > "${OUTPUT_ROOT}/generate_tnfi.log" 2>&1 &
 PID_TNFI=$!
 
@@ -239,8 +249,7 @@ CUDA_VISIBLE_DEVICES=1 python "${GENERATE_SCRIPT}" \
     --generation_input_length   "${GENERATION_INPUT_LENGTH}" \
     --generation_max_new_tokens "${GENERATION_MAX_NEW_TOKENS}" \
     --num_workers               "${NUM_WORKERS}" \
-    --vocab_path                "${VOCAB_PATH}" \
-    --arm_suppress_concepts     "amitriptyline:${TNFI_CONCEPT_IDS}" \
+    "${_SUPPRESS_ARGS_AMITRIPTYLINE[@]}" \
     > "${OUTPUT_ROOT}/generate_amitriptyline.log" 2>&1 &
 PID_AMITRIPTYLINE=$!
 

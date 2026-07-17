@@ -70,6 +70,10 @@ NUM_WORKERS=4
 # Number of parallel workers for Step 1 sequence extraction
 EXTRACTION_NUM_WORKERS=10
 
+# Set to "true" to suppress opposite-drug tokens during generation (recommended).
+# Set to "false" to disable suppression (e.g. for ablation studies).
+SUPPRESS_CONCEPTS=true
+
 # =============================================================================
 # DRUG CONCEPT IDs
 # NOTE: 1395058 appears in both lists (Quinapril / Chlorthalidone) — verify.
@@ -197,6 +201,13 @@ echo "============================================================"
 
 mkdir -p "${TRAJ_DIR}"
 
+_SUPPRESS_ARGS_ACEI=()
+_SUPPRESS_ARGS_THIAZIDE=()
+if [ "${SUPPRESS_CONCEPTS}" = "true" ]; then
+    _SUPPRESS_ARGS_ACEI=(--vocab_path "${VOCAB_PATH}" --arm_suppress_concepts "acei:${THIAZIDE_CONCEPT_IDS}")
+    _SUPPRESS_ARGS_THIAZIDE=(--vocab_path "${VOCAB_PATH}" --arm_suppress_concepts "thiazide:${ACEI_CONCEPT_IDS}")
+fi
+
 CUDA_VISIBLE_DEVICES=0 python "${GENERATE_SCRIPT}" \
     --arm_context "acei:${ACEI_ARM_CTX}" \
     --model_name_or_path        "${MODEL_PATH}" \
@@ -207,8 +218,7 @@ CUDA_VISIBLE_DEVICES=0 python "${GENERATE_SCRIPT}" \
     --generation_input_length   "${GENERATION_INPUT_LENGTH}" \
     --generation_max_new_tokens "${GENERATION_MAX_NEW_TOKENS}" \
     --num_workers               "${NUM_WORKERS}" \
-    --vocab_path                "${VOCAB_PATH}" \
-    --arm_suppress_concepts     "acei:${THIAZIDE_CONCEPT_IDS}" \
+    "${_SUPPRESS_ARGS_ACEI[@]}" \
     > "${OUTPUT_ROOT}/generate_acei.log" 2>&1 &
 PID_ACEI=$!
 
@@ -222,8 +232,7 @@ CUDA_VISIBLE_DEVICES=1 python "${GENERATE_SCRIPT}" \
     --generation_input_length   "${GENERATION_INPUT_LENGTH}" \
     --generation_max_new_tokens "${GENERATION_MAX_NEW_TOKENS}" \
     --num_workers               "${NUM_WORKERS}" \
-    --vocab_path                "${VOCAB_PATH}" \
-    --arm_suppress_concepts     "thiazide:${ACEI_CONCEPT_IDS}" \
+    "${_SUPPRESS_ARGS_THIAZIDE[@]}" \
     > "${OUTPUT_ROOT}/generate_thiazide.log" 2>&1 &
 PID_THIAZIDE=$!
 
