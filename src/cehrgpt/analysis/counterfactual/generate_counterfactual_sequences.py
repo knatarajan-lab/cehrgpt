@@ -298,8 +298,8 @@ def generate_trajectories_for_batch(
     batched_epoch_times = batch["epoch_times"].detach().cpu().tolist()
     batched_input_ids = batch["input_ids"]
     batched_ages = batch["ages"]
-    batched_value_indicators = batch["value_indicators"]
-    batched_values = batch["values"]
+    batched_value_indicators = batch.get("value_indicators", None)
+    batched_values = batch.get("values", None)
 
     batch_sequences = generate_single_batch(
         cehrgpt_model,
