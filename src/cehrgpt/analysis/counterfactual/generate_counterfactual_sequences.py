@@ -433,7 +433,11 @@ def run_generation(
         (= context_length + generation_max_new_tokens).
     """
     print(f"\n[{arm}] Loading context from {context_parquet} …")
-    df = pl.read_parquet(context_parquet)
+    # Accept either a single .parquet file or a directory of parquet shards
+    if os.path.isdir(context_parquet):
+        df = pl.read_parquet(os.path.join(context_parquet, "*.parquet"))
+    else:
+        df = pl.read_parquet(context_parquet)
     print(f"[{arm}] {len(df):,} patient contexts")
 
     # Left-truncate to context_length, preserving demographics header tokens
@@ -648,23 +652,33 @@ def _resolve_arm_map(args: argparse.Namespace) -> Dict[str, Path]:
         return arm_map
 
     # Fallback: context_dir convention
+    # extract_drug_initiation_sequences.py writes these as *directories* of
+    # parquet shards, so accept both a single .parquet file and a directory.
     context_dir = Path(args.context_dir)
-    convention = {
-        NON_TREATED_ARM: context_dir / "non_treated_context.parquet",
-        TREATED_ARM:     context_dir / "treated_context.parquet",
-    }
+
+    def _resolve_context_path(name: str) -> Path:
+        # Prefer directory (chunked shards), fall back to single file
+        as_dir  = context_dir / name
+        as_file = context_dir / f"{name}.parquet"
+        if as_dir.is_dir():
+            return as_dir
+        if as_file.exists():
+            return as_file
+        raise FileNotFoundError(
+            f"Context not found for arm '{name}': "
+            f"tried {as_dir} (directory) and {as_file} (file)"
+        )
+
+    convention_names = {NON_TREATED_ARM: "non_treated_context", TREATED_ARM: "treated_context"}
     arms_to_run = [a.strip() for a in args.arms.split(",")]
     arm_map = {}
     for arm in arms_to_run:
-        if arm not in convention:
+        if arm not in convention_names:
             raise ValueError(
                 f"Unknown arm '{arm}' for --context_dir mode. "
-                f"Choose from: {list(convention)}"
+                f"Choose from: {list(convention_names)}"
             )
-        p = convention[arm]
-        if not p.exists():
-            raise FileNotFoundError(f"Context parquet not found: {p}")
-        arm_map[arm] = p
+        arm_map[arm] = _resolve_context_path(convention_names[arm])
     return arm_map
 
 
