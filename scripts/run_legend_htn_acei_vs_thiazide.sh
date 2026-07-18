@@ -363,6 +363,7 @@ else
         echo "  GPU ${GPU_THIAZIDE} → ${ARM_B}/ (counterfactual: ACEi concept swapped to thiazide)"
     fi
     echo "  Suppress concepts : ${SUPPRESS_CONCEPTS}"
+    echo "  Era gap days      : ${ERA_GAP_DAYS}"
     echo "============================================================"
 
     mkdir -p "${TRAJ_DIR}"
