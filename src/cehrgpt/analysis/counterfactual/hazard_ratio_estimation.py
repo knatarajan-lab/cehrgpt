@@ -515,7 +515,10 @@ def analyse_observed_outcomes(
     obs  = _read(observed_outcomes_path)
     # drug_epoch_time is already in obs; only pull arm and era_end from drug_info
     # to avoid duplicate-column conflicts on join.
-    info = _read(drug_info_path).select(["person_id", "arm", "era_end_epoch_time"])
+    _info_raw = _read(drug_info_path)
+    if "era_end_epoch_time" not in _info_raw.columns:
+        _info_raw = _info_raw.with_columns(pl.lit(None, dtype=pl.Float64).alias("era_end_epoch_time"))
+    info = _info_raw.select(["person_id", "arm", "era_end_epoch_time"])
 
     # Join arm label and era end onto observed outcomes
     df = obs.join(info, on="person_id", how="left")
