@@ -129,17 +129,46 @@ def filter_contaminated_trajectories(
 # Time-to-event computation
 # ---------------------------------------------------------------------------
 
+def _find_era_gap_end(target_days: List[float], era_gap_days: float) -> Optional[float]:
+    """
+    Given a **sorted** list of target drug event times (days since drug start),
+    return the time at which the drug era ends due to a gap > *era_gap_days*.
+
+    Mirrors the gap-detection logic of ``compute_drug_era_end_time`` in
+    ``extract_drug_initiation_sequences.py``: the era ends at
+    ``last_target_time + era_gap_days`` when consecutive target events are
+    separated by more than *era_gap_days* days.
+
+    Returns ``None`` when no such gap is found (era is still active).
+    """
+    for i in range(1, len(target_days)):
+        if target_days[i] - target_days[i - 1] > era_gap_days:
+            return target_days[i - 1] + era_gap_days
+    return None
+
+
 def compute_tte(
     trajectories: pl.DataFrame,
     drug_info: pl.DataFrame,
     outcome_concept_ids: List[str],
     follow_up_days: float,
+    target_concept_ids: Optional[Set[str]] = None,
     competing_concept_ids: Optional[Set[str]] = None,
+    era_gap_days: float = 30.0,
 ) -> pl.DataFrame:
     """
     For each (subject_id, trajectory_id) compute:
       - event      : 1 if outcome occurred, 0 if censored
       - time_days  : days from drug_epoch_time to first outcome (or follow-up)
+
+    Follow-up is censored at the earliest of three conditions, mirroring
+    ``compute_drug_era_end_time`` in ``extract_drug_initiation_sequences.py``:
+
+    1. **Era gap**: consecutive target drug events are > *era_gap_days* apart.
+       Follow-up ends at ``last_target_event + era_gap_days``.
+    2. **Treatment switch**: a concept from *competing_concept_ids* appears in
+       the generated trajectory.  Follow-up ends at that event.
+    3. **End of sequence / no discontinuation**: right-censored at *follow_up_days*.
 
     Parameters
     ----------
@@ -147,15 +176,22 @@ def compute_tte(
         Generated trajectory events.  Expected columns:
         subject_id, trajectory_id, prediction_time, time, code
     drug_info
-        Parquet with (person_id, drug_epoch_time, era_end_epoch_time).
+        Parquet with columns (person_id, drug_epoch_time, …).
     outcome_concept_ids
         List of OMOP concept_id strings to treat as the outcome.
     follow_up_days
         Maximum follow-up window in days.
+    target_concept_ids
+        OMOP concept_ids for the arm's own drug class (used for era-gap
+        detection).  If None, era-gap censoring is skipped.
     competing_concept_ids
-        OMOP concept_ids (and their descendants) for competing/exclusion drugs.
-        When a generated trajectory contains one of these codes, follow-up is
-        censored at that event (the patient "switched" to a disallowed drug).
+        OMOP concept_ids for competing / exclusion drugs (opposite arm plus
+        other excluded antihypertensives).  A trajectory event matching these
+        censors follow-up at that point (treatment switch).  If None, switch
+        censoring is skipped.
+    era_gap_days
+        Persistence window in days (default: 30).  Consecutive target drug
+        events more than this many days apart terminate the era.
 
     Returns
     -------
@@ -165,54 +201,66 @@ def compute_tte(
 
     drug_lf = drug_info.lazy().rename({"person_id": "subject_id"})
 
-    # Attach drug_epoch_time and era_end_epoch_time; compute days_since_drug.
-    # era_end_epoch_time comes from the *observed* sequence (extraction step).
+    # Attach drug_epoch_time to each event and compute days_since_drug.
+    # Only events strictly after the drug start and within follow_up_days matter.
     traj_lf = (
         trajectories.lazy()
-        .join(
-            drug_lf.select(["subject_id", "drug_epoch_time", "era_end_epoch_time"]),
-            on="subject_id",
-            how="left",
-        )
+        .join(drug_lf.select(["subject_id", "drug_epoch_time"]), on="subject_id", how="left")
         .with_columns(
             pl.col("time").cast(pl.Datetime).dt.epoch(time_unit="s").alias("time_epoch_s"),
         )
         .filter(pl.col("time_epoch_s") > pl.col("drug_epoch_time"))
         .with_columns(
-            ((pl.col("time_epoch_s") - pl.col("drug_epoch_time")) / 86_400).alias("days_since_drug"),
-            # Era-based censoring ceiling from observed drug info
-            (
-                (pl.col("era_end_epoch_time") - pl.col("drug_epoch_time")) / 86_400
-            ).fill_null(follow_up_days).clip(upper_bound=follow_up_days).alias("era_follow_up_days"),
+            ((pl.col("time_epoch_s") - pl.col("drug_epoch_time")) / 86_400).alias("days_since_drug")
         )
+        .filter(pl.col("days_since_drug") <= follow_up_days)
     )
 
-    # All unique (subject_id, trajectory_id) pairs; start with era-based ceiling.
+    # All unique (subject_id, trajectory_id) pairs; effective follow-up starts
+    # at follow_up_days and may be reduced by era-gap or competing events below.
     all_pairs = (
         trajectories.lazy()
         .select(["subject_id", "trajectory_id"])
         .unique()
-        .join(
-            drug_lf.select(["subject_id", "era_end_epoch_time", "drug_epoch_time"]),
-            on="subject_id",
-            how="left",
-        )
-        .with_columns(
-            (
-                (pl.col("era_end_epoch_time") - pl.col("drug_epoch_time")) / 86_400
-            ).fill_null(follow_up_days).clip(upper_bound=follow_up_days).alias("effective_follow_up_days"),
-        )
-        .drop(["era_end_epoch_time", "drug_epoch_time"])
+        .with_columns(pl.lit(follow_up_days).alias("effective_follow_up_days"))
     )
 
-    # Additionally censor at the first competing/exclusion drug event in the
-    # generated trajectory.  A competing event occurring within the era window
-    # overrides the era ceiling.
+    # --- Condition 1: era gap ---
+    # Find the first gap > era_gap_days between consecutive target drug events
+    # in the generated trajectory; censor at last_target_time + era_gap_days.
+    if target_concept_ids:
+        target_era_end = (
+            traj_lf
+            .filter(pl.col("code").is_in(list(target_concept_ids)))
+            .group_by(["subject_id", "trajectory_id"])
+            .agg(pl.col("days_since_drug").sort().alias("target_days"))
+            .with_columns(
+                pl.col("target_days").map_elements(
+                    lambda days: _find_era_gap_end(days, era_gap_days),
+                    return_dtype=pl.Float64,
+                ).alias("era_gap_end_days")
+            )
+            .select(["subject_id", "trajectory_id", "era_gap_end_days"])
+        )
+        all_pairs = (
+            all_pairs
+            .join(target_era_end, on=["subject_id", "trajectory_id"], how="left")
+            .with_columns(
+                pl.min_horizontal(
+                    "effective_follow_up_days",
+                    pl.col("era_gap_end_days").fill_null(follow_up_days),
+                ).alias("effective_follow_up_days")
+            )
+            .drop("era_gap_end_days")
+        )
+
+    # --- Condition 2: treatment switch ---
+    # Censor at the first generated event whose code belongs to a competing /
+    # exclusion drug class (opposite arm or other excluded antihypertensives).
     if competing_concept_ids:
         first_competing = (
             traj_lf
             .filter(pl.col("code").is_in(list(competing_concept_ids)))
-            .filter(pl.col("days_since_drug") <= pl.col("era_follow_up_days"))
             .group_by(["subject_id", "trajectory_id"])
             .agg(pl.col("days_since_drug").min().alias("competing_days"))
         )
@@ -221,15 +269,15 @@ def compute_tte(
             .join(first_competing, on=["subject_id", "trajectory_id"], how="left")
             .with_columns(
                 pl.min_horizontal(
-                    pl.col("effective_follow_up_days"),
-                    pl.col("competing_days").fill_null(pl.col("effective_follow_up_days")),
+                    "effective_follow_up_days",
+                    pl.col("competing_days").fill_null(follow_up_days),
                 ).alias("effective_follow_up_days")
             )
             .drop("competing_days")
         )
 
-    # Outcome events: restricted to the final effective follow-up window.
-    traj_with_followup = (
+    # --- Outcome events within effective follow-up ---
+    outcome_events = (
         traj_lf
         .join(
             all_pairs.select(["subject_id", "trajectory_id", "effective_follow_up_days"]),
@@ -237,17 +285,13 @@ def compute_tte(
             how="left",
         )
         .filter(pl.col("days_since_drug") <= pl.col("effective_follow_up_days"))
-    )
-
-    outcome_events = (
-        traj_with_followup
         .filter(pl.col("code").is_in(list(outcome_set)))
         .group_by(["subject_id", "trajectory_id"])
         .agg(pl.col("days_since_drug").min().alias("time_days"))
         .with_columns(pl.lit(1).alias("event"))
     )
 
-    # Left join: censored patients get event=0 and time=effective_follow_up_days
+    # Left join: censored patients get event=0, time=effective_follow_up_days
     tte = (
         all_pairs
         .join(outcome_events, on=["subject_id", "trajectory_id"], how="left")
@@ -583,7 +627,9 @@ def faithfulness_check_outcome(
     follow_up_days: float,
     source_label: str,
     output_dir: Path,
+    target_concept_ids: Optional[Set[str]] = None,
     competing_concept_ids: Optional[Set[str]] = None,
+    era_gap_days: float = 30.0,
 ) -> Optional[Dict]:
     """
     Compare generated source-arm trajectories against the same patients'
@@ -599,16 +645,23 @@ def faithfulness_check_outcome(
         Columns: person_id, drug_epoch_time, <outcome_concept_id>, …
     drug_info
         drug_info parquet (anchors drug_epoch_time for generated TTE).
+    target_concept_ids
+        OMOP concept_ids for the source arm's drug class (for era-gap
+        censoring in generated trajectories).
     competing_concept_ids
         Concepts for which a generated event censors the source-arm follow-up
         (opposite-arm drugs plus exclusion antihypertensives).
+    era_gap_days
+        Persistence window in days (default 30).
     """
     print(f"\n  [Faithfulness] Outcome: {outcome_concept_id}")
 
     # --- Generated source-arm TTE ---
     tte_gen = compute_tte(
         traj_source, drug_info, [outcome_concept_id], follow_up_days,
+        target_concept_ids=target_concept_ids,
         competing_concept_ids=competing_concept_ids,
+        era_gap_days=era_gap_days,
     )
     agg_gen = (
         tte_gen
@@ -703,8 +756,11 @@ def analyse_outcome(
     arm_a_label: str,
     arm_b_label: str,
     output_dir: Path,
+    target_concept_ids_a: Optional[Set[str]] = None,
+    target_concept_ids_b: Optional[Set[str]] = None,
     competing_concept_ids_a: Optional[Set[str]] = None,
     competing_concept_ids_b: Optional[Set[str]] = None,
+    era_gap_days: float = 30.0,
 ) -> Dict:
     """
     Run full HR analysis for a single outcome concept.
@@ -715,22 +771,27 @@ def analyse_outcome(
 
     Parameters
     ----------
-    competing_concept_ids_a
-        Concepts whose appearance in an arm_a generated trajectory censors
-        follow-up (arm_b drugs + exclusion antihypertensives).
-    competing_concept_ids_b
-        Concepts whose appearance in an arm_b generated trajectory censors
-        follow-up (arm_a drugs + exclusion antihypertensives).
+    target_concept_ids_a / target_concept_ids_b
+        OMOP concept_ids for each arm's own drug class (era-gap censoring).
+    competing_concept_ids_a / competing_concept_ids_b
+        Concepts whose appearance in a generated trajectory censors follow-up
+        (opposite-arm drugs + exclusion antihypertensives).
+    era_gap_days
+        Persistence window in days (default 30).
     """
     print(f"\n  Outcome: {outcome_concept_id}")
 
     tte_a = compute_tte(
         traj_arm_a, drug_info, [outcome_concept_id], follow_up_days,
+        target_concept_ids=target_concept_ids_a,
         competing_concept_ids=competing_concept_ids_a,
+        era_gap_days=era_gap_days,
     )
     tte_b = compute_tte(
         traj_arm_b, drug_info, [outcome_concept_id], follow_up_days,
+        target_concept_ids=target_concept_ids_b,
         competing_concept_ids=competing_concept_ids_b,
+        era_gap_days=era_gap_days,
     )
 
     # Aggregate N trajectories per patient:
@@ -908,7 +969,9 @@ def main() -> None:
                 follow_up_days=args.follow_up_days,
                 source_label=args.arm_a,
                 output_dir=output_dir,
+                target_concept_ids=arm_a_concepts or None,
                 competing_concept_ids=competing_for_arm_a,
+                era_gap_days=args.era_gap_days,
             )
             if res is not None:
                 faithfulness_results.append(res)
@@ -936,8 +999,11 @@ def main() -> None:
             arm_a_label=args.arm_a,
             arm_b_label=args.arm_b,
             output_dir=output_dir,
+            target_concept_ids_a=arm_a_concepts or None,
+            target_concept_ids_b=arm_b_concepts or None,
             competing_concept_ids_a=competing_for_arm_a,
             competing_concept_ids_b=competing_for_arm_b,
+            era_gap_days=args.era_gap_days,
         )
         if result is not None:
             results.append(result)
@@ -1024,6 +1090,14 @@ def _parse_args() -> argparse.Namespace:
         help="Comma-separated ingredient concept_ids for excluded antihypertensives "
              "(ARBs, dCCBs, ndCCBs, 2nd-line agents). When a generated trajectory "
              "contains one of these codes, follow-up is censored at that event.",
+    )
+    parser.add_argument(
+        "--era_gap_days",
+        type=float,
+        default=30.0,
+        help="Persistence window in days for drug era computation (default: 30). "
+             "Consecutive target drug events separated by more than this many days "
+             "terminate the era; follow-up is censored at last_event + era_gap_days.",
     )
     return parser.parse_args()
 
