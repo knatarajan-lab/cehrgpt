@@ -471,7 +471,8 @@ else
         --output_dir              "${RESULTS_DIR}" \
         --vocab_path              "${VOCAB_PATH}" \
         --arm_a_concept_ids       "${ACEI_CONCEPT_IDS}" \
-        --arm_b_concept_ids       "${THIAZIDE_CONCEPT_IDS}"
+        --arm_b_concept_ids       "${THIAZIDE_CONCEPT_IDS}" \
+        --exclusion_concept_ids   "${EXCLUSION_CONCEPT_IDS}"
     _step_end
 
     echo "Step 4 complete."
