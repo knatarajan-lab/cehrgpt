@@ -858,6 +858,67 @@ def analyse_outcome(
     }
 
 
+def _print_era_duration_stats(
+    drug_info: pl.DataFrame,
+    follow_up_days: float,
+    arm_a_label: str,
+    arm_b_label: str,
+) -> None:
+    """Print descriptive statistics of drug era duration by arm."""
+    if "era_end_epoch_time" not in drug_info.columns:
+        print("  (era_end_epoch_time not available — skipping era duration stats)")
+        return
+
+    print("\n" + "=" * 60)
+    print("Drug era duration statistics")
+    print("=" * 60)
+
+    arm_map = {"source": arm_a_label, "comparator": arm_b_label}
+    for arm_key, arm_label in arm_map.items():
+        arm_df = drug_info.filter(pl.col("arm") == arm_key)
+        if arm_df.is_empty():
+            continue
+
+        era_days = (
+            arm_df
+            .with_columns(
+                (
+                    (pl.col("era_end_epoch_time") - pl.col("drug_epoch_time")) / 86_400
+                ).alias("era_days")
+            )
+            .select("era_days")
+        )
+
+        n_total      = len(arm_df)
+        n_censored   = era_days.filter(pl.col("era_days").is_null()).height
+        n_terminated = n_total - n_censored
+
+        print(f"\n  {arm_label}  (n={n_total:,})")
+        print(f"    Right-censored (no era end) : {n_censored:,}  ({n_censored/n_total:.1%})")
+        print(f"    Era terminated (gap/switch) : {n_terminated:,}  ({n_terminated/n_total:.1%})")
+
+        if n_terminated > 0:
+            stats = (
+                era_days
+                .filter(pl.col("era_days").is_not_null())
+                .select([
+                    pl.col("era_days").mean().alias("mean"),
+                    pl.col("era_days").median().alias("median"),
+                    pl.col("era_days").quantile(0.25).alias("p25"),
+                    pl.col("era_days").quantile(0.75).alias("p75"),
+                    pl.col("era_days").min().alias("min"),
+                    pl.col("era_days").max().alias("max"),
+                ])
+                .row(0, named=True)
+            )
+            print(f"    Era duration (days) among terminated patients:")
+            print(f"      mean={stats['mean']:.1f}  median={stats['median']:.1f}"
+                  f"  IQR=[{stats['p25']:.1f}, {stats['p75']:.1f}]"
+                  f"  min={stats['min']:.1f}  max={stats['max']:.1f}")
+
+    print("=" * 60)
+
+
 def main() -> None:
     args = _parse_args()
 
@@ -931,6 +992,7 @@ def main() -> None:
 
     print("Loading drug info …")
     drug_info = _read_parquet(args.drug_info_path)
+    _print_era_duration_stats(drug_info, args.follow_up_days, args.arm_a, args.arm_b)
 
     # ------------------------------------------------------------------
     # Faithfulness check: generated comparator vs observed comparator
