@@ -300,8 +300,13 @@ def compute_drug_era_end_time(
     if start_drug_pos >= len(epoch_times):
         return None
 
-    last_target_time = float(epoch_times[start_drug_pos])
+    drug_start_time = float(epoch_times[start_drug_pos])
+    last_target_time = drug_start_time
     competing: Set[str] = competing_concepts or set()
+
+    def _clamp(t: float) -> float:
+        """Era end must be at or after the drug start (guards against timestamp noise)."""
+        return max(t, drug_start_time)
 
     # Skip through the rest of the sequence tracking visits
     current_vs_pos: Optional[int] = None
@@ -312,7 +317,7 @@ def compute_drug_era_end_time(
 
         if token in (END_TOKEN, DEATH_TOKEN):
             # End of record or death — censor at this token's epoch time
-            return float(epoch_times[i]) if i < len(epoch_times) else None
+            return _clamp(float(epoch_times[i])) if i < len(epoch_times) else None
 
         if token == VISIT_START_TOKEN:
             current_vs_pos = i
@@ -337,13 +342,13 @@ def compute_drug_era_end_time(
             gap = event_time - last_target_time
             if gap > era_gap_seconds:
                 # Gap exceeded — era ended before this event
-                return last_target_time + era_gap_seconds
+                return _clamp(last_target_time + era_gap_seconds)
             # Still within the era — extend last known target event time
             last_target_time = event_time
 
         elif token in competing:
             # Treatment switch — follow-up ends at the switching event
-            return event_time
+            return _clamp(event_time)
 
     # Reached end of sequence without gap or switch — right-censored
     return None
