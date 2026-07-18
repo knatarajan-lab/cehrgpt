@@ -357,11 +357,12 @@ else
     echo "============================================================"
     echo "STEP 3: Generate trajectories  (${NUM_TRAJECTORIES} per patient per arm)  [$(date '+%H:%M:%S')]"
     if [ "${SINGLE_GPU}" = "true" ]; then
-        echo "  Mode   : sequential (SINGLE_GPU=true, GPU ${GPU_ACEI})"
+        echo "  Mode              : sequential (SINGLE_GPU=true, GPU ${GPU_ACEI})"
     else
         echo "  GPU ${GPU_ACEI} → ${ARM_A}/     (conditioned on ACEi initiation)"
         echo "  GPU ${GPU_THIAZIDE} → ${ARM_B}/ (counterfactual: ACEi concept swapped to thiazide)"
     fi
+    echo "  Suppress concepts : ${SUPPRESS_CONCEPTS}"
     echo "============================================================"
 
     mkdir -p "${TRAJ_DIR}"
