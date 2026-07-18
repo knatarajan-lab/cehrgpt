@@ -882,9 +882,10 @@ def _print_era_duration_stats(
         era_days = (
             arm_df
             .with_columns(
+                # Clamp to 0 to handle any residual timestamp noise in drug_info
                 (
                     (pl.col("era_end_epoch_time") - pl.col("drug_epoch_time")) / 86_400
-                ).alias("era_days")
+                ).clip(lower_bound=0.0).alias("era_days")
             )
             .select("era_days")
         )
