@@ -60,6 +60,7 @@ VISIT_START_TOKEN = "[VS]"
 VISIT_END_TOKEN = "[VE]"
 END_TOKEN = "[END]"
 DEATH_TOKEN = "[DEATH]"
+INPATIENT_ER_VISIT_CONCEPTS: Set[str] = {"9201", "9203", "262"}
 
 # All columns that are parallel arrays (length == len(concept_ids))
 SEQUENCE_ARRAY_COLS = [
@@ -149,10 +150,19 @@ def find_outcomes_after_drug(
     epoch_times: List[float],
     start_pos: int,
     outcome_concept_groups: Dict[str, Set[str]],
+    inpatient_outcome_labels: Optional[Set[str]] = None,
 ) -> Dict[str, Optional[float]]:
     """
     Scan *concept_ids[start_pos:]* for the first occurrence of each outcome
     concept group.
+
+    Parameters
+    ----------
+    inpatient_outcome_labels
+        Subset of outcome labels that must occur inside an inpatient or ER
+        visit (visit concept immediately following ``[VS]`` must be in
+        ``INPATIENT_ER_VISIT_CONCEPTS``).  If None, no visit-type filter
+        is applied to any outcome.
 
     Returns
     -------
@@ -161,13 +171,37 @@ def find_outcomes_after_drug(
     """
     result: Dict[str, Optional[float]] = {k: None for k in outcome_concept_groups}
     remaining = set(outcome_concept_groups.keys())
+    in_qualifying_visit = False  # currently inside an inpatient/ER visit
 
     for i in range(start_pos, len(concept_ids)):
         if not remaining:
             break
         token = concept_ids[i]
+
+        if token == VISIT_START_TOKEN:
+            # Look ahead: if the very next token is an inpatient/ER concept,
+            # this visit qualifies for inpatient-only outcomes.
+            next_pos = i + 1
+            in_qualifying_visit = (
+                next_pos < len(concept_ids)
+                and concept_ids[next_pos] in INPATIENT_ER_VISIT_CONCEPTS
+            )
+            continue
+
+        if token == VISIT_END_TOKEN:
+            in_qualifying_visit = False
+            continue
+
         for label in list(remaining):
             if token in outcome_concept_groups[label]:
+                # Skip if this outcome requires inpatient context but we are not
+                # currently inside a qualifying (inpatient/ER) visit.
+                if (
+                    inpatient_outcome_labels
+                    and label in inpatient_outcome_labels
+                    and not in_qualifying_visit
+                ):
+                    break
                 result[label] = float(epoch_times[i])
                 remaining.discard(label)
                 break
@@ -455,6 +489,7 @@ def _process_shard(
     population_concepts: Optional[Set[str]] = None,
     exclusion_concepts: Optional[Set[str]] = None,
     era_gap_days: int = 30,
+    inpatient_outcome_labels: Optional[Set[str]] = None,
 ) -> Tuple[int, int]:
     """
     Process one shard of patient rows and write chunked parquet files.
@@ -676,7 +711,8 @@ def _process_shard(
         # ---- Observed outcomes (post-initiation) ----
         if outcome_concept_groups:
             oc_times = find_outcomes_after_drug(
-                concept_ids, epoch_times, drug_pos + 1, outcome_concept_groups
+                concept_ids, epoch_times, drug_pos + 1, outcome_concept_groups,
+                inpatient_outcome_labels=inpatient_outcome_labels,
             )
             observed_outcomes_chunk.append(
                 {"person_id": person_id, "drug_epoch_time": drug_epoch_time, **oc_times}
@@ -709,6 +745,7 @@ def process(
     outcome_concept_ids: Optional[List[int]] = None,
     population_concept_ids: Optional[List[int]] = None,
     exclusion_concept_ids: Optional[List[int]] = None,
+    inpatient_outcome_concept_ids: Optional[List[int]] = None,
     era_gap_days: int = 30,
     min_context_length: int = 4,
     overwrite: bool = False,
@@ -752,6 +789,11 @@ def process(
         list all other first-line antihypertensive classes (ARBs, CCBs,
         second-line agents) so that only treatment-naive patients are kept.
         If None, no exclusion filter is applied.
+    inpatient_outcome_concept_ids
+        Optional list of outcome OMOP concept_ids that must occur inside an
+        inpatient or ER visit (visit concept in {9201, 9203, 262}) to be
+        counted.  Typical use: heart failure, AMI, stroke hospitalisations.
+        Each id is expanded to descendants before matching.
     era_gap_days
         Persistence window in days for drug era computation (default: 30).
         Consecutive drug events separated by more than this many days belong
@@ -842,6 +884,19 @@ def process(
         print(f"  → {len(exclusion_concepts):,} exclusion concepts (patients with ≥1 in pre-drug history are dropped)")
 
     # ------------------------------------------------------------------ #
+    # 2d. Build inpatient-only outcome label set                         #
+    # ------------------------------------------------------------------ #
+    inpatient_outcome_labels: Optional[Set[str]] = None
+    if inpatient_outcome_concept_ids and outcome_concept_groups:
+        # The inpatient filter is keyed on outcome labels (str(concept_id)),
+        # not on the raw integer ids, since outcome_concept_groups uses str keys.
+        inpatient_outcome_labels = {
+            str(oc_id) for oc_id in inpatient_outcome_concept_ids
+            if str(oc_id) in outcome_concept_groups
+        }
+        print(f"  Inpatient-only outcome labels: {sorted(inpatient_outcome_labels)}")
+
+    # ------------------------------------------------------------------ #
     # 3. Enumerate parquet files and inspect schema without loading data  #
     # ------------------------------------------------------------------ #
     if os.path.isdir(patient_sequence_path):
@@ -907,6 +962,7 @@ def process(
             population_concepts,
             exclusion_concepts,
             era_gap_days,
+            inpatient_outcome_labels,
         )
         for shard_id in range(effective_workers)
     ]
@@ -1011,6 +1067,13 @@ def _parse_args() -> argparse.Namespace:
              "estimation as an additional censoring time.",
     )
     parser.add_argument(
+        "--inpatient_outcome_concept_ids",
+        default=None,
+        help="Comma-separated OMOP concept_ids for outcomes that must occur inside "
+             "an inpatient or ER visit (9201, 9203, 262) to be counted. Each id is "
+             "expanded to descendants. Example: 316139 (heart failure), 312327 (AMI).",
+    )
+    parser.add_argument(
         "--min_context_length",
         type=int,
         default=4,
@@ -1047,6 +1110,10 @@ def main() -> None:
         [int(x.strip()) for x in args.exclusion_concept_ids.split(",")]
         if args.exclusion_concept_ids else None
     )
+    inpatient_outcome_concept_ids = (
+        [int(x.strip()) for x in args.inpatient_outcome_concept_ids.split(",")]
+        if args.inpatient_outcome_concept_ids else None
+    )
     process(
         patient_sequence_path=args.patient_sequence_path,
         vocab_path=args.vocab_path,
@@ -1057,6 +1124,7 @@ def main() -> None:
         outcome_concept_ids=outcome_concept_ids,
         population_concept_ids=population_concept_ids,
         exclusion_concept_ids=exclusion_concept_ids,
+        inpatient_outcome_concept_ids=inpatient_outcome_concept_ids,
         era_gap_days=args.era_gap_days,
         min_context_length=args.min_context_length,
         overwrite=args.overwrite,

@@ -51,6 +51,7 @@ EPSILON = 1e-8
 
 # Tokens that explicitly mark the end of a patient's record in generated sequences.
 _RECORD_END_TOKENS = {"[END]", "[DEATH]"}
+INPATIENT_ER_VISIT_CONCEPTS: Set[str] = {"9201", "9203", "262"}
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +119,31 @@ def _find_era_gap_end(target_days: List[float], era_gap_days: float) -> Optional
     return None
 
 
+def _find_first_inpatient_outcome(
+    codes: List[str],
+    times: List[float],
+    outcome_set: Set[str],
+) -> Optional[float]:
+    """
+    Walk sorted (code, time) pairs and return the time of the first outcome
+    event that occurs inside an inpatient or ER visit block.
+
+    A visit qualifies when the token immediately following ``[VS]`` is one of
+    the ``INPATIENT_ER_VISIT_CONCEPTS`` (9201, 9203, 262).
+    """
+    in_qualifying = False
+    for code, t in zip(codes, times):
+        if code == "[VS]":
+            in_qualifying = False
+        elif code in INPATIENT_ER_VISIT_CONCEPTS:
+            in_qualifying = True
+        elif code == "[VE]":
+            in_qualifying = False
+        elif in_qualifying and code in outcome_set:
+            return t
+    return None
+
+
 def compute_tte(
     trajectories: pl.DataFrame,
     drug_info: pl.DataFrame,
@@ -126,6 +152,7 @@ def compute_tte(
     target_concept_ids: Optional[Set[str]] = None,
     competing_concept_ids: Optional[Set[str]] = None,
     era_gap_days: float = 30.0,
+    inpatient_only: bool = False,
 ) -> pl.DataFrame:
     """
     For each (subject_id, trajectory_id) compute:
@@ -163,6 +190,10 @@ def compute_tte(
     era_gap_days
         Persistence window in days (default: 30).  Consecutive target drug
         events more than this many days apart terminate the era.
+    inpatient_only
+        When True, outcomes are only counted when they occur inside an
+        inpatient or ER visit in the generated trajectory (visit concept
+        9201/9203/262 immediately follows the ``[VS]`` token).
 
     Returns
     -------
@@ -269,19 +300,60 @@ def compute_tte(
     )
 
     # --- Outcome events within effective follow-up ---
-    outcome_events = (
-        traj_lf
-        .join(
-            all_pairs.select(["subject_id", "trajectory_id", "effective_follow_up_days"]),
-            on=["subject_id", "trajectory_id"],
-            how="left",
+    if inpatient_only:
+        # Sequential visit-type detection requires Python-level iteration.
+        # Pre-filter to relevant codes before collecting to keep memory low.
+        _relevant = outcome_set | INPATIENT_ER_VISIT_CONCEPTS | {"[VS]", "[VE]"}
+        _inpatient_df = (
+            traj_lf
+            .filter(pl.col("code").is_in(list(_relevant)))
+            .collect()
+            .sort(["subject_id", "trajectory_id", "days_since_drug"])
         )
-        .filter(pl.col("days_since_drug") <= pl.col("effective_follow_up_days"))
-        .filter(pl.col("code").is_in(list(outcome_set)))
-        .group_by(["subject_id", "trajectory_id"])
-        .agg(pl.col("days_since_drug").min().alias("time_days"))
-        .with_columns(pl.lit(1).alias("event"))
-    )
+
+        def _inpatient_group(df: pl.DataFrame) -> pl.DataFrame:
+            t = _find_first_inpatient_outcome(
+                df["code"].to_list(), df["days_since_drug"].to_list(), outcome_set
+            )
+            return pl.DataFrame({
+                "subject_id":    [df["subject_id"][0]],
+                "trajectory_id": [df["trajectory_id"][0]],
+                "time_days":     [t],
+                "event":         [1 if t is not None else None],
+            })
+
+        _raw_outcomes = (
+            _inpatient_df
+            .group_by(["subject_id", "trajectory_id"])
+            .map_groups(_inpatient_group)
+            .filter(pl.col("time_days").is_not_null())
+            .lazy()
+        )
+        # Apply effective follow-up ceiling
+        outcome_events = (
+            _raw_outcomes
+            .join(
+                all_pairs.select(["subject_id", "trajectory_id", "effective_follow_up_days"]),
+                on=["subject_id", "trajectory_id"],
+                how="left",
+            )
+            .filter(pl.col("time_days") <= pl.col("effective_follow_up_days"))
+            .drop("effective_follow_up_days")
+        )
+    else:
+        outcome_events = (
+            traj_lf
+            .join(
+                all_pairs.select(["subject_id", "trajectory_id", "effective_follow_up_days"]),
+                on=["subject_id", "trajectory_id"],
+                how="left",
+            )
+            .filter(pl.col("days_since_drug") <= pl.col("effective_follow_up_days"))
+            .filter(pl.col("code").is_in(list(outcome_set)))
+            .group_by(["subject_id", "trajectory_id"])
+            .agg(pl.col("days_since_drug").min().alias("time_days"))
+            .with_columns(pl.lit(1).alias("event"))
+        )
 
     # Left join: censored patients get event=0, time=effective_follow_up_days
     tte = (
@@ -625,6 +697,7 @@ def faithfulness_check_outcome(
     target_concept_ids: Optional[Set[str]] = None,
     competing_concept_ids: Optional[Set[str]] = None,
     era_gap_days: float = 30.0,
+    inpatient_only: bool = False,
 ) -> Optional[Dict]:
     """
     Compare generated source-arm trajectories against the same patients'
@@ -657,6 +730,7 @@ def faithfulness_check_outcome(
         target_concept_ids=target_concept_ids,
         competing_concept_ids=competing_concept_ids,
         era_gap_days=era_gap_days,
+        inpatient_only=inpatient_only,
     )
     agg_gen = (
         tte_gen
@@ -756,6 +830,7 @@ def analyse_outcome(
     competing_concept_ids_a: Optional[Set[str]] = None,
     competing_concept_ids_b: Optional[Set[str]] = None,
     era_gap_days: float = 30.0,
+    inpatient_only: bool = False,
 ) -> Dict:
     """
     Run full HR analysis for a single outcome concept.
@@ -773,6 +848,8 @@ def analyse_outcome(
         (opposite-arm drugs + exclusion antihypertensives).
     era_gap_days
         Persistence window in days (default 30).
+    inpatient_only
+        When True, outcomes only counted inside inpatient/ER visits.
     """
     print(f"\n  Outcome: {outcome_concept_id}")
 
@@ -781,12 +858,14 @@ def analyse_outcome(
         target_concept_ids=target_concept_ids_a,
         competing_concept_ids=competing_concept_ids_a,
         era_gap_days=era_gap_days,
+        inpatient_only=inpatient_only,
     )
     tte_b = compute_tte(
         traj_arm_b, drug_info, [outcome_concept_id], follow_up_days,
         target_concept_ids=target_concept_ids_b,
         competing_concept_ids=competing_concept_ids_b,
         era_gap_days=era_gap_days,
+        inpatient_only=inpatient_only,
     )
 
     # Aggregate N trajectories per patient:
@@ -928,6 +1007,13 @@ def main() -> None:
 
     outcome_ids = [x.strip() for x in args.outcome_concept_ids.split(",")]
 
+    inpatient_outcome_ids: Set[str] = set()
+    if args.inpatient_outcome_concept_ids:
+        inpatient_outcome_ids = {
+            x.strip() for x in args.inpatient_outcome_concept_ids.split(",")
+        }
+        print(f"Inpatient-only outcomes: {sorted(inpatient_outcome_ids)}")
+
     # ------------------------------------------------------------------
     # Observed baseline HR (runs when --observed_outcomes_path is given)
     # ------------------------------------------------------------------
@@ -1023,6 +1109,7 @@ def main() -> None:
                 target_concept_ids=arm_a_concepts or None,
                 competing_concept_ids=competing_for_arm_a,
                 era_gap_days=args.era_gap_days,
+                inpatient_only=(outcome_id in inpatient_outcome_ids),
             )
             if res is not None:
                 faithfulness_results.append(res)
@@ -1055,6 +1142,7 @@ def main() -> None:
             competing_concept_ids_a=competing_for_arm_a,
             competing_concept_ids_b=competing_for_arm_b,
             era_gap_days=args.era_gap_days,
+            inpatient_only=(outcome_id in inpatient_outcome_ids),
         )
         if result is not None:
             results.append(result)
@@ -1149,6 +1237,13 @@ def _parse_args() -> argparse.Namespace:
         help="Persistence window in days for drug era computation (default: 30). "
              "Consecutive target drug events separated by more than this many days "
              "terminate the era; follow-up is censored at last_event + era_gap_days.",
+    )
+    parser.add_argument(
+        "--inpatient_outcome_concept_ids",
+        default=None,
+        help="Comma-separated OMOP concept_ids for outcomes that must occur "
+             "inside an inpatient or ER visit (9201/9203/262). Used for "
+             "hospitalisation outcomes such as HF (316139) and AMI (312327).",
     )
     return parser.parse_args()
 

@@ -190,6 +190,10 @@ OUTCOME_CONCEPT_IDS="312327,316139,4310996,376713,3655355,437833,434610"
 # 437833   Hypokalemia
 # 434610   Hyperkalemia
 
+# Outcomes that must occur inside an inpatient or ER visit (9201/9203/262).
+# These are hospitalization-based endpoints per LEGEND-HTN protocol.
+INPATIENT_OUTCOME_CONCEPT_IDS="312327,316139,4310996,376713"
+
 # =============================================================================
 # DERIVED PATHS
 # =============================================================================
@@ -273,6 +277,7 @@ else
         --output_dir              "${CONTEXT_DIR}" \
         --tokenizer_path          "${TOKENIZER_PATH}" \
         --outcome_concept_ids     "${OUTCOME_CONCEPT_IDS}" \
+        --inpatient_outcome_concept_ids "${INPATIENT_OUTCOME_CONCEPT_IDS}" \
         --era_gap_days            "${ERA_GAP_DAYS}" \
         --min_context_length      "${MIN_CONTEXT_LENGTH}" \
         --num_workers             "${EXTRACTION_NUM_WORKERS}" \
@@ -473,6 +478,7 @@ else
         --drug_info_path          "${DRUG_INFO}" \
         --observed_outcomes_path  "${CONTEXT_DIR}/observed_outcomes" \
         --outcome_concept_ids     "${OUTCOME_CONCEPT_IDS}" \
+        --inpatient_outcome_concept_ids "${INPATIENT_OUTCOME_CONCEPT_IDS}" \
         --follow_up_days          "${FOLLOW_UP_DAYS}" \
         --arm_a                   "${ARM_A}" \
         --arm_b                   "${ARM_B}" \
