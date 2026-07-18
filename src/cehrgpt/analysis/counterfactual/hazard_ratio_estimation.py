@@ -93,38 +93,6 @@ def expand_to_descendants(vocab_path: str, concept_ids: List[int]) -> Set[str]:
     return result
 
 
-def filter_contaminated_trajectories(
-    trajectories: pl.DataFrame,
-    forbidden_concepts: Set[str],
-    arm: str,
-) -> pl.DataFrame:
-    """
-    Remove entire trajectories (subject_id, trajectory_id) where any
-    generated event code belongs to *forbidden_concepts*.
-
-    For example, ACEi-arm trajectories that contain thiazide events are
-    invalid counterfactuals and must be excluded before HR estimation.
-    """
-    if not forbidden_concepts:
-        return trajectories
-
-    contaminated = (
-        trajectories
-        .filter(pl.col("code").is_in(list(forbidden_concepts)))
-        .select(["subject_id", "trajectory_id"])
-        .unique()
-    )
-    n_contaminated = len(contaminated)
-    if n_contaminated > 0:
-        n_total = trajectories.select(["subject_id", "trajectory_id"]).n_unique()
-        print(f"  [{arm}] Filtering {n_contaminated:,} / {n_total:,} contaminated trajectories "
-              f"({n_contaminated / n_total:.1%})")
-        trajectories = trajectories.join(
-            contaminated, on=["subject_id", "trajectory_id"], how="anti"
-        )
-    return trajectories
-
-
 # ---------------------------------------------------------------------------
 # Time-to-event computation
 # ---------------------------------------------------------------------------
@@ -895,28 +863,21 @@ def main() -> None:
         print("\nNo --trajectories_dir provided; skipping generated-trajectory HR.")
         return
 
-    # Expand drug concept IDs to descendants for contamination filtering and
-    # competing-event censoring.
+    # Expand drug concept IDs to descendants for competing-event censoring.
     arm_a_concepts: Set[str] = set()
     arm_b_concepts: Set[str] = set()
     exclusion_concepts: Set[str] = set()
-    arm_a_forbidden: Set[str] = set()
-    arm_b_forbidden: Set[str] = set()
-    # competing sets: censor generated follow-up when opposite-arm or excluded
-    # drugs appear in the trajectory.
     competing_for_arm_a: Optional[Set[str]] = None
     competing_for_arm_b: Optional[Set[str]] = None
 
     if args.vocab_path and args.arm_a_concept_ids and args.arm_b_concept_ids:
         arm_a_ids = [int(x.strip()) for x in args.arm_a_concept_ids.split(",")]
         arm_b_ids = [int(x.strip()) for x in args.arm_b_concept_ids.split(",")]
-        print("Expanding drug concepts for contamination filtering …")
+        print("Expanding drug concepts …")
         arm_a_concepts = expand_to_descendants(args.vocab_path, arm_a_ids)
         arm_b_concepts = expand_to_descendants(args.vocab_path, arm_b_ids)
-        arm_a_forbidden = arm_b_concepts
-        arm_b_forbidden = arm_a_concepts
-        print(f"  Arm A forbidden concepts (comparator drugs): {len(arm_a_forbidden):,}")
-        print(f"  Arm B forbidden concepts (source drugs):     {len(arm_b_forbidden):,}")
+        print(f"  Arm A concepts: {len(arm_a_concepts):,}")
+        print(f"  Arm B concepts: {len(arm_b_concepts):,}")
 
     if args.vocab_path and args.exclusion_concept_ids:
         excl_ids = [int(x.strip()) for x in args.exclusion_concept_ids.split(",")]
@@ -925,18 +886,18 @@ def main() -> None:
         print(f"  Exclusion concepts (other antihypertensives): {len(exclusion_concepts):,}")
 
     # Build per-arm competing sets (union of opposite-arm + exclusion drugs).
+    # These censor follow-up when a generated trajectory contains a switch event;
+    # trajectories are NOT removed — only their follow-up is shortened.
     if arm_a_concepts or arm_b_concepts or exclusion_concepts:
         competing_for_arm_a = (arm_b_concepts | exclusion_concepts) or None
         competing_for_arm_b = (arm_a_concepts | exclusion_concepts) or None
 
     print(f"Loading {args.arm_a} trajectories …")
     traj_a = load_trajectories(args.trajectories_dir, args.arm_a)
-    traj_a = filter_contaminated_trajectories(traj_a, arm_a_forbidden, args.arm_a)
     print(f"  {len(traj_a):,} events")
 
     print(f"Loading {args.arm_b} trajectories …")
     traj_b = load_trajectories(args.trajectories_dir, args.arm_b)
-    traj_b = filter_contaminated_trajectories(traj_b, arm_b_forbidden, args.arm_b)
     print(f"  {len(traj_b):,} events")
 
     def _read_parquet(path: str) -> pl.DataFrame:
