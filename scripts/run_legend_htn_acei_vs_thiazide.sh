@@ -94,6 +94,11 @@ OVERWRITE=false
 # censoring bound (treatment discontinuation or switch to another antihypertensive).
 ERA_GAP_DAYS=30
 
+# Set to "true" to suppress competing drug concepts during generation so the
+# model cannot generate opposite-arm or excluded antihypertensive tokens.
+# Suppressed per arm: arm_a suppresses thiazide+exclusion; arm_b suppresses acei+exclusion.
+SUPPRESS_CONCEPTS=true
+
 # Optional: comma-separated OMOP concept_ids restricting the eligible population.
 # Each id is expanded to descendants via concept_ancestor; only patients whose
 # pre-drug history contains at least one matching concept are kept.
@@ -361,6 +366,18 @@ else
 
     mkdir -p "${TRAJ_DIR}"
 
+    # Competing concept IDs to suppress per arm:
+    #   arm_a (ACEi) suppresses thiazide + all excluded antihypertensives
+    #   arm_b (thiazide) suppresses ACEi  + all excluded antihypertensives
+    _SUPPRESS_ARGS_A=()
+    _SUPPRESS_ARGS_B=()
+    if [ "${SUPPRESS_CONCEPTS}" = "true" ]; then
+        _SUPPRESS_CONCEPTS_A="${THIAZIDE_CONCEPT_IDS},${EXCLUSION_CONCEPT_IDS}"
+        _SUPPRESS_CONCEPTS_B="${ACEI_CONCEPT_IDS},${EXCLUSION_CONCEPT_IDS}"
+        _SUPPRESS_ARGS_A=(--vocab_path "${VOCAB_PATH}" --arm_suppress_concepts "${ARM_A}:${_SUPPRESS_CONCEPTS_A}")
+        _SUPPRESS_ARGS_B=(--vocab_path "${VOCAB_PATH}" --arm_suppress_concepts "${ARM_B}:${_SUPPRESS_CONCEPTS_B}")
+    fi
+
     _COMMON_GENERATE_ARGS=(
         --model_name_or_path        "${MODEL_PATH}"
         --tokenizer_path            "${TOKENIZER_PATH}"
@@ -379,22 +396,26 @@ else
         CUDA_VISIBLE_DEVICES="${GPU_ACEI}" python "${GENERATE_SCRIPT}" \
             --arm_context "${ARM_A}:${ARM_A_CTX}" \
             "${_COMMON_GENERATE_ARGS[@]}" \
+            "${_SUPPRESS_ARGS_A[@]}" \
             > "${OUTPUT_ROOT}/generate_${ARM_A}.log" 2>&1
         echo "Running ${ARM_B} arm …"
         CUDA_VISIBLE_DEVICES="${GPU_ACEI}" python "${GENERATE_SCRIPT}" \
             --arm_context "${ARM_B}:${ARM_B_CTX}" \
             "${_COMMON_GENERATE_ARGS[@]}" \
+            "${_SUPPRESS_ARGS_B[@]}" \
             > "${OUTPUT_ROOT}/generate_${ARM_B}.log" 2>&1
     else
         CUDA_VISIBLE_DEVICES="${GPU_ACEI}" python "${GENERATE_SCRIPT}" \
             --arm_context "${ARM_A}:${ARM_A_CTX}" \
             "${_COMMON_GENERATE_ARGS[@]}" \
+            "${_SUPPRESS_ARGS_A[@]}" \
             > "${OUTPUT_ROOT}/generate_${ARM_A}.log" 2>&1 &
         PID_A=$!
 
         CUDA_VISIBLE_DEVICES="${GPU_THIAZIDE}" python "${GENERATE_SCRIPT}" \
             --arm_context "${ARM_B}:${ARM_B_CTX}" \
             "${_COMMON_GENERATE_ARGS[@]}" \
+            "${_SUPPRESS_ARGS_B[@]}" \
             > "${OUTPUT_ROOT}/generate_${ARM_B}.log" 2>&1 &
         PID_B=$!
 
