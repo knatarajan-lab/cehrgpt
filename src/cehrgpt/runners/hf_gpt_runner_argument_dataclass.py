@@ -356,3 +356,14 @@ class CehrGPTArguments:
         default=5,
         metadata={"help": "Number of previous visits visible to each token when use_local_attention is True."},
     )
+    local_attention_window_size: int = dataclasses.field(
+        default=None,
+        metadata={
+            "help": (
+                "When set, enables token-count-based local attention via FA2's native sliding window: "
+                "each token attends to the last local_attention_window_size tokens. "
+                "Takes precedence over the visit-based (local_attention_n_prev_visits) mode and "
+                "is fully compatible with Flash Attention 2."
+            )
+        },
+    )

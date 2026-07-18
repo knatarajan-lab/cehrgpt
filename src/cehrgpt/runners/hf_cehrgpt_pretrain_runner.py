@@ -250,6 +250,7 @@ def load_and_create_model(
             att_token_ids=tokenizer.att_token_ids,
             use_local_attention=cehrgpt_args.use_local_attention,
             local_attention_n_prev_visits=cehrgpt_args.local_attention_n_prev_visits,
+            local_attention_window_size=cehrgpt_args.local_attention_window_size,
             use_time_embedding=cehrgpt_args.use_time_embedding,
             n_time_embd=cehrgpt_args.n_time_embd,
             time_embedding_scaling_factor=cehrgpt_args.time_embedding_scaling_factor,
@@ -280,10 +281,16 @@ def load_and_create_model(
         LOG.info("Model age_embedding_scaling_factor: %s", getattr(model.config, "age_embedding_scaling_factor", None))
     LOG.info("Model use_local_attention: %s", getattr(model.config, "use_local_attention", False))
     if getattr(model.config, "use_local_attention", False):
-        LOG.info(
-            "Model local_attention_n_prev_visits: %s",
-            getattr(model.config, "local_attention_n_prev_visits", None),
-        )
+        if getattr(model.config, "local_attention_window_size", None) is not None:
+            LOG.info(
+                "Model local_attention_window_size (token-window, FA2): %s",
+                model.config.local_attention_window_size,
+            )
+        else:
+            LOG.info(
+                "Model local_attention_n_prev_visits (visit-window): %s",
+                getattr(model.config, "local_attention_n_prev_visits", None),
+            )
 
     if model.config.torch_dtype == torch.bfloat16:
         return model.bfloat16()

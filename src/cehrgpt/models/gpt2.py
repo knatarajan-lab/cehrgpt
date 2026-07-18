@@ -299,7 +299,26 @@ class GPT2FlashAttention(GPT2Attention):
             attn_output, attn_weights = self._upcast_and_reordered_attn(
                 query, key, value, attention_mask, head_mask
             )
+        elif (
+            getattr(self.config, "use_local_attention", False)
+            and getattr(self.config, "local_attention_window_size", None) is not None
+        ):
+            # Token-window local attention via FA2's native sliding-window support.
+            # window_size=(N, 0) means each token attends to the N most recent tokens
+            # (causal: right window = 0).  No custom 4D mask needed.
+            n = self.config.local_attention_window_size
+            attn_output = self._flash_attention_forward(
+                query,
+                key,
+                value,
+                attention_mask,
+                query.size(-2),
+                self.attn_dropout.p,
+                window_size=(n, 0),
+            )
+            attn_weights = None
         elif getattr(self.config, "use_local_attention", False):
+            # Visit-based local attention via xformers/SDPA with a custom 4D mask.
             # attention_mask must be the 4D additive local mask (B, 1, L, L).
             # For self-attention it is built by CEHRGPT2Model.forward; for cross-attention
             # in the linear probe it is built by CEHRGPT2LMHeadModel.forward via
@@ -427,6 +446,7 @@ class GPT2FlashAttention(GPT2Attention):
         query_length,
         dropout=0.0,
         softmax_scale=None,
+        window_size=(-1, -1),
     ):
         """
         Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token.
@@ -482,6 +502,7 @@ class GPT2FlashAttention(GPT2Attention):
                 dropout_p=dropout,
                 softmax_scale=softmax_scale,
                 causal=True,
+                window_size=window_size,
             )
             attn_output = pad_input(
                 attn_output_unpad, indices_q, batch_size, query_length
@@ -494,6 +515,7 @@ class GPT2FlashAttention(GPT2Attention):
                 dropout,
                 softmax_scale=softmax_scale,
                 causal=self.is_causal,
+                window_size=window_size,
             )
         # re-order the tensor back to (batch, n_heads, seq_length, head_dim)
         return attn_output.permute(0, 2, 1, 3).contiguous().to(dtype)

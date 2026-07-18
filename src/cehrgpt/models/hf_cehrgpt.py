@@ -761,12 +761,20 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 
         if getattr(config, "use_local_attention", False):
-            logger.info(
-                "Local attention enabled: each token attends to the current visit "
-                "and the previous %d visit(s) (vs_token_id=%s).",
-                getattr(config, "local_attention_n_prev_visits", 5),
-                getattr(config, "vs_token_id", None),
-            )
+            window_size = getattr(config, "local_attention_window_size", None)
+            if window_size is not None:
+                logger.info(
+                    "Local attention enabled: token-window mode, each token attends to "
+                    "the last %d tokens (FA2 native sliding window).",
+                    window_size,
+                )
+            else:
+                logger.info(
+                    "Local attention enabled: visit-window mode, each token attends to "
+                    "the current visit and the previous %d visit(s) (vs_token_id=%s).",
+                    getattr(config, "local_attention_n_prev_visits", 5),
+                    getattr(config, "vs_token_id", None),
+                )
         else:
             logger.info("Local attention disabled — using full causal attention.")
 
@@ -977,6 +985,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         )
         if (
             getattr(self.config, "use_local_attention", False)
+            and getattr(self.config, "local_attention_window_size", None) is None
             and raw_attention_mask is not None
             and getattr(self.config, "vs_token_id", None) is not None
         ):

@@ -128,6 +128,7 @@ class CEHRGPTConfig(PretrainedConfig):
         att_token_ids=None,
         use_local_attention=False,
         local_attention_n_prev_visits=5,
+        local_attention_window_size=None,
         scale_attn_by_inverse_layer_idx=False,
         reorder_and_upcast_attn=False,
         apply_rotary=False,
@@ -272,6 +273,7 @@ class CEHRGPTConfig(PretrainedConfig):
         self.att_token_ids = att_token_ids if att_token_ids is not None else []
         self.use_local_attention = use_local_attention
         self.local_attention_n_prev_visits = local_attention_n_prev_visits
+        self.local_attention_window_size = local_attention_window_size
         self.motor_time_to_event_weight = motor_time_to_event_weight
         self.motor_num_time_pieces = motor_num_time_pieces
         self.linear_prob_token_id = linear_prob_token_id
