@@ -59,6 +59,7 @@ from cehrgpt.models.tokenization_hf_cehrgpt import NONE_BIN, UNKNOWN_BIN, CehrGp
 VISIT_START_TOKEN = "[VS]"
 VISIT_END_TOKEN = "[VE]"
 END_TOKEN = "[END]"
+DEATH_TOKEN = "[DEATH]"
 
 # All columns that are parallel arrays (length == len(concept_ids))
 SEQUENCE_ARRAY_COLS = [
@@ -273,9 +274,9 @@ def compute_drug_era_end_time(
        drug events.  Era end = epoch_time of the last target event + era_gap_seconds.
     2. **Treatment switch**: a concept from *competing_concepts* is encountered in a
        post-initiation visit.  Era end = epoch_time of the switching event.
-    3. **Sequence end**: the ``[END]`` token or the end of the concept_ids list is
-       reached without a gap or switch.  Returns ``None`` (right-censored; follow-up
-       runs to *follow_up_days*).
+    3. **End of record / death**: the ``[END]`` or ``[DEATH]`` token is encountered.
+       Era end = epoch_time of that token.  If neither token appears (truncated
+       sequence), returns ``None`` (right-censored; follow-up runs to *follow_up_days*).
 
     Parameters
     ----------
@@ -309,9 +310,9 @@ def compute_drug_era_end_time(
     for i in range(start_drug_pos + 1, len(concept_ids)):
         token = concept_ids[i]
 
-        if token == END_TOKEN:
-            # Sequence ended normally — right-censored
-            return None
+        if token in (END_TOKEN, DEATH_TOKEN):
+            # End of record or death — censor at this token's epoch time
+            return float(epoch_times[i]) if i < len(epoch_times) else None
 
         if token == VISIT_START_TOKEN:
             current_vs_pos = i

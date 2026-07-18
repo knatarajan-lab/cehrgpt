@@ -92,7 +92,7 @@ OVERWRITE=false
 # Two drug events within this many days belong to the same era.
 # The era end time is stored in drug_info/ and used by Step 4 as an additional
 # censoring bound (treatment discontinuation or switch to another antihypertensive).
-ERA_GAP_DAYS=30
+ERA_GAP_DAYS="${ERA_GAP_DAYS:-30}"
 
 # Set to "true" to suppress competing drug concepts during generation so the
 # model cannot generate opposite-arm or excluded antihypertensive tokens.

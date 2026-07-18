@@ -49,6 +49,9 @@ DEFAULT_ARM_A = "acei"       # the "treated" arm (actual drug received)
 DEFAULT_ARM_B = "thiazide"   # the "comparator" arm (counterfactual)
 EPSILON = 1e-8
 
+# Tokens that explicitly mark the end of a patient's record in generated sequences.
+_RECORD_END_TOKENS = {"[END]", "[DEATH]"}
+
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -243,6 +246,27 @@ def compute_tte(
             )
             .drop("competing_days")
         )
+
+    # --- Condition 3: end of record / death ---
+    # Censor at [END] or [DEATH] if the model generates one of these tokens,
+    # mirroring compute_drug_era_end_time in extract_drug_initiation_sequences.py.
+    end_of_record = (
+        traj_lf
+        .filter(pl.col("code").is_in(list(_RECORD_END_TOKENS)))
+        .group_by(["subject_id", "trajectory_id"])
+        .agg(pl.col("days_since_drug").min().alias("end_of_record_days"))
+    )
+    all_pairs = (
+        all_pairs
+        .join(end_of_record, on=["subject_id", "trajectory_id"], how="left")
+        .with_columns(
+            pl.min_horizontal(
+                "effective_follow_up_days",
+                pl.col("end_of_record_days").fill_null(follow_up_days),
+            ).alias("effective_follow_up_days")
+        )
+        .drop("end_of_record_days")
+    )
 
     # --- Outcome events within effective follow-up ---
     outcome_events = (
