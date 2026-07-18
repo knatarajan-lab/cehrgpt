@@ -58,6 +58,7 @@ from cehrgpt.models.tokenization_hf_cehrgpt import NONE_BIN, UNKNOWN_BIN, CehrGp
 
 VISIT_START_TOKEN = "[VS]"
 VISIT_END_TOKEN = "[VE]"
+END_TOKEN = "[END]"
 
 # All columns that are parallel arrays (length == len(concept_ids))
 SEQUENCE_ARRAY_COLS = [
@@ -253,6 +254,100 @@ def find_first_drug_initiation(
     return None, None, None, None
 
 
+def compute_drug_era_end_time(
+    concept_ids: List[str],
+    epoch_times: List[float],
+    target_concepts: Set[str],
+    competing_concepts: Optional[Set[str]],
+    start_drug_pos: int,
+    era_gap_days: int = 30,
+) -> Optional[float]:
+    """
+    Compute the end epoch_time of the drug era that starts at *start_drug_pos*.
+
+    The era is defined as a continuous period of drug exposure where consecutive
+    drug events occur within *era_gap_days* days.  Follow-up ends at the EARLIEST
+    of three conditions:
+
+    1. **Era gap**: a gap > *era_gap_days* days appears between consecutive target
+       drug events.  Era end = epoch_time of the last target event + era_gap_seconds.
+    2. **Treatment switch**: a concept from *competing_concepts* is encountered in a
+       post-initiation visit.  Era end = epoch_time of the switching event.
+    3. **Sequence end**: the ``[END]`` token or the end of the concept_ids list is
+       reached without a gap or switch.  Returns ``None`` (right-censored; follow-up
+       runs to *follow_up_days*).
+
+    Parameters
+    ----------
+    concept_ids      : token sequence
+    epoch_times      : parallel array of epoch timestamps in **seconds**
+    target_concepts  : OMOP concept_ids (strings) of the patient's current drug
+                       class (source for ACEi patients, comparator for thiazide)
+    competing_concepts : OMOP concept_ids (strings) of any drug that marks a
+                       treatment switch; typically the opposite arm plus all other
+                       first-line antihypertensives from the exclusion list.
+                       Pass ``None`` or an empty set to disable switch detection.
+    start_drug_pos   : index in concept_ids of the first drug event (era start)
+    era_gap_days     : persistence window in days (default: 30)
+
+    Returns
+    -------
+    float  — epoch_time (seconds) at which the era ends, or
+    None   — patient is right-censored (sequence ended without discontinuation)
+    """
+    era_gap_seconds = era_gap_days * 86_400
+    if start_drug_pos >= len(epoch_times):
+        return None
+
+    last_target_time = float(epoch_times[start_drug_pos])
+    competing: Set[str] = competing_concepts or set()
+
+    # Skip through the rest of the sequence tracking visits
+    current_vs_pos: Optional[int] = None
+    in_start_visit = True   # we're still inside the visit that contains the era start
+
+    for i in range(start_drug_pos + 1, len(concept_ids)):
+        token = concept_ids[i]
+
+        if token == END_TOKEN:
+            # Sequence ended normally — right-censored
+            return None
+
+        if token == VISIT_START_TOKEN:
+            current_vs_pos = i
+            in_start_visit = False
+            continue
+
+        if token == VISIT_END_TOKEN:
+            if in_start_visit:
+                in_start_visit = False
+            current_vs_pos = None
+            continue
+
+        # Only process clinical events inside a visit (not ATT tokens between visits)
+        if in_start_visit or current_vs_pos is None:
+            continue
+
+        event_time = float(epoch_times[i]) if i < len(epoch_times) else None
+        if event_time is None:
+            continue
+
+        if token in target_concepts:
+            gap = event_time - last_target_time
+            if gap > era_gap_seconds:
+                # Gap exceeded — era ended before this event
+                return last_target_time + era_gap_seconds
+            # Still within the era — extend last known target event time
+            last_target_time = event_time
+
+        elif token in competing:
+            # Treatment switch — follow-up ends at the switching event
+            return event_time
+
+    # Reached end of sequence without gap or switch — right-censored
+    return None
+
+
 def _to_list(val: Any) -> List:
     """Convert a numpy array or other sequence to a plain Python list."""
     if val is None:
@@ -352,6 +447,8 @@ def _process_shard(
     min_context_length: int,
     chunk_size: int,
     population_concepts: Optional[Set[str]] = None,
+    exclusion_concepts: Optional[Set[str]] = None,
+    era_gap_days: int = 30,
 ) -> Tuple[int, int]:
     """
     Process one shard of patient rows and write chunked parquet files.
@@ -412,8 +509,18 @@ def _process_shard(
                 os.path.join(treated_dir, f"{prefix}.parquet"),
             )
         if drug_info_chunk:
+            # Explicit schema: era_end_epoch_time may be None in every row of a
+            # chunk (right-censored patients).  Without an explicit schema Polars
+            # infers Null type, which breaks concatenation across chunks later.
+            di_schema = {
+                "person_id":          pl.Int64,
+                "drug_concept_id":    pl.String,
+                "drug_epoch_time":    pl.Float64,
+                "era_end_epoch_time": pl.Float64,
+                "arm":                pl.String,
+            }
             _write_atomic(
-                pl.DataFrame(drug_info_chunk),
+                pl.DataFrame(drug_info_chunk, schema=di_schema),
                 os.path.join(drug_info_dir, f"{prefix}.parquet"),
             )
         if observed_outcomes_chunk:
@@ -434,6 +541,13 @@ def _process_shard(
         observed_outcomes_chunk.clear()
         chunk_idx += 1
 
+    # Precompute era-end competing-concept sets (constant across all patients).
+    # Source patients' era ends if they encounter a comparator or exclusion drug.
+    # Comparator patients' era ends if they encounter a source or exclusion drug.
+    _excl: Set[str] = exclusion_concepts or set()
+    competing_for_source: Set[str]     = comparator_concepts | _excl
+    competing_for_comparator: Set[str] = source_concepts | _excl
+
     for row in tqdm(
         df_shard.iter_rows(named=True),
         total=len(df_shard),
@@ -452,19 +566,34 @@ def _process_shard(
             n_skipped += 1
             continue
 
-        # ---- Population filter (e.g. require KOA diagnosis in pre-drug history) ----
+        # ---- Population filter (e.g. require HTN diagnosis in pre-drug history) ----
         if population_concepts:
             pre_drug_set = set(concept_ids[:drug_pos])
             if not (pre_drug_set & population_concepts):
                 n_skipped += 1
                 continue
 
-        # ---- Opposite-drug contamination check ----
-        # Skip patients whose sequences contain concepts from BOTH drug classes
-        concept_set = set(concept_ids)
-        has_source     = bool(concept_set & source_concepts)
-        has_comparator = bool(concept_set & comparator_concepts)
-        if has_source and has_comparator:
+        # ---- Exclusion drug check (prior exposure to other antihypertensives) ----
+        # Patients with any exclusion drug in their pre-index history are dropped
+        # to enforce the "new users" / treatment-naive eligibility criterion.
+        if exclusion_concepts:
+            pre_drug_set = set(concept_ids[:drug_pos])
+            if pre_drug_set & exclusion_concepts:
+                n_skipped += 1
+                continue
+
+        # ---- Same-visit co-prescription check ----
+        # Patients whose INDEX VISIT contains both source and comparator drugs
+        # (concurrent prescription) cannot be cleanly assigned to one arm — exclude.
+        # Post-initiation crossovers are NOT excluded here; compute_drug_era_end_time
+        # detects them and stores the switch time as era_end_epoch_time, which is
+        # used downstream to censor follow-up at the moment of the switch.
+        # Note: pre-index contamination by the opposite arm is structurally impossible
+        # here — find_first_drug_initiation returns the FIRST drug event, so if the
+        # opposite arm had appeared earlier it would have been the index event instead.
+        visit_end = ve_pos if ve_pos is not None else len(concept_ids)
+        index_visit_tokens = set(concept_ids[vs_pos:visit_end + 1])
+        if index_visit_tokens & source_concepts and index_visit_tokens & comparator_concepts:
             n_skipped += 1
             continue
 
@@ -510,11 +639,32 @@ def _process_shard(
 
         # ---- Drug info row ----
         arm_label = "source" if drug_concept_id in source_concepts else "comparator"
+
+        # Compute drug era end time.
+        # Target concepts = the patient's own drug class.
+        # Competing concepts = opposite arm + any exclusion drugs (treatment switch).
+        if arm_label == "source":
+            target_concepts_era = source_concepts
+            competing_for_era   = competing_for_source
+        else:
+            target_concepts_era = comparator_concepts
+            competing_for_era   = competing_for_comparator
+
+        era_end_epoch_time = compute_drug_era_end_time(
+            concept_ids=concept_ids,
+            epoch_times=epoch_times,
+            target_concepts=target_concepts_era,
+            competing_concepts=competing_for_era,
+            start_drug_pos=drug_pos,
+            era_gap_days=era_gap_days,
+        )
+
         drug_info_chunk.append({
-            "person_id":      person_id,
-            "drug_concept_id": str(drug_concept_id),
-            "drug_epoch_time": drug_epoch_time,
-            "arm":             arm_label,
+            "person_id":          person_id,
+            "drug_concept_id":    str(drug_concept_id),
+            "drug_epoch_time":    drug_epoch_time,
+            "era_end_epoch_time": era_end_epoch_time,
+            "arm":                arm_label,
         })
 
         # ---- Observed outcomes (post-initiation) ----
@@ -552,6 +702,8 @@ def process(
     tokenizer_path: Optional[str] = None,
     outcome_concept_ids: Optional[List[int]] = None,
     population_concept_ids: Optional[List[int]] = None,
+    exclusion_concept_ids: Optional[List[int]] = None,
+    era_gap_days: int = 30,
     min_context_length: int = 4,
     overwrite: bool = False,
     num_workers: int = 1,
@@ -583,9 +735,24 @@ def process(
         drug initiation.  Each is expanded to descendants.
     population_concept_ids
         Optional list of OMOP concept_ids defining the eligible population
-        (e.g. KOA diagnosis concepts).  Each is expanded to descendants.
+        (e.g. HTN diagnosis concepts).  Each is expanded to descendants.
         Only patients who have at least one of these concepts in their
         pre-drug history are kept.  If None, no population filter is applied.
+    exclusion_concept_ids
+        Optional list of OMOP ingredient concept_ids for drugs that disqualify
+        a patient from the "new users" cohort.  Each is expanded to all
+        descendants via concept_ancestor.  Any patient whose pre-drug history
+        contains at least one of these concepts is excluded.  Typical use:
+        list all other first-line antihypertensive classes (ARBs, CCBs,
+        second-line agents) so that only treatment-naive patients are kept.
+        If None, no exclusion filter is applied.
+    era_gap_days
+        Persistence window in days for drug era computation (default: 30).
+        Consecutive drug events separated by more than this many days belong
+        to different eras.  A treatment switch (concept from the opposing arm
+        or exclusion list) also terminates the era.  The computed
+        ``era_end_epoch_time`` is written to ``drug_info/`` and used by
+        ``hazard_ratio_estimation.py`` as an additional censoring time.
     min_context_length
         Minimum number of tokens required in the non-treated context
         (patients with fewer tokens are skipped).  Default 4.
@@ -660,6 +827,15 @@ def process(
         print(f"  → {len(population_concepts):,} population concepts (patients must have ≥1 in pre-drug history)")
 
     # ------------------------------------------------------------------ #
+    # 2c. Expand exclusion concept IDs to descendants (new-user filter)   #
+    # ------------------------------------------------------------------ #
+    exclusion_concepts: Optional[Set[str]] = None
+    if exclusion_concept_ids:
+        print(f"Expanding {len(exclusion_concept_ids)} exclusion concept(s) to descendants …")
+        exclusion_concepts = load_drug_descendant_concepts(vocab_path, exclusion_concept_ids)
+        print(f"  → {len(exclusion_concepts):,} exclusion concepts (patients with ≥1 in pre-drug history are dropped)")
+
+    # ------------------------------------------------------------------ #
     # 3. Enumerate parquet files and inspect schema without loading data  #
     # ------------------------------------------------------------------ #
     if os.path.isdir(patient_sequence_path):
@@ -723,6 +899,8 @@ def process(
             min_context_length,
             CHUNK_SIZE,
             population_concepts,
+            exclusion_concepts,
+            era_gap_days,
         )
         for shard_id in range(effective_workers)
     ]
@@ -803,9 +981,28 @@ def _parse_args() -> argparse.Namespace:
         "--population_concept_ids",
         default=None,
         help="Comma-separated OMOP concept_ids defining the eligible population "
-             "(e.g. knee osteoarthritis diagnosis concepts). Each is expanded to "
+             "(e.g. hypertension diagnosis concepts). Each is expanded to "
              "descendants via concept_ancestor. Only patients whose pre-drug history "
              "contains at least one matching concept are kept. Default: no filter.",
+    )
+    parser.add_argument(
+        "--exclusion_concept_ids",
+        default=None,
+        help="Comma-separated OMOP ingredient concept_ids for drugs that disqualify "
+             "a patient from the 'new users' cohort. Each is expanded to all descendants "
+             "via concept_ancestor. Patients whose pre-drug history contains any of these "
+             "concepts are excluded. Use to enforce treatment-naive eligibility (e.g. list "
+             "all other first-line antihypertensive classes for LEGEND-HTN). Default: no filter.",
+    )
+    parser.add_argument(
+        "--era_gap_days",
+        type=int,
+        default=30,
+        help="Persistence window in days for drug era computation (default: 30). "
+             "Consecutive drug events separated by more than this many days belong to "
+             "different eras; a treatment switch also terminates the era. The computed "
+             "era_end_epoch_time is written to drug_info/ for use in hazard ratio "
+             "estimation as an additional censoring time.",
     )
     parser.add_argument(
         "--min_context_length",
@@ -840,6 +1037,10 @@ def main() -> None:
         [int(x.strip()) for x in args.population_concept_ids.split(",")]
         if args.population_concept_ids else None
     )
+    exclusion_concept_ids = (
+        [int(x.strip()) for x in args.exclusion_concept_ids.split(",")]
+        if args.exclusion_concept_ids else None
+    )
     process(
         patient_sequence_path=args.patient_sequence_path,
         vocab_path=args.vocab_path,
@@ -849,6 +1050,8 @@ def main() -> None:
         tokenizer_path=args.tokenizer_path,
         outcome_concept_ids=outcome_concept_ids,
         population_concept_ids=population_concept_ids,
+        exclusion_concept_ids=exclusion_concept_ids,
+        era_gap_days=args.era_gap_days,
         min_context_length=args.min_context_length,
         overwrite=args.overwrite,
         num_workers=args.num_workers,

@@ -157,28 +157,37 @@ def compute_tte(
     DataFrame with columns: subject_id, trajectory_id, event, time_days
     """
     outcome_set = set(outcome_concept_ids)
-    follow_up_seconds = follow_up_days * 86_400
 
-    # Attach drug_epoch_time to each trajectory event
+    # Attach drug_epoch_time and era_end_epoch_time to each trajectory event.
+    # era_end_epoch_time is None (null) for right-censored patients; for them
+    # follow_up_days remains the censoring bound.
     drug_lf = drug_info.lazy().rename({"person_id": "subject_id"})
     traj_lf = (
         trajectories
         .lazy()
-        .join(drug_lf.select(["subject_id", "drug_epoch_time"]), on="subject_id", how="left")
+        .join(
+            drug_lf.select(["subject_id", "drug_epoch_time", "era_end_epoch_time"]),
+            on="subject_id",
+            how="left",
+        )
     )
 
-    # Keep only events within the follow-up window and before drug_epoch_time + window
+    # Effective censoring time in days = min(follow_up_days, era_days).
+    # era_days is null when the era didn't end (right-censored); fill with follow_up_days.
     traj_lf = traj_lf.with_columns(
-        pl.col("time").cast(pl.Datetime).dt.epoch(time_unit="s").alias("time_epoch_s")
+        pl.col("time").cast(pl.Datetime).dt.epoch(time_unit="s").alias("time_epoch_s"),
+        (
+            (pl.col("era_end_epoch_time") - pl.col("drug_epoch_time")) / 86_400
+        ).fill_null(follow_up_days).clip(upper_bound=follow_up_days).alias("effective_follow_up_days"),
     ).filter(
         pl.col("time_epoch_s") > pl.col("drug_epoch_time")
     ).with_columns(
         ((pl.col("time_epoch_s") - pl.col("drug_epoch_time")) / 86_400).alias("days_since_drug")
     ).filter(
-        pl.col("days_since_drug") <= follow_up_days
+        pl.col("days_since_drug") <= pl.col("effective_follow_up_days")
     )
 
-    # Flag outcome events
+    # Flag outcome events (first occurrence per patient-trajectory within follow-up)
     outcome_events = (
         traj_lf
         .filter(pl.col("code").is_in(list(outcome_set)))
@@ -187,22 +196,33 @@ def compute_tte(
         .with_columns(pl.lit(1).alias("event"))
     )
 
-    # All unique (subject_id, trajectory_id) pairs
+    # All unique (subject_id, trajectory_id) pairs with their effective follow-up
     all_pairs = (
         trajectories
         .lazy()
         .select(["subject_id", "trajectory_id"])
         .unique()
+        .join(
+            drug_lf.select(["subject_id", "era_end_epoch_time", "drug_epoch_time"]),
+            on="subject_id",
+            how="left",
+        )
+        .with_columns(
+            (
+                (pl.col("era_end_epoch_time") - pl.col("drug_epoch_time")) / 86_400
+            ).fill_null(follow_up_days).clip(upper_bound=follow_up_days).alias("effective_follow_up_days"),
+        )
     )
 
-    # Left join: censored patients get event=0 and time=follow_up_days
+    # Left join: censored patients get event=0 and time=effective_follow_up_days
     tte = (
         all_pairs
         .join(outcome_events, on=["subject_id", "trajectory_id"], how="left")
         .with_columns(
             pl.col("event").fill_null(0),
-            pl.col("time_days").fill_null(follow_up_days),
+            pl.col("time_days").fill_null(pl.col("effective_follow_up_days")),
         )
+        .select(["subject_id", "trajectory_id", "event", "time_days"])
         .collect()
     )
     return tte
@@ -416,9 +436,11 @@ def analyse_observed_outcomes(
         )
 
     obs  = _read(observed_outcomes_path)
-    info = _read(drug_info_path).select(["person_id", "arm"])
+    # drug_epoch_time is already in obs; only pull arm and era_end from drug_info
+    # to avoid duplicate-column conflicts on join.
+    info = _read(drug_info_path).select(["person_id", "arm", "era_end_epoch_time"])
 
-    # Join arm label onto observed outcomes
+    # Join arm label and era end onto observed outcomes
     df = obs.join(info, on="person_id", how="left")
 
     source_df     = df.filter(pl.col("arm") == "source")
@@ -435,17 +457,28 @@ def analyse_observed_outcomes(
         print(f"\n  Outcome: {oc_id}")
 
         def _tte(arm_df: pl.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
-            """Compute (time_days, event) arrays for one arm."""
+            """Compute (time_days, event) arrays for one arm.
+
+            Censoring at the earlier of follow_up_days and era_end_epoch_time
+            (treatment discontinuation or switch to another antihypertensive).
+            """
             times, events = [], []
-            for row in arm_df.select(["drug_epoch_time", oc_id]).iter_rows():
-                drug_t, outcome_t = row
+            for row in arm_df.select(["drug_epoch_time", "era_end_epoch_time", oc_id]).iter_rows():
+                drug_t, era_end_t, outcome_t = row
+                # Effective censoring = min(follow_up_days, era_days)
+                if drug_t is not None and era_end_t is not None:
+                    era_days = (float(era_end_t) - float(drug_t)) / 86_400
+                    censor_days = min(follow_up_days, max(era_days, 0.0))
+                else:
+                    censor_days = follow_up_days
+
                 if outcome_t is not None and drug_t is not None:
                     t_days = (float(outcome_t) - float(drug_t)) / 86_400
-                    if 0 < t_days <= follow_up_days:
+                    if 0 < t_days <= censor_days:
                         times.append(t_days)
                         events.append(1)
                         continue
-                times.append(follow_up_days)
+                times.append(censor_days)
                 events.append(0)
             return np.array(times, dtype=float), np.array(events, dtype=int)
 
