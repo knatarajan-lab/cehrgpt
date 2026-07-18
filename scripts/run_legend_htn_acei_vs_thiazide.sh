@@ -97,7 +97,7 @@ ERA_GAP_DAYS=30
 # Set to "true" to suppress competing drug concepts during generation so the
 # model cannot generate opposite-arm or excluded antihypertensive tokens.
 # Suppressed per arm: arm_a suppresses thiazide+exclusion; arm_b suppresses acei+exclusion.
-SUPPRESS_CONCEPTS=true
+SUPPRESS_CONCEPTS="${SUPPRESS_CONCEPTS:-true}"
 
 # Optional: comma-separated OMOP concept_ids restricting the eligible population.
 # Each id is expanded to descendants via concept_ancestor; only patients whose
