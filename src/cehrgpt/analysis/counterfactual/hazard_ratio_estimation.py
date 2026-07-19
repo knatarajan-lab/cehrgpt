@@ -311,24 +311,30 @@ def compute_tte(
             .sort(["subject_id", "trajectory_id", "days_since_drug"])
         )
 
-        def _inpatient_group(df: pl.DataFrame) -> pl.DataFrame:
-            t = _find_first_inpatient_outcome(
-                df["code"].to_list(), df["days_since_drug"].to_list(), outcome_set
+        _outcome_rows: List[dict] = []
+        for _grp in _inpatient_df.partition_by(
+            ["subject_id", "trajectory_id"], maintain_order=True
+        ):
+            _t = _find_first_inpatient_outcome(
+                _grp["code"].to_list(), _grp["days_since_drug"].to_list(), outcome_set
             )
-            return pl.DataFrame({
-                "subject_id":    [df["subject_id"][0]],
-                "trajectory_id": [df["trajectory_id"][0]],
-                "time_days":     [t],
-                "event":         [1 if t is not None else None],
-            })
+            if _t is not None:
+                _outcome_rows.append({
+                    "subject_id":    _grp["subject_id"][0],
+                    "trajectory_id": _grp["trajectory_id"][0],
+                    "time_days":     _t,
+                    "event":         1,
+                })
 
-        _raw_outcomes = (
-            _inpatient_df
-            .group_by(["subject_id", "trajectory_id"])
-            .map_groups(_inpatient_group)
-            .filter(pl.col("time_days").is_not_null())
-            .lazy()
-        )
+        if _outcome_rows:
+            _raw_outcomes = pl.DataFrame(_outcome_rows).lazy()
+        else:
+            _raw_outcomes = pl.DataFrame({
+                "subject_id":    pl.Series([], dtype=_inpatient_df["subject_id"].dtype),
+                "trajectory_id": pl.Series([], dtype=_inpatient_df["trajectory_id"].dtype),
+                "time_days":     pl.Series([], dtype=pl.Float64),
+                "event":         pl.Series([], dtype=pl.Int32),
+            }).lazy()
         # Apply effective follow-up ceiling
         outcome_events = (
             _raw_outcomes
