@@ -125,11 +125,14 @@ def _find_first_inpatient_outcome(
     outcome_set: Set[str],
 ) -> Optional[float]:
     """
-    Walk sorted (code, time) pairs and return the time of the first outcome
-    event that occurs inside an inpatient or ER visit block.
+    Return the time of the first outcome event that is **linked to** an
+    inpatient or ER visit, i.e. the outcome must be contained within the same
+    ``[VS]…[VE]`` block as one of the ``INPATIENT_ER_VISIT_CONCEPTS``
+    (9201, 9203, 262).
 
-    A visit qualifies when the token immediately following ``[VS]`` is one of
-    the ``INPATIENT_ER_VISIT_CONCEPTS`` (9201, 9203, 262).
+    The visit-type concept always precedes outcome events within a block, so a
+    single forward pass suffices: ``in_qualifying`` is set when the visit-type
+    token is seen and reset on ``[VS]`` or ``[VE]``.
     """
     in_qualifying = False
     for code, t in zip(codes, times):
@@ -153,6 +156,7 @@ def compute_tte(
     competing_concept_ids: Optional[Set[str]] = None,
     era_gap_days: float = 30.0,
     inpatient_only: bool = False,
+    expanded_outcome_set: Optional[Set[str]] = None,
 ) -> pl.DataFrame:
     """
     For each (subject_id, trajectory_id) compute:
@@ -194,12 +198,17 @@ def compute_tte(
         When True, outcomes are only counted when they occur inside an
         inpatient or ER visit in the generated trajectory (visit concept
         9201/9203/262 immediately follows the ``[VS]`` token).
+    expanded_outcome_set
+        Pre-expanded set of descendant concept_ids (strings) for the outcome.
+        When provided this is used instead of ``outcome_concept_ids`` for code
+        matching, so that all descendant codes count toward the ancestor
+        outcome.  Build with :func:`expand_to_descendants`.
 
     Returns
     -------
     DataFrame with columns: subject_id, trajectory_id, event, time_days
     """
-    outcome_set = set(outcome_concept_ids)
+    outcome_set = expanded_outcome_set if expanded_outcome_set is not None else set(outcome_concept_ids)
 
     drug_lf = drug_info.lazy().rename({"person_id": "subject_id"})
 
@@ -704,6 +713,7 @@ def faithfulness_check_outcome(
     competing_concept_ids: Optional[Set[str]] = None,
     era_gap_days: float = 30.0,
     inpatient_only: bool = False,
+    expanded_outcome_set: Optional[Set[str]] = None,
 ) -> Optional[Dict]:
     """
     Compare generated source-arm trajectories against the same patients'
@@ -737,6 +747,7 @@ def faithfulness_check_outcome(
         competing_concept_ids=competing_concept_ids,
         era_gap_days=era_gap_days,
         inpatient_only=inpatient_only,
+        expanded_outcome_set=expanded_outcome_set,
     )
     agg_gen = (
         tte_gen
@@ -837,6 +848,7 @@ def analyse_outcome(
     competing_concept_ids_b: Optional[Set[str]] = None,
     era_gap_days: float = 30.0,
     inpatient_only: bool = False,
+    expanded_outcome_set: Optional[Set[str]] = None,
 ) -> Dict:
     """
     Run full HR analysis for a single outcome concept.
@@ -856,6 +868,9 @@ def analyse_outcome(
         Persistence window in days (default 30).
     inpatient_only
         When True, outcomes only counted inside inpatient/ER visits.
+    expanded_outcome_set
+        Descendant-expanded concept_ids for the outcome; see
+        :func:`expand_to_descendants`.
     """
     print(f"\n  Outcome: {outcome_concept_id}")
 
@@ -865,6 +880,7 @@ def analyse_outcome(
         competing_concept_ids=competing_concept_ids_a,
         era_gap_days=era_gap_days,
         inpatient_only=inpatient_only,
+        expanded_outcome_set=expanded_outcome_set,
     )
     tte_b = compute_tte(
         traj_arm_b, drug_info, [outcome_concept_id], follow_up_days,
@@ -872,6 +888,7 @@ def analyse_outcome(
         competing_concept_ids=competing_concept_ids_b,
         era_gap_days=era_gap_days,
         inpatient_only=inpatient_only,
+        expanded_outcome_set=expanded_outcome_set,
     )
 
     # Aggregate N trajectories per patient:
@@ -1020,6 +1037,18 @@ def main() -> None:
         }
         print(f"Inpatient-only outcomes: {sorted(inpatient_outcome_ids)}")
 
+    # Expand each outcome concept to all descendants so that any descendant
+    # code in a generated trajectory counts toward the ancestor outcome.
+    outcome_expanded: Dict[str, Set[str]] = {}
+    if args.vocab_path:
+        print("Expanding outcome concepts …")
+        for oid in outcome_ids:
+            outcome_expanded[oid] = expand_to_descendants(args.vocab_path, [int(oid)])
+            print(f"  {oid}: {len(outcome_expanded[oid]):,} concepts (including descendants)")
+    else:
+        for oid in outcome_ids:
+            outcome_expanded[oid] = {oid}
+
     # ------------------------------------------------------------------
     # Observed baseline HR (runs when --observed_outcomes_path is given)
     # ------------------------------------------------------------------
@@ -1116,6 +1145,7 @@ def main() -> None:
                 competing_concept_ids=competing_for_arm_a,
                 era_gap_days=args.era_gap_days,
                 inpatient_only=(outcome_id in inpatient_outcome_ids),
+                expanded_outcome_set=outcome_expanded[outcome_id],
             )
             if res is not None:
                 faithfulness_results.append(res)
@@ -1149,6 +1179,7 @@ def main() -> None:
             competing_concept_ids_b=competing_for_arm_b,
             era_gap_days=args.era_gap_days,
             inpatient_only=(outcome_id in inpatient_outcome_ids),
+            expanded_outcome_set=outcome_expanded[outcome_id],
         )
         if result is not None:
             results.append(result)
