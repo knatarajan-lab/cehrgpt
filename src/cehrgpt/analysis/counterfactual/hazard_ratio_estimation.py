@@ -960,6 +960,171 @@ def analyse_outcome(
     }
 
 
+def _compute_generated_era_end(
+    trajectories: pl.DataFrame,
+    drug_info: pl.DataFrame,
+    follow_up_days: float,
+    target_concept_ids: Optional[Set[str]],
+    competing_concept_ids: Optional[Set[str]],
+    era_gap_days: float,
+) -> pl.DataFrame:
+    """
+    For each (subject_id, trajectory_id) in *trajectories*, compute the
+    effective era end in days from drug start, applying the same three
+    censoring conditions used in ``compute_tte``:
+
+    1. Era gap  — first gap > era_gap_days between target drug events
+    2. Treatment switch — first competing/exclusion drug event
+    3. End of record / death — first [END] or [DEATH] token
+
+    Returns a DataFrame with columns:
+        subject_id, trajectory_id, effective_follow_up_days, terminated (bool)
+    """
+    drug_lf = drug_info.lazy().rename({"person_id": "subject_id"})
+
+    traj_lf = (
+        trajectories.lazy()
+        .join(drug_lf.select(["subject_id", "drug_epoch_time"]), on="subject_id", how="left")
+        .with_columns(
+            pl.col("time").cast(pl.Datetime).dt.epoch(time_unit="s").alias("time_epoch_s"),
+        )
+        .filter(pl.col("time_epoch_s") > pl.col("drug_epoch_time"))
+        .with_columns(
+            ((pl.col("time_epoch_s") - pl.col("drug_epoch_time")) / 86_400).alias("days_since_drug")
+        )
+        .filter(pl.col("days_since_drug") <= follow_up_days)
+    )
+
+    all_pairs = (
+        trajectories.lazy()
+        .select(["subject_id", "trajectory_id"])
+        .unique()
+        .with_columns(pl.lit(follow_up_days).alias("effective_follow_up_days"))
+    )
+
+    if target_concept_ids:
+        target_era_end = (
+            traj_lf
+            .filter(pl.col("code").is_in(list(target_concept_ids)))
+            .group_by(["subject_id", "trajectory_id"])
+            .agg(pl.col("days_since_drug").sort().alias("target_days"))
+            .with_columns(
+                pl.col("target_days").map_elements(
+                    lambda days: _find_era_gap_end(days, era_gap_days),
+                    return_dtype=pl.Float64,
+                ).alias("era_gap_end_days")
+            )
+            .select(["subject_id", "trajectory_id", "era_gap_end_days"])
+        )
+        all_pairs = (
+            all_pairs
+            .join(target_era_end, on=["subject_id", "trajectory_id"], how="left")
+            .with_columns(
+                pl.min_horizontal(
+                    "effective_follow_up_days",
+                    pl.col("era_gap_end_days").fill_null(follow_up_days),
+                ).alias("effective_follow_up_days")
+            )
+            .drop("era_gap_end_days")
+        )
+
+    if competing_concept_ids:
+        first_competing = (
+            traj_lf
+            .filter(pl.col("code").is_in(list(competing_concept_ids)))
+            .group_by(["subject_id", "trajectory_id"])
+            .agg(pl.col("days_since_drug").min().alias("competing_days"))
+        )
+        all_pairs = (
+            all_pairs
+            .join(first_competing, on=["subject_id", "trajectory_id"], how="left")
+            .with_columns(
+                pl.min_horizontal(
+                    "effective_follow_up_days",
+                    pl.col("competing_days").fill_null(follow_up_days),
+                ).alias("effective_follow_up_days")
+            )
+            .drop("competing_days")
+        )
+
+    end_of_record = (
+        traj_lf
+        .filter(pl.col("code").is_in(list(_RECORD_END_TOKENS)))
+        .group_by(["subject_id", "trajectory_id"])
+        .agg(pl.col("days_since_drug").min().alias("end_of_record_days"))
+    )
+    all_pairs = (
+        all_pairs
+        .join(end_of_record, on=["subject_id", "trajectory_id"], how="left")
+        .with_columns(
+            pl.min_horizontal(
+                "effective_follow_up_days",
+                pl.col("end_of_record_days").fill_null(follow_up_days),
+            ).alias("effective_follow_up_days")
+        )
+        .drop("end_of_record_days")
+        .with_columns(
+            (pl.col("effective_follow_up_days") < follow_up_days).alias("terminated")
+        )
+        .collect()
+    )
+    return all_pairs
+
+
+def _print_generated_era_duration_stats(
+    trajectories: pl.DataFrame,
+    drug_info: pl.DataFrame,
+    follow_up_days: float,
+    arm_label: str,
+    target_concept_ids: Optional[Set[str]],
+    competing_concept_ids: Optional[Set[str]],
+    era_gap_days: float,
+) -> None:
+    """Print descriptive statistics of drug era duration from generated trajectories."""
+    era_df = _compute_generated_era_end(
+        trajectories, drug_info, follow_up_days,
+        target_concept_ids, competing_concept_ids, era_gap_days,
+    )
+
+    # Aggregate per patient: mean effective_follow_up_days across trajectories;
+    # a patient is "terminated" if ANY trajectory was terminated.
+    per_patient = (
+        era_df
+        .group_by("subject_id")
+        .agg(
+            pl.col("effective_follow_up_days").mean().alias("era_days"),
+            pl.col("terminated").any().alias("terminated"),
+        )
+    )
+
+    n_total      = len(per_patient)
+    n_terminated = per_patient["terminated"].sum()
+    n_censored   = n_total - n_terminated
+
+    print(f"\n  {arm_label} [generated]  (n={n_total:,} patients, {len(era_df):,} trajectories)")
+    print(f"    Right-censored (reached follow-up) : {n_censored:,}  ({n_censored/n_total:.1%})")
+    print(f"    Era terminated (gap/switch/end)    : {n_terminated:,}  ({n_terminated/n_total:.1%})")
+
+    terminated_df = per_patient.filter(pl.col("terminated"))
+    if len(terminated_df) > 0:
+        stats = (
+            terminated_df
+            .select([
+                pl.col("era_days").mean().alias("mean"),
+                pl.col("era_days").median().alias("median"),
+                pl.col("era_days").quantile(0.25).alias("p25"),
+                pl.col("era_days").quantile(0.75).alias("p75"),
+                pl.col("era_days").min().alias("min"),
+                pl.col("era_days").max().alias("max"),
+            ])
+            .row(0, named=True)
+        )
+        print(f"    Era duration (days) among terminated patients:")
+        print(f"      mean={stats['mean']:.1f}  median={stats['median']:.1f}"
+              f"  IQR=[{stats['p25']:.1f}, {stats['p75']:.1f}]"
+              f"  min={stats['min']:.1f}  max={stats['max']:.1f}")
+
+
 def _print_era_duration_stats(
     drug_info: pl.DataFrame,
     follow_up_days: float,
@@ -1115,6 +1280,23 @@ def main() -> None:
     print("Loading drug info …")
     drug_info = _read_parquet(args.drug_info_path)
     _print_era_duration_stats(drug_info, args.follow_up_days, args.arm_a, args.arm_b)
+
+    print("\n" + "=" * 60)
+    print("Drug era duration statistics (generated trajectories)")
+    print("=" * 60)
+    _print_generated_era_duration_stats(
+        traj_a, drug_info, args.follow_up_days, args.arm_a,
+        target_concept_ids=arm_a_concepts or None,
+        competing_concept_ids=competing_for_arm_a,
+        era_gap_days=args.era_gap_days,
+    )
+    _print_generated_era_duration_stats(
+        traj_b, drug_info, args.follow_up_days, args.arm_b,
+        target_concept_ids=arm_b_concepts or None,
+        competing_concept_ids=competing_for_arm_b,
+        era_gap_days=args.era_gap_days,
+    )
+    print("=" * 60)
 
     # ------------------------------------------------------------------
     # Faithfulness check: generated comparator vs observed comparator
