@@ -749,15 +749,6 @@ def faithfulness_check_outcome(
         inpatient_only=inpatient_only,
         expanded_outcome_set=expanded_outcome_set,
     )
-    agg_gen = (
-        tte_gen
-        .group_by("subject_id")
-        .agg(
-            pl.col("event").max().alias("event"),
-            pl.col("time_days").mean().alias("time_days"),
-        )
-    )
-
     # --- Observed source-arm TTE (drug_epoch_time already in observed_outcomes) ---
     if outcome_concept_id not in observed_outcomes.columns:
         print(f"    Outcome column {outcome_concept_id} not in observed_outcomes — skipping.")
@@ -775,14 +766,16 @@ def faithfulness_check_outcome(
         obs_times.append(follow_up_days)
         obs_events.append(0)
 
-    time_gen  = agg_gen["time_days"].to_numpy()
-    event_gen = agg_gen["event"].to_numpy().astype(int)
+    # Use each (subject_id, trajectory_id) as a separate observation (same as
+    # the main HR analysis).  Observed outcomes are one row per patient.
+    time_gen  = tte_gen["time_days"].to_numpy()
+    event_gen = tte_gen["event"].to_numpy().astype(int)
     time_obs  = np.array(obs_times, dtype=float)
     event_obs = np.array(obs_events, dtype=int)
 
     n_ev_gen = int(event_gen.sum())
     n_ev_obs = int(event_obs.sum())
-    print(f"    Generated {source_label}: {len(time_gen):,} patients, {n_ev_gen:,} events")
+    print(f"    Generated {source_label}: {tte_gen['subject_id'].n_unique():,} patients / {len(time_gen):,} trajectories, {n_ev_gen:,} events")
     print(f"    Observed  {source_label}: {len(time_obs):,} patients, {n_ev_obs:,} events")
 
     if n_ev_gen + n_ev_obs == 0:
@@ -815,7 +808,8 @@ def faithfulness_check_outcome(
 
     return {
         "outcome_concept_id": outcome_concept_id,
-        f"n_generated_{source_label}": len(time_gen),
+        f"n_patients_generated_{source_label}": tte_gen["subject_id"].n_unique(),
+        f"n_trajectories_generated_{source_label}": len(time_gen),
         f"n_observed_{source_label}": len(time_obs),
         f"n_events_generated_{source_label}": n_ev_gen,
         f"n_events_observed_{source_label}": n_ev_obs,
@@ -891,31 +885,22 @@ def analyse_outcome(
         expanded_outcome_set=expanded_outcome_set,
     )
 
-    # Aggregate N trajectories per patient:
-    #   event = 1 if outcome occurred in ANY trajectory
-    #   time  = mean time-to-event across trajectories
-    def aggregate(tte: pl.DataFrame) -> pl.DataFrame:
-        return (
-            tte
-            .group_by("subject_id")
-            .agg(
-                pl.col("event").max().alias("event"),
-                pl.col("time_days").mean().alias("time_days"),
-            )
-        )
+    # Use each (subject_id, trajectory_id) as a separate observation in the
+    # Cox model.  This preserves trajectory-level variance and avoids ad-hoc
+    # aggregation choices (max event / mean time).  Within-patient trajectories
+    # are correlated (shared pre-drug context), so CIs are slightly optimistic,
+    # but the HR point estimate remains valid.
+    time_a  = tte_a["time_days"].to_numpy()
+    event_a = tte_a["event"].to_numpy().astype(int)
+    time_b  = tte_b["time_days"].to_numpy()
+    event_b = tte_b["event"].to_numpy().astype(int)
 
-    agg_a = aggregate(tte_a)
-    agg_b = aggregate(tte_b)
-
-    time_a  = agg_a["time_days"].to_numpy()
-    event_a = agg_a["event"].to_numpy().astype(int)
-    time_b  = agg_b["time_days"].to_numpy()
-    event_b = agg_b["event"].to_numpy().astype(int)
-
+    n_patients_a = tte_a["subject_id"].n_unique()
+    n_patients_b = tte_b["subject_id"].n_unique()
     n_events_a = int(event_a.sum())
     n_events_b = int(event_b.sum())
-    print(f"    {arm_a_label}: {len(time_a):,} patients, {n_events_a:,} events")
-    print(f"    {arm_b_label}: {len(time_b):,} patients, {n_events_b:,} events")
+    print(f"    {arm_a_label}: {n_patients_a:,} patients / {len(time_a):,} trajectories, {n_events_a:,} events")
+    print(f"    {arm_b_label}: {n_patients_b:,} patients / {len(time_b):,} trajectories, {n_events_b:,} events")
 
     if n_events_a + n_events_b == 0:
         print("    Skipping: no events observed in either arm.")
@@ -946,8 +931,10 @@ def analyse_outcome(
 
     return {
         "outcome_concept_id": outcome_concept_id,
-        f"n_{arm_a_label}": len(time_a),
-        f"n_{arm_b_label}": len(time_b),
+        f"n_patients_{arm_a_label}": n_patients_a,
+        f"n_patients_{arm_b_label}": n_patients_b,
+        f"n_trajectories_{arm_a_label}": len(time_a),
+        f"n_trajectories_{arm_b_label}": len(time_b),
         f"n_events_{arm_a_label}": int(event_a.sum()),
         f"n_events_{arm_b_label}": int(event_b.sum()),
         "hr": hr,
