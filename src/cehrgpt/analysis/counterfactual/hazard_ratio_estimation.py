@@ -73,7 +73,7 @@ def load_trajectories(trajectories_dir: str, arm: str) -> pl.DataFrame:
         raise FileNotFoundError(f"No parquet files found under {arm_dir}")
 
     dfs = [pl.read_parquet(str(f)) for f in sorted(parquet_files)]
-    df = pl.concat(dfs)
+    df = pl.concat(dfs).with_row_index("position")
     return df
 
 
@@ -317,7 +317,7 @@ def compute_tte(
             traj_lf
             .filter(pl.col("code").is_in(list(_relevant)))
             .collect()
-            .sort(["subject_id", "trajectory_id", "days_since_drug"])
+            .sort(["subject_id", "trajectory_id", "days_since_drug", "position"])
         )
 
         _outcome_rows: List[dict] = []
