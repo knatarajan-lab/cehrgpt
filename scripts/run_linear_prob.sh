@@ -7,7 +7,8 @@ usage() {
     echo "Options:"
     echo "  --base_dir=DIR                 Base directory containing cohorts (required)"
     echo "  --dataset_prepared_path=PATH   Path to prepared dataset (required)"
-    echo "  --model_path=PATH              Path to pre-trained model and tokenizer (required)"
+    echo "  --model_path=PATH              Path to pre-trained model (required)
+  --tokenizer_path=PATH          Path to tokenizer (optional, defaults to model_path)"
     echo "  --preprocessing_workers=NUM    Number of preprocessing workers (required)"
     echo "  --batch_size=NUM               Batch size for evaluation (required)"
     echo "  --output_dir=DIR               Output directory for results (required)"
@@ -15,6 +16,13 @@ usage() {
     echo "  --max_tokens_per_batch=NUM     Maximum tokens per batch (default: 16384)"
     echo "  --torch_type=TYPE              Torch data type (default: float32)"
     echo "  --disable_sample_packing       Disable sample packing (enabled by default)"
+    echo "  --disable_combine_global_local Disable combining global and local features (enabled by default)"
+    echo "  --add_random_token             Enable adding random token (disabled by default)"
+    echo "  --tokenized_full_dataset_path=PATH Path to a pre-tokenized full dataset (optional)"
+    echo "  --observation_window=NUM       Observation window in days (optional, default: None)"
+    echo "  --preprocessing_batch_size=NUM Batch size for dataset preprocessing (optional, default: 1000)"
+    echo "  --refresh_processed_dataset    Delete and rebuild the cached prepared dataset (disabled by default)
+  --is_data_in_meds              Indicate that the data is in MEDS format (disabled by default)"
     echo ""
     echo "Example:"
     echo "  $0 --base_dir=/path/to/cohorts --dataset_prepared_path=/path/to/dataset_prepared \\"
@@ -28,6 +36,14 @@ MODEL_NAME="cehrgpt_model"
 MAX_TOKENS_PER_BATCH="16384"
 TORCH_TYPE="bfloat16"
 DISABLE_SAMPLE_PACKING="false"
+DISABLE_COMBINE_GLOBAL_LOCAL="false"
+ADD_RANDOM_TOKEN="false"
+REFRESH_PROCESSED_DATASET="false"
+IS_DATA_IN_MEDS="false"
+TOKENIZED_FULL_DATASET_PATH=""
+OBSERVATION_WINDOW=""
+TOKENIZER_PATH=""
+PREPROCESSING_BATCH_SIZE="1000"
 
 # Parse command line arguments
 for arg in "$@"; do
@@ -40,6 +56,9 @@ for arg in "$@"; do
             ;;
         --model_path=*)
             MODEL_PATH="${arg#*=}"
+            ;;
+        --tokenizer_path=*)
+            TOKENIZER_PATH="${arg#*=}"
             ;;
         --preprocessing_workers=*)
             PREPROCESSING_WORKERS="${arg#*=}"
@@ -61,6 +80,27 @@ for arg in "$@"; do
             ;;
         --disable_sample_packing)
             DISABLE_SAMPLE_PACKING="true"
+            ;;
+        --disable_combine_global_local)
+            DISABLE_COMBINE_GLOBAL_LOCAL="true"
+            ;;
+        --add_random_token)
+            ADD_RANDOM_TOKEN="true"
+            ;;
+        --tokenized_full_dataset_path=*)
+            TOKENIZED_FULL_DATASET_PATH="${arg#*=}"
+            ;;
+        --observation_window=*)
+            OBSERVATION_WINDOW="${arg#*=}"
+            ;;
+        --preprocessing_batch_size=*)
+            PREPROCESSING_BATCH_SIZE="${arg#*=}"
+            ;;
+        --refresh_processed_dataset)
+            REFRESH_PROCESSED_DATASET="true"
+            ;;
+        --is_data_in_meds)
+            IS_DATA_IN_MEDS="true"
             ;;
         --help|-h)
             usage
@@ -91,6 +131,19 @@ fi
 
 if [ ! -d "$MODEL_PATH" ]; then
     echo "Error: Model path does not exist: $MODEL_PATH"
+    exit 1
+fi
+
+# Default TOKENIZER_PATH to MODEL_PATH if not provided
+if [ -z "$TOKENIZER_PATH" ]; then
+    TOKENIZER_PATH="$MODEL_PATH"
+elif [ ! -d "$TOKENIZER_PATH" ]; then
+    echo "Error: Tokenizer path does not exist: $TOKENIZER_PATH"
+    exit 1
+fi
+
+if [ -n "$TOKENIZED_FULL_DATASET_PATH" ] && [ ! -d "$TOKENIZED_FULL_DATASET_PATH" ]; then
+    echo "Error: Tokenized full dataset path does not exist: $TOKENIZED_FULL_DATASET_PATH"
     exit 1
 fi
 
@@ -125,11 +178,17 @@ case "$TORCH_TYPE" in
         ;;
 esac
 
-# Validate disable_sample_packing is boolean-like
+# Validate disable flags are boolean-like
 if [ "$DISABLE_SAMPLE_PACKING" != "true" ] && [ "$DISABLE_SAMPLE_PACKING" != "false" ]; then
     echo "Error: disable_sample_packing must be 'true' or 'false': $DISABLE_SAMPLE_PACKING"
     exit 1
 fi
+
+if [ "$DISABLE_COMBINE_GLOBAL_LOCAL" != "true" ] && [ "$DISABLE_COMBINE_GLOBAL_LOCAL" != "false" ]; then
+    echo "Error: disable_combine_global_local must be 'true' or 'false': $DISABLE_COMBINE_GLOBAL_LOCAL"
+    exit 1
+fi
+
 
 # Log file setup
 LOG_DIR="$BASE_DIR/logs"
@@ -149,6 +208,7 @@ log "Configuration:"
 log "  --base_dir=$BASE_DIR"
 log "  --dataset_prepared_path=$DATASET_PREPARED_PATH"
 log "  --model_path=$MODEL_PATH"
+log "  --tokenizer_path=$TOKENIZER_PATH"
 log "  --preprocessing_workers=$PREPROCESSING_WORKERS"
 log "  --batch_size=$BATCH_SIZE"
 log "  --output_dir=$OUTPUT_DIR"
@@ -156,14 +216,28 @@ log "  --model_name=$MODEL_NAME"
 log "  --max_tokens_per_batch=$MAX_TOKENS_PER_BATCH"
 log "  --torch_type=$TORCH_TYPE"
 log "  --disable_sample_packing=$DISABLE_SAMPLE_PACKING"
+log "  --disable_combine_global_local=$DISABLE_COMBINE_GLOBAL_LOCAL"
+log "  --add_random_token=$ADD_RANDOM_TOKEN"
+log "  --tokenized_full_dataset_path=$TOKENIZED_FULL_DATASET_PATH"
+log "  --observation_window=$OBSERVATION_WINDOW"
+log "  --preprocessing_batch_size=$PREPROCESSING_BATCH_SIZE"
+log "  --refresh_processed_dataset=$REFRESH_PROCESSED_DATASET"
+log "  --is_data_in_meds=$IS_DATA_IN_MEDS"
 
 # Find valid cohorts and write to a temp file
 TEMP_COHORT_LIST="$LOG_DIR/cohort_list_${TIMESTAMP}.txt"
 > "$TEMP_COHORT_LIST" # Clear the file
 
-# Find all valid cohorts (directories with train and test subdirectories)
+# Find all valid cohorts
+# When tokenized_full_dataset_path is set, any subdirectory is a valid cohort.
+# Otherwise require train/ and test/ subdirectories.
 for cohort_dir in "$BASE_DIR"/*; do
-    if [ -d "$cohort_dir" ] && [ -d "$cohort_dir/train" ] && [ -d "$cohort_dir/test" ]; then
+    if [ -n "$TOKENIZED_FULL_DATASET_PATH" ]; then
+        if [ -d "$cohort_dir" ]; then
+            cohort_name=$(basename "$cohort_dir")
+            echo "$cohort_name" >> "$TEMP_COHORT_LIST"
+        fi
+    elif [ -d "$cohort_dir" ] && [ -d "$cohort_dir/train" ] && [ -d "$cohort_dir/test" ]; then
         cohort_name=$(basename "$cohort_dir")
         echo "$cohort_name" >> "$TEMP_COHORT_LIST"
     fi
@@ -185,13 +259,15 @@ done < "$TEMP_COHORT_LIST"
 
 # Process each cohort sequentially
 while read -r cohort_name; do
-    cohort_dir="$OUTPUT_DIR/$cohort_name"
+    # Remove trailing slash from OUTPUT_DIR if present, then add cohort_name
+    cohort_dir="${OUTPUT_DIR%/}/$cohort_name"
     output_dir="$cohort_dir/$MODEL_NAME"
     metrics_file="$output_dir/logistic/metrics.json"
 
-    # Check if metrics file exists to determine if cohort has been processed
+    # Check if metrics file exists to determine if cohort has already been processed
     if [ -f "$metrics_file" ]; then
-        log "Skipping cohort $cohort_name: metrics file already exists at $metrics_file"
+        log "Skipping cohort $cohort_name: results already exist at $metrics_file"
+        log "$(cat "$metrics_file")"
         continue
     fi
 
@@ -204,22 +280,49 @@ while read -r cohort_name; do
     # Create output directory if it doesn't exist
     mkdir -p "$output_dir"
 
-    # Prepare command for feature extraction
+    # Prepare base command for feature extraction
     FEATURE_CMD="python -u -m cehrgpt.tools.linear_prob.compute_cehrgpt_features \
         --data_folder \"$BASE_DIR/$cohort_name/train/\" \
         --test_data_folder \"$BASE_DIR/$cohort_name/test/\" \
         --dataset_prepared_path \"$DATASET_PREPARED_PATH\" \
         --model_name_or_path \"$MODEL_PATH\" \
-        --tokenizer_name_or_path \"$MODEL_PATH\" \
+        --tokenizer_name_or_path \"$TOKENIZER_PATH\" \
         --output_dir \"$output_dir\" \
         --preprocessing_num_workers \"$PREPROCESSING_WORKERS\" \
+        --preprocessing_batch_size \"$PREPROCESSING_BATCH_SIZE\" \
         --per_device_eval_batch_size \"$BATCH_SIZE\" \
         --max_tokens_per_batch \"$MAX_TOKENS_PER_BATCH\" \
         --torch_dtype \"$TORCH_TYPE\""
 
-    # Add sample packing flag if not disabled
+    # Add optional flags based on configuration
     if [ "$DISABLE_SAMPLE_PACKING" = "false" ]; then
         FEATURE_CMD="$FEATURE_CMD --sample_packing"
+    fi
+
+    if [ "$DISABLE_COMBINE_GLOBAL_LOCAL" = "false" ]; then
+        FEATURE_CMD="$FEATURE_CMD --combine_global_local_features"
+    fi
+
+    if [ "$ADD_RANDOM_TOKEN" = "true" ]; then
+        FEATURE_CMD="$FEATURE_CMD --add_random_token"
+    fi
+
+    if [ -n "$TOKENIZED_FULL_DATASET_PATH" ]; then
+        FEATURE_CMD="$FEATURE_CMD \
+        --tokenized_full_dataset_path \"$TOKENIZED_FULL_DATASET_PATH\" \
+        --cohort_folder \"$BASE_DIR/$cohort_name\""
+    fi
+
+    if [ -n "$OBSERVATION_WINDOW" ]; then
+        FEATURE_CMD="$FEATURE_CMD --observation_window \"$OBSERVATION_WINDOW\""
+    fi
+
+    if [ "$REFRESH_PROCESSED_DATASET" = "true" ]; then
+        FEATURE_CMD="$FEATURE_CMD --refresh_processed_dataset"
+    fi
+
+    if [ "$IS_DATA_IN_MEDS" = "true" ]; then
+        FEATURE_CMD="$FEATURE_CMD --is_data_in_meds"
     fi
 
     # Step 1: Feature extraction
@@ -234,6 +337,8 @@ while read -r cohort_name; do
         continue
     fi
 
+
+
     # Step 2: Model training
     log "Starting model training for $cohort_name..."
     log "Command: python -u -m cehrgpt.tools.linear_prob.train_with_cehrgpt_features --features_data_dir $output_dir --output_dir $output_dir"
@@ -243,19 +348,44 @@ while read -r cohort_name; do
         --output_dir "$output_dir" \
         >> "$cohort_log" 2>&1
 
-    echo "Running meds-evaluation for logistic regression for $TASK_NAME..."
-    meds-evaluation-cli predictions_path="$output_dir/logistic/test_predictions" \
-      output_dir="$output_dir/logistic/"
-
-        # Check if the second command succeeded
-    if [ $? -ne 0 ]; then
-        echo "Error: Running meds-evaluation failed for logistic regression for task $TASK_NAME"
-    fi
-
     model_training_status=$?
     if [ $model_training_status -ne 0 ]; then
         log "ERROR: Model training failed for $cohort_name. Check $cohort_log for details."
         continue
+    fi
+
+    # Step 3: meds-evaluation
+    log "Running meds-evaluation for logistic regression for $cohort_name..."
+    meds-evaluation-cli predictions_path="$output_dir/logistic/test_predictions" \
+      output_dir="$output_dir/logistic/" >> "$cohort_log" 2>&1
+
+    # Check if the evaluation command succeeded
+    if [ $? -ne 0 ]; then
+        log "ERROR: Running meds-evaluation failed for logistic regression for cohort $cohort_name. Check $cohort_log for details."
+        continue
+    fi
+
+    # Print results.json if it exists
+    results_file="$output_dir/logistic/results.json"
+    log "Looking for results file at: $results_file"
+    # Check for results.json
+    if [ -f "$results_file" ]; then
+        log "Results for $cohort_name:"
+        log "$(cat "$results_file")"
+    else
+        log "Results file not found at $results_file"
+        # Check if there are any JSON files in the logistic directory
+        if [ -d "$output_dir/logistic" ]; then
+            json_files=$(find "$output_dir/logistic" -name "*.json" 2>/dev/null)
+            if [ -n "$json_files" ]; then
+                log "Found other JSON files in logistic directory:"
+                echo "$json_files" | while read json_file; do
+                    log "  $json_file"
+                done
+            else
+                log "No JSON files found in logistic directory"
+            fi
+        fi
     fi
 
     log "Successfully completed processing for $cohort_name"

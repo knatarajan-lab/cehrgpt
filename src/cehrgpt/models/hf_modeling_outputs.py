@@ -80,12 +80,15 @@ class CehrGptCausalLMOutput(ModelOutput):
     next_value_logits: torch.FloatTensor = None
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
+    linear_prob_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
     token_loss: Optional[torch.FloatTensor] = None
     time_token_loss: Optional[torch.FloatTensor] = None
     time_to_visit_loss: Optional[torch.FloatTensor] = None
     token_value_loss: Optional[torch.FloatTensor] = None
     motor_tte_loss: Optional[torch.FloatTensor] = None
+    age_at_vs_loss: Optional[torch.FloatTensor] = None
+    year_at_vs_loss: Optional[torch.FloatTensor] = None
 
 
 @dataclass

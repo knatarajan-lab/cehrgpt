@@ -28,7 +28,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "cehrbert==1.4.9",
+    "cehrbert==1.5.0",
     "cehrbert_data==0.1.1",
     "openai==1.54.3",
     "optuna==4.0.0",
@@ -47,4 +47,7 @@ dev = [
 ]
 flash_attn = [
     "flash_attn"
+]
+xformers = [
+    "xformers>=0.0.26,<0.0.28"
 ]

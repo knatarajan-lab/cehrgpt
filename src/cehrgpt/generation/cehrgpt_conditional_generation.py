@@ -235,7 +235,7 @@ def main():
         # If the full dataset has been tokenized, we don't want to tokenize the cohort containing
         # the subset of the data. We should slice out the portion of the tokenized sequences for each sample
         if cehrgpt_args.tokenized_full_dataset_path is not None:
-            processed_dataset = extract_cohort_sequences(data_args, cehrgpt_args)
+            processed_dataset = extract_cohort_sequences(data_args, cehrgpt_args, cehrgpt_tokenizer)
         else:
             # Organize them into a single DatasetDict
             final_splits = prepare_finetune_dataset(

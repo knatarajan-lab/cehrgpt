@@ -189,6 +189,12 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether we want to include the motor time to events"
         },
     )
+    freeze_cehrgpt_generation_model: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to freeze the CEHR-GPT generation model weights"
+        },
+    )
     num_motor_tasks: Optional[int] = dataclasses.field(
         default=10000,
         metadata={"help": "The number of max MOTOR tasks"},
@@ -213,13 +219,13 @@ class CehrGPTArguments:
         default=0.0,
         metadata={"help": "A flag to indicate whether we want to use sample packing"},
     )
+    linear_prob_n_layer: Optional[int] = dataclasses.field(
+        default=None,
+        metadata={"help": "The number of linear prob layers to use."},
+    )
     vocab_dir: Optional[str] = dataclasses.field(
         default=None,
         metadata={"help": "The directory where the concept data is stored."},
-    )
-    average_over_sequence: bool = dataclasses.field(
-        default=False,
-        metadata={"help": "Whether or not to average tokens per sequence"},
     )
     apply_entropy_filter: Optional[bool] = dataclasses.field(
         default=False,
@@ -250,4 +256,114 @@ class CehrGPTArguments:
     generation_max_new_tokens: Optional[int] = dataclasses.field(
         default=1024,
         metadata={"help": "The maximum number of tokens in the generation sequence"},
+    )
+    combine_global_local_features: Optional[bool] = dataclasses.field(
+        default=True,
+        metadata={
+            "help": "A flag to indicate whether we want to combine global (linear prob) "
+            "and local (last token hidden states) features"
+        },
+    )
+    add_random_token: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to use linear prob tokens"
+        },
+    )
+    include_age_at_vs_prediction: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to include the age-at-VS reconstruction learning objective, "
+            "which predicts patient age at each [VS] token using cross-entropy loss. "
+            "The age vocab size is derived automatically from the tokenizer vocabulary."
+        },
+    )
+    age_at_vs_prediction_loss_weight: Optional[float] = dataclasses.field(
+        default=1.0,
+        metadata={"help": "Loss weight for the age-at-VS prediction objective."},
+    )
+    include_year_at_vs_prediction: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to include the year-at-VS reconstruction learning objective, "
+            "which predicts the calendar year at each [VS] token using cross-entropy loss. "
+            "The year vocab size is derived automatically from the tokenizer vocabulary."
+        },
+    )
+    year_at_vs_prediction_loss_weight: Optional[float] = dataclasses.field(
+        default=1.0,
+        metadata={"help": "Loss weight for the year-at-VS prediction objective."},
+    )
+    aux_loss_warmup_steps: int = dataclasses.field(
+        default=0,
+        metadata={
+            "help": "Number of training steps over which auxiliary losses (all losses except "
+            "token_loss) are linearly ramped from 0 to their full weight. "
+            "Set to 0 (default) to disable warmup and use full weights from the start. "
+            "Ignored when aux_loss_start_step > 0."
+        },
+    )
+    aux_loss_start_step: int = dataclasses.field(
+        default=0,
+        metadata={
+            "help": "Step at which auxiliary losses are switched on (step function). "
+            "Before this step the weight is 0; at and after it the weight is 1. "
+            "When set (> 0) this overrides aux_loss_warmup_steps."
+        },
+    )
+    refresh_processed_dataset: bool = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "If set, delete the cached prepared dataset at prepared_ds_path and "
+            "rebuild it from scratch, ignoring any previously saved version."
+        },
+    )
+    use_time_embedding: bool = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "Add trainable Time2Vec-style embeddings for epoch_times and ages "
+            "(sin(t/scaling_factor * w + phi)), projected back to hidden_size via a linear layer. "
+            "Mirrors the CehrBert embedding approach."
+        },
+    )
+    n_time_embd: int = dataclasses.field(
+        default=16,
+        metadata={"help": "Dimensionality of the time/age embedding vectors (Time2Vec size)."},
+    )
+    time_embedding_scaling_factor: float = dataclasses.field(
+        default=86400.0,
+        metadata={
+            "help": "Scaling factor for epoch_times before Time2Vec encoding. "
+            "Defaults to 86400 (seconds per day), normalising epoch timestamps to days."
+        },
+    )
+    age_embedding_scaling_factor: float = dataclasses.field(
+        default=100.0,
+        metadata={
+            "help": "Scaling factor for ages before Time2Vec encoding. "
+            "Defaults to 100, normalising typical age-in-years values to [0, ~1]."
+        },
+    )
+    use_local_attention: bool = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "Enable visit-local attention: each token attends only to the current visit "
+            "and the previous local_attention_n_prev_visits visits. Only applies to eager "
+            "(non-Flash) attention; no-op during KV-cache generation."
+        },
+    )
+    local_attention_n_prev_visits: int = dataclasses.field(
+        default=5,
+        metadata={"help": "Number of previous visits visible to each token when use_local_attention is True."},
+    )
+    local_attention_window_size: int = dataclasses.field(
+        default=None,
+        metadata={
+            "help": (
+                "When set, enables token-count-based local attention via FA2's native sliding window: "
+                "each token attends to the last local_attention_window_size tokens. "
+                "Takes precedence over the visit-based (local_attention_n_prev_visits) mode and "
+                "is fully compatible with Flash Attention 2."
+            )
+        },
     )
