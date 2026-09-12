@@ -15,7 +15,7 @@ from meds import held_out_split, train_split, tuning_split
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers.trainer_utils import is_main_process
-from transformers.utils import is_flash_attn_2_available, logging
+from transformers.utils import logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
@@ -37,7 +37,11 @@ from cehrgpt.runners.data_utils import (
     extract_cohort_sequences,
     prepare_finetune_dataset,
 )
-from cehrgpt.runners.gpt_runner_util import parse_runner_args
+from cehrgpt.runners.gpt_runner_util import (
+    parse_runner_args,
+    read_backbone,
+    resolve_attn_implementation,
+)
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
 
 LOG = logging.get_logger("transformers")
@@ -194,8 +198,9 @@ def main():
     cehrgpt_model = (
         CEHRGPT2LMHeadModel.from_pretrained(
             model_args.model_name_or_path,
-            attn_implementation=(
-                "flash_attention_2" if is_flash_attn_2_available() else "eager"
+            attn_implementation=resolve_attn_implementation(
+                backbone=read_backbone(model_args.model_name_or_path),
+                requested=cehrgpt_args.force_attn_implementation,
             ),
         )
         .eval()

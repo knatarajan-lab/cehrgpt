@@ -1,0 +1,9 @@
+task_name: "t2dm_hf_prediction"
+outcome_events: ["1326608", "1326609", "1569178", "35207793", "44820856", "44824250", "44827796"]
+future_visit_start: 0
+future_visit_end: -1
+prediction_window_start: 30
+prediction_window_end: -1
+max_new_tokens: 512
+include_descendants: true
+is_ethos_task: true

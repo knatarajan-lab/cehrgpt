@@ -18,6 +18,10 @@ from cehrgpt.cehrgpt_args import create_inference_base_arg_parser
 from cehrgpt.gpt_utils import get_cehrgpt_output_folder, is_visit_end, is_visit_start
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.runners.gpt_runner_util import (
+    read_backbone,
+    resolve_attn_implementation,
+)
 from cehrgpt.time_to_event.time_to_event_model import TimeToEventModel
 
 LOG = logging.get_logger("transformers")
@@ -28,6 +32,7 @@ class TaskConfig:
     task_name: str
     outcome_events: List[str]
     include_descendants: bool = False
+    is_ethos_task: bool = False
     future_visit_start: int = 0
     future_visit_end: int = -1
     prediction_window_start: int = 0
@@ -56,8 +61,8 @@ def main(args):
     cehrgpt_model = (
         CEHRGPT2LMHeadModel.from_pretrained(
             args.model_folder,
-            attn_implementation=(
-                "flash_attention_2" if is_flash_attn_2_available() else "eager"
+            attn_implementation=resolve_attn_implementation(
+                backbone=read_backbone(args.model_folder)
             ),
             torch_dtype=(
                 torch.bfloat16
@@ -76,7 +81,7 @@ def main(args):
 
     task_config = load_task_config_from_yaml(args.task_config)
     task_name = task_config.task_name
-    outcome_events = task_config.outcome_events
+    outcome_events = [int(_) for _ in task_config.outcome_events if _.isnumeric()]
 
     if task_config.include_descendants:
         if not args.concept_ancestor:
@@ -84,10 +89,9 @@ def main(args):
                 "When include_descendants is set to True, the concept_ancestor data needs to be provided."
             )
         concept_ancestor = pd.read_parquet(args.concept_ancestor)
-        ancestor_concept_ids = [int(_) for _ in outcome_events if _.isnumeric()]
         descendant_concept_ids = (
             concept_ancestor[
-                concept_ancestor.ancestor_concept_id.isin(ancestor_concept_ids)
+                concept_ancestor.ancestor_concept_id.isin(outcome_events)
             ]
             .descendant_concept_id.unique()
             .astype(str)
@@ -97,6 +101,19 @@ def main(args):
             _ for _ in descendant_concept_ids if _ not in outcome_events
         ]
         outcome_events += descendant_concept_ids
+
+    if task_config.is_ethos_task:
+        if not args.concept:
+            raise RuntimeError(
+                "When is_ethos_task is set to True, the concept data needs to be provided."
+            )
+        concept = pd.read_parquet(args.concept)
+        new_outcome_events = []
+        for t in concept[concept.concept_id.isin(outcome_events)].itertuples():
+            new_outcome_events.append(
+                [f"{t.vocabulary_id}/{i}/{part}" for i, part in enumerate(t.concept_code.split("."))]
+            )
+        outcome_events = new_outcome_events
 
     prediction_output_folder_name = os.path.join(
         args.output_folder, folder_name, task_name
@@ -153,6 +170,7 @@ def main(args):
     test_dataset = filter_out_existing_results(
         test_dataset, prediction_output_folder_name
     )
+    vocab = cehrgpt_tokenizer.get_vocab()
     tte_outputs = []
     for record in tqdm(test_dataset, total=len(test_dataset)):
         sample_identifier = (
@@ -163,6 +181,11 @@ def main(args):
         ):
             continue
         partial_history = record["concept_ids"]
+        # Filter out the tokens that are not in the vocabulary
+        partial_history = [
+            concept_id for concept_id in partial_history
+            if concept_id in vocab
+        ]
         label = record["label"]
         time_to_event = record["time_to_event"] if "time_to_event" in record else None
         seq_length = len(partial_history)
@@ -337,6 +360,9 @@ def create_arg_parser():
     )
     base_arg_parser.add_argument(
         "--task_config", dest="task_config", action="store", required=True
+    )
+    base_arg_parser.add_argument(
+        "--concept", dest="concept", action="store", required=False
     )
     base_arg_parser.add_argument(
         "--concept_ancestor", dest="concept_ancestor", action="store", required=False

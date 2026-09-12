@@ -21,6 +21,38 @@ INPATIENT_ATT_PATTERN = re.compile(r"(?:VS-|i-)D(\d+)(?:-VE)?")
 DEMOGRAPHIC_PROMPT_SIZE = 4
 logger = logging.get_logger("transformers")
 
+# ETHOS/CoMET time-interval tokens produced by cehrbert_data's ethos_time_token_func
+# (minute-resolution buckets). Between-visit gaps use the bare label (e.g. "3mt-6mt");
+# inpatient (within-visit) gaps prefix it with "i-" (e.g. "i-3mt-6mt"). The values below
+# approximate each bucket by the midpoint of its minute range, converted to days; the
+# open-ended ">=6mt" bucket uses its lower bound, mirroring how "LT" is handled elsewhere.
+ETHOS_TIME_BUCKET_TO_DAYS = {
+    "5m-15m": 0,
+    "15m-1h": 0,
+    "1h-2h": 0,
+    "2h-6h": 0,
+    "6h-12h": 0,
+    "12h-1d": 1,
+    "1d-3d": 2,
+    "3d-1w": 5,
+    "1w-2w": 10,
+    "2w-1mt": 22,
+    "1mt-3mt": 60,
+    "3mt-6mt": 135,
+    ">=6mt": 180,
+}
+
+
+def is_ethos_time_bucket_token(token: str) -> bool:
+    """
+    Check if the token is an ETHOS/CoMET time-interval bucket token.
+
+    :param token: Token to check, e.g. "3mt-6mt" or "i-3mt-6mt".
+    :return: True if the (optionally "i-"-prefixed) token is a known ETHOS time bucket.
+    """
+    bucket = token[2:] if token.startswith("i-") else token
+    return bucket in ETHOS_TIME_BUCKET_TO_DAYS
+
 
 class RandomSampleCache:
     def __init__(
@@ -328,6 +360,8 @@ def is_att_token(token: str):
         "i-H"
     ):  # i-D7 and exclude hour tokens
         return True
+    elif is_ethos_time_bucket_token(token):  # e.g. "3mt-6mt" / "i-3mt-6mt"
+        return True
     return False
 
 
@@ -355,7 +389,10 @@ def is_inpatient_att_token(token: str):
     :param token: Token to check.
     :return: True if the token is an inpatient ATT token, False otherwise.
     """
-    return INPATIENT_ATT_PATTERN.match(token)
+    if INPATIENT_ATT_PATTERN.match(token):
+        return True
+    # e.g. "i-3mt-6mt" (ETHOS/CoMET inpatient time bucket, not covered by INPATIENT_ATT_PATTERN)
+    return token.startswith("i-") and is_ethos_time_bucket_token(token)
 
 
 def extract_time_interval_in_days(token: str):
@@ -377,6 +414,9 @@ def extract_time_interval_in_days(token: str):
             return int(token[1:]) * 365
         elif token == "LT":
             return 365 * 3
+        elif is_ethos_time_bucket_token(token):  # "3mt-6mt" / "i-3mt-6mt"
+            bucket = token[2:] if token.startswith("i-") else token
+            return ETHOS_TIME_BUCKET_TO_DAYS[bucket]
         elif token[:3] == "VS-":  # VS-D7-VE
             part = token.split("-")[1]
             if part.startswith("LT"):

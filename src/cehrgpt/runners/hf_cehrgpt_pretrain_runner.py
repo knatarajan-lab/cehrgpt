@@ -25,7 +25,7 @@ from cehrbert.runners.runner_util import (
 from datasets import Dataset, DatasetDict, IterableDatasetDict, load_from_disk
 from transformers import EarlyStoppingCallback, Trainer, set_seed
 from transformers.trainer_utils import is_main_process
-from transformers.utils import is_flash_attn_2_available, logging
+from transformers.utils import logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import (
@@ -39,9 +39,13 @@ from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.omop.ontology import Ontology
 from cehrgpt.runners.data_utils import get_torch_dtype, load_patient_splits, filter_by_patient_ids
-from cehrgpt.runners.gpt_runner_util import parse_runner_args
+from cehrgpt.runners.gpt_runner_util import (
+    parse_runner_args,
+    resolve_attn_implementation,
+)
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.runners.sample_packing_trainer import SamplePackingTrainer
+from cehrgpt.tools.instability_probe import InstabilityProbe
 
 LOG = logging.get_logger("transformers")
 
@@ -139,8 +143,9 @@ def load_and_create_model(
     cehrgpt_args: CehrGPTArguments,
     tokenizer: CehrGptTokenizer,
 ) -> CEHRGPT2LMHeadModel:
-    attn_implementation = (
-        "flash_attention_2" if is_flash_attn_2_available() else "eager"
+    attn_implementation = resolve_attn_implementation(
+        backbone=cehrgpt_args.backbone,
+        requested=cehrgpt_args.force_attn_implementation,
     )
     torch_dtype = get_torch_dtype(model_args.torch_dtype)
     model_abspath = os.path.expanduser(model_args.model_name_or_path)
@@ -221,6 +226,14 @@ def load_and_create_model(
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
             n_inner=cehrgpt_args.inner_dim,
             decoder_mlp=cehrgpt_args.decoder_mlp,
+            backbone=cehrgpt_args.backbone,
+            rms_norm_eps=cehrgpt_args.rms_norm_eps,
+            num_key_value_heads=cehrgpt_args.num_key_value_heads,
+            rope_theta=cehrgpt_args.rope_theta,
+            use_qk_norm=cehrgpt_args.use_qk_norm,
+            resid_pdrop=cehrgpt_args.resid_pdrop,
+            embd_pdrop=cehrgpt_args.embd_pdrop,
+            attn_pdrop=cehrgpt_args.attn_pdrop,
             **model_args_cehrgpt,
         )
 
@@ -557,6 +570,10 @@ def main():
                 model_args.early_stopping_patience,
                 cehrgpt_args.early_stopping_threshold,
             )
+        )
+    if cehrgpt_args.instability_probe:
+        callbacks.append(
+            InstabilityProbe(every=cehrgpt_args.instability_probe_every)
         )
 
     if cehrgpt_args.sample_packing:

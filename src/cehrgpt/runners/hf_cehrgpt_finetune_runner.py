@@ -6,6 +6,7 @@ import shutil
 from datetime import datetime
 from functools import partial
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -36,7 +37,7 @@ from transformers import (
     set_seed,
 )
 from transformers.trainer_utils import is_main_process
-from transformers.utils import is_flash_attn_2_available, logging
+from transformers.utils import logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import (
@@ -56,7 +57,11 @@ from cehrgpt.runners.data_utils import (
     get_torch_dtype,
     prepare_finetune_dataset,
 )
-from cehrgpt.runners.gpt_runner_util import parse_runner_args
+from cehrgpt.runners.gpt_runner_util import (
+    parse_runner_args,
+    read_backbone,
+    resolve_attn_implementation,
+)
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.runners.hyperparameter_search_util import perform_hyperparameter_search
@@ -140,6 +145,7 @@ def load_finetuned_model(
     model_args: ModelArguments,
     training_args: TrainingArguments,
     model_name_or_path: str,
+    cehrgpt_args: Optional[CehrGPTArguments] = None,
 ) -> CEHRGPTPreTrainedModel:
     if model_args.finetune_model_type == FineTuneModelType.POOLING.value:
         finetune_model_cls = CehrGptForClassification
@@ -147,8 +153,10 @@ def load_finetuned_model(
         raise ValueError(
             f"finetune_model_type can be one of the following types {FineTuneModelType.POOLING.value}"
         )
-    attn_implementation = (
-        "flash_attention_2" if is_flash_attn_2_available() else "eager"
+    # The backbone comes from the pretrained checkpoint, not from the fine-tuning args.
+    attn_implementation = resolve_attn_implementation(
+        backbone=read_backbone(model_name_or_path),
+        requested=cehrgpt_args.force_attn_implementation if cehrgpt_args else None,
     )
     torch_dtype = get_torch_dtype(model_args.torch_dtype)
     # Try to create a new model based on the base model
@@ -169,7 +177,7 @@ def model_init(
     tokenizer: CehrGptTokenizer,
 ):
     model = load_finetuned_model(
-        model_args, training_args, model_args.model_name_or_path
+        model_args, training_args, model_args.model_name_or_path, cehrgpt_args
     )
 
     if cehrgpt_args.class_weights:
@@ -491,7 +499,9 @@ def do_predict(
 
     # Load model and LoRA adapters if applicable
     model = (
-        load_finetuned_model(model_args, training_args, training_args.output_dir)
+        load_finetuned_model(
+            model_args, training_args, training_args.output_dir, cehrgpt_args
+        )
         if not model_args.use_lora
         else load_lora_model(model_args, training_args, cehrgpt_args)
     )
@@ -581,7 +591,7 @@ def load_lora_model(
 ) -> PeftModel:
     LOG.info("Loading base model from %s", model_args.model_name_or_path)
     model = load_finetuned_model(
-        model_args, training_args, model_args.model_name_or_path
+        model_args, training_args, model_args.model_name_or_path, cehrgpt_args
     )
     # Enable include_values when include_values is set to be False during pre-training
     if model_args.include_values and not model.cehrgpt.include_values:

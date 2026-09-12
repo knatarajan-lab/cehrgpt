@@ -37,6 +37,7 @@ from cehrgpt.models.hf_modeling_outputs import (
     CehrGptOutputWithPast,
     CehrGptSequenceClassifierOutput,
 )
+from cehrgpt.models.qwen2 import Qwen2Block
 
 logger = logging.get_logger(__name__)
 
@@ -182,9 +183,12 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
     base_model_prefix = "cehrgpt"
     is_parallelizable = True
     supports_gradient_checkpointing = True
-    _no_split_modules = ["GPT2Block"]
+    _no_split_modules = ["GPT2Block", "Qwen2Block"]
     _skip_keys_device_placement = "past_key_values"
     _supports_flash_attn_2 = True
+    # SDPA is implemented by the qwen2 backbone only; resolve_attn_implementation
+    # refuses to select it for the gpt2 backbone, whose attention always runs eager.
+    _supports_sdpa = True
 
     def __init__(self, *inputs, **kwargs):
         super().__init__(*inputs, **kwargs)
@@ -204,6 +208,8 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
         elif isinstance(module, nn.LayerNorm):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
+        elif isinstance(module, RMSNorm):
+            module.weight.data.fill_(1.0)
 
         # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
         #   > A modified initialization which accounts for the accumulation on the residual path with model depth. Scale
@@ -211,8 +217,12 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
         #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
         #
         # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
+        #
+        # "c_proj" covers the GPT-2 block (attention output and MLP output); "o_proj" and
+        # "down_proj" are the corresponding residual-path projections in the Qwen2 block
+        # and the Llama-style MLP, which would otherwise miss this scaling entirely.
         for name, p in module.named_parameters():
-            if name == "c_proj.weight":
+            if name in ("c_proj.weight", "o_proj.weight", "down_proj.weight"):
                 # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
                 p.data.normal_(
                     mean=0.0,
@@ -464,13 +474,30 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             )
 
         self.drop = nn.Dropout(config.embd_pdrop)
+        # The decoder stack is the only backbone-specific part of this model; the
+        # embedding logic above and every head/output object downstream are shared.
+        backbone = getattr(config, "backbone", "gpt2")
+        # Declaring `_supports_sdpa` makes transformers auto-select "sdpa" for every
+        # CEHR-GPT model, but only the qwen2 block implements it - GPT2AttentionRoPE
+        # always runs eager math. Normalise so the config does not claim otherwise and
+        # the gpt2 backbone keeps its previous behaviour exactly.
+        if (
+            backbone != "qwen2"
+            and getattr(config, "_attn_implementation", "eager") == "sdpa"
+        ):
+            config._attn_implementation = "eager"
+        block_class = Qwen2Block if backbone == "qwen2" else GPT2Block
         gpt_blocks = []
         for i in range(config.num_hidden_layers):
-            gpt_block = GPT2Block(config, layer_idx=i)
+            gpt_block = block_class(config, layer_idx=i)
             gpt_block.is_causal = True
             gpt_blocks.append(gpt_block)
         self.h = nn.ModuleList(gpt_blocks)
-        self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        self.ln_f = (
+            RMSNorm(self.embed_dim, eps=getattr(config, "rms_norm_eps", 1e-6))
+            if backbone == "qwen2"
+            else nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        )
 
         # Model parallel
         self.model_parallel = False
@@ -659,8 +686,9 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
 
         if past_key_values is None:
             past_key_values = tuple([None] * len(self.h))
+            past_length = 0
         else:
-            past_key_values[0][0].size(-2)
+            past_length = past_key_values[0][0].size(-2)
 
         # GPT2Attention mask.
         if attention_mask is not None:
@@ -714,6 +742,42 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                     dtype=self.dtype
                 )  # fp16 compatibility
                 attention_mask = (1.0 - attention_mask) * torch.finfo(self.dtype).min
+
+                # SDPA cannot take `is_causal=True` together with an explicit mask, so
+                # causality has to be folded into the mask. Done once here rather than
+                # per layer: at a 16k packed sequence length the combined mask is a
+                # sizeable tensor, and every layer would otherwise rebuild an identical
+                # copy. The eager path does not need this - it applies its own `bias`
+                # buffer inside the attention module.
+                if (
+                    getattr(self.config, "backbone", "gpt2") == "qwen2"
+                    and getattr(self.config, "_attn_implementation", "eager") == "sdpa"
+                ):
+                    query_length = input_shape[-1]
+                    key_length = past_length + query_length
+                    causal_mask = self.h[0].attn.bias[
+                        :, :, key_length - query_length : key_length, :key_length
+                    ]
+                    attention_mask = attention_mask.masked_fill(
+                        ~causal_mask, torch.finfo(self.dtype).min
+                    )
+                    # Sample packing zeroes the entire row of every separator position,
+                    # leaving it attending to nothing. SDPA's fused kernels return NaN
+                    # for such rows (the math backend returns a finite average, which is
+                    # why this only shows up on GPU), and that NaN spreads to every
+                    # position in later layers via `0 * NaN` when their column is
+                    # weighted. Let those positions attend to themselves so no row is
+                    # ever empty. Rows that already attend somewhere are unaffected,
+                    # because a position's own diagonal entry is unmasked whenever it is
+                    # a real token. The values produced at separator positions are
+                    # discarded downstream: their labels are -100 and their columns stay
+                    # masked for every other query, so nothing can leak.
+                    query_indices = torch.arange(
+                        query_length, device=attention_mask.device
+                    )
+                    attention_mask[
+                        ..., query_indices, query_indices + (key_length - query_length)
+                    ] = 0.0
 
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
@@ -782,6 +846,26 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             )
 
         hidden_states = self.drop(input_embeddings)
+
+        if getattr(self.config, "backbone", "gpt2") == "qwen2":
+            # The Qwen2 backbone uses standard sequential positions for its rotary
+            # embeddings. `position_ids` arrives here holding patient ages (that is what
+            # the GPT-2 backbone's age-based rotary consumes), so it is deliberately
+            # replaced rather than reused. Built after the causal-SFM expansion above so
+            # the length always matches `hidden_states`.
+            # Under sample packing the positions run continuously across packed segments;
+            # that is harmless because rotary embeddings are relative and the
+            # block-diagonal attention mask already prevents cross-segment attention.
+            position_ids = (
+                torch.arange(
+                    past_length,
+                    past_length + hidden_states.shape[1],
+                    dtype=torch.long,
+                    device=hidden_states.device,
+                )
+                .unsqueeze(0)
+                .expand(hidden_states.shape[0], -1)
+            )
 
         output_shape = (-1,) + input_shape[1:] + (hidden_states.size(-1),)
 

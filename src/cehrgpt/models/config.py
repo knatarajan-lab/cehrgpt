@@ -2,6 +2,8 @@ from typing import Dict, List
 
 from transformers import PretrainedConfig
 
+SUPPORTED_BACKBONES = ("gpt2", "qwen2")
+
 
 class CEHRGPTConfig(PretrainedConfig):
     """
@@ -77,6 +79,28 @@ class CEHRGPTConfig(PretrainedConfig):
         reorder_and_upcast_attn (`bool`, *optional*, defaults to `False`):
             Whether to scale keys (K) prior to computing attention (dot-product) and upcast attention
             dot-product/softmax to float() when training with mixed precision.
+        backbone (`str`, *optional*, defaults to `"gpt2"`):
+            Which decoder stack to build, one of `("gpt2", "qwen2")`. `"gpt2"` uses the GPT-2 block
+            (LayerNorm, `Conv1D` attention projections, optional age-based rotary embeddings).
+            `"qwen2"` uses the Qwen2-style block (RMSNorm, `nn.Linear` q/k/v/o projections, per-head
+            rotary embeddings over *sequential* positions). The custom embedding stack, the task heads
+            and all output objects are identical for both backbones.
+        rms_norm_eps (`float`, *optional*, defaults to 1e-06):
+            The epsilon used by the RMSNorm layers. Only used when `backbone="qwen2"`.
+        num_key_value_heads (`int`, *optional*):
+            Number of key/value heads for grouped-query attention. `None` means it is set to
+            `num_attention_heads`, i.e. standard multi-head attention. Only used when
+            `backbone="qwen2"`.
+        rope_theta (`float`, *optional*, defaults to 10000.0):
+            The base period of the rotary embeddings. Only used when `backbone="qwen2"`.
+        use_qk_norm (`bool`, *optional*, defaults to `False`):
+            Whether to apply RMSNorm to each head's query and key vector before the rotary
+            embedding, as introduced in Qwen3. Qwen2 has nothing bounding the scale of the
+            attention logits, which is a documented source of instability when training
+            from random initialisation; Qwen3 added this "to ensure stable training".
+            Adds two `head_dim`-sized gains per layer, so a checkpoint saved with this
+            enabled cannot be loaded with it disabled and vice versa. Only used when
+            `backbone="qwen2"`.
     """
 
     model_type = "cehrgpt"
@@ -108,6 +132,11 @@ class CEHRGPTConfig(PretrainedConfig):
         activation_function="gelu_new",
         decoder_mlp="GPT2MLP",
         mlp_bias=False,
+        backbone="gpt2",
+        rms_norm_eps=1e-6,
+        num_key_value_heads=None,
+        rope_theta=10000.0,
+        use_qk_norm=False,
         resid_pdrop=0.1,
         embd_pdrop=0.1,
         attn_pdrop=0.1,
@@ -172,6 +201,23 @@ class CEHRGPTConfig(PretrainedConfig):
         self.activation_function = activation_function
         self.decoder_mlp = decoder_mlp
         self.mlp_bias = mlp_bias
+        if backbone not in SUPPORTED_BACKBONES:
+            raise ValueError(
+                f"backbone must be one of {SUPPORTED_BACKBONES}, got {backbone!r}"
+            )
+        self.backbone = backbone
+        self.rms_norm_eps = rms_norm_eps
+        # None means standard multi-head attention (no grouped-query attention)
+        self.num_key_value_heads = (
+            num_key_value_heads if num_key_value_heads is not None else n_head
+        )
+        if n_head % self.num_key_value_heads != 0:
+            raise ValueError(
+                f"num_attention_heads ({n_head}) must be divisible by "
+                f"num_key_value_heads ({self.num_key_value_heads})"
+            )
+        self.rope_theta = rope_theta
+        self.use_qk_norm = use_qk_norm
         self.resid_pdrop = resid_pdrop
         self.embd_pdrop = embd_pdrop
         self.attn_pdrop = attn_pdrop
