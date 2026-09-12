@@ -785,7 +785,10 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         elif "[VS]" in self._tokenizer.get_vocab():
             return self._convert_token_to_id("[VS]")
         else:
-            raise RuntimeError("The tokenizer does not contain either VS or [VS]")
+            # Some tokenization schemes (e.g. ETHOS/CoMET) do not use VS/[VS] tokens at all,
+            # so fall back to pad_token_id instead of failing every caller.
+            LOG.warning("The tokenizer does not contain either VS or [VS]")
+            return self.pad_token_id
 
     @property
     def ve_token_id(self):
@@ -796,7 +799,10 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         elif "[VE]" in self._tokenizer.get_vocab():
             return self._convert_token_to_id("[VE]")
         else:
-            raise RuntimeError("The tokenizer does not contain either VE or [VE]")
+            # Some tokenization schemes (e.g. ETHOS/CoMET) do not use VE/[VE] tokens at all,
+            # so fall back to pad_token_id instead of failing every caller.
+            LOG.warning("The tokenizer does not contain either VE or [VE]")
+            return self.pad_token_id
 
     @property
     def numeric_concept_ids(self):

@@ -192,10 +192,18 @@ log "  --observation_window=$OBSERVATION_WINDOW"
 TEMP_COHORT_LIST="$LOG_DIR/cohort_list_${TIMESTAMP}.txt"
 > "$TEMP_COHORT_LIST" # Clear the file
 
-# Find all valid cohorts (directories with train and test subdirectories)
+# Find all valid cohorts.
+# When --tokenized_full_dataset_path is set, cohort sequences are sliced out of the
+# pre-tokenized dataset (see extract_cohort_sequences), so any subdirectory is a valid
+# cohort. Otherwise require train/ and test/ subdirectories.
 for cohort_dir in "$BASE_DIR"/*; do
-    if [ -d "$cohort_dir" ] && [ -d "$cohort_dir/train" ] && [ -d "$cohort_dir/test" ]; then
-        cohort_name=$(basename "$cohort_dir")
+    [ -d "$cohort_dir" ] || continue
+    cohort_name=$(basename "$cohort_dir")
+    # LOG_DIR lives directly under BASE_DIR, so it would otherwise be picked up as a cohort
+    [ "$cohort_name" = "logs" ] && continue
+    if [ -n "$TOKENIZED_FULL_DATASET_PATH" ]; then
+        echo "$cohort_name" >> "$TEMP_COHORT_LIST"
+    elif [ -d "$cohort_dir/train" ] && [ -d "$cohort_dir/test" ]; then
         echo "$cohort_name" >> "$TEMP_COHORT_LIST"
     fi
 done
@@ -235,10 +243,21 @@ while read -r cohort_name; do
     # Create output directory if it doesn't exist
     mkdir -p "$output_dir"
 
+    # --data_folder/--test_data_folder assume a per-cohort train/ and test/ directory
+    # layout. That doesn't apply when --tokenized_full_dataset_path is set (the cohort
+    # may be a single flat directory, and the train/test split comes from the
+    # pre-tokenized dataset instead) -- --data_folder is a required argument, so we still
+    # pass it (pointing at the cohort dir itself), but --test_data_folder is dropped since
+    # it's unused in that mode.
+    if [ -n "$TOKENIZED_FULL_DATASET_PATH" ]; then
+        DATA_FOLDER_ARG="--data_folder \"$COHORT_FOLDER/$cohort_name\""
+    else
+        DATA_FOLDER_ARG="--data_folder \"$BASE_DIR/$cohort_name/train/\" --test_data_folder \"$BASE_DIR/$cohort_name/test/\""
+    fi
+
     # Prepare command for feature extraction
     FEATURE_CMD="python -u -m cehrgpt.tools.linear_prob.compute_cehrgpt_features \
-        --data_folder \"$BASE_DIR/$cohort_name/train/\" \
-        --test_data_folder \"$BASE_DIR/$cohort_name/test/\" \
+        $DATA_FOLDER_ARG \
         --dataset_prepared_path \"$DATASET_PREPARED_PATH\" \
         --model_name_or_path \"$MODEL_PATH\" \
         --tokenizer_name_or_path \"$MODEL_PATH\" \
@@ -255,8 +274,9 @@ while read -r cohort_name; do
 
     # Add tokenized_full_dataset_path if provided, so the cohort sequences are sliced
     # out of the fully tokenized dataset instead of being re-tokenized per cohort.
-    # --cohort_folder points at the per-cohort dir (containing train/ and test/)
-    # so extract_cohort_sequences can pull person_ids from both splits at once.
+    # --cohort_folder points at the per-cohort dir (parquet files may be nested in
+    # subdirectories, e.g. train/+test/ or a single data/ folder -- extract_cohort_sequences
+    # globs recursively) so it can pull person_ids from all of them at once.
     if [ -n "$TOKENIZED_FULL_DATASET_PATH" ]; then
         FEATURE_CMD="$FEATURE_CMD \
         --tokenized_full_dataset_path \"$TOKENIZED_FULL_DATASET_PATH\" \
