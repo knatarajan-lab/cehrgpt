@@ -7,6 +7,11 @@ usage() {
     echo "Options:"
     echo "  --base_dir=DIR                 Base directory containing cohorts (required)"
     echo "  --dataset_prepared_path=PATH   Path to prepared dataset (required)"
+    echo "  --tokenized_full_dataset_path=PATH  Path to the fully tokenized dataset, used to slice out"
+    echo "                                 cohort sequences instead of re-tokenizing per cohort (optional)"
+    echo "  --cohort_folder=DIR            Base directory containing per-cohort subdirectories used to"
+    echo "                                 resolve person_ids/labels for --tokenized_full_dataset_path"
+    echo "                                 (optional, defaults to --base_dir)"
     echo "  --model_path=PATH              Path to pre-trained model and tokenizer (required)"
     echo "  --preprocessing_workers=NUM    Number of preprocessing workers (required)"
     echo "  --batch_size=NUM               Batch size for evaluation (required)"
@@ -15,6 +20,7 @@ usage() {
     echo "  --max_tokens_per_batch=NUM     Maximum tokens per batch (default: 16384)"
     echo "  --torch_type=TYPE              Torch data type (default: float32)"
     echo "  --disable_sample_packing       Disable sample packing (enabled by default)"
+    echo "  --observation_window=NUM       Observation window in days (optional, default: None)"
     echo ""
     echo "Example:"
     echo "  $0 --base_dir=/path/to/cohorts --dataset_prepared_path=/path/to/dataset_prepared \\"
@@ -37,6 +43,15 @@ for arg in "$@"; do
             ;;
         --dataset_prepared_path=*)
             DATASET_PREPARED_PATH="${arg#*=}"
+            ;;
+        --tokenized_full_dataset_path=*)
+            TOKENIZED_FULL_DATASET_PATH="${arg#*=}"
+            ;;
+        --cohort_folder=*)
+            COHORT_FOLDER="${arg#*=}"
+            ;;
+        --observation_window=*)
+            OBSERVATION_WINDOW="${arg#*=}"
             ;;
         --model_path=*)
             MODEL_PATH="${arg#*=}"
@@ -86,6 +101,19 @@ fi
 
 if [ ! -d "$DATASET_PREPARED_PATH" ]; then
     echo "Error: Dataset prepared path does not exist: $DATASET_PREPARED_PATH"
+    exit 1
+fi
+
+if [ -n "$TOKENIZED_FULL_DATASET_PATH" ] && [ ! -d "$TOKENIZED_FULL_DATASET_PATH" ]; then
+    echo "Error: Tokenized full dataset path does not exist: $TOKENIZED_FULL_DATASET_PATH"
+    exit 1
+fi
+
+# Default cohort_folder to base_dir if not explicitly provided
+if [ -z "$COHORT_FOLDER" ]; then
+    COHORT_FOLDER="$BASE_DIR"
+elif [ ! -d "$COHORT_FOLDER" ]; then
+    echo "Error: Cohort folder does not exist: $COHORT_FOLDER"
     exit 1
 fi
 
@@ -148,6 +176,8 @@ log "Starting feature extraction and model training process"
 log "Configuration:"
 log "  --base_dir=$BASE_DIR"
 log "  --dataset_prepared_path=$DATASET_PREPARED_PATH"
+log "  --tokenized_full_dataset_path=$TOKENIZED_FULL_DATASET_PATH"
+log "  --cohort_folder=$COHORT_FOLDER"
 log "  --model_path=$MODEL_PATH"
 log "  --preprocessing_workers=$PREPROCESSING_WORKERS"
 log "  --batch_size=$BATCH_SIZE"
@@ -156,6 +186,7 @@ log "  --model_name=$MODEL_NAME"
 log "  --max_tokens_per_batch=$MAX_TOKENS_PER_BATCH"
 log "  --torch_type=$TORCH_TYPE"
 log "  --disable_sample_packing=$DISABLE_SAMPLE_PACKING"
+log "  --observation_window=$OBSERVATION_WINDOW"
 
 # Find valid cohorts and write to a temp file
 TEMP_COHORT_LIST="$LOG_DIR/cohort_list_${TIMESTAMP}.txt"
@@ -220,6 +251,21 @@ while read -r cohort_name; do
     # Add sample packing flag if not disabled
     if [ "$DISABLE_SAMPLE_PACKING" = "false" ]; then
         FEATURE_CMD="$FEATURE_CMD --sample_packing"
+    fi
+
+    # Add tokenized_full_dataset_path if provided, so the cohort sequences are sliced
+    # out of the fully tokenized dataset instead of being re-tokenized per cohort.
+    # --cohort_folder points at the per-cohort dir (containing train/ and test/)
+    # so extract_cohort_sequences can pull person_ids from both splits at once.
+    if [ -n "$TOKENIZED_FULL_DATASET_PATH" ]; then
+        FEATURE_CMD="$FEATURE_CMD \
+        --tokenized_full_dataset_path \"$TOKENIZED_FULL_DATASET_PATH\" \
+        --cohort_folder \"$COHORT_FOLDER/$cohort_name\""
+    fi
+
+    # Add observation_window if provided
+    if [ -n "$OBSERVATION_WINDOW" ]; then
+        FEATURE_CMD="$FEATURE_CMD --observation_window \"$OBSERVATION_WINDOW\""
     fi
 
     # Step 1: Feature extraction
