@@ -300,25 +300,27 @@ def main():
         batch_sampler=test_batch_sampler,
     )
 
-    if data_args.is_data_in_meds:
-        demographics_dict = dict()
-    else:
-        # Loading demographics
-        print("Loading demographics as a dictionary")
-        demographics_df = pd.concat(
-            [
-                pd.read_parquet(
-                    data_dir,
-                    columns=[
-                        "person_id",
-                        "index_date",
-                        "gender_concept_id",
-                        "race_concept_id",
-                    ],
-                )
-                for data_dir in [data_args.data_folder, data_args.test_data_folder]
-            ]
-        )
+    # Loading demographics
+    print("Loading demographics as a dictionary")
+    demographics_df = pd.concat(
+        [
+            pd.read_parquet(data_dir)
+            for data_dir in [data_args.data_folder, data_args.test_data_folder]
+        ]
+    )
+    # Auto-detect MEDS format from the actual schema, regardless of the is_data_in_meds flag
+    is_meds = data_args.is_data_in_meds or "subject_id" in demographics_df.columns
+    id_col, time_col = (
+        ("subject_id", "prediction_time") if is_meds else ("person_id", "index_date")
+    )
+    if {"gender_concept_id", "race_concept_id"}.issubset(demographics_df.columns):
+        demographics_df = demographics_df[
+            [id_col, time_col, "gender_concept_id", "race_concept_id"]
+        ]
+        if is_meds:
+            demographics_df = demographics_df.rename(
+                columns={id_col: "person_id", time_col: "index_date"}
+            )
 
         demographics_df["index_date"] = (
             demographics_df["index_date"].dt.tz_localize("UTC")
@@ -332,6 +334,8 @@ def main():
             }
             for _, row in demographics_df.iterrows()
         }
+    else:
+        demographics_dict = dict()
 
     data_loaders = [("train", train_loader), ("test", test_dataloader)]
 
