@@ -365,7 +365,7 @@ def extract_cohort_sequences(
         RuntimeError: If any `person_id` in the cohort is missing from the tokenized dataset.
     """
 
-    cohort = pl.read_parquet(os.path.join(data_args.cohort_folder, "*.parquet"))
+    cohort = pl.read_parquet(os.path.join(data_args.cohort_folder, "**", "*.parquet"))
     if data_args.is_data_in_meds:
         cohort = cohort.rename(
             mapping={
