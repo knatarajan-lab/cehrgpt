@@ -1,6 +1,6 @@
 import math
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -28,10 +28,15 @@ class TimeToEvent:
     time_intervals: List[int]
     outcome_events: List[str]
     time_interval_probability_table: List[Dict[str, Any]]
+    # The raw generated continuation for every simulated trial (not just the ones that
+    # satisfied the stopping criteria), kept for manual investigation of model behavior.
+    generated_trajectories: List[List[str]] = field(default_factory=list)
 
 
 def create_time_to_event(
-    time_event_tuples: List[Tuple[str, int]], num_of_simulations: int
+    time_event_tuples: List[Tuple[str, int]],
+    num_of_simulations: int,
+    generated_trajectories: Optional[List[List[str]]] = None,
 ) -> TimeToEvent:
     outcome_events, time_intervals = zip(*time_event_tuples)
     time_buckets = [time_month_token(_) for _ in time_intervals]
@@ -55,6 +60,7 @@ def create_time_to_event(
         most_likely_time=most_common_item,
         num_of_simulations=num_of_simulations,
         time_interval_probability_table=sorted_probability_table,
+        generated_trajectories=generated_trajectories or [],
     )
 
 
@@ -143,6 +149,7 @@ class TimeToEventModel:
         patient_history_length = len(partial_history)
         time_event_tuples = []
         seqs_failed_to_convert = []
+        generated_trajectories = []
         n_trial = 0
         num_return_sequences = self.generation_config.num_return_sequences
         max_new_tokens = self.generation_config.max_new_tokens
@@ -161,6 +168,7 @@ class TimeToEventModel:
                 time_delta = 0
                 success = False
                 generated_trajectory = seq[patient_history_length:]
+                generated_trajectories.append(generated_trajectory)
                 for i, next_token in enumerate(generated_trajectory):
                     visit_counter += int(is_visit_start(next_token))
                     if (
@@ -200,7 +208,9 @@ class TimeToEventModel:
 
         # Count the occurrences of each time tokens for each concept
         return (
-            create_time_to_event(time_event_tuples, len(time_event_tuples))
+            create_time_to_event(
+                time_event_tuples, len(time_event_tuples), generated_trajectories
+            )
             if len(time_event_tuples) > 0
             else None
         )
