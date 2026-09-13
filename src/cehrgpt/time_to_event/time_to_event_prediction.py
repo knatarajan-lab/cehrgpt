@@ -72,6 +72,7 @@ def load_time_to_event_dataset(args) -> Dataset:
             data_folder=args.cohort_folder,
             dataset_prepared_path=args.output_folder,
             cohort_folder=args.cohort_folder,
+            observation_window=args.observation_window,
         )
         cehrgpt_args = CehrGPTArguments(
             tokenized_full_dataset_path=args.tokenized_full_dataset_path
@@ -422,6 +423,17 @@ def create_arg_parser():
         help="Directory containing the cohort's parquet files (person_id/index_date/label, "
         "or MEDS subject_id/prediction_time/boolean_value). Used with "
         "--tokenized_full_dataset_path.",
+        required=False,
+        default=None,
+    )
+    base_arg_parser.add_argument(
+        "--observation_window",
+        dest="observation_window",
+        action="store",
+        type=int,
+        help="Observation window in days before the index date to extract the sequence "
+        "from. Used with --tokenized_full_dataset_path; defaults to the patient's full "
+        "history up to the index date.",
         required=False,
         default=None,
     )
