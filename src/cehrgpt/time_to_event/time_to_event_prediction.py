@@ -9,8 +9,10 @@ from typing import Any, Dict, List
 import pandas as pd
 import torch
 import yaml
+from cehrbert.data_generators.hf_data_generator.cache_util import CacheFileCollector
+from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from cehrbert.runners.runner_util import load_parquet_as_dataset
-from datasets import Dataset
+from datasets import Dataset, concatenate_datasets
 from tqdm import tqdm
 from transformers.utils import is_flash_attn_2_available, logging
 
@@ -18,10 +20,12 @@ from cehrgpt.cehrgpt_args import create_inference_base_arg_parser
 from cehrgpt.gpt_utils import get_cehrgpt_output_folder, is_visit_end, is_visit_start
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.runners.data_utils import extract_cohort_sequences
 from cehrgpt.runners.gpt_runner_util import (
     read_backbone,
     resolve_attn_implementation,
 )
+from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.time_to_event.time_to_event_model import TimeToEventModel
 
 LOG = logging.get_logger("transformers")
@@ -56,7 +60,48 @@ def get_device():
     return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
+def load_time_to_event_dataset(args) -> Dataset:
+    if args.tokenized_full_dataset_path and args.cohort_folder:
+        LOG.info(
+            "Extracting cohort sequences from the pre-tokenized dataset at %s "
+            "using cohort_folder %s",
+            args.tokenized_full_dataset_path,
+            args.cohort_folder,
+        )
+        data_args = DataTrainingArguments(
+            data_folder=args.cohort_folder,
+            dataset_prepared_path=args.output_folder,
+            cohort_folder=args.cohort_folder,
+        )
+        cehrgpt_args = CehrGPTArguments(
+            tokenized_full_dataset_path=args.tokenized_full_dataset_path
+        )
+        processed_dataset = extract_cohort_sequences(
+            data_args, cehrgpt_args, CacheFileCollector()
+        )
+        dataset = concatenate_datasets(list(processed_dataset.values()))
+        dataset = dataset.rename_column("classifier_label", "label")
+        # num_of_concepts (if present) reflects the patient's full history length before
+        # slicing to the observation window; recompute it from the sliced concept_ids so
+        # the min_num_of_concepts filter below reflects the actual available context.
+        dataset = dataset.map(
+            lambda batch: {"num_of_concepts": [len(_) for _ in batch["concept_ids"]]},
+            batched=True,
+        )
+        return dataset
+    return load_parquet_as_dataset(args.dataset_folder)
+
+
 def main(args):
+    uses_tokenized_full_dataset = bool(
+        args.tokenized_full_dataset_path and args.cohort_folder
+    )
+    if not uses_tokenized_full_dataset and not args.dataset_folder:
+        raise RuntimeError(
+            "Either --dataset_folder, or both --tokenized_full_dataset_path and "
+            "--cohort_folder, must be provided."
+        )
+
     cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer_folder)
     cehrgpt_model = (
         CEHRGPT2LMHeadModel.from_pretrained(
@@ -158,7 +203,7 @@ def main(args):
         batch_size=args.batch_size,
         device=get_device(),
     )
-    dataset = load_parquet_as_dataset(args.dataset_folder)
+    dataset = load_time_to_event_dataset(args)
 
     def filter_func(examples):
         return [_ >= args.min_num_of_concepts for _ in examples["num_of_concepts"]]
@@ -173,9 +218,12 @@ def main(args):
     vocab = cehrgpt_tokenizer.get_vocab()
     tte_outputs = []
     for record in tqdm(test_dataset, total=len(test_dataset)):
-        sample_identifier = (
-            f"{record['person_id']}_{record['index_date'].strftime('%Y_%m_%d')}"
-        )
+        index_date = record["index_date"]
+        # extract_cohort_sequences produces index_date as a POSIX timestamp rather than
+        # a datetime object
+        if isinstance(index_date, (int, float)):
+            index_date = datetime.datetime.utcfromtimestamp(index_date)
+        sample_identifier = f"{record['person_id']}_{index_date.strftime('%Y_%m_%d')}"
         if acquire_lock_or_skip_if_already_exist(
             output_folder=temp_folder, sample_id=sample_identifier
         ):
@@ -222,7 +270,7 @@ def main(args):
         tte_outputs.append(
             {
                 "subject_id": record["person_id"],
-                "prediction_time": record["index_date"],
+                "prediction_time": index_date,
                 "visit_counter": visit_counter,
                 "boolean_value": label,
                 "predicted_boolean_probability": predicted_boolean_probability,
@@ -303,12 +351,16 @@ def filter_out_existing_results(
             )
 
         def filter_func(batched):
-            return [
-                (person_id, index_date.strftime("%Y-%m-%d")) not in cohort_members
-                for person_id, index_date in zip(
-                    batched["person_id"], batched["index_date"]
-                )
-            ]
+            keys = []
+            for person_id, index_date in zip(
+                batched["person_id"], batched["index_date"]
+            ):
+                # extract_cohort_sequences produces index_date as a POSIX timestamp
+                # rather than a datetime object
+                if isinstance(index_date, (int, float)):
+                    index_date = datetime.datetime.utcfromtimestamp(index_date)
+                keys.append((person_id, index_date.strftime("%Y-%m-%d")))
+            return [key not in cohort_members for key in keys]
 
         test_dataset = test_dataset.filter(filter_func, batched=True, batch_size=1000)
     return test_dataset
@@ -348,8 +400,30 @@ def create_arg_parser():
         "--dataset_folder",
         dest="dataset_folder",
         action="store",
-        help="The path for your dataset",
-        required=True,
+        help="The path for your dataset. Required unless both --tokenized_full_dataset_path "
+        "and --cohort_folder are provided.",
+        required=False,
+        default=None,
+    )
+    base_arg_parser.add_argument(
+        "--tokenized_full_dataset_path",
+        dest="tokenized_full_dataset_path",
+        action="store",
+        help="Path to a fully tokenized dataset. When provided together with "
+        "--cohort_folder, cohort sequences are sliced out of it (up to each patient's "
+        "index date) via extract_cohort_sequences instead of loading --dataset_folder.",
+        required=False,
+        default=None,
+    )
+    base_arg_parser.add_argument(
+        "--cohort_folder",
+        dest="cohort_folder",
+        action="store",
+        help="Directory containing the cohort's parquet files (person_id/index_date/label, "
+        "or MEDS subject_id/prediction_time/boolean_value). Used with "
+        "--tokenized_full_dataset_path.",
+        required=False,
+        default=None,
     )
     base_arg_parser.add_argument(
         "--num_return_sequences",
