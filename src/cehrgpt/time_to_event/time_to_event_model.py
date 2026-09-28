@@ -77,7 +77,13 @@ class TimeToEventModel:
         self.tokenizer = tokenizer
         self.model = model.eval()
         self.generation_config = generation_config
-        self.outcome_events = outcome_events
+        # Generated tokens are always decoded as strings, so outcome_events (which callers
+        # may build from int-typed concept ids, e.g. to query concept_ancestor) needs to be
+        # normalized to strings here so token matching in is_outcome_event actually works.
+        self.outcome_events = [
+            [str(token) for token in event] if isinstance(event, list) else str(event)
+            for event in outcome_events
+        ]
         self.device = device
         self.batch_size = batch_size
         self.max_sequence = model.config.n_positions
