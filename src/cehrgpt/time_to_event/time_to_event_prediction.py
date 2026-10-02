@@ -26,7 +26,10 @@ from cehrgpt.runners.gpt_runner_util import (
     resolve_attn_implementation,
 )
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
-from cehrgpt.time_to_event.time_to_event_model import TimeToEventModel
+from cehrgpt.time_to_event.time_to_event_model import (
+    TimeToEventModel,
+    validate_zero_shot_time_tokens,
+)
 
 LOG = logging.get_logger("transformers")
 
@@ -104,6 +107,7 @@ def main(args):
         )
 
     cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer_folder)
+    validate_zero_shot_time_tokens(cehrgpt_tokenizer.get_vocab())
     cehrgpt_model = (
         CEHRGPT2LMHeadModel.from_pretrained(
             args.model_folder,

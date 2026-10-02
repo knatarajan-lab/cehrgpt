@@ -1,7 +1,8 @@
 import math
+import re
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -11,11 +12,42 @@ from transformers import GenerationConfig
 from cehrgpt.gpt_utils import (
     extract_time_interval_in_days,
     is_att_token,
+    is_ethos_time_bucket_token,
     is_visit_end,
     is_visit_start,
 )
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+
+# WEEK, MONTH, CEHR_BERT and MIX time tokens (W2, M3, i-W1, W-1, ...)
+_UNSUPPORTED_TIME_TOKEN = re.compile(r"^(?:i-)?[WMY]-?\d+$")
+_DAY_TIME_TOKEN = re.compile(r"^(?:i-)?D\d+$")
+
+
+def validate_zero_shot_time_tokens(vocab_tokens: Iterable[str]) -> None:
+    """
+    Check that a tokenizer's time tokens are ones zero-shot prediction can convert to time.
+
+    Zero-shot accumulates the time of the generated trajectory from its time tokens, and only
+    the DAY (D{n}) and ETHOS/CoMET (e.g. 2mt-6mt, =6mt) token sets are supported.
+
+    :param vocab_tokens: The tokenizer's vocabulary tokens.
+    :raises ValueError: If the vocabulary has WEEK/MONTH/CEHR_BERT/MIX time tokens, or has no
+        DAY or ETHOS/CoMET time tokens at all.
+    """
+    tokens = list(vocab_tokens)
+    unsupported = sorted(t for t in tokens if _UNSUPPORTED_TIME_TOKEN.match(t))
+    if unsupported:
+        raise ValueError(
+            "Zero-shot time-to-event prediction only supports the DAY (D{n}) and "
+            "ETHOS/CoMET time tokens, but the tokenizer vocabulary has "
+            f"{len(unsupported)} week/month/year time tokens, e.g. {unsupported[:5]}."
+        )
+    if not any(_DAY_TIME_TOKEN.match(t) or is_ethos_time_bucket_token(t) for t in tokens):
+        raise ValueError(
+            "Zero-shot time-to-event prediction needs DAY (D{n}) or ETHOS/CoMET time "
+            "tokens to measure time, but the tokenizer vocabulary has neither."
+        )
 
 
 @dataclass
