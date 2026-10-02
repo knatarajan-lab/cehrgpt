@@ -21,13 +21,41 @@ INPATIENT_ATT_PATTERN = re.compile(r"(?:VS-|i-)D(\d+)(?:-VE)?")
 DEMOGRAPHIC_PROMPT_SIZE = 4
 logger = logging.get_logger("transformers")
 
-# ETHOS/CoMET time-interval tokens produced by cehrbert_data's ethos_time_token_func
-# (minute-resolution buckets). Between-visit gaps use the bare label (e.g. "3mt-6mt");
-# inpatient (within-visit) gaps prefix it with "i-" (e.g. "i-3mt-6mt"). The values below
-# approximate each bucket by the midpoint of its minute range, converted to days; the
-# open-ended ">=6mt" bucket uses its lower bound, mirroring how "LT" is handled elsewhere.
+# ETHOS/CoMET time-interval tokens, produced by cehrbert_data's ethos_time_tokens_func, which
+# mirrors ethos-ares' `time_intervals_spec`. Between-visit gaps use the bare label
+# (e.g. "2mt-6mt"); inpatient (within-visit) gaps prefix it with "i-" (e.g. "i-2mt-6mt") and
+# share the label's duration. Gaps of 180 days or more are written as "=6mt" repeated
+# round(gap / 180 days) times, so summing per-token durations stays consistent.
+#
+# Like ethos-ares at inference time (get_token_time), each token is converted back to time
+# with the mean duration estimated from the training data (interval_estimates.json from
+# ethos-ares' IntervalEstimator, omop/all), in days.
 ETHOS_TIME_BUCKET_TO_DAYS = {
-    "5m-15m": 0,
+    "5m-15m": 0.006483,
+    "15m-45m": 0.018534,
+    "45m-1h15m": 0.040307,
+    "1h15m-2h": 0.067193,
+    "2h-3h": 0.103266,
+    "3h-5h": 0.163644,
+    "5h-8h": 0.245683,
+    "8h-12h": 0.416427,
+    "12h-18h": 0.606374,
+    "18h-1d": 0.832514,
+    "1d-2d": 1.299552,
+    "2d-4d": 2.855607,
+    "4d-7d": 5.413992,
+    "7d-12d": 8.927872,
+    "12d-20d": 15.233339,
+    "20d-30d": 24.212421,
+    "30d-2mt": 42.535764,
+    "2mt-6mt": 105.303134,
+    "=6mt": 180.187472,
+}
+
+# Labels of the earlier 13-bucket ETHOS scheme (no overlap with the labels above except
+# "5m-15m", which the table above takes over). Kept so datasets and models tokenized with
+# that scheme keep parsing.
+LEGACY_ETHOS_TIME_BUCKET_TO_DAYS = {
     "15m-1h": 0,
     "1h-2h": 0,
     "2h-6h": 0,
@@ -41,6 +69,10 @@ ETHOS_TIME_BUCKET_TO_DAYS = {
     "3mt-6mt": 135,
     ">=6mt": 180,
 }
+ALL_ETHOS_TIME_BUCKET_TO_DAYS = {
+    **LEGACY_ETHOS_TIME_BUCKET_TO_DAYS,
+    **ETHOS_TIME_BUCKET_TO_DAYS,
+}
 
 
 def is_ethos_time_bucket_token(token: str) -> bool:
@@ -51,7 +83,7 @@ def is_ethos_time_bucket_token(token: str) -> bool:
     :return: True if the (optionally "i-"-prefixed) token is a known ETHOS time bucket.
     """
     bucket = token[2:] if token.startswith("i-") else token
-    return bucket in ETHOS_TIME_BUCKET_TO_DAYS
+    return bucket in ALL_ETHOS_TIME_BUCKET_TO_DAYS
 
 
 class RandomSampleCache:
@@ -416,7 +448,7 @@ def extract_time_interval_in_days(token: str):
             return 365 * 3
         elif is_ethos_time_bucket_token(token):  # "3mt-6mt" / "i-3mt-6mt"
             bucket = token[2:] if token.startswith("i-") else token
-            return ETHOS_TIME_BUCKET_TO_DAYS[bucket]
+            return ALL_ETHOS_TIME_BUCKET_TO_DAYS[bucket]
         elif token[:3] == "VS-":  # VS-D7-VE
             part = token.split("-")[1]
             if part.startswith("LT"):

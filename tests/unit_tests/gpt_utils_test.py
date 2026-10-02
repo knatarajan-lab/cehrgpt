@@ -2,11 +2,13 @@ import random
 import unittest
 
 from cehrgpt.gpt_utils import (
+    ETHOS_TIME_BUCKET_TO_DAYS,
     RandomSampleCache,
     convert_time_interval_to_time_tuple,
     extract_time_interval_in_days,
     generate_artificial_time_tokens,
     is_att_token,
+    is_ethos_time_bucket_token,
     is_inpatient_att_token,
     is_visit_start,
     random_slice_gpt_sequence,
@@ -162,6 +164,35 @@ class TestGenerateArtificialTimeTokens(unittest.TestCase):
         self.assertTrue("W1" in tokens)
         self.assertTrue("M1" in tokens)
         self.assertTrue("LT" in tokens)
+
+
+class TestEthosTimeTokens(unittest.TestCase):
+    def test_every_bucket_and_its_inpatient_variant_converts_to_days(self):
+        for bucket, days in ETHOS_TIME_BUCKET_TO_DAYS.items():
+            for token in (bucket, f"i-{bucket}"):
+                self.assertTrue(is_ethos_time_bucket_token(token), token)
+                self.assertTrue(is_att_token(token), token)
+                self.assertEqual(extract_time_interval_in_days(token), days, token)
+
+    def test_six_month_token_is_180_days_and_repeats_add_up(self):
+        self.assertAlmostEqual(extract_time_interval_in_days("=6mt"), 180, delta=1)
+        total = sum(extract_time_interval_in_days(t) for t in ["=6mt"] * 3)
+        self.assertAlmostEqual(total, 540, delta=3)
+
+    def test_legacy_bucket_labels_still_parse(self):
+        self.assertEqual(extract_time_interval_in_days("2w-1mt"), 22)
+        self.assertEqual(extract_time_interval_in_days("i-12h-1d"), 1)
+
+    def test_standard_att_tokens_are_unchanged(self):
+        self.assertEqual(extract_time_interval_in_days("D7"), 7)
+        self.assertEqual(extract_time_interval_in_days("W2"), 14)
+        self.assertEqual(extract_time_interval_in_days("i-D3"), 3)
+        self.assertEqual(extract_time_interval_in_days("LT"), 365 * 3)
+        self.assertFalse(is_ethos_time_bucket_token("D7"))
+
+    def test_non_time_tokens_are_not_time_buckets(self):
+        for token in ("ICD9CM/0/311", "Visit/OP", "VALUE_BIN/8", "Gender/F"):
+            self.assertFalse(is_ethos_time_bucket_token(token), token)
 
 
 if __name__ == "__main__":
