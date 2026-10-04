@@ -139,19 +139,19 @@ def generate_trajectories_per_batch(
             else:
                 valid_indices.append(i)
                 generated_epoch_times.append(
-                    datetime.datetime.utcfromtimestamp(current_cursor).replace(
-                        tzinfo=None
-                    )
+                    datetime.datetime.fromtimestamp(
+                        current_cursor, datetime.timezone.utc
+                    ).replace(tzinfo=None)
                 )
 
         trajectories.append(
             {
                 "subject_id": subject_ids[sample_i],
-                "prediction_time": datetime.datetime.utcfromtimestamp(
-                    prediction_times[sample_i]
+                "prediction_time": datetime.datetime.fromtimestamp(
+                    prediction_times[sample_i], datetime.timezone.utc
                 ).replace(tzinfo=None),
-                "window_last_observed_time": datetime.datetime.utcfromtimestamp(
-                    window_last_observed
+                "window_last_observed_time": datetime.datetime.fromtimestamp(
+                    window_last_observed, datetime.timezone.utc
                 ).replace(tzinfo=None),
                 "times": generated_epoch_times,
                 "concept_ids": np.asarray(concept_ids)[valid_indices].tolist(),

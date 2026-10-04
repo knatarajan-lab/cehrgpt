@@ -223,7 +223,9 @@ def main(args):
         # extract_cohort_sequences produces index_date as a POSIX timestamp rather than
         # a datetime object
         if isinstance(index_date, (int, float)):
-            index_date = datetime.datetime.utcfromtimestamp(index_date)
+            index_date = datetime.datetime.fromtimestamp(
+                index_date, datetime.timezone.utc
+            ).replace(tzinfo=None)
         sample_identifier = f"{record['person_id']}_{index_date.strftime('%Y_%m_%d')}"
         if acquire_lock_or_skip_if_already_exist(
             output_folder=temp_folder, sample_id=sample_identifier
@@ -359,7 +361,9 @@ def filter_out_existing_results(
                 # extract_cohort_sequences produces index_date as a POSIX timestamp
                 # rather than a datetime object
                 if isinstance(index_date, (int, float)):
-                    index_date = datetime.datetime.utcfromtimestamp(index_date)
+                    index_date = datetime.datetime.fromtimestamp(
+                        index_date, datetime.timezone.utc
+                    ).replace(tzinfo=None)
                 keys.append((person_id, index_date.strftime("%Y-%m-%d")))
             return [key not in cohort_members for key in keys]
 
