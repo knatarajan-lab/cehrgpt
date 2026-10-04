@@ -3,7 +3,7 @@ import json
 import os
 import random
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Optional
@@ -527,9 +527,9 @@ def do_predict(
 
             index_dates = list(
                 map(
-                    lambda posix_time: datetime.utcfromtimestamp(posix_time).replace(
-                        tzinfo=None
-                    ),
+                    lambda posix_time: datetime.fromtimestamp(
+                        posix_time, timezone.utc
+                    ).replace(tzinfo=None),
                     index_dates.tolist(),
                 )
             )

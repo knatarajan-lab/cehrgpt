@@ -377,8 +377,8 @@ def main():
 
                 prediction_time = list(
                     map(
-                        lambda posix_time: datetime.datetime.utcfromtimestamp(
-                            posix_time
+                        lambda posix_time: datetime.datetime.fromtimestamp(
+                            posix_time, datetime.timezone.utc
                         ).replace(tzinfo=None),
                         prediction_time_posix,
                     )
