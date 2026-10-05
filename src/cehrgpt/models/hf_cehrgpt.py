@@ -1,6 +1,6 @@
 import math
 import warnings
-from typing import List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -40,6 +40,27 @@ from cehrgpt.models.hf_modeling_outputs import (
 from cehrgpt.models.qwen2 import Qwen2Block
 
 logger = logging.get_logger(__name__)
+
+
+def replace_nonfinite_loss(
+    loss: torch.Tensor, name: str, anchor_parameters: Iterable[nn.Parameter]
+) -> torch.Tensor:
+    """
+    Return `loss` unchanged if it is finite, else log a warning and return an exact 0.0.
+
+    The replacement is the anchor parameters (NaN/inf mapped to finite values) multiplied by
+    0 rather than a bare constant: it keeps them in the autograd graph, so DDP does not flag
+    them as unused, and it back-propagates an exactly-zero gradient instead of NaN.
+    """
+    if torch.isfinite(loss).all():
+        return loss
+    logger.warning(
+        "Non-finite %s (%s); replacing it with 0.0 for this step.", name, loss.item()
+    )
+    anchor = sum(
+        torch.nan_to_num(p).sum().to(loss.device) for p in anchor_parameters
+    )
+    return (anchor * 0.0).to(loss.dtype)
 
 
 def extract_features_from_packed_sequence(
@@ -139,9 +160,9 @@ class VisitTimeToEventHead(nn.Module):
         )
         # Check for NaN values
         if torch.isnan(lambda_param).any():
-            logger.warning(f"NaN values found in scale_param. x: {x}")
+            logger.warning("NaN values found in scale_param.")
         if torch.isnan(k_param).any():
-            logger.warning(f"NaN values found in k_param. x: {x}")
+            logger.warning("NaN values found in k_param.")
         return lambda_param, k_param
 
 
@@ -1482,18 +1503,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     time_to_visit_indicator, log_probs, torch.zeros_like(log_probs)
                 )
                 time_to_visit_loss = -log_probs.sum() / total_num_tokens
-                if not torch.isfinite(time_to_visit_loss):
-                    logger.warning(
-                        "Non-finite time_to_visit_loss (%s); replacing it with 0.0 for "
-                        "this step.",
-                        time_to_visit_loss.item(),
-                    )
-                    # Multiplying the tte_head parameters by 0 (rather than using a bare
-                    # constant) keeps them in the graph so DDP does not flag them unused,
-                    # and contributes an exactly-zero gradient.
-                    time_to_visit_loss = (
-                        sum(p.sum() for p in self.tte_head.parameters()) * 0.0
-                    )
+                time_to_visit_loss = replace_nonfinite_loss(
+                    time_to_visit_loss, "time_to_visit_loss", self.tte_head.parameters()
+                )
                 # Compute the loss
                 loss += time_to_visit_loss * self.config.time_to_visit_loss_weight
 
@@ -1519,6 +1531,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                         token_value_loss * self.config.lab_token_loss_weight
                     )
                 loss += token_value_loss * self.config.value_prediction_loss_weight
+
+            # Last line of defence: whatever produced a NaN/inf (activations, any loss term),
+            # skip this step's update instead of letting it poison the weights.
+            loss = replace_nonfinite_loss(loss, "loss", self.parameters())
 
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]

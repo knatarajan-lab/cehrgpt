@@ -216,5 +216,68 @@ class TestNonFiniteLossGuard(unittest.TestCase):
         self.assertGreater(out.time_to_visit_loss.item(), 0.0)
 
 
+class TestTotalLossGuard(unittest.TestCase):
+    """A NaN/inf from anywhere must not produce a NaN loss, NaN grads, or NaN weights."""
+
+    def setUp(self):
+        torch.manual_seed(0)
+
+    @staticmethod
+    def _constant_logits(model, bad_value):
+        real_forward = model.lm_head.forward
+        return mock.patch.object(
+            model.lm_head,
+            "forward",
+            side_effect=lambda x: torch.full_like(real_forward(x), bad_value),
+        )
+
+    def _assert_safe_step(self, model, out):
+        self.assertEqual(out.loss.item(), 0.0)
+        out.loss.backward()
+        self.assertTrue(all_grads_finite(model))
+        before = {n: p.detach().clone() for n, p in model.named_parameters()}
+        torch.optim.SGD(model.parameters(), lr=1.0).step()
+        for n, p in model.named_parameters():
+            self.assertTrue(torch.equal(before[n], p.detach()), n)
+
+    def test_nonfinite_lm_logits_give_zero_loss(self):
+        for bad_value in (float("nan"), float("inf")):
+            with self.subTest(bad_value=bad_value):
+                model = CEHRGPT2LMHeadModel(build_config()).train()
+                with self._constant_logits(model, bad_value):
+                    out = model(**make_batch())
+                self._assert_safe_step(model, out)
+
+    def test_nan_weights_do_not_propagate(self):
+        """A diverged model (NaN embeddings) yields loss 0.0 and finite zero gradients."""
+        model = CEHRGPT2LMHeadModel(build_config()).train()
+        with torch.no_grad():
+            model.cehrgpt.wte.weight[2:5] = float("nan")
+        batch = make_batch()
+        batch["input_ids"][:] = 3  # every token hits a NaN embedding row
+        batch["labels"] = batch["input_ids"].clone()
+        out = model(**batch)
+        self.assertEqual(out.loss.item(), 0.0)
+        out.loss.backward()
+        self.assertTrue(all_grads_finite(model))
+
+    def test_guard_names_the_loss_and_warns_once(self):
+        model = CEHRGPT2LMHeadModel(build_config()).train()
+        with self.assertLogs(hf_cehrgpt.logger.name, level="WARNING") as logs:
+            with self._constant_logits(model, float("nan")):
+                model(**make_batch())
+        self.assertEqual(sum("Non-finite loss" in m for m in logs.output), 1)
+
+    def test_recovers_on_the_next_good_step(self):
+        model = CEHRGPT2LMHeadModel(build_config()).train()
+        with self._constant_logits(model, float("nan")):
+            bad = model(**make_batch())
+        self.assertEqual(bad.loss.item(), 0.0)
+        good = model(**make_batch())
+        self.assertGreater(good.loss.item(), 0.0)
+        good.loss.backward()
+        self.assertTrue(all_grads_finite(model))
+
+
 if __name__ == "__main__":
     unittest.main()
