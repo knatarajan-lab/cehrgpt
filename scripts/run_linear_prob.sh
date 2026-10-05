@@ -20,6 +20,9 @@ usage() {
     echo "  --max_tokens_per_batch=NUM     Maximum tokens per batch (default: 16384)"
     echo "  --torch_type=TYPE              Torch data type (default: float32)"
     echo "  --disable_sample_packing       Disable sample packing (enabled by default)"
+    echo "  --force_attn_implementation=IMPL  Force the attention implementation: eager, sdpa or"
+    echo "                                 flash_attention_2 (optional; default: flash_attention_2 for"
+    echo "                                 gpt2 when installed, sdpa for qwen2)"
     echo "  --observation_window=NUM       Observation window in days (optional, default: None)"
     echo ""
     echo "Example:"
@@ -76,6 +79,9 @@ for arg in "$@"; do
             ;;
         --disable_sample_packing)
             DISABLE_SAMPLE_PACKING="true"
+            ;;
+        --force_attn_implementation=*)
+            FORCE_ATTN_IMPLEMENTATION="${arg#*=}"
             ;;
         --help|-h)
             usage
@@ -286,6 +292,11 @@ while read -r cohort_name; do
     # Add observation_window if provided
     if [ -n "$OBSERVATION_WINDOW" ]; then
         FEATURE_CMD="$FEATURE_CMD --observation_window \"$OBSERVATION_WINDOW\""
+    fi
+
+    # Add force_attn_implementation if provided
+    if [ -n "$FORCE_ATTN_IMPLEMENTATION" ]; then
+        FEATURE_CMD="$FEATURE_CMD --force_attn_implementation \"$FORCE_ATTN_IMPLEMENTATION\""
     fi
 
     # Step 1: Feature extraction
