@@ -116,6 +116,9 @@ class MotorTaskHead(nn.Module):
 
 
 class VisitTimeToEventHead(nn.Module):
+    PARAM_MIN = 1e-3
+    PARAM_MAX = 1e3
+
     def __init__(self, input_dim):
         super(VisitTimeToEventHead, self).__init__()
         self.linear1 = nn.Sequential(
@@ -126,8 +129,14 @@ class VisitTimeToEventHead(nn.Module):
         )
 
     def forward(self, x):
-        lambda_param = f.softplus(self.linear1(x))  # Ensure scale is positive
-        k_param = f.softplus(self.linear2(x))  # Ensure shape is positive
+        # Compute in float32 and bound the Gamma parameters: softplus underflows to 0 (or
+        # grows without limit) at the extremes, which makes the Gamma log-prob NaN/inf.
+        lambda_param = f.softplus(self.linear1(x).float()).clamp(
+            self.PARAM_MIN, self.PARAM_MAX
+        )
+        k_param = f.softplus(self.linear2(x).float()).clamp(
+            self.PARAM_MIN, self.PARAM_MAX
+        )
         # Check for NaN values
         if torch.isnan(lambda_param).any():
             logger.warning(f"NaN values found in scale_param. x: {x}")
@@ -1445,16 +1454,46 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 # Move to the same device as lambda_param
                 shift_time_to_visits = shift_time_to_visits.to(lambda_param.device)
                 time_to_visit_indicator = shift_time_to_visits >= 0
-                # Define the Gamma distribution
-                dist = Gamma(
-                    shifted_k_param.squeeze(-1), shifted_lambda_param.squeeze(-1)
+                # Replace the parameters and targets at masked positions with safe values
+                # before building the distribution. torch.where on the output alone still
+                # back-propagates NaN/inf from the unselected (padding) positions.
+                safe_k = torch.where(
+                    time_to_visit_indicator,
+                    shifted_k_param.squeeze(-1).float(),
+                    torch.ones_like(shift_time_to_visits, dtype=torch.float32),
                 )
+                safe_lambda = torch.where(
+                    time_to_visit_indicator,
+                    shifted_lambda_param.squeeze(-1).float(),
+                    torch.ones_like(shift_time_to_visits, dtype=torch.float32),
+                )
+                safe_targets = torch.where(
+                    time_to_visit_indicator,
+                    torch.clamp(shift_time_to_visits.float(), min=1e-3) + 1e-6,
+                    torch.ones_like(shift_time_to_visits, dtype=torch.float32),
+                )
+                # Define the Gamma distribution. Argument validation is off on purpose: with
+                # it on, a NaN parameter raises a ValueError here and crashes the run before
+                # the non-finite-loss guard below gets a chance to handle it.
+                dist = Gamma(safe_k, safe_lambda, validate_args=False)
                 # Compute log-probs and apply the time_to_visit_indicator
-                log_probs = dist.log_prob(
-                    torch.clamp(shift_time_to_visits, min=1e-3) + 1e-6
+                log_probs = dist.log_prob(safe_targets)
+                log_probs = torch.where(
+                    time_to_visit_indicator, log_probs, torch.zeros_like(log_probs)
                 )
-                log_probs = torch.where(time_to_visit_indicator, log_probs, 0)
                 time_to_visit_loss = -log_probs.sum() / total_num_tokens
+                if not torch.isfinite(time_to_visit_loss):
+                    logger.warning(
+                        "Non-finite time_to_visit_loss (%s); replacing it with 0.0 for "
+                        "this step.",
+                        time_to_visit_loss.item(),
+                    )
+                    # Multiplying the tte_head parameters by 0 (rather than using a bare
+                    # constant) keeps them in the graph so DDP does not flag them unused,
+                    # and contributes an exactly-zero gradient.
+                    time_to_visit_loss = (
+                        sum(p.sum() for p in self.tte_head.parameters()) * 0.0
+                    )
                 # Compute the loss
                 loss += time_to_visit_loss * self.config.time_to_visit_loss_weight
 
