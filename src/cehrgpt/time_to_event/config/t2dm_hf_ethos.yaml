@@ -1,12 +1,9 @@
 task_name: "t2dm_hf_prediction"
-# Each outcome is a token as it is in the tokenizer's vocabulary, or a list of tokens that have to be
-# generated one after the other. A token matches every sequence that contains it, so the first two
-# cover all the codes under them: ICD10CM I50 (I50.84, I50.89, I50.9, ...) and ICD9CM 428 (428.9, ...).
-# The last one is ICD9CM 404.13.
+# The ETHOS tokenizer emits ICD//CM//HEART_FAILURE for every ICD-10-CM I50.* code and for ICD-9-CM 428.*
+# (ICD-9 codes are converted to ICD-10 first), so this one token is the heart failure outcome. A token
+# matches every sequence that contains it.
 outcome_events:
-  - "ICD10CM/0/I50"
-  - "ICD9CM/0/428"
-  - ["ICD9CM/0/404", "ICD9CM/1/13"]
+  - "ICD//CM//HEART_FAILURE"
 future_visit_start: 0
 future_visit_end: -1
 prediction_window_start: 30
