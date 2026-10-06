@@ -1,14 +1,11 @@
 task_name: "t2dm_hf_prediction"
-# Each outcome is the list of tokens that have to be generated one after the other, as they are in
-# the tokenizer's vocabulary. A list with a single token matches every code that starts with it.
-# Heart failure: ICD10CM I50 / I50.84 / I50.89 / I50.9 and ICD9CM 428 / 428.9 / 404.13.
+# Each outcome is a token as it is in the tokenizer's vocabulary, or a list of tokens that have to be
+# generated one after the other. A token matches every sequence that contains it, so the first two
+# cover all the codes under them: ICD10CM I50 (I50.84, I50.89, I50.9, ...) and ICD9CM 428 (428.9, ...).
+# The last one is ICD9CM 404.13.
 outcome_events:
-  - ["ICD10CM/0/I50"]
-  - ["ICD10CM/0/I50", "ICD10CM/1/84"]
-  - ["ICD10CM/0/I50", "ICD10CM/1/89"]
-  - ["ICD10CM/0/I50", "ICD10CM/1/9"]
-  - ["ICD9CM/0/428"]
-  - ["ICD9CM/0/428", "ICD9CM/1/9"]
+  - "ICD10CM/0/I50"
+  - "ICD9CM/0/428"
   - ["ICD9CM/0/404", "ICD9CM/1/13"]
 future_visit_start: 0
 future_visit_end: -1
