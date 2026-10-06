@@ -4,7 +4,7 @@ import os
 import shutil
 import uuid
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple, Union
 
 import pandas as pd
 import torch
@@ -34,9 +34,9 @@ LOG = logging.get_logger("transformers")
 @dataclass
 class TaskConfig:
     task_name: str
-    outcome_events: List[str]
+    # concept ids, or lists of tokens that have to be generated one after the other
+    outcome_events: List[Union[str, List[str]]]
     include_descendants: bool = False
-    is_ethos_task: bool = False
     future_visit_start: int = 0
     future_visit_end: int = -1
     prediction_window_start: int = 0
@@ -94,6 +94,36 @@ def load_time_to_event_dataset(args) -> Dataset:
     return load_parquet_as_dataset(args.dataset_folder)
 
 
+def split_outcome_events(
+    outcome_events: List[Union[str, int, List[str]]]
+) -> Tuple[List[int], List[List[str]]]:
+    """Separates the concept ids from the token sequences of the outcome_events of a task config.
+
+    An outcome event is either a concept id, or a list of the tokens that have to be generated one
+    after the other, written exactly as they are in the tokenizer's vocabulary, e.g.
+    ["ICD10CM/0/I50", "ICD10CM/1/84"]. A list with one token matches every sequence that
+    contains the token."""
+    concept_ids, token_sequences = [], []
+    for event in outcome_events:
+        if isinstance(event, (list, tuple)):
+            if not event:
+                raise ValueError("An outcome event cannot be an empty list of tokens")
+            token_sequences.append([str(token) for token in event])
+        elif str(event).isnumeric():
+            concept_ids.append(int(event))
+        else:
+            raise ValueError(
+                f"The outcome event {event!r} is neither a concept id nor a list of tokens"
+            )
+    if concept_ids and token_sequences:
+        raise ValueError(
+            "outcome_events cannot mix concept ids and lists of tokens, use one of them"
+        )
+    if not concept_ids and not token_sequences:
+        raise ValueError("outcome_events is empty")
+    return concept_ids, token_sequences
+
+
 def main(args):
     uses_tokenized_full_dataset = bool(
         args.tokenized_full_dataset_path and args.cohort_folder
@@ -128,7 +158,11 @@ def main(args):
 
     task_config = load_task_config_from_yaml(args.task_config)
     task_name = task_config.task_name
-    outcome_events = [int(_) for _ in task_config.outcome_events if _.isnumeric()]
+    outcome_events, token_sequences = split_outcome_events(task_config.outcome_events)
+    if token_sequences and task_config.include_descendants:
+        raise ValueError(
+            "include_descendants expands concept ids, list the tokens of the descendants instead"
+        )
 
     if task_config.include_descendants:
         if not args.concept_ancestor:
@@ -149,18 +183,8 @@ def main(args):
         ]
         outcome_events += descendant_concept_ids
 
-    if task_config.is_ethos_task:
-        if not args.concept:
-            raise RuntimeError(
-                "When is_ethos_task is set to True, the concept data needs to be provided."
-            )
-        concept = pd.read_parquet(args.concept)
-        new_outcome_events = []
-        for t in concept[concept.concept_id.isin(outcome_events)].itertuples():
-            new_outcome_events.append(
-                [f"{t.vocabulary_id}/{i}/{part}" for i, part in enumerate(t.concept_code.split("."))]
-            )
-        outcome_events = new_outcome_events
+    if token_sequences:
+        outcome_events = token_sequences
 
     prediction_output_folder_name = os.path.join(
         args.output_folder, folder_name, task_name
@@ -458,9 +482,6 @@ def create_arg_parser():
     )
     base_arg_parser.add_argument(
         "--task_config", dest="task_config", action="store", required=True
-    )
-    base_arg_parser.add_argument(
-        "--concept", dest="concept", action="store", required=False
     )
     base_arg_parser.add_argument(
         "--concept_ancestor", dest="concept_ancestor", action="store", required=False

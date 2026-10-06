@@ -87,14 +87,20 @@ class TimeToEventModel:
         self.device = device
         self.batch_size = batch_size
         self.max_sequence = model.config.n_positions
-        self.is_ethos_task = isinstance(self.outcome_events[0], list)
-        if self.is_ethos_task:
+        # An outcome is either a single token (e.g. a concept id) or a list of tokens that have
+        # to be generated one after the other (e.g. the parts of a split ICD code).
+        self.match_token_sequences = isinstance(self.outcome_events[0], list)
+        if any(isinstance(event, list) != self.match_token_sequences for event in self.outcome_events):
+            raise ValueError(
+                "outcome_events has to be either all single tokens or all lists of tokens"
+            )
+        if self.match_token_sequences:
             self.max_outcome_token_length = max(map(len, self.outcome_events))
         else:
             self.max_outcome_token_length = 0
 
     def is_outcome_event(self, token: Union[str, List[str]]) -> bool:
-        if self.is_ethos_task:
+        if self.match_token_sequences:
             for outcome_event in self.outcome_events:
                 if len(token) == len(outcome_event):
                     if token == outcome_event:
@@ -190,7 +196,7 @@ class TimeToEventModel:
                         visit_counter >= future_visit_start
                         and time_delta >= prediction_window_start
                     ):
-                        if self.is_ethos_task:
+                        if self.match_token_sequences:
                             lookback_tokens = generated_trajectory[max(i - self.max_outcome_token_length, 0): i + 1]
                             outcome_occurred = self.is_outcome_event(lookback_tokens)
                         else:
