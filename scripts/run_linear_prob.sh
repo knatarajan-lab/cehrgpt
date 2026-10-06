@@ -24,6 +24,9 @@ usage() {
     echo "                                 flash_attention_2 (optional; default: flash_attention_2 for"
     echo "                                 gpt2 when installed, sdpa for qwen2)"
     echo "  --observation_window=NUM       Observation window in days (optional, default: None)"
+    echo "  --allow_missing_tokenized_persons  Skip cohort persons that are missing from the tokenized"
+    echo "                                 dataset (with a warning) instead of failing; only used with"
+    echo "                                 --tokenized_full_dataset_path (disabled by default)"
     echo ""
     echo "Example:"
     echo "  $0 --base_dir=/path/to/cohorts --dataset_prepared_path=/path/to/dataset_prepared \\"
@@ -37,6 +40,7 @@ MODEL_NAME="cehrgpt_model"
 MAX_TOKENS_PER_BATCH="16384"
 TORCH_TYPE="bfloat16"
 DISABLE_SAMPLE_PACKING="false"
+ALLOW_MISSING_TOKENIZED_PERSONS="false"
 
 # Parse command line arguments
 for arg in "$@"; do
@@ -79,6 +83,9 @@ for arg in "$@"; do
             ;;
         --disable_sample_packing)
             DISABLE_SAMPLE_PACKING="true"
+            ;;
+        --allow_missing_tokenized_persons)
+            ALLOW_MISSING_TOKENIZED_PERSONS="true"
             ;;
         --force_attn_implementation=*)
             FORCE_ATTN_IMPLEMENTATION="${arg#*=}"
@@ -193,6 +200,7 @@ log "  --max_tokens_per_batch=$MAX_TOKENS_PER_BATCH"
 log "  --torch_type=$TORCH_TYPE"
 log "  --disable_sample_packing=$DISABLE_SAMPLE_PACKING"
 log "  --observation_window=$OBSERVATION_WINDOW"
+log "  --allow_missing_tokenized_persons=$ALLOW_MISSING_TOKENIZED_PERSONS"
 
 # Find valid cohorts and write to a temp file
 TEMP_COHORT_LIST="$LOG_DIR/cohort_list_${TIMESTAMP}.txt"
@@ -292,6 +300,11 @@ while read -r cohort_name; do
     # Add observation_window if provided
     if [ -n "$OBSERVATION_WINDOW" ]; then
         FEATURE_CMD="$FEATURE_CMD --observation_window \"$OBSERVATION_WINDOW\""
+    fi
+
+    # Skip cohort persons that are missing from the tokenized dataset instead of failing
+    if [ "$ALLOW_MISSING_TOKENIZED_PERSONS" = "true" ]; then
+        FEATURE_CMD="$FEATURE_CMD --allow_missing_tokenized_persons"
     fi
 
     # Add force_attn_implementation if provided
