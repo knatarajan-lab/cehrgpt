@@ -422,10 +422,25 @@ def extract_cohort_sequences(
         if person_id not in tokenized_person_ids
     ]
     if missing_person_ids:
-        raise RuntimeError(
-            f"There are {len(missing_person_ids)} missing in the tokenized dataset. "
-            f"The list contains: {missing_person_ids}"
+        if not cehrgpt_args.allow_missing_tokenized_persons:
+            raise RuntimeError(
+                f"There are {len(missing_person_ids)} missing in the tokenized dataset. "
+                f"The list contains: {missing_person_ids}"
+            )
+        # Only persons present in the tokenized dataset are sliced below, so the missing
+        # cohort members are simply left out of the result.
+        LOG.warning(
+            "%s of %s cohort persons are missing in the tokenized dataset and will be "
+            "skipped. First missing person_ids: %s",
+            len(missing_person_ids),
+            len(person_index_date_map),
+            missing_person_ids[:20],
         )
+        if len(missing_person_ids) == len(person_index_date_map):
+            raise RuntimeError(
+                "None of the cohort persons exist in the tokenized dataset, "
+                "so there is nothing to extract."
+            )
     processed_dataset = filtered_tokenized_dataset.map(
         ExtractTokenizedSequenceDataMapping(
             person_index_date_map, data_args.observation_window

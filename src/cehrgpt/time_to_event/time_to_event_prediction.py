@@ -75,7 +75,8 @@ def load_time_to_event_dataset(args) -> Dataset:
             observation_window=args.observation_window,
         )
         cehrgpt_args = CehrGPTArguments(
-            tokenized_full_dataset_path=args.tokenized_full_dataset_path
+            tokenized_full_dataset_path=args.tokenized_full_dataset_path,
+            allow_missing_tokenized_persons=args.allow_missing_tokenized_persons,
         )
         processed_dataset = extract_cohort_sequences(
             data_args, cehrgpt_args, CacheFileCollector()
@@ -440,6 +441,13 @@ def create_arg_parser():
         "history up to the index date.",
         required=False,
         default=None,
+    )
+    base_arg_parser.add_argument(
+        "--allow_missing_tokenized_persons",
+        dest="allow_missing_tokenized_persons",
+        action="store_true",
+        help="Skip cohort persons that are missing from the tokenized dataset (with a "
+        "warning) instead of failing. Used with --tokenized_full_dataset_path.",
     )
     base_arg_parser.add_argument(
         "--num_return_sequences",

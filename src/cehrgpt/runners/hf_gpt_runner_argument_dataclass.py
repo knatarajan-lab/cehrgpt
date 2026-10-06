@@ -22,6 +22,14 @@ class CehrGPTArguments:
             "help": "The path to the tokenized dataset created for the full population"
         },
     )
+    allow_missing_tokenized_persons: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "When extracting cohort sequences from the tokenized dataset, skip the "
+            "cohort persons that are missing from it (with a warning) instead of raising an "
+            "error."
+        },
+    )
     activation_function: Literal[tuple(ACT2FN.keys())] = dataclasses.field(
         default="gelu_new",
         metadata={"help": "The activation function to use"},
