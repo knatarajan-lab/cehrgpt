@@ -42,6 +42,87 @@ from cehrgpt.models.qwen2 import Qwen2Block
 logger = logging.get_logger(__name__)
 
 
+class SinusoidalTimeEmbedding(nn.Module):
+    """Fixed paired sine/cosine encoding for continuous elapsed-day values."""
+
+    def __init__(self, embedding_dim: int, base: float = 10000.0, scale: float = 1.0):
+        super().__init__()
+        if embedding_dim <= 0:
+            raise ValueError("embedding_dim must be positive")
+        if base <= 0:
+            raise ValueError("base must be positive")
+        self.embedding_dim = embedding_dim
+        self.base = base
+        self.scale = scale
+        frequencies = torch.exp(
+            torch.arange(0, embedding_dim, 2, dtype=torch.float32)
+            * (-math.log(base) / embedding_dim)
+        )
+        self.register_buffer("frequencies", frequencies, persistent=True)
+
+    def forward(self, time_values: torch.Tensor) -> torch.Tensor:
+        angles = (
+            time_values.to(self.frequencies.dtype).unsqueeze(-1) * self.frequencies
+        )
+        embeddings = torch.empty(
+            *time_values.shape,
+            self.embedding_dim,
+            dtype=angles.dtype,
+            device=angles.device,
+        )
+        embeddings[..., 0::2] = torch.sin(angles)
+        if self.embedding_dim > 1:
+            embeddings[..., 1::2] = torch.cos(
+                angles[..., : embeddings[..., 1::2].shape[-1]]
+            )
+        return embeddings * self.scale
+
+
+class TimeTokenEmbeddingReplacer(nn.Module):
+    """Replace vocabulary embeddings only where token ids represent time intervals."""
+
+    def __init__(self, config: CEHRGPTConfig):
+        super().__init__()
+        values_by_token_id = torch.full((config.vocab_size,), -1.0)
+        time_token_ids = set(config.token_to_time_token_mapping) - {-1}
+        missing_time_values = time_token_ids - set(config.time_token_values)
+        if missing_time_values:
+            raise ValueError(
+                "Missing elapsed-day values for time-token ids: "
+                f"{sorted(missing_time_values)}"
+            )
+        if time_token_ids:
+            ordered_token_ids = sorted(time_token_ids)
+            token_ids = torch.tensor(ordered_token_ids, dtype=torch.long)
+            time_values = torch.tensor(
+                [config.time_token_values[token_id] for token_id in ordered_token_ids],
+                dtype=torch.float32,
+            )
+            values_by_token_id[token_ids] = time_values
+        self.register_buffer(
+            "values_by_token_id", values_by_token_id, persistent=True
+        )
+        self.encoder = SinusoidalTimeEmbedding(
+            embedding_dim=config.hidden_size,
+            base=config.sinusoidal_time_base,
+            scale=config.sinusoidal_time_scale,
+        )
+
+    def forward(
+        self, input_ids: torch.LongTensor, token_embeddings: torch.Tensor
+    ) -> torch.Tensor:
+        time_values = self.values_by_token_id[input_ids]
+        time_token_mask = time_values >= 0
+        if not torch.any(time_token_mask):
+            return token_embeddings
+        time_embeddings = self.encoder(time_values.clamp_min(0)).to(
+            token_embeddings.dtype
+        )
+        return torch.where(
+            time_token_mask.unsqueeze(-1), time_embeddings, token_embeddings
+        )
+
+
 def replace_nonfinite_loss(
     loss: torch.Tensor, name: str, anchor_parameters: Iterable[nn.Parameter]
 ) -> torch.Tensor:
@@ -497,6 +578,11 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             self.pretrained_wte = None
 
         self.wte = nn.Embedding(config.vocab_size, self.embed_dim)
+        self.time_token_embedding_replacer = (
+            TimeTokenEmbeddingReplacer(config)
+            if config.time_token_embedding_type == "sinusoidal"
+            else None
+        )
         if self.include_values:
             self.vte = nn.Embedding(config.value_vocab_size, self.embed_dim)
             self.concept_value_transformation_layer = ConceptValueTransformationLayer(
@@ -585,6 +671,10 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         )
         self.last_device = "cuda:" + str(max(self.device_map.keys()))
         self.wte = self.wte.to(self.first_device)
+        if self.time_token_embedding_replacer is not None:
+            self.time_token_embedding_replacer = (
+                self.time_token_embedding_replacer.to(self.first_device)
+            )
         if self.config.use_pretrained_embeddings:
             self.pretrained_wte = self.pretrained_wte.to(self.first_device)
         if self.include_values:
@@ -610,6 +700,10 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.first_device = "cpu"
         self.last_device = "cpu"
         self.wte = self.wte.to("cpu")
+        if self.time_token_embedding_replacer is not None:
+            self.time_token_embedding_replacer = (
+                self.time_token_embedding_replacer.to("cpu")
+            )
         if self.config.use_pretrained_embeddings:
             self.pretrained_wte = self.pretrained_wte.to("cpu")
         self.vte = self.vte.to("cpu")
@@ -827,6 +921,11 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             )
         else:
             input_embeddings = self.wte(input_ids)
+
+        if self.time_token_embedding_replacer is not None:
+            input_embeddings = self.time_token_embedding_replacer(
+                input_ids, input_embeddings
+            )
 
         if self.config.causal_sfm and input_shape[1] >= self.config.demographics_size:
             demographic_embeddings = input_embeddings[

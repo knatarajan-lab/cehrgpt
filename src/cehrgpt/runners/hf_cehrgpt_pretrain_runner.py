@@ -33,6 +33,7 @@ from cehrgpt.data.hf_cehrgpt_dataset_collator import (
     SamplePackingCehrGptDataCollator,
 )
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
+from cehrgpt.gpt_utils import extract_time_interval_in_days
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
@@ -48,6 +49,20 @@ from cehrgpt.runners.sample_packing_trainer import SamplePackingTrainer
 from cehrgpt.tools.instability_probe import InstabilityProbe
 
 LOG = logging.get_logger("transformers")
+
+
+def get_time_token_values(tokenizer: CehrGptTokenizer):
+    """Map the tokenizer's canonical time-token ids to elapsed-day values."""
+    time_token_ids = set(tokenizer.token_to_time_token_mapping) - {-1}
+    tokens_by_id = {token_id: token for token, token_id in tokenizer.get_vocab().items()}
+    time_token_values = {}
+    for token_id in sorted(time_token_ids):
+        token = tokens_by_id[token_id]
+        try:
+            time_token_values[token_id] = float(extract_time_interval_in_days(token))
+        except ValueError:
+            LOG.warning("Skipping unrecognized time token %s", token)
+    return time_token_values
 
 
 class CustomEarlyStoppingCallback(EarlyStoppingCallback):
@@ -193,6 +208,7 @@ def load_and_create_model(
         model_args_cehrgpt.pop("attn_implementation")
         # CEHR-GPT does not support this anymore
         model_args_cehrgpt.pop("exclude_position_ids")
+        time_token_values = get_time_token_values(tokenizer)
         model_config = CEHRGPTConfig(
             activation_function=cehrgpt_args.activation_function,
             vocab_size=tokenizer.vocab_size,
@@ -202,6 +218,9 @@ def load_and_create_model(
             eos_token_id=tokenizer.end_token_id,
             lab_token_ids=tokenizer.lab_token_ids,
             token_to_time_token_mapping=tokenizer.token_to_time_token_mapping,
+            time_token_embedding_type=cehrgpt_args.time_token_embedding_type,
+            time_token_values=time_token_values,
+            sinusoidal_time_base=cehrgpt_args.sinusoidal_time_base,
             attn_implementation=attn_implementation,
             causal_sfm=cehrgpt_args.causal_sfm,
             demographics_size=cehrgpt_args.demographics_size,
