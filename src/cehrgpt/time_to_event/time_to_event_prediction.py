@@ -34,7 +34,8 @@ LOG = logging.get_logger("transformers")
 @dataclass
 class TaskConfig:
     task_name: str
-    # concept ids, or lists of tokens that have to be generated one after the other
+    # concept ids, single tokens (e.g. "CPT4/33510"), or lists of tokens that have to be
+    # generated one after the other
     outcome_events: List[Union[str, List[str]]]
     include_descendants: bool = False
     future_visit_start: int = 0
@@ -99,10 +100,11 @@ def split_outcome_events(
 ) -> Tuple[List[int], List[List[str]]]:
     """Separates the concept ids from the token sequences of the outcome_events of a task config.
 
-    An outcome event is either a concept id, or a list of the tokens that have to be generated one
-    after the other, written exactly as they are in the tokenizer's vocabulary, e.g.
-    ["ICD10CM/0/I50", "ICD10CM/1/84"]. A list with one token matches every sequence that
-    contains the token."""
+    An outcome event is either a concept id, a single token, or a list of the tokens that have to
+    be generated one after the other. Tokens are written exactly as they are in the tokenizer's
+    vocabulary, e.g. "CPT4/33510" or ["ICD10CM/0/I50", "ICD10CM/1/84"]. A non-numeric string is
+    a single token, i.e. the same as a list with that token, and matches every sequence that
+    contains it."""
     concept_ids, token_sequences = [], []
     for event in outcome_events:
         if isinstance(event, (list, tuple)):
@@ -111,9 +113,11 @@ def split_outcome_events(
             token_sequences.append([str(token) for token in event])
         elif str(event).isnumeric():
             concept_ids.append(int(event))
+        elif isinstance(event, str) and event:
+            token_sequences.append([event])
         else:
             raise ValueError(
-                f"The outcome event {event!r} is neither a concept id nor a list of tokens"
+                f"The outcome event {event!r} is neither a concept id, a token nor a list of tokens"
             )
     if concept_ids and token_sequences:
         raise ValueError(

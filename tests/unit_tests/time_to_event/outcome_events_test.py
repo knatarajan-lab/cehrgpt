@@ -41,8 +41,14 @@ class TestSplitOutcomeEvents(unittest.TestCase):
             ([], [["ICD10CM/0/I50"], ["ICD10CM/0/I50", "ICD10CM/1/9"]]),
         )
 
+    def test_bare_token_is_a_single_token_sequence(self):
+        self.assertEqual(
+            split_outcome_events(["CPT4/33510", ["ICD10CM/0/I50", "ICD10CM/1/9"]]),
+            ([], [["CPT4/33510"], ["ICD10CM/0/I50", "ICD10CM/1/9"]]),
+        )
+
     def test_invalid_outcome_events(self):
-        for events in ([["A"], "9201"], ["Visit/IP"], [[]], []):
+        for events in ([["A"], "9201"], ["CPT4/33510", "9201"], [[]], [""], []):
             with self.assertRaises(ValueError, msg=str(events)):
                 split_outcome_events(events)
 
