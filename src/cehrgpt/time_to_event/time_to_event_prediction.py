@@ -2,9 +2,12 @@ import datetime
 import glob
 import os
 import shutil
+import signal
+import subprocess
+import sys
 import uuid
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 import torch
@@ -12,7 +15,7 @@ import yaml
 from cehrbert.data_generators.hf_data_generator.cache_util import CacheFileCollector
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from cehrbert.runners.runner_util import load_parquet_as_dataset
-from datasets import Dataset, concatenate_datasets
+from datasets import Dataset, concatenate_datasets, load_from_disk
 from tqdm import tqdm
 from transformers.utils import is_flash_attn_2_available, logging
 
@@ -60,6 +63,47 @@ def get_device():
     return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
+def resolve_gpu_ids(gpu_ids: str) -> List[str]:
+    """
+    Resolve --gpu_ids ("all" or comma separated indices) into the CUDA_VISIBLE_DEVICES values.
+
+    The indices are relative to the GPUs visible to this process, so the option composes
+    with an existing CUDA_VISIBLE_DEVICES, e.g. CUDA_VISIBLE_DEVICES=1,3 with --gpu_ids all
+    runs on physical GPUs 1 and 3.
+    """
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    visible_ids = [_.strip() for _ in visible.split(",") if _.strip()] if visible else None
+    num_visible = len(visible_ids) if visible_ids is not None else torch.cuda.device_count()
+    if num_visible == 0:
+        raise RuntimeError("--gpu_ids was provided but no CUDA device is visible.")
+    if gpu_ids.strip().lower() == "all":
+        indices = list(range(num_visible))
+    else:
+        indices = [int(_) for _ in gpu_ids.split(",") if _.strip()]
+    if len(set(indices)) != len(indices):
+        raise ValueError(f"--gpu_ids contains duplicates: {gpu_ids}")
+    out_of_range = [_ for _ in indices if not 0 <= _ < num_visible]
+    if out_of_range:
+        raise ValueError(
+            f"--gpu_ids {out_of_range} out of range, {num_visible} GPU(s) are visible."
+        )
+    return [visible_ids[_] if visible_ids is not None else str(_) for _ in indices]
+
+
+def strip_cli_option(argv: List[str], option: str) -> List[str]:
+    """Drop `option` and its value (both `--opt value` and `--opt=value`) from argv."""
+    stripped = []
+    skip_next = False
+    for arg in argv:
+        if skip_next:
+            skip_next = False
+        elif arg == option:
+            skip_next = True
+        elif not arg.startswith(option + "="):
+            stripped.append(arg)
+    return stripped
+
+
 def load_time_to_event_dataset(args) -> Dataset:
     if args.tokenized_full_dataset_path and args.cohort_folder:
         LOG.info(
@@ -92,6 +136,118 @@ def load_time_to_event_dataset(args) -> Dataset:
         )
         return dataset
     return load_parquet_as_dataset(args.dataset_folder)
+
+
+def prepare_test_dataset(args, prediction_output_folder_name: str) -> Dataset:
+    dataset = load_time_to_event_dataset(args)
+
+    def filter_func(examples):
+        return [_ >= args.min_num_of_concepts for _ in examples["num_of_concepts"]]
+
+    test_dataset = dataset.filter(filter_func, batched=True, batch_size=1000)
+    test_dataset = test_dataset.shuffle(seed=42)
+
+    # Filter out the records for which the predictions have been generated previously
+    return filter_out_existing_results(test_dataset, prediction_output_folder_name)
+
+
+def run_on_multiple_gpus(args, gpu_ids: List[str]) -> int:
+    """
+    Split the pending predictions into disjoint shards and run one worker process per GPU.
+
+    The dataset is prepared once here (so the workers don't race on the datasets cache),
+    each worker re-runs this module on its own shard with CUDA_VISIBLE_DEVICES pinned to
+    one GPU and writes its parquet files into <prediction folder>/shard_<i>. Samples that
+    already have predictions in the prediction folder (including any shard_<i> subfolder
+    from an earlier, possibly interrupted, run) are excluded before sharding, so rerunning
+    the same command resumes where it stopped.
+    """
+    cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer_folder)
+    folder_name = get_cehrgpt_output_folder(args, cehrgpt_tokenizer)
+    task_name = load_task_config_from_yaml(args.task_config).task_name
+    prediction_output_folder_name = os.path.join(
+        args.output_folder, folder_name, task_name
+    )
+    shard_root = os.path.join(args.output_folder, folder_name, "temp", "shards")
+    log_folder = os.path.join(args.output_folder, folder_name, "worker_logs")
+    # Shards left over from an interrupted run are stale, finished samples are skipped
+    # through the existing parquet files instead
+    shutil.rmtree(shard_root, ignore_errors=True)
+    os.makedirs(prediction_output_folder_name, exist_ok=True)
+    os.makedirs(log_folder, exist_ok=True)
+
+    test_dataset = prepare_test_dataset(args, prediction_output_folder_name)
+    num_workers = min(len(gpu_ids), len(test_dataset))
+    if num_workers == 0:
+        LOG.info("There are no pending samples to predict.")
+        return 0
+    LOG.info(
+        "Splitting %s samples across %s GPUs: %s",
+        len(test_dataset),
+        num_workers,
+        gpu_ids[:num_workers],
+    )
+
+    worker_argv = strip_cli_option(sys.argv[1:], "--gpu_ids")
+    processes: List[subprocess.Popen] = []
+    log_paths = []
+    # Make sure the workers don't outlive us when we are asked to stop
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    try:
+        for worker_index in range(num_workers):
+            shard_path = os.path.join(shard_root, f"shard_{worker_index}")
+            test_dataset.shard(
+                num_shards=num_workers, index=worker_index, contiguous=False
+            ).save_to_disk(shard_path)
+            log_path = os.path.join(
+                log_folder, f"worker_{worker_index}_gpu_{gpu_ids[worker_index]}.log"
+            )
+            log_paths.append(log_path)
+            with open(log_path, "w") as log_file:
+                processes.append(
+                    subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-m",
+                            "cehrgpt.time_to_event.time_to_event_prediction",
+                            *worker_argv,
+                            "--prepared_dataset_path",
+                            shard_path,
+                        ],
+                        env={
+                            **os.environ,
+                            "CUDA_VISIBLE_DEVICES": gpu_ids[worker_index],
+                        },
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
+                    )
+                )
+            LOG.info(
+                "Started worker %s on GPU %s, log: %s",
+                worker_index,
+                gpu_ids[worker_index],
+                log_path,
+            )
+        exit_codes = [process.wait() for process in processes]
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+
+    failed = [i for i, code in enumerate(exit_codes) if code != 0]
+    if failed:
+        for i in failed:
+            LOG.error(
+                "Worker %s exited with code %s, see %s", i, exit_codes[i], log_paths[i]
+            )
+        return 1
+    shutil.rmtree(shard_root, ignore_errors=True)
+    try:
+        os.rmdir(os.path.dirname(shard_root))
+    except OSError:
+        pass
+    LOG.info("All %s workers finished", num_workers)
+    return 0
 
 
 def split_outcome_events(
@@ -129,6 +285,16 @@ def main(args):
             "Either --dataset_folder, or both --tokenized_full_dataset_path and "
             "--cohort_folder, must be provided."
         )
+
+    if args.gpu_ids and not args.prepared_dataset_path:
+        gpu_ids = resolve_gpu_ids(args.gpu_ids)
+        if len(gpu_ids) > 1:
+            exit_code = run_on_multiple_gpus(args, gpu_ids)
+            if exit_code:
+                sys.exit(exit_code)
+            return
+        # CUDA has not been initialized yet, so this pins the single requested GPU
+        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_ids[0]
 
     cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer_folder)
     cehrgpt_model = (
@@ -185,7 +351,16 @@ def main(args):
     prediction_output_folder_name = os.path.join(
         args.output_folder, folder_name, task_name
     )
-    temp_folder = os.path.join(args.output_folder, folder_name, "temp")
+    if args.prepared_dataset_path:
+        # A --gpu_ids worker owns its shard: it writes into its own shard_<i> output folder
+        # and must not touch the other workers' locks
+        shard_name = os.path.basename(args.prepared_dataset_path.rstrip("/"))
+        prediction_output_folder_name = os.path.join(
+            prediction_output_folder_name, shard_name
+        )
+        temp_folder = f"{args.prepared_dataset_path.rstrip('/')}_locks"
+    else:
+        temp_folder = os.path.join(args.output_folder, folder_name, "temp")
     os.makedirs(prediction_output_folder_name, exist_ok=True)
     os.makedirs(temp_folder, exist_ok=True)
 
@@ -225,18 +400,10 @@ def main(args):
         batch_size=args.batch_size,
         device=get_device(),
     )
-    dataset = load_time_to_event_dataset(args)
-
-    def filter_func(examples):
-        return [_ >= args.min_num_of_concepts for _ in examples["num_of_concepts"]]
-
-    test_dataset = dataset.filter(filter_func, batched=True, batch_size=1000)
-    test_dataset = test_dataset.shuffle(seed=42)
-
-    # Filter out the records for which the predictions have been generated previously
-    test_dataset = filter_out_existing_results(
-        test_dataset, prediction_output_folder_name
-    )
+    if args.prepared_dataset_path:
+        test_dataset = load_from_disk(args.prepared_dataset_path)
+    else:
+        test_dataset = prepare_test_dataset(args, prediction_output_folder_name)
     vocab = cehrgpt_tokenizer.get_vocab()
     tte_outputs = []
     for record in tqdm(test_dataset, total=len(test_dataset)):
@@ -363,7 +530,10 @@ def acquire_lock_or_skip_if_already_exist(output_folder: str, sample_id: str):
 def filter_out_existing_results(
     test_dataset: Dataset, prediction_output_folder_name: str
 ):
-    parquet_files = glob.glob(os.path.join(prediction_output_folder_name, "*parquet"))
+    # Recursive so predictions written by previous --gpu_ids runs (shard_<i> folders) count
+    parquet_files = glob.glob(
+        os.path.join(prediction_output_folder_name, "**", "*.parquet"), recursive=True
+    )
     if parquet_files:
         cohort_members = set()
         results_dataframe = pd.read_parquet(parquet_files)[
@@ -468,6 +638,26 @@ def create_arg_parser():
         action="store_true",
         help="Skip cohort persons that are missing from the tokenized dataset (with a "
         "warning) instead of failing. Used with --tokenized_full_dataset_path.",
+    )
+    base_arg_parser.add_argument(
+        "--gpu_ids",
+        dest="gpu_ids",
+        action="store",
+        help="Split the predictions across multiple GPUs: either 'all' or comma separated "
+        "indices of the visible GPUs, e.g. 0,1,3. One worker process is started per GPU, "
+        "each loading its own copy of the model and predicting a disjoint shard of the "
+        "samples. Indices are relative to CUDA_VISIBLE_DEVICES when it is set. By default "
+        "a single process is used.",
+        required=False,
+        default=None,
+    )
+    base_arg_parser.add_argument(
+        "--prepared_dataset_path",
+        dest="prepared_dataset_path",
+        action="store",
+        help="Internal, set by --gpu_ids: the shard of pending samples this worker predicts.",
+        required=False,
+        default=None,
     )
     base_arg_parser.add_argument(
         "--num_return_sequences",
