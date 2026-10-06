@@ -4,7 +4,7 @@ import os
 import shutil
 import uuid
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple, Union
 
 import pandas as pd
 import torch
@@ -34,9 +34,9 @@ LOG = logging.get_logger("transformers")
 @dataclass
 class TaskConfig:
     task_name: str
+    # concept ids, or tokens as they are in the tokenizer's vocabulary (e.g. "CPT4/33510")
     outcome_events: List[str]
     include_descendants: bool = False
-    is_ethos_task: bool = False
     future_visit_start: int = 0
     future_visit_end: int = -1
     prediction_window_start: int = 0
@@ -94,6 +94,32 @@ def load_time_to_event_dataset(args) -> Dataset:
     return load_parquet_as_dataset(args.dataset_folder)
 
 
+def split_outcome_events(
+    outcome_events: List[Union[str, int]]
+) -> Tuple[List[int], List[str]]:
+    """Separates the concept ids from the tokens of the outcome_events of a task config.
+
+    An outcome event is either a concept id (numeric), or a token written exactly as it is in the
+    tokenizer's vocabulary, e.g. "CPT4/33510". A config uses one of the two."""
+    concept_ids, tokens = [], []
+    for event in outcome_events:
+        if str(event).isnumeric():
+            concept_ids.append(int(event))
+        elif isinstance(event, str) and event:
+            tokens.append(event)
+        else:
+            raise ValueError(
+                f"The outcome event {event!r} is neither a concept id nor a token"
+            )
+    if concept_ids and tokens:
+        raise ValueError(
+            "outcome_events cannot mix concept ids and tokens, use one of them"
+        )
+    if not concept_ids and not tokens:
+        raise ValueError("outcome_events is empty")
+    return concept_ids, tokens
+
+
 def main(args):
     uses_tokenized_full_dataset = bool(
         args.tokenized_full_dataset_path and args.cohort_folder
@@ -128,7 +154,11 @@ def main(args):
 
     task_config = load_task_config_from_yaml(args.task_config)
     task_name = task_config.task_name
-    outcome_events = [int(_) for _ in task_config.outcome_events if _.isnumeric()]
+    outcome_events, tokens = split_outcome_events(task_config.outcome_events)
+    if tokens and task_config.include_descendants:
+        raise ValueError(
+            "include_descendants expands concept ids, list the tokens of the descendants instead"
+        )
 
     if task_config.include_descendants:
         if not args.concept_ancestor:
@@ -149,18 +179,8 @@ def main(args):
         ]
         outcome_events += descendant_concept_ids
 
-    if task_config.is_ethos_task:
-        if not args.concept:
-            raise RuntimeError(
-                "When is_ethos_task is set to True, the concept data needs to be provided."
-            )
-        concept = pd.read_parquet(args.concept)
-        new_outcome_events = []
-        for t in concept[concept.concept_id.isin(outcome_events)].itertuples():
-            new_outcome_events.append(
-                [f"{t.vocabulary_id}/{i}/{part}" for i, part in enumerate(t.concept_code.split("."))]
-            )
-        outcome_events = new_outcome_events
+    if tokens:
+        outcome_events = tokens
 
     prediction_output_folder_name = os.path.join(
         args.output_folder, folder_name, task_name
@@ -458,9 +478,6 @@ def create_arg_parser():
     )
     base_arg_parser.add_argument(
         "--task_config", dest="task_config", action="store", required=True
-    )
-    base_arg_parser.add_argument(
-        "--concept", dest="concept", action="store", required=False
     )
     base_arg_parser.add_argument(
         "--concept_ancestor", dest="concept_ancestor", action="store", required=False
