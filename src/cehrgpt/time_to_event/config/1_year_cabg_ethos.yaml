@@ -1,0 +1,36 @@
+task_name: "cabg_prediction"
+# Each outcome is a token as it is in the tokenizer's vocabulary. These are the CPT4 codes of the
+# ETHOS 1 year CABG task (ethos-ares, scripts/zero_shot/1_year_cabg.yaml): each is one token,
+# <vocabulary_id>/<concept_code>, and matches every sequence that contains it. The codes have to be
+# CPT4 tokens in the data: when the CPT4 codes of the procedures were mapped to ICD10PCS, they are not.
+outcome_events:
+  - "CPT4/00567"  # Anesthesia for direct coronary artery bypass grafting; with pump oxygenator
+  - "CPT4/33509"  # Harvest of upper extremity artery, 1 segment, for coronary artery bypass procedu
+  - "CPT4/33510"  # Coronary artery bypass, vein only; single coronary venous graft
+  - "CPT4/33511"  # Coronary artery bypass, vein only; 2 coronary venous grafts
+  - "CPT4/33512"  # Coronary artery bypass, vein only; 3 coronary venous grafts
+  - "CPT4/33513"  # Coronary artery bypass, vein only; 4 coronary venous grafts
+  - "CPT4/33514"  # Coronary artery bypass, vein only; 5 coronary venous grafts
+  - "CPT4/33516"  # Coronary artery bypass, vein only; 6 or more coronary venous grafts
+  - "CPT4/33517"  # Coronary artery bypass, using venous graft(s) and arterial graft(s); single vein
+  - "CPT4/33518"  # Coronary artery bypass, using venous graft(s) and arterial graft(s); 2 venous gr
+  - "CPT4/33519"  # Coronary artery bypass, using venous graft(s) and arterial graft(s); 3 venous gr
+  - "CPT4/33521"  # Coronary artery bypass, using venous graft(s) and arterial graft(s); 4 venous gr
+  - "CPT4/33522"  # Coronary artery bypass, using venous graft(s) and arterial graft(s); 5 venous gr
+  - "CPT4/33523"  # Coronary artery bypass, using venous graft(s) and arterial graft(s); 6 or more v
+  - "CPT4/33533"  # Coronary artery bypass, using arterial graft(s); single arterial graft
+  - "CPT4/33534"  # Coronary artery bypass, using arterial graft(s); 2 coronary arterial grafts
+  - "CPT4/33535"  # Coronary artery bypass, using arterial graft(s); 3 coronary arterial grafts
+  - "CPT4/33536"  # Coronary artery bypass, using arterial graft(s); 4 or more coronary arterial gra
+  - "CPT4/33572"  # Coronary endarterectomy, open, any method, of left anterior descending, circumfl
+  - "CPT4/4110F"  # Internal mammary artery graft performed for primary, isolated coronary artery by
+  - "CPT4/92937"  # Percutaneous transluminal revascularization of or through coronary artery bypass
+  - "CPT4/92938"  # Percutaneous transluminal revascularization of or through coronary artery bypass
+  - "CPT4/92941"  # Percutaneous transluminal revascularization of acute total/subtotal occlusion du
+  - "CPT4/92943"  # Percutaneous transluminal revascularization of chronic total occlusion, coronary
+  - "CPT4/92944"  # Percutaneous transluminal revascularization of chronic total occlusion, coronary
+future_visit_start: 0
+future_visit_end: -1
+prediction_window_start: 0
+prediction_window_end: 365
+max_new_tokens: 1024
