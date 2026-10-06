@@ -34,9 +34,8 @@ LOG = logging.get_logger("transformers")
 @dataclass
 class TaskConfig:
     task_name: str
-    # concept ids, single tokens (e.g. "CPT4/33510"), or lists of tokens that have to be
-    # generated one after the other
-    outcome_events: List[Union[str, List[str]]]
+    # concept ids, or tokens as they are in the tokenizer's vocabulary (e.g. "CPT4/33510")
+    outcome_events: List[str]
     include_descendants: bool = False
     future_visit_start: int = 0
     future_visit_end: int = -1
@@ -96,36 +95,29 @@ def load_time_to_event_dataset(args) -> Dataset:
 
 
 def split_outcome_events(
-    outcome_events: List[Union[str, int, List[str]]]
-) -> Tuple[List[int], List[List[str]]]:
-    """Separates the concept ids from the token sequences of the outcome_events of a task config.
+    outcome_events: List[Union[str, int]]
+) -> Tuple[List[int], List[str]]:
+    """Separates the concept ids from the tokens of the outcome_events of a task config.
 
-    An outcome event is either a concept id, a single token, or a list of the tokens that have to
-    be generated one after the other. Tokens are written exactly as they are in the tokenizer's
-    vocabulary, e.g. "CPT4/33510" or ["ICD10CM/0/I50", "ICD10CM/1/84"]. A non-numeric string is
-    a single token, i.e. the same as a list with that token, and matches every sequence that
-    contains it."""
-    concept_ids, token_sequences = [], []
+    An outcome event is either a concept id (numeric), or a token written exactly as it is in the
+    tokenizer's vocabulary, e.g. "CPT4/33510". A config uses one of the two."""
+    concept_ids, tokens = [], []
     for event in outcome_events:
-        if isinstance(event, (list, tuple)):
-            if not event:
-                raise ValueError("An outcome event cannot be an empty list of tokens")
-            token_sequences.append([str(token) for token in event])
-        elif str(event).isnumeric():
+        if str(event).isnumeric():
             concept_ids.append(int(event))
         elif isinstance(event, str) and event:
-            token_sequences.append([event])
+            tokens.append(event)
         else:
             raise ValueError(
-                f"The outcome event {event!r} is neither a concept id, a token nor a list of tokens"
+                f"The outcome event {event!r} is neither a concept id nor a token"
             )
-    if concept_ids and token_sequences:
+    if concept_ids and tokens:
         raise ValueError(
-            "outcome_events cannot mix concept ids and lists of tokens, use one of them"
+            "outcome_events cannot mix concept ids and tokens, use one of them"
         )
-    if not concept_ids and not token_sequences:
+    if not concept_ids and not tokens:
         raise ValueError("outcome_events is empty")
-    return concept_ids, token_sequences
+    return concept_ids, tokens
 
 
 def main(args):
@@ -162,8 +154,8 @@ def main(args):
 
     task_config = load_task_config_from_yaml(args.task_config)
     task_name = task_config.task_name
-    outcome_events, token_sequences = split_outcome_events(task_config.outcome_events)
-    if token_sequences and task_config.include_descendants:
+    outcome_events, tokens = split_outcome_events(task_config.outcome_events)
+    if tokens and task_config.include_descendants:
         raise ValueError(
             "include_descendants expands concept ids, list the tokens of the descendants instead"
         )
@@ -187,8 +179,8 @@ def main(args):
         ]
         outcome_events += descendant_concept_ids
 
-    if token_sequences:
-        outcome_events = token_sequences
+    if tokens:
+        outcome_events = tokens
 
     prediction_output_folder_name = os.path.join(
         args.output_folder, folder_name, task_name
