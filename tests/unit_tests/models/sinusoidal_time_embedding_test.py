@@ -10,6 +10,24 @@ from cehrgpt.models.hf_cehrgpt import (
 
 
 class SinusoidalTimeEmbeddingTest(unittest.TestCase):
+    def test_config_repr_summarizes_time_tokens_without_dumping_mappings(self):
+        config = CEHRGPTConfig(
+            vocab_size=5,
+            n_embd=8,
+            n_layer=1,
+            n_head=1,
+            time_token_embedding_type="sinusoidal",
+            token_to_time_token_mapping={-1: [0, 0, 0], 2: [1, 0, 0]},
+            time_token_values={2: 1.0},
+        )
+
+        representation = repr(config)
+
+        self.assertIn("time_token_embedding_type='sinusoidal'", representation)
+        self.assertIn("time_token_count=1", representation)
+        self.assertNotIn("time_token_values", representation)
+        self.assertNotIn("token_to_time_token_mapping", representation)
+
     def test_supports_fractional_days(self):
         encoder = SinusoidalTimeEmbedding(embedding_dim=16)
         result = encoder(torch.tensor([1.0, 1.5, 2.0]))

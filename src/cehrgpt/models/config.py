@@ -112,6 +112,30 @@ class CEHRGPTConfig(PretrainedConfig):
         "num_hidden_layers": "n_layer",
     }
 
+    def __repr__(self) -> str:
+        """Return a concise summary for Transformers' INFO-level config logging.
+
+        ``PretrainedConfig.__repr__`` serializes the complete configuration. CEHR-GPT
+        stores vocabulary-sized metadata such as ``time_token_values`` and
+        ``_token_to_time_token_mapping`` in that configuration, so the default
+        representation can produce thousands of log lines during checkpoint loading.
+        This does not alter ``to_dict``/``to_json_string`` or checkpoint persistence.
+        """
+        time_token_count = len(set(self.token_to_time_token_mapping) - {-1})
+        return (
+            f"{self.__class__.__name__}("
+            f"backbone={getattr(self, 'backbone', 'gpt2')!r}, "
+            f"vocab_size={self.vocab_size}, "
+            f"hidden_size={self.hidden_size}, "
+            f"num_hidden_layers={self.num_hidden_layers}, "
+            f"num_attention_heads={self.num_attention_heads}, "
+            f"max_position_embeddings={self.max_position_embeddings}, "
+            f"time_token_embedding_type="
+            f"{getattr(self, 'time_token_embedding_type', 'concept')!r}, "
+            f"time_token_count={time_token_count}, "
+            f"tie_word_embeddings={self.tie_word_embeddings})"
+        )
+
     @property
     def token_to_time_token_mapping(self) -> Dict[int, List[int]]:
         # The saved _token_to_time_token_mapping converts the key to string, so we need to convert it back to int
