@@ -122,6 +122,18 @@ class CehrGPTArguments:
         default=True,
         metadata={"help": "Include inpatient hour token"},
     )
+    time_token_embedding_type: Literal["concept", "sinusoidal"] = dataclasses.field(
+        default="concept",
+        metadata={
+            "help": "Input embedding used for time interval tokens. 'concept' uses "
+            "the ordinary vocabulary lookup; 'sinusoidal' replaces recognized time "
+            "tokens with a deterministic continuous encoding of elapsed days."
+        },
+    )
+    sinusoidal_time_base: float = dataclasses.field(
+        default=10000.0,
+        metadata={"help": "Frequency base for sinusoidal time embeddings."},
+    )
     include_demographics: Optional[bool] = dataclasses.field(
         default=False,
         metadata={
