@@ -83,7 +83,13 @@ class TimeTokenEmbeddingReplacer(nn.Module):
 
     def __init__(self, config: CEHRGPTConfig):
         super().__init__()
-        values_by_token_id = torch.full((config.vocab_size,), -1.0)
+        # ``from_pretrained(torch_dtype=...)`` temporarily changes PyTorch's default
+        # dtype while constructing the model. Keep elapsed-day values in FP32 so
+        # assigning the explicitly FP32 ``time_values`` below also works for BF16/FP16
+        # model loads and preserves time precision before the final embedding cast.
+        values_by_token_id = torch.full(
+            (config.vocab_size,), -1.0, dtype=torch.float32
+        )
         time_token_ids = set(config.token_to_time_token_mapping) - {-1}
         missing_time_values = time_token_ids - set(config.time_token_values)
         if missing_time_values:

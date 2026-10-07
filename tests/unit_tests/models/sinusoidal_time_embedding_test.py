@@ -44,6 +44,25 @@ class SinusoidalTimeEmbeddingTest(unittest.TestCase):
         self.assertFalse(torch.equal(result[:, 1], original[:, 1]))
         self.assertFalse(torch.equal(result[:, 3], original[:, 3]))
 
+    def test_lookup_values_remain_float32_when_default_dtype_is_bfloat16(self):
+        config = CEHRGPTConfig(
+            vocab_size=5,
+            n_embd=8,
+            n_layer=1,
+            n_head=1,
+            time_token_embedding_type="sinusoidal",
+            token_to_time_token_mapping={-1: [0, 0, 0], 2: [1, 0, 0]},
+            time_token_values={2: 1.0},
+        )
+        original_dtype = torch.get_default_dtype()
+        try:
+            torch.set_default_dtype(torch.bfloat16)
+            replacer = TimeTokenEmbeddingReplacer(config)
+        finally:
+            torch.set_default_dtype(original_dtype)
+
+        self.assertEqual(replacer.values_by_token_id.dtype, torch.float32)
+
 
 if __name__ == "__main__":
     unittest.main()
