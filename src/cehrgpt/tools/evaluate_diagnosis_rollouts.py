@@ -72,6 +72,30 @@ def create_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rollout-batch-size", type=int)
     parser.add_argument("--horizon-days", type=int, default=365)
     parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument(
+        "--top_p",
+        "--top-p",
+        dest="top_p",
+        type=float,
+        default=1.0,
+        help="Nucleus sampling probability",
+    )
+    parser.add_argument(
+        "--top_k",
+        "--top-k",
+        dest="top_k",
+        type=int,
+        default=300,
+        help="Maximum number of tokens retained for sampling",
+    )
+    parser.add_argument(
+        "--temperature",
+        "--temp",
+        dest="temperature",
+        type=float,
+        default=1.0,
+        help="Sampling temperature",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--max-n-trial",
@@ -508,7 +532,7 @@ def build_output(
 ) -> Dict[str, Any]:
     """Aggregate patient predictions into the final evaluation artifact."""
     c_index, comparable_pairs = harrell_c_index(results)
-    ci_low, ci_high, bootstrap_resamples = (math.nan, math.nan, 0)
+    ci_low, ci_high, bootstrap_resamples = (None, None, 0)
     if args.bootstrap_resamples > 0:
         ci_low, ci_high, bootstrap_resamples = bootstrap_c_index(
             results, args.bootstrap_resamples, args.seed
@@ -520,11 +544,14 @@ def build_output(
         "rollouts_per_patient": args.rollouts,
         "horizon_days": args.horizon_days,
         "max_new_tokens": args.max_new_tokens,
+        "top_p": args.top_p,
+        "top_k": args.top_k,
+        "temperature": args.temperature,
         "seed": args.seed,
         "condition_token_count": condition_token_count,
         "observed_events": sum(item["observed_event"] for item in results),
         "comparable_pairs": comparable_pairs,
-        "c_index": c_index,
+        "c_index": None if math.isnan(c_index) else c_index,
         "c_index_bootstrap_95_ci": [ci_low, ci_high],
         "bootstrap_resamples": bootstrap_resamples,
         "valid_rollouts": sum(item["valid_rollouts"] for item in results),
@@ -681,6 +708,12 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
         raise ValueError("--patients must be greater than 1")
     if args.rollouts <= 0:
         raise ValueError("--rollouts must be positive")
+    if not 0 < args.top_p <= 1:
+        raise ValueError("--top_p must be in (0, 1]")
+    if args.top_k < 0:
+        raise ValueError("--top_k must be non-negative")
+    if args.temperature <= 0:
+        raise ValueError("--temperature must be positive")
 
     if args.gpu_ids and not args.partition_input:
         gpu_ids = resolve_gpu_ids(args.gpu_ids)
@@ -726,6 +759,9 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
         tokenizer=tokenizer,
         max_length=model.config.max_position_embeddings,
         num_return_sequences=args.rollouts,
+        top_p=args.top_p,
+        top_k=args.top_k,
+        temperature=args.temperature,
         max_new_tokens=args.max_new_tokens,
     )
     predictor = TimeToEventModel(

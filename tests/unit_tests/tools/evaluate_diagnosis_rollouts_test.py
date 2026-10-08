@@ -12,6 +12,7 @@ from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.tools import evaluate_diagnosis_rollouts as evaluation
 from cehrgpt.tools.evaluate_diagnosis_rollouts import (
     bootstrap_c_index,
+    create_arg_parser,
     find_observed_diagnosis,
     generate_diagnosis_rollouts,
     harrell_c_index,
@@ -32,6 +33,31 @@ def test_sampling_signature_matches_pinned_transformers():
     )
 
     assert cehrgpt_parameters == transformers_parameters
+
+
+def test_sampling_arguments_accept_aliases():
+    args = create_arg_parser().parse_args(
+        [
+            "--model",
+            "model",
+            "--sequences",
+            "sequences",
+            "--concept",
+            "concept",
+            "--output",
+            "output.json",
+            "--top-p",
+            "0.9",
+            "--top-k",
+            "50",
+            "--temp",
+            "0.7",
+        ]
+    )
+
+    assert args.top_p == 0.9
+    assert args.top_k == 50
+    assert args.temperature == 0.7
 
 
 def test_harrell_c_index_is_patient_level_and_handles_censoring():
@@ -235,6 +261,9 @@ def test_multiple_gpu_run_uses_disjoint_partitions_and_merges_results(tmp_path):
         rollouts=2,
         horizon_days=365,
         max_new_tokens=512,
+        top_p=1.0,
+        top_k=300,
+        temperature=1.0,
         seed=42,
         bootstrap_resamples=0,
         trajectory_output=None,
