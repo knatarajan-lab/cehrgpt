@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Sequence, Set, Tuple
 
 import numpy as np
+import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
@@ -100,6 +101,20 @@ def create_arg_parser() -> argparse.ArgumentParser:
         "--partition-input",
         dest="partition_input",
         help="Internal: JSON patient partition prepared by --gpu-ids",
+    )
+    parser.add_argument(
+        "--trajectory_output",
+        "--trajectory-output",
+        dest="trajectory_output",
+        help="Parquet output folder; defaults to <output>.trajectories",
+    )
+    parser.add_argument(
+        "--trajectory_buffer_size",
+        "--trajectory-buffer-size",
+        dest="trajectory_buffer_size",
+        type=int,
+        default=100,
+        help="Patients per trajectory Parquet part",
     )
     return parser
 
@@ -422,12 +437,74 @@ def write_json(path: Path, value: Dict[str, Any] | List[Dict[str, Any]]) -> None
     temporary.replace(path)
 
 
+TRAJECTORY_SCHEMA = pa.schema(
+    [
+        pa.field("sample_index", pa.int64(), nullable=False),
+        pa.field("person_id", pa.int64(), nullable=False),
+        pa.field("cutoff_timestamp", pa.float64(), nullable=False),
+        pa.field("prompt_tokens", pa.list_(pa.string()), nullable=False),
+        pa.field(
+            "generated_trajectories",
+            pa.list_(
+                pa.struct(
+                    [
+                        pa.field("tokens", pa.list_(pa.string()), nullable=False),
+                        pa.field("completed", pa.bool_(), nullable=False),
+                        pa.field("completion_reason", pa.string(), nullable=False),
+                        pa.field("outcome_event", pa.string()),
+                        pa.field("time_to_event_days", pa.float64()),
+                        pa.field(
+                            "generated_elapsed_days", pa.float64(), nullable=False
+                        ),
+                    ]
+                )
+            ),
+            nullable=False,
+        ),
+    ]
+)
+
+
+class TrajectoryParquetWriter:
+    """Incrementally write one nested trajectory record per patient."""
+
+    def __init__(self, output_folder: Path, buffer_size: int):
+        if buffer_size <= 0:
+            raise ValueError("--trajectory-buffer-size must be positive")
+        self.output_folder = output_folder
+        self.output_folder.mkdir(parents=True, exist_ok=True)
+        self.buffer_size = buffer_size
+        self.buffer: List[Dict[str, Any]] = []
+        self.part_index = 0
+
+    def add(self, record: Dict[str, Any]) -> None:
+        self.buffer.append(record)
+        if len(self.buffer) >= self.buffer_size:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self.buffer:
+            return
+        table = pa.Table.from_pylist(self.buffer, schema=TRAJECTORY_SCHEMA)
+        output_path = self.output_folder / f"part_{self.part_index:05d}.parquet"
+        temporary = output_path.with_suffix(".parquet.tmp")
+        pq.write_table(table, temporary, compression="zstd")
+        temporary.replace(output_path)
+        self.buffer.clear()
+        self.part_index += 1
+
+
+def trajectory_output_path(args: argparse.Namespace) -> Path:
+    return Path(args.trajectory_output or (str(args.output) + ".trajectories"))
+
+
 def build_output(
     args: argparse.Namespace,
     results: Sequence[Dict[str, Any]],
     condition_token_count: int,
     device: str,
     elapsed_seconds: float,
+    trajectory_output: str,
 ) -> Dict[str, Any]:
     """Aggregate patient predictions into the final evaluation artifact."""
     c_index, comparable_pairs = harrell_c_index(results)
@@ -454,7 +531,7 @@ def build_output(
         "imputed_incomplete_rollouts": sum(
             item["imputed_incomplete_rollouts"] for item in results
         ),
-        "trajectories_saved": True,
+        "trajectory_output": trajectory_output,
         "risk_score": "negative restricted mean generated time to diagnosis",
         "elapsed_seconds": elapsed_seconds,
         "patients_detail": list(results),
@@ -490,9 +567,12 @@ def run_on_multiple_gpus(
     num_workers = min(len(gpu_ids), len(selected))
     partition_root = Path(str(args.output) + ".partitions")
     log_root = Path(str(args.output) + ".worker_logs")
+    trajectory_root = trajectory_output_path(args)
     shutil.rmtree(partition_root, ignore_errors=True)
+    shutil.rmtree(trajectory_root, ignore_errors=True)
     partition_root.mkdir(parents=True)
     log_root.mkdir(parents=True, exist_ok=True)
+    trajectory_root.mkdir(parents=True)
 
     worker_argv = list(sys.argv[1:])
     for option in (
@@ -504,6 +584,8 @@ def run_on_multiple_gpus(
         "--output",
         "--patients",
         "--bootstrap-resamples",
+        "--trajectory_output",
+        "--trajectory-output",
     ):
         worker_argv = strip_cli_option(worker_argv, option)
 
@@ -516,6 +598,7 @@ def run_on_multiple_gpus(
             partition = selected[worker_index::num_workers]
             partition_input = partition_root / f"partition_{worker_index}.json"
             worker_output = partition_root / f"result_{worker_index}.json"
+            worker_trajectory_output = trajectory_root / f"worker_{worker_index}"
             log_name = f"worker_{worker_index}_gpu_{gpu_ids[worker_index]}.log"
             log_path = log_root / log_name
             write_json(
@@ -545,6 +628,8 @@ def run_on_multiple_gpus(
                             "0",
                             "--device",
                             "cuda:0",
+                            "--trajectory-output",
+                            str(worker_trajectory_output),
                         ],
                         env={
                             **os.environ,
@@ -583,6 +668,7 @@ def run_on_multiple_gpus(
         len(condition_tokens),
         f"cuda:{','.join(gpu_ids[:num_workers])}",
         time.monotonic() - started,
+        str(trajectory_root),
     )
     write_json(Path(args.output), output)
     shutil.rmtree(partition_root)
@@ -652,6 +738,11 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
     )
     predictor.outcome_events = condition_tokens
 
+    trajectory_folder = trajectory_output_path(args)
+    shutil.rmtree(trajectory_folder, ignore_errors=True)
+    trajectory_writer = TrajectoryParquetWriter(
+        trajectory_folder, args.trajectory_buffer_size
+    )
     results = []
     vocab = tokenizer.get_vocab()
     for record in selected:
@@ -681,6 +772,15 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
             rollout_events.extend([False] * missing)
 
         restricted_mean = float(np.mean(rollout_times))
+        trajectory_writer.add(
+            {
+                "sample_index": record["sample_index"],
+                "person_id": record["person_id"],
+                "cutoff_timestamp": cutoff,
+                "prompt_tokens": prefix,
+                "generated_trajectories": generated_trajectories,
+            }
+        )
         results.append(
             {
                 "sample_index": record["sample_index"],
@@ -697,8 +797,6 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
                 "valid_rollouts": valid_rollouts,
                 "imputed_incomplete_rollouts": missing,
                 "discarded_incomplete_attempts": incomplete_attempts,
-                "prompt_tokens": prefix,
-                "generated_trajectories": generated_trajectories,
             }
         )
         print(
@@ -708,12 +806,14 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
             flush=True,
         )
 
+    trajectory_writer.flush()
     output = build_output(
         args,
         results,
         len(condition_tokens),
         str(device),
         time.monotonic() - started,
+        str(trajectory_folder),
     )
     write_json(Path(args.output), output)
     summary = {key: value for key, value in output.items() if key != "patients_detail"}

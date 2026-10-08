@@ -5,6 +5,7 @@ import time
 from types import SimpleNamespace
 from unittest import mock
 
+import pyarrow.parquet as pq
 from transformers.generation.utils import GenerationMixin
 
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
@@ -17,6 +18,7 @@ from cehrgpt.tools.evaluate_diagnosis_rollouts import (
     resolve_device,
     resolve_gpu_ids,
     strip_cli_option,
+    TrajectoryParquetWriter,
     truncate_prefix,
 )
 
@@ -162,6 +164,37 @@ def test_generate_diagnosis_rollouts_parses_event_and_end_token():
     ]
 
 
+def test_trajectory_writer_saves_nested_records_to_parquet(tmp_path):
+    writer = TrajectoryParquetWriter(tmp_path, buffer_size=1)
+    writer.add(
+        {
+            "sample_index": 0,
+            "person_id": 123,
+            "cutoff_timestamp": 100.0,
+            "prompt_tokens": ["[VS]", "[VE]"],
+            "generated_trajectories": [
+                {
+                    "tokens": ["D10", "condition"],
+                    "completed": True,
+                    "completion_reason": "condition",
+                    "outcome_event": "condition",
+                    "time_to_event_days": 10.0,
+                    "generated_elapsed_days": 10.0,
+                }
+            ],
+        }
+    )
+
+    rows = pq.read_table(tmp_path / "part_00000.parquet").to_pylist()
+
+    assert len(rows) == 1
+    assert rows[0]["prompt_tokens"] == ["[VS]", "[VE]"]
+    assert rows[0]["generated_trajectories"][0]["tokens"] == [
+        "D10",
+        "condition",
+    ]
+
+
 def test_resolve_device_accepts_cpu():
     device = resolve_device("cpu")
     assert device.type == "cpu"
@@ -204,6 +237,8 @@ def test_multiple_gpu_run_uses_disjoint_partitions_and_merges_results(tmp_path):
         max_new_tokens=512,
         seed=42,
         bootstrap_resamples=0,
+        trajectory_output=None,
+        trajectory_buffer_size=100,
     )
     calls = []
     partitions = []
