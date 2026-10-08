@@ -302,11 +302,12 @@ def generate_diagnosis_rollouts(
     horizon_days: int,
     target_rollouts: int,
     max_n_trial: int,
-) -> Tuple[List[float], List[bool], int]:
+) -> Tuple[List[float], List[bool], int, List[Dict[str, Any]]]:
     """Generate valid rollouts, retrying trajectories cut off by token limits."""
     rollout_times = []
     rollout_events = []
     incomplete = 0
+    trajectories = []
     original_num_return_sequences = predictor.generation_config.num_return_sequences
     try:
         for _ in range(max_n_trial):
@@ -318,6 +319,9 @@ def generate_diagnosis_rollouts(
                 generated = sequence[len(prefix) :]
                 elapsed_days = 0.0
                 completed = False
+                completion_reason = "max_new_tokens"
+                outcome_event = None
+                time_to_event_days = None
                 for token in generated:
                     if is_att_token(token):
                         elapsed_days += extract_time_interval_in_days(token)
@@ -325,24 +329,43 @@ def generate_diagnosis_rollouts(
                             rollout_times.append(float(horizon_days))
                             rollout_events.append(False)
                             completed = True
+                            completion_reason = "horizon"
+                            time_to_event_days = float(horizon_days)
                             break
                     elif token in condition_tokens:
-                        rollout_times.append(float(min(elapsed_days, horizon_days)))
+                        time_to_event_days = float(
+                            min(elapsed_days, horizon_days)
+                        )
+                        rollout_times.append(time_to_event_days)
                         rollout_events.append(elapsed_days <= horizon_days)
                         completed = True
+                        completion_reason = "condition"
+                        outcome_event = token
                         break
                     elif token == predictor.tokenizer.end_token:
                         rollout_times.append(float(horizon_days))
                         rollout_events.append(False)
                         completed = True
+                        completion_reason = "end_token"
+                        time_to_event_days = float(horizon_days)
                         break
+                trajectories.append(
+                    {
+                        "tokens": generated,
+                        "completed": completed,
+                        "completion_reason": completion_reason,
+                        "outcome_event": outcome_event,
+                        "time_to_event_days": time_to_event_days,
+                        "generated_elapsed_days": float(elapsed_days),
+                    }
+                )
                 if not completed:
                     incomplete += 1
     finally:
         predictor.generation_config.num_return_sequences = (
             original_num_return_sequences
         )
-    return rollout_times, rollout_events, incomplete
+    return rollout_times, rollout_events, incomplete, trajectories
 
 
 def resolve_gpu_ids(gpu_ids: str) -> List[str]:
@@ -431,6 +454,7 @@ def build_output(
         "imputed_incomplete_rollouts": sum(
             item["imputed_incomplete_rollouts"] for item in results
         ),
+        "trajectories_saved": True,
         "risk_score": "negative restricted mean generated time to diagnosis",
         "elapsed_seconds": elapsed_seconds,
         "patients_detail": list(results),
@@ -635,15 +659,18 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
         prefix = [token for token in record["prefix"] if token in vocab]
         prefix = truncate_prefix(prefix, max_prompt_length)
         torch.manual_seed(args.seed + record["sample_index"])
-        rollout_times, rollout_events, incomplete_attempts = (
-            generate_diagnosis_rollouts(
-                predictor=predictor,
-                prefix=prefix,
-                condition_tokens=condition_tokens,
-                horizon_days=args.horizon_days,
-                target_rollouts=args.rollouts,
-                max_n_trial=args.max_n_trial,
-            )
+        (
+            rollout_times,
+            rollout_events,
+            incomplete_attempts,
+            generated_trajectories,
+        ) = generate_diagnosis_rollouts(
+            predictor=predictor,
+            prefix=prefix,
+            condition_tokens=condition_tokens,
+            horizon_days=args.horizon_days,
+            target_rollouts=args.rollouts,
+            max_n_trial=args.max_n_trial,
         )
         valid_rollouts = len(rollout_times)
         missing = args.rollouts - valid_rollouts
@@ -670,6 +697,8 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
                 "valid_rollouts": valid_rollouts,
                 "imputed_incomplete_rollouts": missing,
                 "discarded_incomplete_attempts": incomplete_attempts,
+                "prompt_tokens": prefix,
+                "generated_trajectories": generated_trajectories,
             }
         )
         print(

@@ -135,13 +135,31 @@ def test_generate_diagnosis_rollouts_parses_event_and_end_token():
                 prefix + ["D30", "[END]"],
             ]
 
-    times, events, incomplete = generate_diagnosis_rollouts(
+    times, events, incomplete, trajectories = generate_diagnosis_rollouts(
         Predictor(), prefix, {"condition"}, 365, 2, 1
     )
 
     assert times == [10.0, 365.0]
     assert events == [True, False]
     assert incomplete == 0
+    assert trajectories == [
+        {
+            "tokens": ["D10", "condition"],
+            "completed": True,
+            "completion_reason": "condition",
+            "outcome_event": "condition",
+            "time_to_event_days": 10.0,
+            "generated_elapsed_days": 10.0,
+        },
+        {
+            "tokens": ["D30", "[END]"],
+            "completed": True,
+            "completion_reason": "end_token",
+            "outcome_event": None,
+            "time_to_event_days": 365.0,
+            "generated_elapsed_days": 30.0,
+        },
+    ]
 
 
 def test_resolve_device_accepts_cpu():
