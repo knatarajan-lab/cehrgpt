@@ -804,16 +804,7 @@ def run_on_multiple_gpus(
                 f"{log_path}",
                 flush=True,
             )
-        exit_codes = []
-        with tqdm(
-            total=len(processes),
-            desc="GPU workers",
-            unit="worker",
-            dynamic_ncols=True,
-        ) as progress:
-            for process in processes:
-                exit_codes.append(process.wait())
-                progress.update()
+        exit_codes = [process.wait() for process in processes]
     finally:
         for process in processes:
             if process.poll() is None:
