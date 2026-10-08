@@ -947,7 +947,7 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
         desc="Evaluating patients",
         unit="patient",
         dynamic_ncols=True,
-        disable=bool(args.partition_input),
+        mininterval=1.0,
     )
     for record in progress:
         cutoff = record["cutoff_timestamp"]
