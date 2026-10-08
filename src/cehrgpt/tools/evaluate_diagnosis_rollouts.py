@@ -71,6 +71,14 @@ def create_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rollouts", type=int, default=20)
     parser.add_argument("--rollout-batch-size", type=int)
     parser.add_argument("--horizon-days", type=int, default=365)
+    parser.add_argument(
+        "--min_history_visits",
+        "--min-history-visits",
+        dest="min_history_visits",
+        type=int,
+        default=2,
+        help="Minimum completed visits required before the prediction cutoff",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument(
         "--top_p",
@@ -157,9 +165,13 @@ def find_observed_diagnosis(
     cutoff_time: float,
     condition_tokens: Set[str],
     horizon_days: int,
-) -> Tuple[float, bool, str | None]:
+    last_observed_time: float,
+) -> Tuple[float, bool, str | None, float]:
     """Find the first Condition-domain sequence event after the cutoff."""
-    horizon_end = cutoff_time + horizon_days * SECONDS_PER_DAY
+    horizon_end = min(
+        cutoff_time + horizon_days * SECONDS_PER_DAY, last_observed_time
+    )
+    followup_days = max(0.0, (horizon_end - cutoff_time) / SECONDS_PER_DAY)
     future_conditions = [
         (epoch_time, token)
         for token, epoch_time in zip(
@@ -168,9 +180,38 @@ def find_observed_diagnosis(
         if token in condition_tokens and cutoff_time < epoch_time <= horizon_end
     ]
     if not future_conditions:
-        return float(horizon_days), False, None
+        return followup_days, False, None, followup_days
     event_time, concept_id = min(future_conditions)
-    return (event_time - cutoff_time) / SECONDS_PER_DAY, True, concept_id
+    return (
+        (event_time - cutoff_time) / SECONDS_PER_DAY,
+        True,
+        concept_id,
+        followup_days,
+    )
+
+
+def eligible_visit_cutoffs(
+    concepts: Sequence[str],
+    epoch_times: Sequence[float],
+    min_history_visits: int,
+) -> List[Tuple[int, float, int]]:
+    """Return visit-end cutoffs with enough history and positive follow-up."""
+    if not epoch_times:
+        return []
+    last_observed_time = max(epoch_times)
+    prefix_max_time = -math.inf
+    completed_visits = 0
+    eligible = []
+    for index, (token, epoch_time) in enumerate(zip(concepts, epoch_times)):
+        prefix_max_time = max(prefix_max_time, epoch_time)
+        if is_visit_end(token):
+            completed_visits += 1
+            if (
+                completed_visits >= min_history_visits
+                and prefix_max_time < last_observed_time
+            ):
+                eligible.append((index, prefix_max_time, completed_visits))
+    return eligible
 
 
 def select_cutoffs(
@@ -179,6 +220,7 @@ def select_cutoffs(
     horizon_days: int,
     seed: int,
     condition_tokens: Set[str],
+    min_history_visits: int,
 ) -> List[Dict[str, Any]]:
     """Select one random eligible visit-end cutoff per sampled patient."""
     files = parquet_files(sequence_path)
@@ -199,33 +241,30 @@ def select_cutoffs(
             if len(concepts) < 2 or not epoch_times:
                 continue
 
-            sequence_end = max(epoch_times)
-            prefix_max_time = -math.inf
-            eligible = []
-            for index, (token, epoch_time) in enumerate(
-                zip(concepts, epoch_times)
-            ):
-                prefix_max_time = max(prefix_max_time, epoch_time)
-                if (
-                    is_visit_end(token)
-                    and index >= 4
-                    and sequence_end - prefix_max_time
-                    >= horizon_days * SECONDS_PER_DAY
-                ):
-                    eligible.append((index, prefix_max_time))
+            eligible = eligible_visit_cutoffs(
+                concepts,
+                epoch_times,
+                min_history_visits,
+            )
 
             if not eligible:
                 continue
-            cutoff_index, cutoff_time = eligible[int(rng.integers(len(eligible)))]
-            observed_days, observed_event, observed_concept_id = (
-                find_observed_diagnosis(
-                    concepts,
-                    epoch_times,
-                    cutoff_index,
-                    cutoff_time,
-                    condition_tokens,
-                    horizon_days,
-                )
+            cutoff_index, cutoff_time, history_visit_count = eligible[
+                int(rng.integers(len(eligible)))
+            ]
+            (
+                observed_days,
+                observed_event,
+                observed_concept_id,
+                followup_days,
+            ) = find_observed_diagnosis(
+                concepts,
+                epoch_times,
+                cutoff_index,
+                cutoff_time,
+                condition_tokens,
+                horizon_days,
+                max(epoch_times),
             )
             selected.append(
                 {
@@ -233,6 +272,8 @@ def select_cutoffs(
                     "person_id": int(record["person_id"]),
                     "cutoff_index": int(cutoff_index),
                     "cutoff_timestamp": float(cutoff_time),
+                    "history_visit_count": history_visit_count,
+                    "followup_days": followup_days,
                     "prefix": concepts[: cutoff_index + 1],
                     "observed_days": observed_days,
                     "observed_event": observed_event,
@@ -244,7 +285,8 @@ def select_cutoffs(
 
     if len(selected) < sample_size:
         raise RuntimeError(
-            f"Only found {len(selected)} patients with an eligible visit boundary"
+            f"Only found {len(selected)} patients with at least "
+            f"{min_history_visits} completed visits and positive follow-up"
         )
     return selected
 
@@ -466,6 +508,8 @@ TRAJECTORY_SCHEMA = pa.schema(
         pa.field("sample_index", pa.int64(), nullable=False),
         pa.field("person_id", pa.int64(), nullable=False),
         pa.field("cutoff_timestamp", pa.float64(), nullable=False),
+        pa.field("history_visit_count", pa.int64(), nullable=False),
+        pa.field("followup_days", pa.float64(), nullable=False),
         pa.field("prompt_tokens", pa.list_(pa.string()), nullable=False),
         pa.field(
             "generated_trajectories",
@@ -543,6 +587,7 @@ def build_output(
         "patients": len(results),
         "rollouts_per_patient": args.rollouts,
         "horizon_days": args.horizon_days,
+        "min_history_visits": args.min_history_visits,
         "max_new_tokens": args.max_new_tokens,
         "top_p": args.top_p,
         "top_k": args.top_k,
@@ -590,6 +635,7 @@ def run_on_multiple_gpus(
         args.horizon_days,
         args.seed,
         condition_tokens,
+        args.min_history_visits,
     )
     num_workers = min(len(gpu_ids), len(selected))
     partition_root = Path(str(args.output) + ".partitions")
@@ -708,6 +754,8 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
         raise ValueError("--patients must be greater than 1")
     if args.rollouts <= 0:
         raise ValueError("--rollouts must be positive")
+    if args.min_history_visits <= 0:
+        raise ValueError("--min_history_visits must be positive")
     if not 0 < args.top_p <= 1:
         raise ValueError("--top_p must be in (0, 1]")
     if args.top_k < 0:
@@ -743,6 +791,7 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
             args.horizon_days,
             args.seed,
             condition_tokens,
+            args.min_history_visits,
         )
     if not condition_tokens:
         raise RuntimeError("No Condition-domain concepts occur in the tokenizer")
@@ -813,6 +862,8 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
                 "sample_index": record["sample_index"],
                 "person_id": record["person_id"],
                 "cutoff_timestamp": cutoff,
+                "history_visit_count": record["history_visit_count"],
+                "followup_days": record["followup_days"],
                 "prompt_tokens": prefix,
                 "generated_trajectories": generated_trajectories,
             }
@@ -822,6 +873,8 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
                 "sample_index": record["sample_index"],
                 "person_id": record["person_id"],
                 "cutoff_timestamp": cutoff,
+                "history_visit_count": record["history_visit_count"],
+                "followup_days": record["followup_days"],
                 "observed_days": record["observed_days"],
                 "observed_event": record["observed_event"],
                 "observed_condition_concept_id": record[

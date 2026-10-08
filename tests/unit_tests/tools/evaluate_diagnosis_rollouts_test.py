@@ -13,6 +13,7 @@ from cehrgpt.tools import evaluate_diagnosis_rollouts as evaluation
 from cehrgpt.tools.evaluate_diagnosis_rollouts import (
     bootstrap_c_index,
     create_arg_parser,
+    eligible_visit_cutoffs,
     find_observed_diagnosis,
     generate_diagnosis_rollouts,
     harrell_c_index,
@@ -58,6 +59,7 @@ def test_sampling_arguments_accept_aliases():
     assert args.top_p == 0.9
     assert args.top_k == 50
     assert args.temperature == 0.7
+    assert args.min_history_visits == 2
 
 
 def test_harrell_c_index_is_patient_level_and_handles_censoring():
@@ -132,9 +134,10 @@ def test_find_observed_diagnosis_uses_condition_tokens_in_sequence():
         cutoff_time=0,
         condition_tokens={"condition"},
         horizon_days=365,
+        last_observed_time=20 * 86400,
     )
 
-    assert result == (10.0, True, "condition")
+    assert result == (10.0, True, "condition", 20.0)
 
 
 def test_find_observed_diagnosis_censors_when_no_condition_is_in_horizon():
@@ -145,9 +148,45 @@ def test_find_observed_diagnosis_censors_when_no_condition_is_in_horizon():
         cutoff_time=0,
         condition_tokens={"condition"},
         horizon_days=365,
+        last_observed_time=400 * 86400,
     )
 
-    assert result == (365.0, False, None)
+    assert result == (365.0, False, None, 365.0)
+
+
+def test_find_observed_diagnosis_censors_at_last_observed_event():
+    result = find_observed_diagnosis(
+        ["[VE]", "D100", "other"],
+        [0, 100 * 86400, 100 * 86400],
+        cutoff_index=0,
+        cutoff_time=0,
+        condition_tokens={"condition"},
+        horizon_days=365,
+        last_observed_time=100 * 86400,
+    )
+
+    assert result == (100.0, False, None, 100.0)
+
+
+def test_eligible_cutoffs_require_two_completed_history_visits():
+    day = 86400
+    concepts = ["[VS]", "a", "[VE]", "[VS]", "b", "[VE]", "D800"]
+    epoch_times = [0, 0, 0, day, day, day, 800 * day]
+
+    cutoffs = eligible_visit_cutoffs(
+        concepts,
+        epoch_times,
+        min_history_visits=2,
+    )
+
+    assert cutoffs == [(5, float(day), 2)]
+
+
+def test_eligible_cutoffs_require_positive_followup():
+    concepts = ["[VS]", "a", "[VE]", "[VS]", "b", "[VE]"]
+    epoch_times = [0, 0, 0, 86400, 86400, 86400]
+
+    assert eligible_visit_cutoffs(concepts, epoch_times, 2) == []
 
 
 def test_generate_diagnosis_rollouts_parses_event_and_end_token():
@@ -197,6 +236,8 @@ def test_trajectory_writer_saves_nested_records_to_parquet(tmp_path):
             "sample_index": 0,
             "person_id": 123,
             "cutoff_timestamp": 100.0,
+            "history_visit_count": 2,
+            "followup_days": 365.0,
             "prompt_tokens": ["[VS]", "[VE]"],
             "generated_trajectories": [
                 {
@@ -244,6 +285,8 @@ def test_multiple_gpu_run_uses_disjoint_partitions_and_merges_results(tmp_path):
             "sample_index": index,
             "person_id": 100 + index,
             "cutoff_timestamp": 0.0,
+            "history_visit_count": 2,
+            "followup_days": 365.0,
             "prefix": ["[VS]", "[VE]"],
             "observed_days": float(index + 1),
             "observed_event": True,
@@ -260,6 +303,7 @@ def test_multiple_gpu_run_uses_disjoint_partitions_and_merges_results(tmp_path):
         patients=6,
         rollouts=2,
         horizon_days=365,
+        min_history_visits=2,
         max_new_tokens=512,
         top_p=1.0,
         top_k=300,
