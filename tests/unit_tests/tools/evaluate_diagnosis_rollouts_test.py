@@ -6,6 +6,7 @@ from transformers.generation.utils import GenerationMixin
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.tools.evaluate_diagnosis_rollouts import (
     bootstrap_c_index,
+    find_observed_diagnosis,
     generate_diagnosis_rollouts,
     harrell_c_index,
     resolve_device,
@@ -49,6 +50,18 @@ def test_harrell_c_index_gives_half_credit_to_risk_ties():
     assert comparable == 1
 
 
+def test_harrell_c_index_compares_event_and_censoring_at_same_time():
+    rows = [
+        {"observed_days": 5.0, "observed_event": True, "predicted_risk": 0.9},
+        {"observed_days": 5.0, "observed_event": False, "predicted_risk": 0.1},
+    ]
+
+    value, comparable = harrell_c_index(rows)
+
+    assert value == 1.0
+    assert comparable == 1
+
+
 def test_bootstrap_c_index_is_reproducible():
     rows = [
         {
@@ -71,6 +84,35 @@ def test_truncate_prefix_starts_at_next_complete_visit():
 
     assert truncate_prefix(prefix, 4) == ["[VS]", "b", "[VE]"]
     assert truncate_prefix(prefix, 20) == prefix
+
+
+def test_find_observed_diagnosis_uses_condition_tokens_in_sequence():
+    concepts = ["[VS]", "history", "[VE]", "D10", "condition", "other"]
+    epoch_times = [0, 0, 0, 10 * 86400, 10 * 86400, 20 * 86400]
+
+    result = find_observed_diagnosis(
+        concepts,
+        epoch_times,
+        cutoff_index=2,
+        cutoff_time=0,
+        condition_tokens={"condition"},
+        horizon_days=365,
+    )
+
+    assert result == (10.0, True, "condition")
+
+
+def test_find_observed_diagnosis_censors_when_no_condition_is_in_horizon():
+    result = find_observed_diagnosis(
+        ["[VE]", "D400", "condition"],
+        [0, 400 * 86400, 400 * 86400],
+        cutoff_index=0,
+        cutoff_time=0,
+        condition_tokens={"condition"},
+        horizon_days=365,
+    )
+
+    assert result == (365.0, False, None)
 
 
 def test_generate_diagnosis_rollouts_parses_event_and_end_token():

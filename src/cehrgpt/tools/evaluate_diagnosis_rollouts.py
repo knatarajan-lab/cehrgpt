@@ -3,22 +3,21 @@
 For each randomly sampled patient, this tool selects one eligible visit-end cutoff,
 generates future trajectories, and reduces the rollouts to one patient-level risk
 score: the negative restricted mean time to the first generated Condition token.
-The observed outcome is the first ``condition_occurrence`` after the cutoff, with
-administrative censoring at the requested horizon. Harrell's c-index is computed
-across patients, along with a patient-level bootstrap confidence interval.
+The observed outcome is the first Condition-domain token in the patient sequence
+after the cutoff, with administrative censoring at the requested horizon. Harrell's
+c-index is computed across patients, along with a patient-level bootstrap confidence
+interval.
 
 Example:
     python -m cehrgpt.tools.evaluate_diagnosis_rollouts \
         --model /path/to/model \
         --sequences /path/to/patient_sequence/test \
-        --condition-occurrence /path/to/condition_occurrence \
         --concept /path/to/concept \
         --output /path/to/diagnosis_rollout_cindex.json \
         --device cuda:0
 """
 
 import argparse
-import datetime as dt
 import json
 import math
 import time
@@ -26,11 +25,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Sequence, Set, Tuple
 
 import numpy as np
-import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 import torch
+from lifelines.utils import concordance_index
 
 from cehrgpt.gpt_utils import (
     extract_time_interval_in_days,
@@ -57,11 +56,6 @@ def create_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--sequences", required=True, help="Test patient_sequence parquet folder"
-    )
-    parser.add_argument(
-        "--condition-occurrence",
-        required=True,
-        help="OMOP condition_occurrence parquet folder",
     )
     parser.add_argument(
         "--concept", required=True, help="OMOP concept parquet folder"
@@ -100,8 +94,35 @@ def parquet_files(path: str) -> List[str]:
     return files
 
 
+def find_observed_diagnosis(
+    concepts: Sequence[str],
+    epoch_times: Sequence[float],
+    cutoff_index: int,
+    cutoff_time: float,
+    condition_tokens: Set[str],
+    horizon_days: int,
+) -> Tuple[float, bool, str | None]:
+    """Find the first Condition-domain sequence event after the cutoff."""
+    horizon_end = cutoff_time + horizon_days * SECONDS_PER_DAY
+    future_conditions = [
+        (epoch_time, token)
+        for token, epoch_time in zip(
+            concepts[cutoff_index + 1 :], epoch_times[cutoff_index + 1 :]
+        )
+        if token in condition_tokens and cutoff_time < epoch_time <= horizon_end
+    ]
+    if not future_conditions:
+        return float(horizon_days), False, None
+    event_time, concept_id = min(future_conditions)
+    return (event_time - cutoff_time) / SECONDS_PER_DAY, True, concept_id
+
+
 def select_cutoffs(
-    sequence_path: str, sample_size: int, horizon_days: int, seed: int
+    sequence_path: str,
+    sample_size: int,
+    horizon_days: int,
+    seed: int,
+    condition_tokens: Set[str],
 ) -> List[Dict[str, Any]]:
     """Select one random eligible visit-end cutoff per sampled patient."""
     files = parquet_files(sequence_path)
@@ -140,12 +161,25 @@ def select_cutoffs(
             if not eligible:
                 continue
             cutoff_index, cutoff_time = eligible[int(rng.integers(len(eligible)))]
+            observed_days, observed_event, observed_concept_id = (
+                find_observed_diagnosis(
+                    concepts,
+                    epoch_times,
+                    cutoff_index,
+                    cutoff_time,
+                    condition_tokens,
+                    horizon_days,
+                )
+            )
             selected.append(
                 {
                     "person_id": int(record["person_id"]),
                     "cutoff_index": int(cutoff_index),
                     "cutoff_timestamp": float(cutoff_time),
                     "prefix": concepts[: cutoff_index + 1],
+                    "observed_days": observed_days,
+                    "observed_event": observed_event,
+                    "observed_condition_concept_id": observed_concept_id,
                 }
             )
             if len(selected) >= sample_size:
@@ -174,31 +208,6 @@ def load_condition_tokens(
     }
 
 
-def load_observed_conditions(
-    condition_path: str, person_ids: Sequence[int]
-) -> Dict[int, List[Tuple[float, str]]]:
-    """Read condition occurrences only for the sampled patients."""
-    table = ds.dataset(parquet_files(condition_path), format="parquet").to_table(
-        columns=["person_id", "condition_concept_id", "condition_start_datetime"],
-        filter=pc.is_in(pc.field("person_id"), value_set=pa.array(person_ids)),
-    )
-    by_person = {person_id: [] for person_id in person_ids}
-    for record in table.to_pylist():
-        timestamp = record["condition_start_datetime"]
-        if timestamp is None:
-            continue
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=dt.timezone.utc)
-        else:
-            timestamp = timestamp.astimezone(dt.timezone.utc)
-        by_person[int(record["person_id"])].append(
-            (timestamp.timestamp(), str(record["condition_concept_id"]))
-        )
-    for events in by_person.values():
-        events.sort()
-    return by_person
-
-
 def truncate_prefix(prefix: Sequence[str], max_length: int) -> List[str]:
     """Keep the newest complete-visit-aligned suffix that fits the model."""
     prefix = list(prefix)
@@ -212,12 +221,17 @@ def truncate_prefix(prefix: Sequence[str], max_length: int) -> List[str]:
 
 
 def harrell_c_index(rows: Sequence[Dict[str, Any]]) -> Tuple[float, int]:
-    """Compute censored Harrell concordance across patient-level predictions."""
-    score = 0.0
+    """Compute censored patient-level concordance with lifelines."""
     comparable = 0
     for index, left in enumerate(rows):
         for right in rows[:index]:
             if left["observed_days"] == right["observed_days"]:
+                # At the same time, lifelines considers an observed event
+                # comparable with a censored observation, but not two events or
+                # two censored observations.
+                comparable += int(
+                    left["observed_event"] != right["observed_event"]
+                )
                 continue
             if left["observed_days"] < right["observed_days"]:
                 earlier, later = left, right
@@ -226,11 +240,24 @@ def harrell_c_index(rows: Sequence[Dict[str, Any]]) -> Tuple[float, int]:
             if not earlier["observed_event"]:
                 continue
             comparable += 1
-            if earlier["predicted_risk"] > later["predicted_risk"]:
-                score += 1.0
-            elif earlier["predicted_risk"] == later["predicted_risk"]:
-                score += 0.5
-    return score / comparable if comparable else math.nan, comparable
+    if not comparable:
+        return math.nan, 0
+
+    event_times = np.asarray([row["observed_days"] for row in rows], dtype=float)
+    # lifelines expects a larger predicted score to mean longer survival, whereas
+    # predicted_risk is larger for an earlier diagnosis.
+    predicted_survival = -np.asarray(
+        [row["predicted_risk"] for row in rows], dtype=float
+    )
+    event_observed = np.asarray(
+        [row["observed_event"] for row in rows], dtype=bool
+    )
+    value = concordance_index(
+        event_times=event_times,
+        predicted_scores=predicted_survival,
+        event_observed=event_observed,
+    )
+    return float(value), comparable
 
 
 def bootstrap_c_index(
@@ -319,16 +346,16 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
     if args.rollouts <= 0:
         raise ValueError("--rollouts must be positive")
 
-    selected = select_cutoffs(
-        args.sequences, args.patients, args.horizon_days, args.seed
-    )
-    person_ids = [record["person_id"] for record in selected]
     tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer or args.model)
     condition_tokens = load_condition_tokens(args.concept, tokenizer)
     if not condition_tokens:
         raise RuntimeError("No Condition-domain concepts occur in the tokenizer")
-    observed_conditions = load_observed_conditions(
-        args.condition_occurrence, person_ids
+    selected = select_cutoffs(
+        args.sequences,
+        args.patients,
+        args.horizon_days,
+        args.seed,
+        condition_tokens,
     )
 
     device = resolve_device(args.device)
@@ -359,21 +386,6 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
     vocab = tokenizer.get_vocab()
     for patient_index, record in enumerate(selected):
         cutoff = record["cutoff_timestamp"]
-        horizon_end = cutoff + args.horizon_days * SECONDS_PER_DAY
-        future = [
-            event
-            for event in observed_conditions[record["person_id"]]
-            if cutoff < event[0] <= horizon_end
-        ]
-        if future:
-            observed_days = (future[0][0] - cutoff) / SECONDS_PER_DAY
-            observed_event = True
-            observed_concept_id = future[0][1]
-        else:
-            observed_days = float(args.horizon_days)
-            observed_event = False
-            observed_concept_id = None
-
         prefix = [token for token in record["prefix"] if token in vocab]
         prefix = truncate_prefix(prefix, max_prompt_length)
         torch.manual_seed(args.seed + patient_index)
@@ -400,9 +412,11 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
             {
                 "person_id": record["person_id"],
                 "cutoff_timestamp": cutoff,
-                "observed_days": observed_days,
-                "observed_event": observed_event,
-                "observed_condition_concept_id": observed_concept_id,
+                "observed_days": record["observed_days"],
+                "observed_event": record["observed_event"],
+                "observed_condition_concept_id": record[
+                    "observed_condition_concept_id"
+                ],
                 "predicted_event_probability": float(np.mean(rollout_events)),
                 "predicted_restricted_mean_days": restricted_mean,
                 "predicted_risk": -restricted_mean,
