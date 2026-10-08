@@ -5,7 +5,9 @@ import time
 from types import SimpleNamespace
 from unittest import mock
 
+import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 from transformers.generation.utils import GenerationMixin
 
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
@@ -17,6 +19,8 @@ from cehrgpt.tools.evaluate_diagnosis_rollouts import (
     find_observed_diagnosis,
     generate_diagnosis_rollouts,
     harrell_c_index,
+    load_concept_name,
+    load_condition_tokens,
     resolve_device,
     resolve_gpu_ids,
     strip_cli_option,
@@ -60,6 +64,171 @@ def test_sampling_arguments_accept_aliases():
     assert args.top_k == 50
     assert args.temperature == 0.7
     assert args.min_history_visits == 2
+    assert args.diagnosis_concept_id is None
+
+
+def test_diagnosis_arguments_accept_aliases():
+    args = create_arg_parser().parse_args(
+        [
+            "--model",
+            "model",
+            "--sequences",
+            "sequences",
+            "--concept",
+            "concept",
+            "--output",
+            "output.json",
+            "--diagnosis_concept_id",
+            "100",
+            "--concept_ancestor",
+            "concept_ancestor",
+        ]
+    )
+
+    assert args.diagnosis_concept_id == 100
+    assert args.concept_ancestor == "concept_ancestor"
+
+
+def test_load_condition_tokens_expands_diagnosis_descendants(tmp_path):
+    concept_path = tmp_path / "concept"
+    concept_ancestor_path = tmp_path / "concept_ancestor"
+    concept_path.mkdir()
+    concept_ancestor_path.mkdir()
+    pq.write_table(
+        pa.table(
+            {
+                "concept_id": [100, 101, 102, 103, 200],
+                "domain_id": [
+                    "Condition",
+                    "Condition",
+                    "Drug",
+                    "Condition",
+                    "Condition",
+                ],
+            }
+        ),
+        concept_path / "part.parquet",
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "ancestor_concept_id": [100, 100, 999],
+                "descendant_concept_id": [101, 102, 103],
+            }
+        ),
+        concept_ancestor_path / "part.parquet",
+    )
+    tokenizer = SimpleNamespace(
+        get_vocab=lambda: {"100": 0, "101": 1, "102": 2, "200": 3}
+    )
+
+    tokens = load_condition_tokens(
+        str(concept_path),
+        tokenizer,
+        diagnosis_concept_id=100,
+        concept_ancestor_path=str(concept_ancestor_path),
+    )
+
+    assert tokens == {"100", "101"}
+
+
+def test_load_concept_name(tmp_path):
+    concept_path = tmp_path / "concept"
+    concept_path.mkdir()
+    pq.write_table(
+        pa.table(
+            {
+                "concept_id": [100, 101],
+                "concept_name": ["Target diagnosis", "Descendant diagnosis"],
+            }
+        ),
+        concept_path / "part.parquet",
+    )
+
+    assert load_concept_name(str(concept_path), 100) == "Target diagnosis"
+
+
+def test_load_concept_name_rejects_unknown_concept(tmp_path):
+    concept_path = tmp_path / "concept"
+    concept_path.mkdir()
+    pq.write_table(
+        pa.table({"concept_id": [100], "concept_name": ["Known diagnosis"]}),
+        concept_path / "part.parquet",
+    )
+
+    with pytest.raises(ValueError, match="Diagnosis concept 999 is absent"):
+        load_concept_name(str(concept_path), 999)
+
+
+def test_load_condition_tokens_requires_ancestor_data_for_diagnosis(tmp_path):
+    tokenizer = SimpleNamespace(get_vocab=lambda: {"100": 0})
+
+    with pytest.raises(ValueError, match="--concept-ancestor is required"):
+        load_condition_tokens(
+            str(tmp_path), tokenizer, diagnosis_concept_id=100
+        )
+
+
+def test_load_condition_tokens_accepts_tokenized_descendant(tmp_path):
+    concept_path = tmp_path / "concept"
+    concept_ancestor_path = tmp_path / "concept_ancestor"
+    concept_path.mkdir()
+    concept_ancestor_path.mkdir()
+    pq.write_table(
+        pa.table({"concept_id": [100, 101], "domain_id": ["Condition"] * 2}),
+        concept_path / "part.parquet",
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "ancestor_concept_id": [100],
+                "descendant_concept_id": [101],
+            }
+        ),
+        concept_ancestor_path / "part.parquet",
+    )
+    tokenizer = SimpleNamespace(get_vocab=lambda: {"101": 0})
+
+    tokens = load_condition_tokens(
+        str(concept_path),
+        tokenizer,
+        diagnosis_concept_id=100,
+        concept_ancestor_path=str(concept_ancestor_path),
+    )
+
+    assert tokens == {"101"}
+
+
+def test_load_condition_tokens_rejects_unavailable_diagnosis_family(tmp_path):
+    concept_path = tmp_path / "concept"
+    concept_ancestor_path = tmp_path / "concept_ancestor"
+    concept_path.mkdir()
+    concept_ancestor_path.mkdir()
+    pq.write_table(
+        pa.table({"concept_id": [100, 101], "domain_id": ["Condition"] * 2}),
+        concept_path / "part.parquet",
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "ancestor_concept_id": [100],
+                "descendant_concept_id": [101],
+            }
+        ),
+        concept_ancestor_path / "part.parquet",
+    )
+    tokenizer = SimpleNamespace(get_vocab=lambda: {"999": 0})
+
+    with pytest.raises(
+        ValueError,
+        match="Diagnosis concept 100 and its Condition-domain descendants",
+    ):
+        load_condition_tokens(
+            str(concept_path),
+            tokenizer,
+            diagnosis_concept_id=100,
+            concept_ancestor_path=str(concept_ancestor_path),
+        )
 
 
 def test_harrell_c_index_is_patient_level_and_handles_censoring():
@@ -298,6 +467,8 @@ def test_multiple_gpu_run_uses_disjoint_partitions_and_merges_results(tmp_path):
         model="model",
         tokenizer=None,
         concept="concept",
+        diagnosis_concept_id=None,
+        concept_ancestor=None,
         sequences="sequences",
         output=str(tmp_path / "result.json"),
         patients=6,

@@ -3,10 +3,11 @@
 For each randomly sampled patient, this tool selects one eligible visit-end cutoff,
 generates future trajectories, and reduces the rollouts to one patient-level risk
 score: the negative restricted mean time to the first generated Condition token.
-The observed outcome is the first Condition-domain token in the patient sequence
-after the cutoff, with administrative censoring at the requested horizon. Harrell's
-c-index is computed across patients, along with a patient-level bootstrap confidence
-interval.
+The observed outcome is the first matching Condition-domain token in the patient
+sequence after the cutoff, with administrative censoring at the requested horizon.
+The outcome can be all diagnoses or one user-supplied OMOP diagnosis concept plus
+its descendants. Harrell's c-index is computed across patients, along with a
+patient-level bootstrap confidence interval.
 
 Example:
     python -m cehrgpt.tools.evaluate_diagnosis_rollouts \
@@ -36,6 +37,7 @@ import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 import torch
 from lifelines.utils import concordance_index
+from tqdm.auto import tqdm
 
 from cehrgpt.gpt_utils import (
     extract_time_interval_in_days,
@@ -65,6 +67,25 @@ def create_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--concept", required=True, help="OMOP concept parquet folder"
+    )
+    parser.add_argument(
+        "--diagnosis_concept_id",
+        "--diagnosis-concept-id",
+        dest="diagnosis_concept_id",
+        type=int,
+        help=(
+            "Optional ancestor Condition concept ID to evaluate instead of all "
+            "diagnoses"
+        ),
+    )
+    parser.add_argument(
+        "--concept_ancestor",
+        "--concept-ancestor",
+        dest="concept_ancestor",
+        help=(
+            "OMOP concept_ancestor parquet folder; required with "
+            "--diagnosis-concept-id"
+        ),
     )
     parser.add_argument("--output", required=True, help="Output JSON file")
     parser.add_argument("--patients", type=int, default=100)
@@ -292,19 +313,77 @@ def select_cutoffs(
 
 
 def load_condition_tokens(
-    concept_path: str, tokenizer: CehrGptTokenizer
+    concept_path: str,
+    tokenizer: CehrGptTokenizer,
+    diagnosis_concept_id: int | None = None,
+    concept_ancestor_path: str | None = None,
 ) -> Set[str]:
-    """Return Condition-domain concept IDs represented in the tokenizer."""
+    """Return tokenizer Condition IDs, optionally restricted to an ancestor."""
+    vocab = tokenizer.get_vocab()
+    allowed_concept_ids = None
+    if diagnosis_concept_id is not None:
+        diagnosis_token = str(diagnosis_concept_id)
+        if not concept_ancestor_path:
+            raise ValueError(
+                "--concept-ancestor is required with --diagnosis-concept-id"
+            )
+        ancestor_table = ds.dataset(
+            parquet_files(concept_ancestor_path), format="parquet"
+        ).to_table(
+            columns=["descendant_concept_id"],
+            filter=pc.field("ancestor_concept_id") == diagnosis_concept_id,
+        )
+        allowed_concept_ids = {
+            str(concept_id)
+            for concept_id in ancestor_table["descendant_concept_id"].to_pylist()
+        }
+        # Do not depend on concept_ancestor containing the zero-level self row.
+        allowed_concept_ids.add(diagnosis_token)
+
     table = ds.dataset(parquet_files(concept_path), format="parquet").to_table(
         columns=["concept_id", "domain_id"],
         filter=pc.field("domain_id") == "Condition",
     )
-    vocab = tokenizer.get_vocab()
-    return {
+    condition_tokens = {
         str(concept_id)
         for concept_id in table["concept_id"].to_pylist()
         if str(concept_id) in vocab
+        and (
+            allowed_concept_ids is None
+            or str(concept_id) in allowed_concept_ids
+        )
     }
+    if diagnosis_concept_id is not None and not condition_tokens:
+        raise ValueError(
+            f"Diagnosis concept {diagnosis_concept_id} and its Condition-domain "
+            "descendants are not available in the tokenizer"
+        )
+    return condition_tokens
+
+
+def load_concept_name(concept_path: str, concept_id: int) -> str:
+    """Load one OMOP concept label using a predicate-pushed parquet scan."""
+    table = ds.dataset(parquet_files(concept_path), format="parquet").to_table(
+        columns=["concept_name"],
+        filter=pc.field("concept_id") == concept_id,
+    )
+    if table.num_rows == 0:
+        raise ValueError(f"Diagnosis concept {concept_id} is absent from --concept")
+    return str(table["concept_name"][0].as_py())
+
+
+def require_condition_tokens(
+    condition_tokens: Set[str], diagnosis_concept_id: int | None
+) -> None:
+    """Raise an informative error when no requested outcome is tokenized."""
+    if condition_tokens:
+        return
+    target = (
+        f"diagnosis concept {diagnosis_concept_id} or its descendants"
+        if diagnosis_concept_id is not None
+        else "Condition-domain concepts"
+    )
+    raise RuntimeError(f"No {target} occur in the tokenizer")
 
 
 def truncate_prefix(prefix: Sequence[str], max_length: int) -> List[str]:
@@ -593,6 +672,10 @@ def build_output(
         "top_k": args.top_k,
         "temperature": args.temperature,
         "seed": args.seed,
+        "diagnosis_concept_id": args.diagnosis_concept_id,
+        "diagnosis_concept_name": getattr(
+            args, "diagnosis_concept_name", None
+        ),
         "condition_token_count": condition_token_count,
         "observed_events": sum(item["observed_event"] for item in results),
         "comparable_pairs": comparable_pairs,
@@ -626,9 +709,13 @@ def run_on_multiple_gpus(
 ) -> Dict[str, Any]:
     """Partition selected patients and run one evaluator worker per GPU."""
     tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer or args.model)
-    condition_tokens = load_condition_tokens(args.concept, tokenizer)
-    if not condition_tokens:
-        raise RuntimeError("No Condition-domain concepts occur in the tokenizer")
+    condition_tokens = load_condition_tokens(
+        args.concept,
+        tokenizer,
+        args.diagnosis_concept_id,
+        args.concept_ancestor,
+    )
+    require_condition_tokens(condition_tokens, args.diagnosis_concept_id)
     selected = select_cutoffs(
         args.sequences,
         args.patients,
@@ -717,7 +804,16 @@ def run_on_multiple_gpus(
                 f"{log_path}",
                 flush=True,
             )
-        exit_codes = [process.wait() for process in processes]
+        exit_codes = []
+        with tqdm(
+            total=len(processes),
+            desc="GPU workers",
+            unit="worker",
+            dynamic_ncols=True,
+        ) as progress:
+            for process in processes:
+                exit_codes.append(process.wait())
+                progress.update()
     finally:
         for process in processes:
             if process.poll() is None:
@@ -763,6 +859,17 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
     if args.temperature <= 0:
         raise ValueError("--temperature must be positive")
 
+    args.diagnosis_concept_name = None
+    if args.diagnosis_concept_id is not None and not args.partition_input:
+        args.diagnosis_concept_name = load_concept_name(
+            args.concept, args.diagnosis_concept_id
+        )
+        print(
+            f"Diagnosis concept: {args.diagnosis_concept_name} "
+            f"({args.diagnosis_concept_id})",
+            flush=True,
+        )
+
     if args.gpu_ids and not args.partition_input:
         gpu_ids = resolve_gpu_ids(args.gpu_ids)
         if len(gpu_ids) > 1:
@@ -784,7 +891,12 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
         condition_tokens = set(partition["condition_tokens"])
         selected = partition["patients"]
     else:
-        condition_tokens = load_condition_tokens(args.concept, tokenizer)
+        condition_tokens = load_condition_tokens(
+            args.concept,
+            tokenizer,
+            args.diagnosis_concept_id,
+            args.concept_ancestor,
+        )
         selected = select_cutoffs(
             args.sequences,
             args.patients,
@@ -793,8 +905,7 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
             condition_tokens,
             args.min_history_visits,
         )
-    if not condition_tokens:
-        raise RuntimeError("No Condition-domain concepts occur in the tokenizer")
+    require_condition_tokens(condition_tokens, args.diagnosis_concept_id)
 
     device = resolve_device(args.device)
     model = CEHRGPT2LMHeadModel.from_pretrained(args.model).eval().to(device)
@@ -830,7 +941,15 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
     )
     results = []
     vocab = tokenizer.get_vocab()
-    for record in selected:
+    progress = tqdm(
+        selected,
+        total=len(selected),
+        desc="Evaluating patients",
+        unit="patient",
+        dynamic_ncols=True,
+        disable=bool(args.partition_input),
+    )
+    for record in progress:
         cutoff = record["cutoff_timestamp"]
         prefix = [token for token in record["prefix"] if token in vocab]
         prefix = truncate_prefix(prefix, max_prompt_length)
@@ -888,11 +1007,9 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
                 "discarded_incomplete_attempts": incomplete_attempts,
             }
         )
-        print(
-            f"patients={len(results)}/{args.patients} "
-            f"observed_events={sum(item['observed_event'] for item in results)} "
-            f"elapsed_seconds={time.monotonic() - started:.1f}",
-            flush=True,
+        progress.set_postfix(
+            observed_events=sum(item["observed_event"] for item in results),
+            valid_rollouts=sum(item["valid_rollouts"] for item in results),
         )
 
     trajectory_writer.flush()

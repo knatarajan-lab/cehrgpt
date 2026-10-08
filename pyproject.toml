@@ -38,6 +38,7 @@ dependencies = [
     "lightgbm",
     "lifelines==0.30.0",
     "polars",
+    "tqdm",
 ]
 
 [tool.setuptools_scm]
