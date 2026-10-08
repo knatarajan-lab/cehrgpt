@@ -14,12 +14,17 @@ Example:
         --sequences /path/to/patient_sequence/test \
         --concept /path/to/concept \
         --output /path/to/diagnosis_rollout_cindex.json \
-        --device cuda:0
+        --gpu_ids all
 """
 
 import argparse
 import json
 import math
+import os
+import shutil
+import signal
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Set, Tuple
@@ -83,6 +88,18 @@ def create_arg_parser() -> argparse.ArgumentParser:
         "--device",
         default="auto",
         help="Torch device such as cuda:0 or cpu; auto chooses CUDA when available",
+    )
+    parser.add_argument(
+        "--gpu_ids",
+        "--gpu-ids",
+        dest="gpu_ids",
+        help="Run one worker per GPU: 'all' or comma-separated visible GPU indices",
+    )
+    parser.add_argument(
+        "--partition_input",
+        "--partition-input",
+        dest="partition_input",
+        help="Internal: JSON patient partition prepared by --gpu-ids",
     )
     return parser
 
@@ -173,6 +190,7 @@ def select_cutoffs(
             )
             selected.append(
                 {
+                    "sample_index": len(selected),
                     "person_id": int(record["person_id"]),
                     "cutoff_index": int(cutoff_index),
                     "cutoff_timestamp": float(cutoff_time),
@@ -327,6 +345,98 @@ def generate_diagnosis_rollouts(
     return rollout_times, rollout_events, incomplete
 
 
+def resolve_gpu_ids(gpu_ids: str) -> List[str]:
+    """Resolve GPU indices relative to the currently visible CUDA devices."""
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    visible_ids = (
+        [item.strip() for item in visible.split(",") if item.strip()]
+        if visible
+        else None
+    )
+    num_visible = (
+        len(visible_ids) if visible_ids is not None else torch.cuda.device_count()
+    )
+    if num_visible == 0:
+        raise RuntimeError("--gpu-ids was provided but no CUDA device is visible")
+    if gpu_ids.strip().lower() == "all":
+        indices = list(range(num_visible))
+    else:
+        indices = [int(item) for item in gpu_ids.split(",") if item.strip()]
+    if not indices:
+        raise ValueError("--gpu-ids must contain at least one GPU")
+    if len(set(indices)) != len(indices):
+        raise ValueError(f"--gpu-ids contains duplicates: {gpu_ids}")
+    out_of_range = [index for index in indices if not 0 <= index < num_visible]
+    if out_of_range:
+        raise ValueError(
+            f"--gpu-ids {out_of_range} out of range; {num_visible} GPU(s) are visible"
+        )
+    return [
+        visible_ids[index] if visible_ids is not None else str(index)
+        for index in indices
+    ]
+
+
+def strip_cli_option(argv: Sequence[str], option: str) -> List[str]:
+    """Remove a CLI option and its value in both supported spellings."""
+    stripped = []
+    skip_next = False
+    for argument in argv:
+        if skip_next:
+            skip_next = False
+        elif argument == option:
+            skip_next = True
+        elif not argument.startswith(option + "="):
+            stripped.append(argument)
+    return stripped
+
+
+def write_json(path: Path, value: Dict[str, Any] | List[Dict[str, Any]]) -> None:
+    """Atomically write JSON so interrupted workers leave no valid-looking output."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2) + "\n")
+    temporary.replace(path)
+
+
+def build_output(
+    args: argparse.Namespace,
+    results: Sequence[Dict[str, Any]],
+    condition_token_count: int,
+    device: str,
+    elapsed_seconds: float,
+) -> Dict[str, Any]:
+    """Aggregate patient predictions into the final evaluation artifact."""
+    c_index, comparable_pairs = harrell_c_index(results)
+    ci_low, ci_high, bootstrap_resamples = (math.nan, math.nan, 0)
+    if args.bootstrap_resamples > 0:
+        ci_low, ci_high, bootstrap_resamples = bootstrap_c_index(
+            results, args.bootstrap_resamples, args.seed
+        )
+    return {
+        "model": args.model,
+        "device": device,
+        "patients": len(results),
+        "rollouts_per_patient": args.rollouts,
+        "horizon_days": args.horizon_days,
+        "max_new_tokens": args.max_new_tokens,
+        "seed": args.seed,
+        "condition_token_count": condition_token_count,
+        "observed_events": sum(item["observed_event"] for item in results),
+        "comparable_pairs": comparable_pairs,
+        "c_index": c_index,
+        "c_index_bootstrap_95_ci": [ci_low, ci_high],
+        "bootstrap_resamples": bootstrap_resamples,
+        "valid_rollouts": sum(item["valid_rollouts"] for item in results),
+        "imputed_incomplete_rollouts": sum(
+            item["imputed_incomplete_rollouts"] for item in results
+        ),
+        "risk_score": "negative restricted mean generated time to diagnosis",
+        "elapsed_seconds": elapsed_seconds,
+        "patients_detail": list(results),
+    }
+
+
 def resolve_device(requested: str) -> torch.device:
     if requested == "auto":
         return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -338,14 +448,10 @@ def resolve_device(requested: str) -> torch.device:
     return device
 
 
-def main(args: argparse.Namespace) -> Dict[str, Any]:
-    started = time.monotonic()
-    torch.manual_seed(args.seed)
-    if args.patients <= 1:
-        raise ValueError("--patients must be greater than 1")
-    if args.rollouts <= 0:
-        raise ValueError("--rollouts must be positive")
-
+def run_on_multiple_gpus(
+    args: argparse.Namespace, gpu_ids: Sequence[str], started: float
+) -> Dict[str, Any]:
+    """Partition selected patients and run one evaluator worker per GPU."""
     tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer or args.model)
     condition_tokens = load_condition_tokens(args.concept, tokenizer)
     if not condition_tokens:
@@ -357,6 +463,146 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
         args.seed,
         condition_tokens,
     )
+    num_workers = min(len(gpu_ids), len(selected))
+    partition_root = Path(str(args.output) + ".partitions")
+    log_root = Path(str(args.output) + ".worker_logs")
+    shutil.rmtree(partition_root, ignore_errors=True)
+    partition_root.mkdir(parents=True)
+    log_root.mkdir(parents=True, exist_ok=True)
+
+    worker_argv = list(sys.argv[1:])
+    for option in (
+        "--gpu_ids",
+        "--gpu-ids",
+        "--device",
+        "--partition_input",
+        "--partition-input",
+        "--output",
+        "--patients",
+        "--bootstrap-resamples",
+    ):
+        worker_argv = strip_cli_option(worker_argv, option)
+
+    processes = []
+    worker_outputs = []
+    log_paths = []
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    try:
+        for worker_index in range(num_workers):
+            partition = selected[worker_index::num_workers]
+            partition_input = partition_root / f"partition_{worker_index}.json"
+            worker_output = partition_root / f"result_{worker_index}.json"
+            log_name = f"worker_{worker_index}_gpu_{gpu_ids[worker_index]}.log"
+            log_path = log_root / log_name
+            write_json(
+                partition_input,
+                {
+                    "condition_tokens": sorted(condition_tokens),
+                    "patients": partition,
+                },
+            )
+            worker_outputs.append(worker_output)
+            log_paths.append(log_path)
+            with log_path.open("w") as log_file:
+                processes.append(
+                    subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-m",
+                            "cehrgpt.tools.evaluate_diagnosis_rollouts",
+                            *worker_argv,
+                            "--partition-input",
+                            str(partition_input),
+                            "--output",
+                            str(worker_output),
+                            "--patients",
+                            str(len(partition)),
+                            "--bootstrap-resamples",
+                            "0",
+                            "--device",
+                            "cuda:0",
+                        ],
+                        env={
+                            **os.environ,
+                            "CUDA_VISIBLE_DEVICES": gpu_ids[worker_index],
+                        },
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
+                    )
+                )
+            print(
+                f"Started worker {worker_index} on GPU {gpu_ids[worker_index]}: "
+                f"{log_path}",
+                flush=True,
+            )
+        exit_codes = [process.wait() for process in processes]
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+
+    failed = [index for index, code in enumerate(exit_codes) if code != 0]
+    if failed:
+        failures = ", ".join(
+            f"worker {index} ({log_paths[index]})" for index in failed
+        )
+        raise RuntimeError(f"Diagnosis rollout workers failed: {failures}")
+
+    results = []
+    for worker_output in worker_outputs:
+        worker_result = json.loads(worker_output.read_text())
+        results.extend(worker_result["patients_detail"])
+    results.sort(key=lambda item: item["sample_index"])
+    output = build_output(
+        args,
+        results,
+        len(condition_tokens),
+        f"cuda:{','.join(gpu_ids[:num_workers])}",
+        time.monotonic() - started,
+    )
+    write_json(Path(args.output), output)
+    shutil.rmtree(partition_root)
+    return output
+
+
+def main(args: argparse.Namespace) -> Dict[str, Any]:
+    started = time.monotonic()
+    if args.patients <= 1 and not args.partition_input:
+        raise ValueError("--patients must be greater than 1")
+    if args.rollouts <= 0:
+        raise ValueError("--rollouts must be positive")
+
+    if args.gpu_ids and not args.partition_input:
+        gpu_ids = resolve_gpu_ids(args.gpu_ids)
+        if len(gpu_ids) > 1:
+            output = run_on_multiple_gpus(args, gpu_ids, started)
+            summary = {
+                key: value
+                for key, value in output.items()
+                if key != "patients_detail"
+            }
+            print(json.dumps(summary, indent=2))
+            return output
+        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_ids[0]
+        args.device = "cuda:0"
+
+    torch.manual_seed(args.seed)
+    tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer or args.model)
+    if args.partition_input:
+        partition = json.loads(Path(args.partition_input).read_text())
+        condition_tokens = set(partition["condition_tokens"])
+        selected = partition["patients"]
+    else:
+        condition_tokens = load_condition_tokens(args.concept, tokenizer)
+        selected = select_cutoffs(
+            args.sequences,
+            args.patients,
+            args.horizon_days,
+            args.seed,
+            condition_tokens,
+        )
+    if not condition_tokens:
+        raise RuntimeError("No Condition-domain concepts occur in the tokenizer")
 
     device = resolve_device(args.device)
     model = CEHRGPT2LMHeadModel.from_pretrained(args.model).eval().to(device)
@@ -384,11 +630,11 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
 
     results = []
     vocab = tokenizer.get_vocab()
-    for patient_index, record in enumerate(selected):
+    for record in selected:
         cutoff = record["cutoff_timestamp"]
         prefix = [token for token in record["prefix"] if token in vocab]
         prefix = truncate_prefix(prefix, max_prompt_length)
-        torch.manual_seed(args.seed + patient_index)
+        torch.manual_seed(args.seed + record["sample_index"])
         rollout_times, rollout_events, incomplete_attempts = (
             generate_diagnosis_rollouts(
                 predictor=predictor,
@@ -410,6 +656,7 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
         restricted_mean = float(np.mean(rollout_times))
         results.append(
             {
+                "sample_index": record["sample_index"],
                 "person_id": record["person_id"],
                 "cutoff_timestamp": cutoff,
                 "observed_days": record["observed_days"],
@@ -432,37 +679,14 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
             flush=True,
         )
 
-    c_index, comparable_pairs = harrell_c_index(results)
-    ci_low, ci_high, bootstrap_resamples = (math.nan, math.nan, 0)
-    if args.bootstrap_resamples > 0:
-        ci_low, ci_high, bootstrap_resamples = bootstrap_c_index(
-            results, args.bootstrap_resamples, args.seed
-        )
-    output = {
-        "model": args.model,
-        "device": str(device),
-        "patients": len(results),
-        "rollouts_per_patient": args.rollouts,
-        "horizon_days": args.horizon_days,
-        "max_new_tokens": args.max_new_tokens,
-        "seed": args.seed,
-        "condition_token_count": len(condition_tokens),
-        "observed_events": sum(item["observed_event"] for item in results),
-        "comparable_pairs": comparable_pairs,
-        "c_index": c_index,
-        "c_index_bootstrap_95_ci": [ci_low, ci_high],
-        "bootstrap_resamples": bootstrap_resamples,
-        "valid_rollouts": sum(item["valid_rollouts"] for item in results),
-        "imputed_incomplete_rollouts": sum(
-            item["imputed_incomplete_rollouts"] for item in results
-        ),
-        "risk_score": "negative restricted mean generated time to diagnosis",
-        "elapsed_seconds": time.monotonic() - started,
-        "patients_detail": results,
-    }
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(output, indent=2) + "\n")
+    output = build_output(
+        args,
+        results,
+        len(condition_tokens),
+        str(device),
+        time.monotonic() - started,
+    )
+    write_json(Path(args.output), output)
     summary = {key: value for key, value in output.items() if key != "patients_detail"}
     print(json.dumps(summary, indent=2))
     return output
