@@ -8,13 +8,10 @@ import torch.nn.functional as f
 from torch import nn
 from torch.distributions import Gamma
 from torch.nn import CrossEntropyLoss
-from transformers import PreTrainedModel
+from transformers import GenerationConfig, PreTrainedModel
 from transformers.activations import gelu_new
 from transformers.generation.logits_process import LogitsProcessorList
-from transformers.generation.stopping_criteria import (
-    StoppingCriteriaList,
-    validate_stopping_criteria,
-)
+from transformers.generation.stopping_criteria import StoppingCriteriaList
 from transformers.generation.streamers import BaseStreamer
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.pytorch_utils import Conv1D
@@ -1576,84 +1573,25 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
     def _sample(
         self,
         input_ids: torch.LongTensor,
-        logits_processor: Optional[LogitsProcessorList] = None,
-        stopping_criteria: Optional[StoppingCriteriaList] = None,
-        logits_warper: Optional[LogitsProcessorList] = None,
-        max_length: Optional[int] = None,
-        pad_token_id: Optional[int] = None,
-        eos_token_id: Optional[Union[int, List[int]]] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        output_scores: Optional[bool] = None,
-        output_logits: Optional[bool] = None,
-        return_dict_in_generate: Optional[bool] = None,
-        synced_gpus: bool = False,
-        streamer: Optional["BaseStreamer"] = None,
+        logits_processor: LogitsProcessorList,
+        stopping_criteria: StoppingCriteriaList,
+        generation_config: GenerationConfig,
+        synced_gpus: bool,
+        streamer: Optional["BaseStreamer"],
+        logits_warper: Optional[LogitsProcessorList],
         **model_kwargs,
     ) -> Union[CehrGptGenerateDecoderOnlyOutput, torch.LongTensor]:
-        # init values
-        logits_processor = (
-            logits_processor if logits_processor is not None else LogitsProcessorList()
-        )
-        stopping_criteria = (
-            stopping_criteria
-            if stopping_criteria is not None
-            else StoppingCriteriaList()
-        )
-        if max_length is not None:
-            warnings.warn(
-                "`max_length` is deprecated in this function, use"
-                " `stopping_criteria=StoppingCriteriaList([MaxLengthCriteria(max_length=max_length)])` instead.",
-                UserWarning,
-            )
-            stopping_criteria = validate_stopping_criteria(
-                stopping_criteria, max_length
-            )
-        logits_warper = (
-            logits_warper if logits_warper is not None else LogitsProcessorList()
-        )
-        pad_token_id = (
-            pad_token_id
-            if pad_token_id is not None
-            else self.generation_config.pad_token_id
-        )
-        eos_token_id = (
-            eos_token_id
-            if eos_token_id is not None
-            else self.generation_config.eos_token_id
-        )
-        if isinstance(eos_token_id, int):
-            eos_token_id = [eos_token_id]
-        eos_token_id_tensor = (
-            torch.tensor(eos_token_id).to(input_ids.device)
-            if eos_token_id is not None
-            else None
-        )
-        output_scores = (
-            output_scores
-            if output_scores is not None
-            else self.generation_config.output_scores
-        )
-        output_logits = (
-            output_logits
-            if output_logits is not None
-            else self.generation_config.output_logits
-        )
-        output_attentions = (
-            output_attentions
-            if output_attentions is not None
-            else self.generation_config.output_attentions
-        )
-        output_hidden_states = (
-            output_hidden_states
-            if output_hidden_states is not None
-            else self.generation_config.output_hidden_states
-        )
-        return_dict_in_generate = (
-            return_dict_in_generate
-            if return_dict_in_generate is not None
-            else self.generation_config.return_dict_in_generate
-        )
+        # `generate` resolves missing special tokens (for example, using EOS as
+        # padding) without mutating the public integer config fields. Consume the
+        # prepared tensors so checkpoints with no explicit pad_token_id still work.
+        pad_token_id = generation_config._pad_token_tensor
+        eos_token_id_tensor = generation_config._eos_token_tensor
+        do_sample = generation_config.do_sample
+        output_scores = generation_config.output_scores
+        output_logits = generation_config.output_logits
+        output_attentions = generation_config.output_attentions
+        output_hidden_states = generation_config.output_hidden_states
+        return_dict_in_generate = generation_config.return_dict_in_generate
 
         if "cehrgpt_tokenizer" not in model_kwargs:
             raise RuntimeError(
@@ -1679,7 +1617,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         # keep track of which sequences are already finished
         batch_size, cur_len = input_ids.shape
-        model_kwargs["attention_mask"] = input_ids != pad_token_id
+        model_kwargs["attention_mask"] = (
+            input_ids != pad_token_id
+            if pad_token_id is not None
+            else torch.ones_like(input_ids, dtype=torch.bool)
+        )
         if "inputs_embeds" in model_kwargs:
             cur_len = model_kwargs["inputs_embeds"].shape[1]
         this_peer_finished = False
@@ -1760,7 +1702,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             # pre-process distribution
             next_token_scores = logits_processor(input_ids, next_token_logits)
-            next_token_scores = logits_warper(input_ids, next_token_scores)
+            if do_sample:
+                if logits_warper is None:
+                    raise ValueError(
+                        "Sampling requires a LogitsProcessorList logits_warper"
+                    )
+                next_token_scores = logits_warper(input_ids, next_token_scores)
 
             # Store scores, attentions and hidden_states when required
             if return_dict_in_generate:
@@ -1784,9 +1731,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                         else (outputs.hidden_states,)
                     )
 
-            # sample
-            probs = nn.functional.softmax(next_token_scores, dim=-1)
-            next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+            if do_sample:
+                probs = nn.functional.softmax(next_token_scores, dim=-1)
+                next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+            else:
+                next_tokens = torch.argmax(next_token_scores, dim=-1)
 
             # TODO: decode to get time tokens and recalculate the age at this time step
             # Look for a potential time token
@@ -1805,7 +1754,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             model_kwargs["ages"] = torch.tensor(batched_ages).to(input_ids.device)
 
             # finished sentences should have their next token be a padding token
-            if eos_token_id is not None:
+            if eos_token_id_tensor is not None:
                 if pad_token_id is None:
                     raise ValueError(
                         "If `eos_token_id` is defined, make sure that `pad_token_id` is defined."
