@@ -14,6 +14,7 @@ from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.tools import evaluate_diagnosis_rollouts as evaluation
 from cehrgpt.tools.evaluate_diagnosis_rollouts import (
     bootstrap_c_index,
+    build_output,
     create_arg_parser,
     eligible_visit_cutoffs,
     find_observed_diagnosis,
@@ -24,6 +25,7 @@ from cehrgpt.tools.evaluate_diagnosis_rollouts import (
     resolve_device,
     resolve_gpu_ids,
     resolve_top_k,
+    score_diagnosis_trajectories,
     strip_cli_option,
     TrajectoryParquetWriter,
     truncate_prefix,
@@ -101,12 +103,14 @@ def test_diagnosis_arguments_accept_aliases():
             "output.json",
             "--diagnosis_concept_id",
             "100",
+            "--diagnosis-concept-id",
+            "200",
             "--concept_ancestor",
             "concept_ancestor",
         ]
     )
 
-    assert args.diagnosis_concept_id == 100
+    assert args.diagnosis_concept_id == [100, 200]
     assert args.concept_ancestor == "concept_ancestor"
 
 
@@ -306,6 +310,84 @@ def test_bootstrap_c_index_is_reproducible():
     assert first == (1.0, 1.0, 20)
 
 
+def test_build_output_reports_each_outcome_separately():
+    args = SimpleNamespace(
+        model="model",
+        rollouts=2,
+        horizon_days=365,
+        min_history_visits=2,
+        max_new_tokens=512,
+        top_p=1.0,
+        top_k=100,
+        temperature=1.0,
+        seed=42,
+        bootstrap_resamples=0,
+    )
+    outcome_results = [
+        [
+            {
+                "observed_days": 5.0,
+                "observed_event": True,
+                "predicted_risk": 0.9,
+                "valid_rollouts": 2,
+                "imputed_incomplete_rollouts": 0,
+            },
+            {
+                "observed_days": 10.0,
+                "observed_event": True,
+                "predicted_risk": 0.1,
+                "valid_rollouts": 2,
+                "imputed_incomplete_rollouts": 0,
+            },
+        ],
+        [
+            {
+                "observed_days": 6.0,
+                "observed_event": True,
+                "predicted_risk": 0.8,
+                "valid_rollouts": 2,
+                "imputed_incomplete_rollouts": 0,
+            },
+            {
+                "observed_days": 12.0,
+                "observed_event": False,
+                "predicted_risk": 0.2,
+                "valid_rollouts": 2,
+                "imputed_incomplete_rollouts": 0,
+            },
+        ],
+    ]
+    outcomes = [
+        {
+            "diagnosis_concept_id": 100,
+            "diagnosis_concept_name": "Outcome A",
+            "condition_tokens": {"100"},
+        },
+        {
+            "diagnosis_concept_id": 200,
+            "diagnosis_concept_name": "Outcome B",
+            "condition_tokens": {"200", "201"},
+        },
+    ]
+
+    output = build_output(
+        args,
+        outcome_results,
+        outcomes,
+        "cpu",
+        1.0,
+        "trajectories",
+    )
+
+    assert [item["diagnosis_concept_id"] for item in output["outcomes"]] == [
+        100,
+        200,
+    ]
+    assert [item["c_index"] for item in output["outcomes"]] == [1.0, 1.0]
+    assert "c_index" not in output
+    assert "patients_detail" not in output
+
+
 def test_truncate_prefix_starts_at_next_complete_visit():
     prefix = ["old", "[VS]", "a", "[VE]", "[VS]", "b", "[VE]"]
 
@@ -461,6 +543,27 @@ def test_generate_diagnosis_rollouts_parses_event_and_end_token():
     ]
 
 
+def test_shared_trajectories_are_scored_independently_for_each_outcome():
+    trajectories = [
+        {"tokens": ["D10", "condition_a", "D20", "condition_b"]},
+        {"tokens": ["D15", "condition_b", "[END]"]},
+    ]
+
+    a_times, a_events, a_incomplete = score_diagnosis_trajectories(
+        trajectories, {"condition_a"}, 365, 2, "[END]"
+    )
+    b_times, b_events, b_incomplete = score_diagnosis_trajectories(
+        trajectories, {"condition_b"}, 365, 2, "[END]"
+    )
+
+    assert a_times == [10.0, 365.0]
+    assert a_events == [True, False]
+    assert a_incomplete == 0
+    assert b_times == [30.0, 15.0]
+    assert b_events == [True, True]
+    assert b_incomplete == 0
+
+
 def test_trajectory_writer_saves_nested_records_to_parquet(tmp_path):
     writer = TrajectoryParquetWriter(tmp_path, buffer_size=1)
     writer.add(
@@ -523,6 +626,13 @@ def test_multiple_gpu_run_uses_disjoint_partitions_and_merges_results(tmp_path):
             "observed_days": float(index + 1),
             "observed_event": True,
             "observed_condition_concept_id": "condition",
+            "observed_outcomes": [
+                {
+                    "observed_days": float(index + 1),
+                    "observed_event": True,
+                    "observed_condition_concept_id": "condition",
+                }
+            ],
         }
         for index in range(6)
     ]
@@ -556,6 +666,9 @@ def test_multiple_gpu_run_uses_disjoint_partitions_and_merges_results(tmp_path):
         partition_payload = json.loads(open(partition_path).read())
         partition = partition_payload["patients"]
         assert partition_payload["condition_tokens"] == ["condition"]
+        assert partition_payload["outcomes"][0]["condition_tokens"] == [
+            "condition"
+        ]
         partitions.append([record["sample_index"] for record in partition])
         patients_detail = []
         for record in partition:
@@ -571,7 +684,10 @@ def test_multiple_gpu_run_uses_disjoint_partitions_and_merges_results(tmp_path):
                 }
             )
         with open(output_path, "w") as output_file:
-            json.dump({"patients_detail": patients_detail}, output_file)
+            json.dump(
+                {"outcomes": [{"patients_detail": patients_detail}]},
+                output_file,
+            )
         calls.append((command, env))
         process = mock.Mock()
         process.wait.return_value = 0
@@ -581,7 +697,15 @@ def test_multiple_gpu_run_uses_disjoint_partitions_and_merges_results(tmp_path):
     with mock.patch.object(
         evaluation.CehrGptTokenizer, "from_pretrained", return_value=mock.Mock()
     ), mock.patch.object(
-        evaluation, "load_condition_tokens", return_value={"condition"}
+        evaluation,
+        "load_outcomes",
+        return_value=[
+            {
+                "diagnosis_concept_id": None,
+                "diagnosis_concept_name": None,
+                "condition_tokens": {"condition"},
+            }
+        ],
     ), mock.patch.object(
         evaluation, "select_cutoffs", return_value=selected
     ), mock.patch.object(
