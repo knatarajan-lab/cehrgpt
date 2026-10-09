@@ -337,10 +337,20 @@ def test_find_observed_diagnosis_censors_at_last_observed_event():
     assert result == (100.0, False, None, 100.0)
 
 
-def test_eligible_cutoffs_require_two_completed_history_visits():
+def test_eligible_cutoffs_use_token_before_between_visit_time_token():
     day = 86400
-    concepts = ["[VS]", "a", "[VE]", "[VS]", "b", "[VE]", "D800"]
-    epoch_times = [0, 0, 0, day, day, day, 800 * day]
+    concepts = [
+        "[VS]",
+        "a",
+        "[VE]",
+        "D1",
+        "[VS]",
+        "b",
+        "[VE]",
+        "D799",
+        "future",
+    ]
+    epoch_times = [0, 0, 0, day, day, day, day, 800 * day, 800 * day]
 
     cutoffs = eligible_visit_cutoffs(
         concepts,
@@ -348,7 +358,39 @@ def test_eligible_cutoffs_require_two_completed_history_visits():
         min_history_visits=2,
     )
 
-    assert cutoffs == [(5, float(day), 2)]
+    assert cutoffs == [(6, float(day), 2)]
+
+
+def test_eligible_cutoffs_support_ethos_time_tokens_and_ignore_inpatient_tokens():
+    day = 86400
+    concepts = [
+        "first_visit_event",
+        "2mt-6mt",
+        "second_visit_event",
+        "i-1d-2d",
+        "second_visit_event_2",
+        "=6mt",
+        "=6mt",
+        "third_visit_event",
+    ]
+    epoch_times = [
+        0,
+        105 * day,
+        105 * day,
+        106 * day,
+        106 * day,
+        286 * day,
+        466 * day,
+        466 * day,
+    ]
+
+    cutoffs = eligible_visit_cutoffs(
+        concepts,
+        epoch_times,
+        min_history_visits=2,
+    )
+
+    assert cutoffs == [(4, float(106 * day), 2)]
 
 
 def test_eligible_cutoffs_require_positive_followup():

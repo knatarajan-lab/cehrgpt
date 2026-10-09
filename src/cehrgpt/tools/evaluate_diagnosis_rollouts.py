@@ -1,8 +1,9 @@
 """Evaluate patient-level time to the next diagnosis using model rollouts.
 
-For each randomly sampled patient, this tool selects one eligible visit-end cutoff,
-generates future trajectories, and reduces the rollouts to one patient-level risk
-score: the negative restricted mean time to the first generated Condition token.
+For each randomly sampled patient, this tool selects one eligible cutoff immediately
+before a between-visit time token, generates future trajectories, and reduces the
+rollouts to one patient-level risk score: the negative restricted mean time to the
+first generated Condition token.
 The observed outcome is the first matching Condition-domain token in the patient
 sequence after the cutoff, with administrative censoring at the requested horizon.
 The outcome can be all diagnoses or one user-supplied OMOP diagnosis concept plus
@@ -42,7 +43,7 @@ from tqdm.auto import tqdm
 from cehrgpt.gpt_utils import (
     extract_time_interval_in_days,
     is_att_token,
-    is_visit_end,
+    is_inpatient_att_token,
     is_visit_start,
 )
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
@@ -216,7 +217,7 @@ def eligible_visit_cutoffs(
     epoch_times: Sequence[float],
     min_history_visits: int,
 ) -> List[Tuple[int, float, int]]:
-    """Return visit-end cutoffs with enough history and positive follow-up."""
+    """Return cutoffs before between-visit time tokens with enough history."""
     if not epoch_times:
         return []
     last_observed_time = max(epoch_times)
@@ -224,14 +225,22 @@ def eligible_visit_cutoffs(
     completed_visits = 0
     eligible = []
     for index, (token, epoch_time) in enumerate(zip(concepts, epoch_times)):
-        prefix_max_time = max(prefix_max_time, epoch_time)
-        if is_visit_end(token):
+        is_between_visit_time = is_att_token(token) and not is_inpatient_att_token(
+            token
+        )
+        previous_is_between_visit_time = index > 0 and is_att_token(
+            concepts[index - 1]
+        ) and not is_inpatient_att_token(concepts[index - 1])
+        # A run of time tokens represents one long gap (ETHOS emits repeated
+        # "=6mt" tokens), so only its first token defines a visit boundary.
+        if index > 0 and is_between_visit_time and not previous_is_between_visit_time:
             completed_visits += 1
             if (
                 completed_visits >= min_history_visits
                 and prefix_max_time < last_observed_time
             ):
-                eligible.append((index, prefix_max_time, completed_visits))
+                eligible.append((index - 1, prefix_max_time, completed_visits))
+        prefix_max_time = max(prefix_max_time, epoch_time)
     return eligible
 
 
@@ -243,7 +252,7 @@ def select_cutoffs(
     condition_tokens: Set[str],
     min_history_visits: int,
 ) -> List[Dict[str, Any]]:
-    """Select one random eligible visit-end cutoff per sampled patient."""
+    """Select one random eligible between-visit boundary per sampled patient."""
     files = parquet_files(sequence_path)
     dataset = ds.dataset(files, format="parquet")
     total_rows = sum(pq.ParquetFile(path).metadata.num_rows for path in files)
