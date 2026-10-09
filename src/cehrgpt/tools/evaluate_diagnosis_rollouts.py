@@ -1,13 +1,15 @@
 """Evaluate patient-level time to the next diagnosis using model rollouts.
 
-For each randomly sampled patient, this tool selects one eligible visit-end cutoff,
-generates future trajectories, and reduces the rollouts to one patient-level risk
-score: the negative restricted mean time to the first generated Condition token.
+For each randomly sampled patient, this tool selects one eligible cutoff immediately
+before a between-visit time token, generates future trajectories, and reduces the
+rollouts to one patient-level risk score: the negative restricted mean time to the
+first generated Condition token.
 The observed outcome is the first matching Condition-domain token in the patient
 sequence after the cutoff, with administrative censoring at the requested horizon.
-The outcome can be all diagnoses or one user-supplied OMOP diagnosis concept plus
-its descendants. Harrell's c-index is computed across patients, along with a
-patient-level bootstrap confidence interval.
+The outcome can be all diagnoses or one or more user-supplied OMOP diagnosis
+concepts plus their descendants. The same generated trajectories are reused for
+every requested outcome. Harrell's c-index is computed separately for each outcome,
+along with a patient-level bootstrap confidence interval.
 
 Example:
     python -m cehrgpt.tools.evaluate_diagnosis_rollouts \
@@ -42,7 +44,7 @@ from tqdm.auto import tqdm
 from cehrgpt.gpt_utils import (
     extract_time_interval_in_days,
     is_att_token,
-    is_visit_end,
+    is_inpatient_att_token,
     is_visit_start,
 )
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
@@ -73,9 +75,10 @@ def create_arg_parser() -> argparse.ArgumentParser:
         "--diagnosis-concept-id",
         dest="diagnosis_concept_id",
         type=int,
+        action="append",
         help=(
             "Optional ancestor Condition concept ID to evaluate instead of all "
-            "diagnoses"
+            "diagnoses; repeat for multiple outcomes"
         ),
     )
     parser.add_argument(
@@ -88,6 +91,12 @@ def create_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--output", required=True, help="Output JSON file")
+    parser.add_argument(
+        "--patient_output",
+        "--patient-output",
+        dest="patient_output",
+        help="Patient-level JSON file; defaults to <output>.patients.json",
+    )
     parser.add_argument("--patients", type=int, default=100)
     parser.add_argument("--rollouts", type=int, default=20)
     parser.add_argument("--rollout-batch-size", type=int)
@@ -114,8 +123,10 @@ def create_arg_parser() -> argparse.ArgumentParser:
         "--top-k",
         dest="top_k",
         type=int,
-        default=300,
-        help="Maximum number of tokens retained for sampling",
+        help=(
+            "Maximum number of tokens retained for sampling; defaults to the "
+            "tokenizer's full vocabulary"
+        ),
     )
     parser.add_argument(
         "--temperature",
@@ -158,6 +169,8 @@ def create_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--trajectory_output",
         "--trajectory-output",
+        "--patient_output",
+        "--patient-output",
         dest="trajectory_output",
         help="Parquet output folder; defaults to <output>.trajectories",
     )
@@ -216,7 +229,7 @@ def eligible_visit_cutoffs(
     epoch_times: Sequence[float],
     min_history_visits: int,
 ) -> List[Tuple[int, float, int]]:
-    """Return visit-end cutoffs with enough history and positive follow-up."""
+    """Return cutoffs before between-visit time tokens with enough history."""
     if not epoch_times:
         return []
     last_observed_time = max(epoch_times)
@@ -224,14 +237,22 @@ def eligible_visit_cutoffs(
     completed_visits = 0
     eligible = []
     for index, (token, epoch_time) in enumerate(zip(concepts, epoch_times)):
-        prefix_max_time = max(prefix_max_time, epoch_time)
-        if is_visit_end(token):
+        is_between_visit_time = is_att_token(token) and not is_inpatient_att_token(
+            token
+        )
+        previous_is_between_visit_time = index > 0 and is_att_token(
+            concepts[index - 1]
+        ) and not is_inpatient_att_token(concepts[index - 1])
+        # A run of time tokens represents one long gap (ETHOS emits repeated
+        # "=6mt" tokens), so only its first token defines a visit boundary.
+        if index > 0 and is_between_visit_time and not previous_is_between_visit_time:
             completed_visits += 1
             if (
                 completed_visits >= min_history_visits
                 and prefix_max_time < last_observed_time
             ):
-                eligible.append((index, prefix_max_time, completed_visits))
+                eligible.append((index - 1, prefix_max_time, completed_visits))
+        prefix_max_time = max(prefix_max_time, epoch_time)
     return eligible
 
 
@@ -240,10 +261,12 @@ def select_cutoffs(
     sample_size: int,
     horizon_days: int,
     seed: int,
-    condition_tokens: Set[str],
+    outcome_condition_tokens: Set[str] | Sequence[Set[str]],
     min_history_visits: int,
 ) -> List[Dict[str, Any]]:
-    """Select one random eligible visit-end cutoff per sampled patient."""
+    """Select one random eligible between-visit boundary per sampled patient."""
+    if isinstance(outcome_condition_tokens, set):
+        outcome_condition_tokens = [outcome_condition_tokens]
     files = parquet_files(sequence_path)
     dataset = ds.dataset(files, format="parquet")
     total_rows = sum(pq.ParquetFile(path).metadata.num_rows for path in files)
@@ -273,20 +296,30 @@ def select_cutoffs(
             cutoff_index, cutoff_time, history_visit_count = eligible[
                 int(rng.integers(len(eligible)))
             ]
-            (
-                observed_days,
-                observed_event,
-                observed_concept_id,
-                followup_days,
-            ) = find_observed_diagnosis(
-                concepts,
-                epoch_times,
-                cutoff_index,
-                cutoff_time,
-                condition_tokens,
-                horizon_days,
-                max(epoch_times),
-            )
+            observed_outcomes = []
+            for condition_tokens in outcome_condition_tokens:
+                (
+                    observed_days,
+                    observed_event,
+                    observed_concept_id,
+                    followup_days,
+                ) = find_observed_diagnosis(
+                    concepts,
+                    epoch_times,
+                    cutoff_index,
+                    cutoff_time,
+                    condition_tokens,
+                    horizon_days,
+                    max(epoch_times),
+                )
+                observed_outcomes.append(
+                    {
+                        "observed_days": observed_days,
+                        "observed_event": observed_event,
+                        "observed_condition_concept_id": observed_concept_id,
+                    }
+                )
+            first_observed = observed_outcomes[0]
             selected.append(
                 {
                     "sample_index": len(selected),
@@ -296,9 +329,9 @@ def select_cutoffs(
                     "history_visit_count": history_visit_count,
                     "followup_days": followup_days,
                     "prefix": concepts[: cutoff_index + 1],
-                    "observed_days": observed_days,
-                    "observed_event": observed_event,
-                    "observed_condition_concept_id": observed_concept_id,
+                    "observed_outcomes": observed_outcomes,
+                    # Retain the original fields for single-outcome consumers.
+                    **first_observed,
                 }
             )
             if len(selected) >= sample_size:
@@ -370,6 +403,42 @@ def load_concept_name(concept_path: str, concept_id: int) -> str:
     if table.num_rows == 0:
         raise ValueError(f"Diagnosis concept {concept_id} is absent from --concept")
     return str(table["concept_name"][0].as_py())
+
+
+def load_outcomes(
+    concept_path: str,
+    tokenizer: CehrGptTokenizer,
+    diagnosis_concept_ids: int | Sequence[int] | None,
+    concept_ancestor_path: str | None,
+) -> List[Dict[str, Any]]:
+    """Load one independently scored outcome definition per requested diagnosis."""
+    if diagnosis_concept_ids is None:
+        concept_ids = [None]
+    elif isinstance(diagnosis_concept_ids, int):
+        concept_ids = [diagnosis_concept_ids]
+    else:
+        concept_ids = list(diagnosis_concept_ids)
+    outcomes = []
+    for concept_id in concept_ids:
+        condition_tokens = load_condition_tokens(
+            concept_path,
+            tokenizer,
+            concept_id,
+            concept_ancestor_path,
+        )
+        require_condition_tokens(condition_tokens, concept_id)
+        outcomes.append(
+            {
+                "diagnosis_concept_id": concept_id,
+                "diagnosis_concept_name": (
+                    load_concept_name(concept_path, concept_id)
+                    if concept_id is not None
+                    else None
+                ),
+                "condition_tokens": condition_tokens,
+            }
+        )
+    return outcomes
 
 
 def require_condition_tokens(
@@ -528,6 +597,45 @@ def generate_diagnosis_rollouts(
     return rollout_times, rollout_events, incomplete, trajectories
 
 
+def score_diagnosis_trajectories(
+    trajectories: Sequence[Dict[str, Any]],
+    condition_tokens: Set[str],
+    horizon_days: int,
+    target_rollouts: int,
+    end_token: str,
+) -> Tuple[List[float], List[bool], int]:
+    """Score one outcome from shared generated trajectories."""
+    rollout_times = []
+    rollout_events = []
+    incomplete = 0
+    for trajectory in trajectories:
+        if len(rollout_times) >= target_rollouts:
+            break
+        elapsed_days = 0.0
+        completed = False
+        for token in trajectory["tokens"]:
+            if is_att_token(token):
+                elapsed_days += extract_time_interval_in_days(token)
+                if elapsed_days > horizon_days:
+                    rollout_times.append(float(horizon_days))
+                    rollout_events.append(False)
+                    completed = True
+                    break
+            elif token in condition_tokens:
+                rollout_times.append(float(min(elapsed_days, horizon_days)))
+                rollout_events.append(elapsed_days <= horizon_days)
+                completed = True
+                break
+            elif token == end_token:
+                rollout_times.append(float(horizon_days))
+                rollout_events.append(False)
+                completed = True
+                break
+        if not completed:
+            incomplete += 1
+    return rollout_times, rollout_events, incomplete
+
+
 def resolve_gpu_ids(gpu_ids: str) -> List[str]:
     """Resolve GPU indices relative to the currently visible CUDA devices."""
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
@@ -645,25 +753,68 @@ def trajectory_output_path(args: argparse.Namespace) -> Path:
     return Path(args.trajectory_output or (str(args.output) + ".trajectories"))
 
 
+def patient_output_path(args: argparse.Namespace) -> Path:
+    return Path(
+        getattr(args, "patient_output", None)
+        or (str(args.output) + ".patients.json")
+    )
+
+
+def build_patient_output(
+    outcome_results: Sequence[Sequence[Dict[str, Any]]],
+    outcomes: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Build the patient-level artifact separately from aggregate metrics."""
+    return {
+        "outcomes": [
+            {
+                "diagnosis_concept_id": outcome["diagnosis_concept_id"],
+                "diagnosis_concept_name": outcome["diagnosis_concept_name"],
+                "patients_detail": list(results),
+            }
+            for outcome, results in zip(outcomes, outcome_results)
+        ]
+    }
+
+
 def build_output(
     args: argparse.Namespace,
-    results: Sequence[Dict[str, Any]],
-    condition_token_count: int,
+    outcome_results: Sequence[Sequence[Dict[str, Any]]],
+    outcomes: Sequence[Dict[str, Any]],
     device: str,
     elapsed_seconds: float,
     trajectory_output: str,
 ) -> Dict[str, Any]:
-    """Aggregate patient predictions into the final evaluation artifact."""
-    c_index, comparable_pairs = harrell_c_index(results)
-    ci_low, ci_high, bootstrap_resamples = (None, None, 0)
-    if args.bootstrap_resamples > 0:
-        ci_low, ci_high, bootstrap_resamples = bootstrap_c_index(
-            results, args.bootstrap_resamples, args.seed
+    """Aggregate patient predictions into one result per requested outcome."""
+    outcome_summaries = []
+    for outcome, results in zip(outcomes, outcome_results):
+        c_index, comparable_pairs = harrell_c_index(results)
+        ci_low, ci_high, bootstrap_resamples = (None, None, 0)
+        if args.bootstrap_resamples > 0:
+            ci_low, ci_high, bootstrap_resamples = bootstrap_c_index(
+                results, args.bootstrap_resamples, args.seed
+            )
+        outcome_summaries.append(
+            {
+                "diagnosis_concept_id": outcome["diagnosis_concept_id"],
+                "diagnosis_concept_name": outcome["diagnosis_concept_name"],
+                "condition_token_count": len(outcome["condition_tokens"]),
+                "observed_events": sum(item["observed_event"] for item in results),
+                "comparable_pairs": comparable_pairs,
+                "c_index": None if math.isnan(c_index) else c_index,
+                "c_index_bootstrap_95_ci": [ci_low, ci_high],
+                "bootstrap_resamples": bootstrap_resamples,
+                "valid_rollouts": sum(item["valid_rollouts"] for item in results),
+                "imputed_incomplete_rollouts": sum(
+                    item["imputed_incomplete_rollouts"] for item in results
+                ),
+            }
         )
-    return {
+
+    output = {
         "model": args.model,
         "device": device,
-        "patients": len(results),
+        "patients": len(outcome_results[0]),
         "rollouts_per_patient": args.rollouts,
         "horizon_days": args.horizon_days,
         "min_history_visits": args.min_history_visits,
@@ -672,24 +823,22 @@ def build_output(
         "top_k": args.top_k,
         "temperature": args.temperature,
         "seed": args.seed,
-        "diagnosis_concept_id": args.diagnosis_concept_id,
-        "diagnosis_concept_name": getattr(
-            args, "diagnosis_concept_name", None
-        ),
-        "condition_token_count": condition_token_count,
-        "observed_events": sum(item["observed_event"] for item in results),
-        "comparable_pairs": comparable_pairs,
-        "c_index": None if math.isnan(c_index) else c_index,
-        "c_index_bootstrap_95_ci": [ci_low, ci_high],
-        "bootstrap_resamples": bootstrap_resamples,
-        "valid_rollouts": sum(item["valid_rollouts"] for item in results),
-        "imputed_incomplete_rollouts": sum(
-            item["imputed_incomplete_rollouts"] for item in results
-        ),
         "trajectory_output": trajectory_output,
+        "patient_output": str(patient_output_path(args)),
         "risk_score": "negative restricted mean generated time to diagnosis",
         "elapsed_seconds": elapsed_seconds,
-        "patients_detail": list(results),
+        "outcomes": outcome_summaries,
+    }
+    if len(outcome_summaries) == 1:
+        # Preserve the original top-level metric fields for existing consumers.
+        output.update(outcome_summaries[0])
+    return output
+
+
+def compact_output_summary(output: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the aggregate metrics artifact for console display."""
+    return {
+        key: value for key, value in output.items() if not key.startswith("_")
     }
 
 
@@ -704,24 +853,32 @@ def resolve_device(requested: str) -> torch.device:
     return device
 
 
+def resolve_top_k(top_k: int | None, tokenizer: CehrGptTokenizer) -> int:
+    """Use the full tokenizer vocabulary when no top-k limit was supplied."""
+    return len(tokenizer.get_vocab()) if top_k is None else top_k
+
+
 def run_on_multiple_gpus(
     args: argparse.Namespace, gpu_ids: Sequence[str], started: float
 ) -> Dict[str, Any]:
     """Partition selected patients and run one evaluator worker per GPU."""
     tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer or args.model)
-    condition_tokens = load_condition_tokens(
+    args.top_k = resolve_top_k(args.top_k, tokenizer)
+    outcomes = load_outcomes(
         args.concept,
         tokenizer,
         args.diagnosis_concept_id,
         args.concept_ancestor,
     )
-    require_condition_tokens(condition_tokens, args.diagnosis_concept_id)
+    condition_tokens = set().union(
+        *(outcome["condition_tokens"] for outcome in outcomes)
+    )
     selected = select_cutoffs(
         args.sequences,
         args.patients,
         args.horizon_days,
         args.seed,
-        condition_tokens,
+        [outcome["condition_tokens"] for outcome in outcomes],
         args.min_history_visits,
     )
     num_workers = min(len(gpu_ids), len(selected))
@@ -765,6 +922,15 @@ def run_on_multiple_gpus(
                 partition_input,
                 {
                     "condition_tokens": sorted(condition_tokens),
+                    "outcomes": [
+                        {
+                            **outcome,
+                            "condition_tokens": sorted(
+                                outcome["condition_tokens"]
+                            ),
+                        }
+                        for outcome in outcomes
+                    ],
                     "patients": partition,
                 },
             )
@@ -817,18 +983,26 @@ def run_on_multiple_gpus(
         )
         raise RuntimeError(f"Diagnosis rollout workers failed: {failures}")
 
-    results = []
+    outcome_results = [[] for _ in outcomes]
     for worker_output in worker_outputs:
         worker_result = json.loads(worker_output.read_text())
-        results.extend(worker_result["patients_detail"])
-    results.sort(key=lambda item: item["sample_index"])
+        for index, patients_detail in enumerate(
+            worker_result["_patients_detail"]
+        ):
+            outcome_results[index].extend(patients_detail)
+    for results in outcome_results:
+        results.sort(key=lambda item: item["sample_index"])
     output = build_output(
         args,
-        results,
-        len(condition_tokens),
+        outcome_results,
+        outcomes,
         f"cuda:{','.join(gpu_ids[:num_workers])}",
         time.monotonic() - started,
         str(trajectory_root),
+    )
+    write_json(
+        patient_output_path(args),
+        build_patient_output(outcome_results, outcomes),
     )
     write_json(Path(args.output), output)
     shutil.rmtree(partition_root)
@@ -845,44 +1019,35 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
         raise ValueError("--min_history_visits must be positive")
     if not 0 < args.top_p <= 1:
         raise ValueError("--top_p must be in (0, 1]")
-    if args.top_k < 0:
+    if args.top_k is not None and args.top_k < 0:
         raise ValueError("--top_k must be non-negative")
     if args.temperature <= 0:
         raise ValueError("--temperature must be positive")
-
-    args.diagnosis_concept_name = None
-    if args.diagnosis_concept_id is not None and not args.partition_input:
-        args.diagnosis_concept_name = load_concept_name(
-            args.concept, args.diagnosis_concept_id
-        )
-        print(
-            f"Diagnosis concept: {args.diagnosis_concept_name} "
-            f"({args.diagnosis_concept_id})",
-            flush=True,
-        )
 
     if args.gpu_ids and not args.partition_input:
         gpu_ids = resolve_gpu_ids(args.gpu_ids)
         if len(gpu_ids) > 1:
             output = run_on_multiple_gpus(args, gpu_ids, started)
-            summary = {
-                key: value
-                for key, value in output.items()
-                if key != "patients_detail"
-            }
-            print(json.dumps(summary, indent=2))
+            print(json.dumps(compact_output_summary(output), indent=2))
             return output
         os.environ["CUDA_VISIBLE_DEVICES"] = gpu_ids[0]
         args.device = "cuda:0"
 
     torch.manual_seed(args.seed)
     tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer or args.model)
+    args.top_k = resolve_top_k(args.top_k, tokenizer)
     if args.partition_input:
         partition = json.loads(Path(args.partition_input).read_text())
-        condition_tokens = set(partition["condition_tokens"])
+        outcomes = [
+            {
+                **outcome,
+                "condition_tokens": set(outcome["condition_tokens"]),
+            }
+            for outcome in partition["outcomes"]
+        ]
         selected = partition["patients"]
     else:
-        condition_tokens = load_condition_tokens(
+        outcomes = load_outcomes(
             args.concept,
             tokenizer,
             args.diagnosis_concept_id,
@@ -893,10 +1058,12 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
             args.patients,
             args.horizon_days,
             args.seed,
-            condition_tokens,
+            [outcome["condition_tokens"] for outcome in outcomes],
             args.min_history_visits,
         )
-    require_condition_tokens(condition_tokens, args.diagnosis_concept_id)
+    condition_tokens = set().union(
+        *(outcome["condition_tokens"] for outcome in outcomes)
+    )
 
     device = resolve_device(args.device)
     model = CEHRGPT2LMHeadModel.from_pretrained(args.model).eval().to(device)
@@ -930,7 +1097,7 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
     trajectory_writer = TrajectoryParquetWriter(
         trajectory_folder, args.trajectory_buffer_size
     )
-    results = []
+    outcome_results = [[] for _ in outcomes]
     vocab = tokenizer.get_vocab()
     progress = tqdm(
         selected,
@@ -945,12 +1112,7 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
         prefix = [token for token in record["prefix"] if token in vocab]
         prefix = truncate_prefix(prefix, max_prompt_length)
         torch.manual_seed(args.seed + record["sample_index"])
-        (
-            rollout_times,
-            rollout_events,
-            incomplete_attempts,
-            generated_trajectories,
-        ) = generate_diagnosis_rollouts(
+        _, _, _, generated_trajectories = generate_diagnosis_rollouts(
             predictor=predictor,
             prefix=prefix,
             condition_tokens=condition_tokens,
@@ -958,15 +1120,6 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
             target_rollouts=args.rollouts,
             max_n_trial=args.max_n_trial,
         )
-        valid_rollouts = len(rollout_times)
-        missing = args.rollouts - valid_rollouts
-        if missing:
-            # Conservative fallback: an incomplete generated trajectory contributes
-            # no predicted diagnosis before the administrative horizon.
-            rollout_times.extend([float(args.horizon_days)] * missing)
-            rollout_events.extend([False] * missing)
-
-        restricted_mean = float(np.mean(rollout_times))
         trajectory_writer.add(
             {
                 "sample_index": record["sample_index"],
@@ -978,43 +1131,75 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
                 "generated_trajectories": generated_trajectories,
             }
         )
-        results.append(
-            {
-                "sample_index": record["sample_index"],
-                "person_id": record["person_id"],
-                "cutoff_timestamp": cutoff,
-                "history_visit_count": record["history_visit_count"],
-                "followup_days": record["followup_days"],
-                "observed_days": record["observed_days"],
-                "observed_event": record["observed_event"],
-                "observed_condition_concept_id": record[
-                    "observed_condition_concept_id"
-                ],
-                "predicted_event_probability": float(np.mean(rollout_events)),
-                "predicted_restricted_mean_days": restricted_mean,
-                "predicted_risk": -restricted_mean,
-                "valid_rollouts": valid_rollouts,
-                "imputed_incomplete_rollouts": missing,
-                "discarded_incomplete_attempts": incomplete_attempts,
-            }
-        )
+        for index, outcome in enumerate(outcomes):
+            rollout_times, rollout_events, incomplete_attempts = (
+                score_diagnosis_trajectories(
+                    generated_trajectories,
+                    outcome["condition_tokens"],
+                    args.horizon_days,
+                    args.rollouts,
+                    predictor.tokenizer.end_token,
+                )
+            )
+            valid_rollouts = len(rollout_times)
+            missing = args.rollouts - valid_rollouts
+            if missing:
+                # Conservative fallback: an incomplete generated trajectory
+                # contributes no predicted diagnosis before the horizon.
+                rollout_times.extend([float(args.horizon_days)] * missing)
+                rollout_events.extend([False] * missing)
+            restricted_mean = float(np.mean(rollout_times))
+            observed = record["observed_outcomes"][index]
+            outcome_results[index].append(
+                {
+                    "sample_index": record["sample_index"],
+                    "person_id": record["person_id"],
+                    "cutoff_timestamp": cutoff,
+                    "history_visit_count": record["history_visit_count"],
+                    "followup_days": record["followup_days"],
+                    **observed,
+                    "predicted_event_probability": float(
+                        np.mean(rollout_events)
+                    ),
+                    "predicted_restricted_mean_days": restricted_mean,
+                    "predicted_risk": -restricted_mean,
+                    "valid_rollouts": valid_rollouts,
+                    "imputed_incomplete_rollouts": missing,
+                    "discarded_incomplete_attempts": incomplete_attempts,
+                }
+            )
         progress.set_postfix(
-            observed_events=sum(item["observed_event"] for item in results),
-            valid_rollouts=sum(item["valid_rollouts"] for item in results),
+            observed_events=sum(
+                item["observed_event"]
+                for results in outcome_results
+                for item in results
+            ),
+            valid_rollouts=sum(
+                item["valid_rollouts"]
+                for results in outcome_results
+                for item in results
+            ),
         )
 
     trajectory_writer.flush()
     output = build_output(
         args,
-        results,
-        len(condition_tokens),
+        outcome_results,
+        outcomes,
         str(device),
         time.monotonic() - started,
         str(trajectory_folder),
     )
+    if args.partition_input:
+        # Internal worker payload; the coordinator writes the final patient file.
+        output["_patients_detail"] = [list(results) for results in outcome_results]
+    else:
+        write_json(
+            patient_output_path(args),
+            build_patient_output(outcome_results, outcomes),
+        )
     write_json(Path(args.output), output)
-    summary = {key: value for key, value in output.items() if key != "patients_detail"}
-    print(json.dumps(summary, indent=2))
+    print(json.dumps(compact_output_summary(output), indent=2))
     return output
 
 
