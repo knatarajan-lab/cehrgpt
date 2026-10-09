@@ -23,6 +23,7 @@ from cehrgpt.tools.evaluate_diagnosis_rollouts import (
     load_condition_tokens,
     resolve_device,
     resolve_gpu_ids,
+    resolve_top_k,
     strip_cli_option,
     TrajectoryParquetWriter,
     truncate_prefix,
@@ -65,6 +66,26 @@ def test_sampling_arguments_accept_aliases():
     assert args.temperature == 0.7
     assert args.min_history_visits == 2
     assert args.diagnosis_concept_id is None
+
+
+def test_top_k_defaults_to_full_tokenizer_vocabulary():
+    args = create_arg_parser().parse_args(
+        [
+            "--model",
+            "model",
+            "--sequences",
+            "sequences",
+            "--concept",
+            "concept",
+            "--output",
+            "output.json",
+        ]
+    )
+    tokenizer = SimpleNamespace(get_vocab=lambda: {"a": 0, "b": 1, "c": 2})
+
+    assert args.top_k is None
+    assert resolve_top_k(args.top_k, tokenizer) == 3
+    assert resolve_top_k(2, tokenizer) == 2
 
 
 def test_diagnosis_arguments_accept_aliases():

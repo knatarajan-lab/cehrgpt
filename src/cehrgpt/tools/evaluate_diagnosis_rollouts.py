@@ -115,8 +115,10 @@ def create_arg_parser() -> argparse.ArgumentParser:
         "--top-k",
         dest="top_k",
         type=int,
-        default=300,
-        help="Maximum number of tokens retained for sampling",
+        help=(
+            "Maximum number of tokens retained for sampling; defaults to the "
+            "tokenizer's full vocabulary"
+        ),
     )
     parser.add_argument(
         "--temperature",
@@ -713,11 +715,17 @@ def resolve_device(requested: str) -> torch.device:
     return device
 
 
+def resolve_top_k(top_k: int | None, tokenizer: CehrGptTokenizer) -> int:
+    """Use the full tokenizer vocabulary when no top-k limit was supplied."""
+    return len(tokenizer.get_vocab()) if top_k is None else top_k
+
+
 def run_on_multiple_gpus(
     args: argparse.Namespace, gpu_ids: Sequence[str], started: float
 ) -> Dict[str, Any]:
     """Partition selected patients and run one evaluator worker per GPU."""
     tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer or args.model)
+    args.top_k = resolve_top_k(args.top_k, tokenizer)
     condition_tokens = load_condition_tokens(
         args.concept,
         tokenizer,
@@ -854,7 +862,7 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
         raise ValueError("--min_history_visits must be positive")
     if not 0 < args.top_p <= 1:
         raise ValueError("--top_p must be in (0, 1]")
-    if args.top_k < 0:
+    if args.top_k is not None and args.top_k < 0:
         raise ValueError("--top_k must be non-negative")
     if args.temperature <= 0:
         raise ValueError("--temperature must be positive")
@@ -886,6 +894,7 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
 
     torch.manual_seed(args.seed)
     tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer or args.model)
+    args.top_k = resolve_top_k(args.top_k, tokenizer)
     if args.partition_input:
         partition = json.loads(Path(args.partition_input).read_text())
         condition_tokens = set(partition["condition_tokens"])
