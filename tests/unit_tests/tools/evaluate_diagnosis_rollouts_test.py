@@ -14,6 +14,7 @@ from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.tools import evaluate_diagnosis_rollouts as evaluation
 from cehrgpt.tools.evaluate_diagnosis_rollouts import (
     bootstrap_c_index,
+    build_patient_output,
     build_output,
     create_arg_parser,
     eligible_visit_cutoffs,
@@ -322,6 +323,8 @@ def test_build_output_reports_each_outcome_separately():
         temperature=1.0,
         seed=42,
         bootstrap_resamples=0,
+        output="metrics.json",
+        patient_output=None,
     )
     outcome_results = [
         [
@@ -386,6 +389,12 @@ def test_build_output_reports_each_outcome_separately():
     assert [item["c_index"] for item in output["outcomes"]] == [1.0, 1.0]
     assert "c_index" not in output
     assert "patients_detail" not in output
+    assert all("patients_detail" not in item for item in output["outcomes"])
+    assert output["patient_output"] == "metrics.json.patients.json"
+
+    patient_output = build_patient_output(outcome_results, outcomes)
+    assert len(patient_output["outcomes"][0]["patients_detail"]) == 2
+    assert len(patient_output["outcomes"][1]["patients_detail"]) == 2
 
 
 def test_truncate_prefix_starts_at_next_complete_visit():
@@ -656,6 +665,7 @@ def test_multiple_gpu_run_uses_disjoint_partitions_and_merges_results(tmp_path):
         bootstrap_resamples=0,
         trajectory_output=None,
         trajectory_buffer_size=100,
+        patient_output=None,
     )
     calls = []
     partitions = []
@@ -685,7 +695,7 @@ def test_multiple_gpu_run_uses_disjoint_partitions_and_merges_results(tmp_path):
             )
         with open(output_path, "w") as output_file:
             json.dump(
-                {"outcomes": [{"patients_detail": patients_detail}]},
+                {"_patients_detail": [patients_detail]},
                 output_file,
             )
         calls.append((command, env))
@@ -719,8 +729,19 @@ def test_multiple_gpu_run_uses_disjoint_partitions_and_merges_results(tmp_path):
 
     assert result["patients"] == 6
     assert result["c_index"] == 1.0
-    assert [item["sample_index"] for item in result["patients_detail"]] == list(
-        range(6)
+    patient_output = json.loads(
+        (tmp_path / "result.json.patients.json").read_text()
+    )
+    assert len(patient_output["outcomes"][0]["patients_detail"]) == 6
+    assert [
+        item["sample_index"]
+        for item in patient_output["outcomes"][0]["patients_detail"]
+    ] == list(range(6))
+    metrics_output = json.loads((tmp_path / "result.json").read_text())
+    assert "patients_detail" not in metrics_output
+    assert all(
+        "patients_detail" not in outcome
+        for outcome in metrics_output["outcomes"]
     )
     assert sorted(partitions[0] + partitions[1]) == list(range(6))
     assert set(partitions[0]).isdisjoint(partitions[1])

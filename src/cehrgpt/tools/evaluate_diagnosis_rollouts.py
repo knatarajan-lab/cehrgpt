@@ -91,6 +91,12 @@ def create_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--output", required=True, help="Output JSON file")
+    parser.add_argument(
+        "--patient_output",
+        "--patient-output",
+        dest="patient_output",
+        help="Patient-level JSON file; defaults to <output>.patients.json",
+    )
     parser.add_argument("--patients", type=int, default=100)
     parser.add_argument("--rollouts", type=int, default=20)
     parser.add_argument("--rollout-batch-size", type=int)
@@ -163,6 +169,8 @@ def create_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--trajectory_output",
         "--trajectory-output",
+        "--patient_output",
+        "--patient-output",
         dest="trajectory_output",
         help="Parquet output folder; defaults to <output>.trajectories",
     )
@@ -745,6 +753,30 @@ def trajectory_output_path(args: argparse.Namespace) -> Path:
     return Path(args.trajectory_output or (str(args.output) + ".trajectories"))
 
 
+def patient_output_path(args: argparse.Namespace) -> Path:
+    return Path(
+        getattr(args, "patient_output", None)
+        or (str(args.output) + ".patients.json")
+    )
+
+
+def build_patient_output(
+    outcome_results: Sequence[Sequence[Dict[str, Any]]],
+    outcomes: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Build the patient-level artifact separately from aggregate metrics."""
+    return {
+        "outcomes": [
+            {
+                "diagnosis_concept_id": outcome["diagnosis_concept_id"],
+                "diagnosis_concept_name": outcome["diagnosis_concept_name"],
+                "patients_detail": list(results),
+            }
+            for outcome, results in zip(outcomes, outcome_results)
+        ]
+    }
+
+
 def build_output(
     args: argparse.Namespace,
     outcome_results: Sequence[Sequence[Dict[str, Any]]],
@@ -776,7 +808,6 @@ def build_output(
                 "imputed_incomplete_rollouts": sum(
                     item["imputed_incomplete_rollouts"] for item in results
                 ),
-                "patients_detail": list(results),
             }
         )
 
@@ -793,28 +824,22 @@ def build_output(
         "temperature": args.temperature,
         "seed": args.seed,
         "trajectory_output": trajectory_output,
+        "patient_output": str(patient_output_path(args)),
         "risk_score": "negative restricted mean generated time to diagnosis",
         "elapsed_seconds": elapsed_seconds,
         "outcomes": outcome_summaries,
     }
     if len(outcome_summaries) == 1:
-        # Preserve the original top-level result shape for existing consumers.
+        # Preserve the original top-level metric fields for existing consumers.
         output.update(outcome_summaries[0])
     return output
 
 
 def compact_output_summary(output: Dict[str, Any]) -> Dict[str, Any]:
-    """Remove patient-level rows from the console summary."""
-    summary = {key: value for key, value in output.items() if key != "patients_detail"}
-    summary["outcomes"] = [
-        {
-            key: value
-            for key, value in outcome.items()
-            if key != "patients_detail"
-        }
-        for outcome in output["outcomes"]
-    ]
-    return summary
+    """Return the aggregate metrics artifact for console display."""
+    return {
+        key: value for key, value in output.items() if not key.startswith("_")
+    }
 
 
 def resolve_device(requested: str) -> torch.device:
@@ -961,8 +986,10 @@ def run_on_multiple_gpus(
     outcome_results = [[] for _ in outcomes]
     for worker_output in worker_outputs:
         worker_result = json.loads(worker_output.read_text())
-        for index, outcome in enumerate(worker_result["outcomes"]):
-            outcome_results[index].extend(outcome["patients_detail"])
+        for index, patients_detail in enumerate(
+            worker_result["_patients_detail"]
+        ):
+            outcome_results[index].extend(patients_detail)
     for results in outcome_results:
         results.sort(key=lambda item: item["sample_index"])
     output = build_output(
@@ -972,6 +999,10 @@ def run_on_multiple_gpus(
         f"cuda:{','.join(gpu_ids[:num_workers])}",
         time.monotonic() - started,
         str(trajectory_root),
+    )
+    write_json(
+        patient_output_path(args),
+        build_patient_output(outcome_results, outcomes),
     )
     write_json(Path(args.output), output)
     shutil.rmtree(partition_root)
@@ -1159,6 +1190,14 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
         time.monotonic() - started,
         str(trajectory_folder),
     )
+    if args.partition_input:
+        # Internal worker payload; the coordinator writes the final patient file.
+        output["_patients_detail"] = [list(results) for results in outcome_results]
+    else:
+        write_json(
+            patient_output_path(args),
+            build_patient_output(outcome_results, outcomes),
+        )
     write_json(Path(args.output), output)
     print(json.dumps(compact_output_summary(output), indent=2))
     return output
