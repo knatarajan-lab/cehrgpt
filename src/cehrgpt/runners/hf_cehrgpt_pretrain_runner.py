@@ -1,3 +1,4 @@
+import hashlib
 import os
 from functools import partial
 from pathlib import Path
@@ -282,6 +283,15 @@ def main():
             )
     else:
         prepared_ds_path = generate_prepared_ds_path(data_args, model_args)
+        # generate_prepared_ds_path ignores test_data_folder, so without this a cached
+        # dataset prepared without a test split would be silently reused.
+        if data_args.test_data_folder:
+            test_folder_hash = hashlib.md5(
+                os.path.expanduser(data_args.test_data_folder).encode()
+            ).hexdigest()[:8]
+            prepared_ds_path = prepared_ds_path.with_name(
+                f"{prepared_ds_path.name}_test{test_folder_hash}"
+            )
 
     if os.path.exists(os.path.join(data_args.data_folder, "dataset_dict.json")):
         LOG.info(f"Loading prepared dataset from disk at {data_args.data_folder}...")
@@ -429,6 +439,15 @@ def main():
                         f"streaming: {data_args.streaming}"
                     )
 
+                # The test set is tokenized with the train/validation sets, but is not used to
+                # train the tokenizer (load_and_create_tokenizer only reads train/validation).
+                if data_args.test_data_folder:
+                    dataset["test"] = load_parquet_as_dataset(
+                        os.path.expanduser(data_args.test_data_folder),
+                        split="train",
+                        streaming=data_args.streaming,
+                    )
+
             # Create the CEHR-GPT tokenizer if it's not available in the output folder
             cehrgpt_tokenizer = load_and_create_tokenizer(
                 data_args=data_args,
@@ -500,6 +519,12 @@ def main():
 
     if processed_dataset is None:
         raise RuntimeError("The processed dataset cannot be None")
+
+    if data_args.test_data_folder and "test" not in processed_dataset:
+        LOG.warning(
+            "test_data_folder is set but the loaded processed dataset has no 'test' split "
+            "(it was prepared without one); test_data_folder is ignored."
+        )
 
     def filter_func(examples):
         if cehrgpt_args.drop_long_sequences:
