@@ -169,8 +169,6 @@ def create_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--trajectory_output",
         "--trajectory-output",
-        "--patient_output",
-        "--patient-output",
         dest="trajectory_output",
         help="Parquet output folder; defaults to <output>.trajectories",
     )
