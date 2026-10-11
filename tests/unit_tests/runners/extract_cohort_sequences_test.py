@@ -17,7 +17,16 @@ TOKENIZED_PERSON_IDS = {"train": [1, 2, 3], "validation": [4]}
 
 
 def tokenized_record(person_id: int):
-    concept_ids = ["year:2020", "age:50", "Gender/F", "Visit/OP", "1234", "5678"]
+    # year, age, gender and race are the demographic prompt that is always kept
+    concept_ids = [
+        "year:2020",
+        "age:50",
+        "Gender/F",
+        "Race/5",
+        "Visit/OP",
+        "1234",
+        "5678",
+    ]
     return {
         "person_id": person_id,
         "concept_ids": concept_ids,
@@ -44,7 +53,7 @@ class TestExtractCohortSequencesMissingPersons(unittest.TestCase):
         pd.DataFrame(
             {
                 "person_id": person_ids,
-                "index_date": [datetime.datetime(2020, 1, 4)] * len(person_ids),
+                "index_date": [datetime.datetime(2020, 1, 6)] * len(person_ids),
                 "label": [1] * len(person_ids),
             }
         ).to_parquet(os.path.join(cohort_folder, "cohort.parquet"))
