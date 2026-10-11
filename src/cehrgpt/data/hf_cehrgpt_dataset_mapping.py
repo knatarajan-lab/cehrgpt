@@ -422,6 +422,10 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         self._concept_tokenizer._motor_time_to_event_codes = []
         self._concept_tokenizer._motor_code_to_id_mapping = {}
         self._lab_token_ids = self._concept_tokenizer.lab_token_ids
+        # Reading lab_token_ids loaded the lab statistics, which can be hundreds of MB. Drop
+        # them again so the pickled mapping stays small; the workers read them back from
+        # disk if they need to bin a numeric value.
+        self._concept_tokenizer.release_lazy_data()
 
     def remove_columns(self):
         return [

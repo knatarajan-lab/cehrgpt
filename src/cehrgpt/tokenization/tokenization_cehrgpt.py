@@ -70,7 +70,45 @@ from cehrgpt.omop.ontology import Ontology
 LOG = logging.get_logger("transformers")
 MAX_CLINICAL_AGE = 120
 
+
+class _LazyAttribute:
+    """
+    Loads a group of attributes from disk the first time one of them is read.
+
+    It is a non-data descriptor, so once the value is in the instance ``__dict__`` (loaded, or
+    assigned explicitly) the instance value wins and the descriptor is never consulted again.
+    """
+
+    def __init__(self, group: str):
+        self.group = group
+        self.name = None
+
+    def __set_name__(self, owner, name):
+        self.name = name
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        obj._load_lazy_group(self.group)
+        try:
+            return obj.__dict__[self.name]
+        except KeyError:
+            raise AttributeError(self.name) from None
+
+
 class CehrGptTokenizer(PreTrainedTokenizer):
+    # The statistics, MOTOR info and ontology can be hundreds of MB and are only needed for
+    # training, generation and to bin numeric values, so a tokenizer loaded with
+    # `from_pretrained` reads them from disk on first use (see `lazy_files`).
+    _numeric_lab_stats = _LazyAttribute("lab_stats")
+    _categorical_lab_stats = _LazyAttribute("lab_stats")
+    _numeric_event_statistics = _LazyAttribute("lab_stats")
+    _numeric_concept_ids = _LazyAttribute("lab_stats")
+    _categorical_concept_ids = _LazyAttribute("lab_stats")
+    _motor_task_info = _LazyAttribute("motor_task_info")
+    _motor_time_to_event_codes = _LazyAttribute("motor_task_info")
+    _motor_code_to_id_mapping = _LazyAttribute("motor_task_info")
+    _ontology = _LazyAttribute("ontology")
 
     def __init__(
             self,
@@ -79,23 +117,41 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             att_tokenizer: Tokenizer,
             token_to_sub_time_token_mapping: Dict[str, List[str]],
             concept_code_stats: Dict[str, Any],
-            numeric_lab_stats: List[Dict[str, Any]],
-            categorical_lab_stats: Dict[Tuple[str, str], int],
+            numeric_lab_stats: Optional[List[Dict[str, Any]]],
+            categorical_lab_stats: Optional[Dict[Tuple[str, str], int]],
             concept_name_mapping: Dict[str, str],
             pretrained_concept_embedding_model: PretrainedEmbeddings = None,
             motor_task_info: Optional[Dict[str, Any]] = None,
             gender_map: Optional[Dict[str, int]] = None,
             race_map: Optional[Dict[str, int]] = None,
             ontology: Optional[Ontology] = None,
+            lazy_files: Optional[Dict[str, Tuple[str, str]]] = None,
     ):
+        """
+        ``lazy_files`` maps a group ("lab_stats", "motor_task_info", "ontology") to a
+        (kind, path) tuple, kind being "pickle" or "legacy" (the json lab stats of old
+        tokenizers). The group is then read from ``path`` on first use, and the matching
+        constructor arguments (numeric_lab_stats / categorical_lab_stats, motor_task_info,
+        ontology) are ignored.
+        """
+        self._lazy_files = dict(lazy_files) if lazy_files else {}
+        # The objects that were read from disk, so that they can be dropped again
+        self._lazy_loaded: Dict[str, Any] = {}
         self._tokenizer = tokenizer
         self._value_tokenizer = value_tokenizer
         self._att_tokenizer = att_tokenizer
         self._token_to_sub_time_token_mapping = token_to_sub_time_token_mapping
         self._concept_code_stats = concept_code_stats
-        self._numeric_lab_stats = numeric_lab_stats
-        self._numeric_event_statistics = NumericEventStatistics(numeric_lab_stats)
-        self._categorical_lab_stats = categorical_lab_stats
+        if "lab_stats" not in self._lazy_files:
+            self._numeric_lab_stats = numeric_lab_stats
+            self._numeric_event_statistics = NumericEventStatistics(numeric_lab_stats)
+            self._categorical_lab_stats = categorical_lab_stats
+            self._numeric_concept_ids = (
+                self._numeric_event_statistics.get_numeric_concept_ids()
+            )
+            self._categorical_concept_ids = list(
+                {t[0] for t in self._categorical_lab_stats.keys()}
+            )
         self._concept_name_mapping = concept_name_mapping
         self._oov_token_id = self._tokenizer.token_to_id(OUT_OF_VOCABULARY_TOKEN)
         self._padding_token_id = self._tokenizer.token_to_id(PAD_TOKEN)
@@ -115,12 +171,6 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         else:
             self._random_token_id = self._oov_token_id
 
-        self._numeric_concept_ids = (
-            self._numeric_event_statistics.get_numeric_concept_ids()
-        )
-        self._categorical_concept_ids = list(
-            {t[0] for t in self._categorical_lab_stats.keys()}
-        )
         self._padding_value_token_id = self._value_tokenizer.token_to_id(PAD_TOKEN)
         self._pretrained_concept_embedding_model = (
             pretrained_concept_embedding_model
@@ -132,19 +182,88 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             for _ in self.get_vocab().keys()
             if self._pretrained_concept_embedding_model.is_concept_available(_)
         ]
-        self._motor_task_info: Dict[str, Any] = (
-            motor_task_info if motor_task_info is not None else {}
-        )
-        self._motor_time_to_event_codes = self._motor_task_info.get(
-            "motor_time_to_event_codes", []
-        )
-        self._motor_code_to_id_mapping = {
-            code: i for i, code in enumerate(sorted(self._motor_time_to_event_codes))
-        }
+        if "motor_task_info" not in self._lazy_files:
+            self._motor_task_info: Dict[str, Any] = (
+                motor_task_info if motor_task_info is not None else {}
+            )
+            self._motor_time_to_event_codes = self._motor_task_info.get(
+                "motor_time_to_event_codes", []
+            )
+            self._motor_code_to_id_mapping = {
+                code: i
+                for i, code in enumerate(sorted(self._motor_time_to_event_codes))
+            }
         self._gender_map = gender_map if gender_map else {}
         self._race_map = race_map if race_map else {}
-        self._ontology = ontology
+        if "ontology" not in self._lazy_files:
+            self._ontology = ontology
         super().__init__()
+
+    def _load_lazy_group(self, group: str) -> None:
+        """Read a group of lazily loaded attributes from disk, keeping any assigned explicitly."""
+        source = self.__dict__.get("_lazy_files", {}).get(group)
+        if source is None:
+            raise AttributeError(f"{group} is not available in this tokenizer")
+        kind, path = source
+        values: Dict[str, Any] = {}
+        if group == "lab_stats":
+            if kind == "legacy":
+                # Support the old version of the numeric lab stats file
+                numeric_lab_stats, categorical_lab_stats = load_json_file(path), dict()
+            else:
+                with open(path, "rb") as file:
+                    lab_stats = pickle.load(file)
+                numeric_lab_stats = lab_stats["numeric_lab_stats"]
+                categorical_lab_stats = lab_stats["categorical_lab_stats"]
+            numeric_event_statistics = NumericEventStatistics(numeric_lab_stats)
+            values = {
+                "_numeric_lab_stats": numeric_lab_stats,
+                "_categorical_lab_stats": categorical_lab_stats,
+                "_numeric_event_statistics": numeric_event_statistics,
+                "_numeric_concept_ids": numeric_event_statistics.get_numeric_concept_ids(),
+                "_categorical_concept_ids": list(
+                    {t[0] for t in categorical_lab_stats.keys()}
+                ),
+            }
+        elif group == "motor_task_info":
+            with open(path, "rb") as file:
+                motor_task_info = pickle.load(file)
+            motor_task_info = motor_task_info if motor_task_info is not None else {}
+            codes = motor_task_info.get("motor_time_to_event_codes", [])
+            values = {
+                "_motor_task_info": motor_task_info,
+                "_motor_time_to_event_codes": codes,
+                "_motor_code_to_id_mapping": {
+                    code: i for i, code in enumerate(sorted(codes))
+                },
+            }
+        elif group == "ontology":
+            with open(path, "rb") as file:
+                values = {"_ontology": pickle.load(file)}
+        for name, value in values.items():
+            # An attribute assigned in the meantime wins over what is on disk
+            if name not in self.__dict__:
+                self.__dict__[name] = value
+                self._lazy_loaded[name] = value
+
+    def release_lazy_data(self) -> None:
+        """
+        Drop the lazily loaded data that has not been replaced, so it is read again from disk
+        on next use. Keeps the tokenizer small to pickle or to copy to worker processes.
+        """
+        for name, value in list(self.__dict__.get("_lazy_loaded", {}).items()):
+            if self.__dict__.get(name) is value:
+                del self.__dict__[name]
+        self._lazy_loaded = {}
+
+    def __getstate__(self):
+        # Lazily loaded data is re-read from disk by the unpickled copy
+        state = self.__dict__.copy()
+        for name, value in state.get("_lazy_loaded", {}).items():
+            if state.get(name) is value:
+                del state[name]
+        state["_lazy_loaded"] = {}
+        return state
 
     @property
     def pretrained_concept_ids(self):
@@ -704,27 +823,22 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             token_to_sub_time_token_mapping_file
         )
 
-        # Load the lab stats pickle file
+        # The lab stats can be hundreds of MB, they are read when first needed
+        lazy_files: Dict[str, Tuple[str, str]] = {}
         if is_legacy_tokenizer:
             legacy_lab_stats_file = transformers.utils.hub.cached_file(
                 pretrained_model_name_or_path, LEGACY_LAB_STATS_FILE_NAME, **kwargs
             )
             if not legacy_lab_stats_file:
                 return None
-            # Support the old version of the numeric lab stats file
-            lab_stats = {
-                "numeric_lab_stats": load_json_file(legacy_lab_stats_file),
-                "categorical_lab_stats": dict(),
-            }
+            lazy_files["lab_stats"] = ("legacy", legacy_lab_stats_file)
         else:
             lab_stats_file = transformers.utils.hub.cached_file(
                 pretrained_model_name_or_path, LAB_STATS_FILE_NAME, **kwargs
             )
             if not lab_stats_file:
                 return None
-
-            with open(lab_stats_file, "rb") as file:
-                lab_stats = pickle.load(file)
+            lazy_files["lab_stats"] = ("pickle", lab_stats_file)
         try:
             # Load the demographics stats json file
             demographics_stats_file = transformers.utils.hub.cached_file(
@@ -767,10 +881,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                 **kwargs,
             )
             if motor_tte_task_info_file:
-                with open(motor_tte_task_info_file, "rb") as file:
-                    motor_task_info = pickle.load(file)
-            else:
-                motor_task_info = None
+                lazy_files["motor_task_info"] = ("pickle", motor_tte_task_info_file)
+            motor_task_info = None
         except EnvironmentError:
             LOG.warning(
                 f"The %s files does not exist in %s, setting motor_task_info to None",
@@ -787,8 +899,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                 **kwargs,
             )
             if ontology_file:
-                with open(ontology_file, "rb") as file:
-                    ontology = pickle.load(file)
+                lazy_files["ontology"] = ("pickle", ontology_file)
         except EnvironmentError | OSError:
             LOG.warning(
                 "The ontology file %s does not existing in %s",
@@ -804,14 +915,15 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             att_tokenizer,
             token_to_sub_time_token_mapping,
             concept_code_stats,
-            lab_stats["numeric_lab_stats"],
-            lab_stats["categorical_lab_stats"],
+            None,
+            None,
             concept_name_mapping,
             pretrained_embedding_model,
             motor_task_info,
             demographics_stats["gender_map"] if demographics_stats else None,
             demographics_stats["race_map"] if demographics_stats else None,
             ontology=ontology,
+            lazy_files=lazy_files,
         )
 
     @classmethod
