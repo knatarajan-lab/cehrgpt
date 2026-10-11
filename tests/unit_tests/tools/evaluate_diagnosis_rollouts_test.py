@@ -14,6 +14,8 @@ from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.tools import evaluate_diagnosis_rollouts as evaluation
 from cehrgpt.tools.evaluate_diagnosis_rollouts import (
     bootstrap_c_index,
+    build_patient_output,
+    build_output,
     create_arg_parser,
     eligible_visit_cutoffs,
     find_observed_diagnosis,
@@ -23,6 +25,8 @@ from cehrgpt.tools.evaluate_diagnosis_rollouts import (
     load_condition_tokens,
     resolve_device,
     resolve_gpu_ids,
+    resolve_top_k,
+    score_diagnosis_trajectories,
     strip_cli_option,
     TrajectoryParquetWriter,
     truncate_prefix,
@@ -67,6 +71,26 @@ def test_sampling_arguments_accept_aliases():
     assert args.diagnosis_concept_id is None
 
 
+def test_top_k_defaults_to_full_tokenizer_vocabulary():
+    args = create_arg_parser().parse_args(
+        [
+            "--model",
+            "model",
+            "--sequences",
+            "sequences",
+            "--concept",
+            "concept",
+            "--output",
+            "output.json",
+        ]
+    )
+    tokenizer = SimpleNamespace(get_vocab=lambda: {"a": 0, "b": 1, "c": 2})
+
+    assert args.top_k is None
+    assert resolve_top_k(args.top_k, tokenizer) == 3
+    assert resolve_top_k(2, tokenizer) == 2
+
+
 def test_diagnosis_arguments_accept_aliases():
     args = create_arg_parser().parse_args(
         [
@@ -80,12 +104,14 @@ def test_diagnosis_arguments_accept_aliases():
             "output.json",
             "--diagnosis_concept_id",
             "100",
+            "--diagnosis-concept-id",
+            "200",
             "--concept_ancestor",
             "concept_ancestor",
         ]
     )
 
-    assert args.diagnosis_concept_id == 100
+    assert args.diagnosis_concept_id == [100, 200]
     assert args.concept_ancestor == "concept_ancestor"
 
 
@@ -285,6 +311,92 @@ def test_bootstrap_c_index_is_reproducible():
     assert first == (1.0, 1.0, 20)
 
 
+def test_build_output_reports_each_outcome_separately():
+    args = SimpleNamespace(
+        model="model",
+        rollouts=2,
+        horizon_days=365,
+        min_history_visits=2,
+        max_new_tokens=512,
+        top_p=1.0,
+        top_k=100,
+        temperature=1.0,
+        seed=42,
+        bootstrap_resamples=0,
+        output="metrics.json",
+        patient_output=None,
+    )
+    outcome_results = [
+        [
+            {
+                "observed_days": 5.0,
+                "observed_event": True,
+                "predicted_risk": 0.9,
+                "valid_rollouts": 2,
+                "imputed_incomplete_rollouts": 0,
+            },
+            {
+                "observed_days": 10.0,
+                "observed_event": True,
+                "predicted_risk": 0.1,
+                "valid_rollouts": 2,
+                "imputed_incomplete_rollouts": 0,
+            },
+        ],
+        [
+            {
+                "observed_days": 6.0,
+                "observed_event": True,
+                "predicted_risk": 0.8,
+                "valid_rollouts": 2,
+                "imputed_incomplete_rollouts": 0,
+            },
+            {
+                "observed_days": 12.0,
+                "observed_event": False,
+                "predicted_risk": 0.2,
+                "valid_rollouts": 2,
+                "imputed_incomplete_rollouts": 0,
+            },
+        ],
+    ]
+    outcomes = [
+        {
+            "diagnosis_concept_id": 100,
+            "diagnosis_concept_name": "Outcome A",
+            "condition_tokens": {"100"},
+        },
+        {
+            "diagnosis_concept_id": 200,
+            "diagnosis_concept_name": "Outcome B",
+            "condition_tokens": {"200", "201"},
+        },
+    ]
+
+    output = build_output(
+        args,
+        outcome_results,
+        outcomes,
+        "cpu",
+        1.0,
+        "trajectories",
+    )
+
+    assert [item["diagnosis_concept_id"] for item in output["outcomes"]] == [
+        100,
+        200,
+    ]
+    assert [item["c_index"] for item in output["outcomes"]] == [1.0, 1.0]
+    assert "c_index" not in output
+    assert "patients_detail" not in output
+    assert all("patients_detail" not in item for item in output["outcomes"])
+    assert output["patient_output"] == "metrics.json.patients.json"
+
+    patient_output = build_patient_output(outcome_results, outcomes)
+    assert len(patient_output["outcomes"][0]["patients_detail"]) == 2
+    assert len(patient_output["outcomes"][1]["patients_detail"]) == 2
+
+
 def test_truncate_prefix_starts_at_next_complete_visit():
     prefix = ["old", "[VS]", "a", "[VE]", "[VS]", "b", "[VE]"]
 
@@ -337,10 +449,20 @@ def test_find_observed_diagnosis_censors_at_last_observed_event():
     assert result == (100.0, False, None, 100.0)
 
 
-def test_eligible_cutoffs_require_two_completed_history_visits():
+def test_eligible_cutoffs_use_token_before_between_visit_time_token():
     day = 86400
-    concepts = ["[VS]", "a", "[VE]", "[VS]", "b", "[VE]", "D800"]
-    epoch_times = [0, 0, 0, day, day, day, 800 * day]
+    concepts = [
+        "[VS]",
+        "a",
+        "[VE]",
+        "D1",
+        "[VS]",
+        "b",
+        "[VE]",
+        "D799",
+        "future",
+    ]
+    epoch_times = [0, 0, 0, day, day, day, day, 800 * day, 800 * day]
 
     cutoffs = eligible_visit_cutoffs(
         concepts,
@@ -348,7 +470,39 @@ def test_eligible_cutoffs_require_two_completed_history_visits():
         min_history_visits=2,
     )
 
-    assert cutoffs == [(5, float(day), 2)]
+    assert cutoffs == [(6, float(day), 2)]
+
+
+def test_eligible_cutoffs_support_ethos_time_tokens_and_ignore_inpatient_tokens():
+    day = 86400
+    concepts = [
+        "first_visit_event",
+        "2mt-6mt",
+        "second_visit_event",
+        "i-1d-2d",
+        "second_visit_event_2",
+        "=6mt",
+        "=6mt",
+        "third_visit_event",
+    ]
+    epoch_times = [
+        0,
+        105 * day,
+        105 * day,
+        106 * day,
+        106 * day,
+        286 * day,
+        466 * day,
+        466 * day,
+    ]
+
+    cutoffs = eligible_visit_cutoffs(
+        concepts,
+        epoch_times,
+        min_history_visits=2,
+    )
+
+    assert cutoffs == [(4, float(106 * day), 2)]
 
 
 def test_eligible_cutoffs_require_positive_followup():
@@ -396,6 +550,27 @@ def test_generate_diagnosis_rollouts_parses_event_and_end_token():
             "generated_elapsed_days": 30.0,
         },
     ]
+
+
+def test_shared_trajectories_are_scored_independently_for_each_outcome():
+    trajectories = [
+        {"tokens": ["D10", "condition_a", "D20", "condition_b"]},
+        {"tokens": ["D15", "condition_b", "[END]"]},
+    ]
+
+    a_times, a_events, a_incomplete = score_diagnosis_trajectories(
+        trajectories, {"condition_a"}, 365, 2, "[END]"
+    )
+    b_times, b_events, b_incomplete = score_diagnosis_trajectories(
+        trajectories, {"condition_b"}, 365, 2, "[END]"
+    )
+
+    assert a_times == [10.0, 365.0]
+    assert a_events == [True, False]
+    assert a_incomplete == 0
+    assert b_times == [30.0, 15.0]
+    assert b_events == [True, True]
+    assert b_incomplete == 0
 
 
 def test_trajectory_writer_saves_nested_records_to_parquet(tmp_path):
@@ -460,6 +635,13 @@ def test_multiple_gpu_run_uses_disjoint_partitions_and_merges_results(tmp_path):
             "observed_days": float(index + 1),
             "observed_event": True,
             "observed_condition_concept_id": "condition",
+            "observed_outcomes": [
+                {
+                    "observed_days": float(index + 1),
+                    "observed_event": True,
+                    "observed_condition_concept_id": "condition",
+                }
+            ],
         }
         for index in range(6)
     ]
@@ -483,6 +665,7 @@ def test_multiple_gpu_run_uses_disjoint_partitions_and_merges_results(tmp_path):
         bootstrap_resamples=0,
         trajectory_output=None,
         trajectory_buffer_size=100,
+        patient_output=None,
     )
     calls = []
     partitions = []
@@ -493,6 +676,9 @@ def test_multiple_gpu_run_uses_disjoint_partitions_and_merges_results(tmp_path):
         partition_payload = json.loads(open(partition_path).read())
         partition = partition_payload["patients"]
         assert partition_payload["condition_tokens"] == ["condition"]
+        assert partition_payload["outcomes"][0]["condition_tokens"] == [
+            "condition"
+        ]
         partitions.append([record["sample_index"] for record in partition])
         patients_detail = []
         for record in partition:
@@ -508,7 +694,10 @@ def test_multiple_gpu_run_uses_disjoint_partitions_and_merges_results(tmp_path):
                 }
             )
         with open(output_path, "w") as output_file:
-            json.dump({"patients_detail": patients_detail}, output_file)
+            json.dump(
+                {"_patients_detail": [patients_detail]},
+                output_file,
+            )
         calls.append((command, env))
         process = mock.Mock()
         process.wait.return_value = 0
@@ -518,7 +707,15 @@ def test_multiple_gpu_run_uses_disjoint_partitions_and_merges_results(tmp_path):
     with mock.patch.object(
         evaluation.CehrGptTokenizer, "from_pretrained", return_value=mock.Mock()
     ), mock.patch.object(
-        evaluation, "load_condition_tokens", return_value={"condition"}
+        evaluation,
+        "load_outcomes",
+        return_value=[
+            {
+                "diagnosis_concept_id": None,
+                "diagnosis_concept_name": None,
+                "condition_tokens": {"condition"},
+            }
+        ],
     ), mock.patch.object(
         evaluation, "select_cutoffs", return_value=selected
     ), mock.patch.object(
@@ -532,8 +729,19 @@ def test_multiple_gpu_run_uses_disjoint_partitions_and_merges_results(tmp_path):
 
     assert result["patients"] == 6
     assert result["c_index"] == 1.0
-    assert [item["sample_index"] for item in result["patients_detail"]] == list(
-        range(6)
+    patient_output = json.loads(
+        (tmp_path / "result.json.patients.json").read_text()
+    )
+    assert len(patient_output["outcomes"][0]["patients_detail"]) == 6
+    assert [
+        item["sample_index"]
+        for item in patient_output["outcomes"][0]["patients_detail"]
+    ] == list(range(6))
+    metrics_output = json.loads((tmp_path / "result.json").read_text())
+    assert "patients_detail" not in metrics_output
+    assert all(
+        "patients_detail" not in outcome
+        for outcome in metrics_output["outcomes"]
     )
     assert sorted(partitions[0] + partitions[1]) == list(range(6))
     assert set(partitions[0]).isdisjoint(partitions[1])
