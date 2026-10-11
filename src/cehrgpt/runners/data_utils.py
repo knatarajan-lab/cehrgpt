@@ -1,4 +1,3 @@
-import math
 import os
 from datetime import datetime
 from typing import Dict, List, Optional, Union, Tuple
@@ -141,10 +140,17 @@ def prepare_finetune_dataset(
 
 
 def _clamp_num_proc(dataset_len: int, num_proc: Optional[int], batch_size: int) -> Optional[int]:
-    """Clamp num_proc so we don't spawn more workers than there are batches."""
+    """
+    Clamp num_proc so we don't spawn more workers than there are rows.
+
+    datasets splits the rows evenly across the workers, whatever the batch size is, so the
+    clamp must not depend on it: capping at ceil(rows / batch_size) leaves a dataset smaller
+    than the batch size on a single process, however many workers were requested. batch_size
+    is only kept for the callers.
+    """
     if num_proc is None:
         return None
-    return min(num_proc, max(1, math.ceil(dataset_len / batch_size)))
+    return min(num_proc, max(1, dataset_len))
 
 
 # Helper function to apply patient-based filtering
