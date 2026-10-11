@@ -1,6 +1,6 @@
 import math
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -28,10 +28,15 @@ class TimeToEvent:
     time_intervals: List[int]
     outcome_events: List[str]
     time_interval_probability_table: List[Dict[str, Any]]
+    # The raw generated continuation for every simulated trial (not just the ones that
+    # satisfied the stopping criteria), kept for manual investigation of model behavior.
+    generated_trajectories: List[List[str]] = field(default_factory=list)
 
 
 def create_time_to_event(
-    time_event_tuples: List[Tuple[str, int]], num_of_simulations: int
+    time_event_tuples: List[Tuple[str, int]],
+    num_of_simulations: int,
+    generated_trajectories: Optional[List[List[str]]] = None,
 ) -> TimeToEvent:
     outcome_events, time_intervals = zip(*time_event_tuples)
     time_buckets = [time_month_token(_) for _ in time_intervals]
@@ -55,6 +60,7 @@ def create_time_to_event(
         most_likely_time=most_common_item,
         num_of_simulations=num_of_simulations,
         time_interval_probability_table=sorted_probability_table,
+        generated_trajectories=generated_trajectories or [],
     )
 
 
@@ -63,7 +69,7 @@ class TimeToEventModel:
         self,
         tokenizer: CehrGptTokenizer,
         model: CEHRGPT2LMHeadModel,
-        outcome_events: List[str],
+        outcome_events: List[Union[str, int]],
         generation_config: GenerationConfig,
         device: torch.device = torch.device("cpu"),
         batch_size: int = 32,
@@ -71,12 +77,15 @@ class TimeToEventModel:
         self.tokenizer = tokenizer
         self.model = model.eval()
         self.generation_config = generation_config
-        self.outcome_events = outcome_events
+        # Generated tokens are always decoded as strings, so outcome_events (which callers
+        # may build from int-typed concept ids, e.g. to query concept_ancestor) needs to be
+        # normalized to strings here so token matching in is_outcome_event actually works.
+        self.outcome_events = [str(event) for event in outcome_events]
         self.device = device
         self.batch_size = batch_size
         self.max_sequence = model.config.n_positions
 
-    def is_outcome_event(self, token: str):
+    def is_outcome_event(self, token: str) -> bool:
         return token in self.outcome_events
 
     def simulate(
@@ -123,15 +132,11 @@ class TimeToEventModel:
         prediction_window_end: int = 365,
         debug: bool = False,
         max_n_trial: int = 2,
-    ) -> Tuple[Optional[TimeToEvent], List[List[str]]]:
-        """
-        Returns (TimeToEvent or None, trajectories) where trajectories is a list
-        of generated token sequences (generated portion only, prefix excluded).
-        """
+    ) -> Optional[TimeToEvent]:
         patient_history_length = len(partial_history)
         time_event_tuples = []
         seqs_failed_to_convert = []
-        all_simulated_seqs: List[List[str]] = []
+        generated_trajectories = []
         n_trial = 0
         num_return_sequences = self.generation_config.num_return_sequences
         max_new_tokens = self.generation_config.max_new_tokens
@@ -144,13 +149,14 @@ class TimeToEventModel:
             )
             # self.generation_config.max_new_tokens = max_new_tokens * (n_trial + 1)
             simulated_seqs = self.simulate(partial_history)
-            all_simulated_seqs.extend(simulated_seqs)
             n_trial += 1
             for seq in simulated_seqs:
                 visit_counter = 0
                 time_delta = 0
                 success = False
-                for next_token in seq[patient_history_length:]:
+                generated_trajectory = seq[patient_history_length:]
+                generated_trajectories.append(generated_trajectory)
+                for next_token in generated_trajectory:
                     visit_counter += int(is_visit_start(next_token))
                     if (
                         visit_counter > future_visit_end != -1
@@ -164,10 +170,11 @@ class TimeToEventModel:
                     elif (
                         visit_counter >= future_visit_start
                         and time_delta >= prediction_window_start
-                    ) and self.is_outcome_event(next_token):
-                        time_event_tuples.append((next_token, time_delta))
-                        success = True
-                        break
+                    ):
+                        if self.is_outcome_event(next_token):
+                            time_event_tuples.append((next_token, time_delta))
+                            success = True
+                            break
                 if not success:
                     # This indicates the generated sequence did not satisfy the criteria
                     if future_visit_end != -1 or prediction_window_end != -1:
@@ -181,15 +188,14 @@ class TimeToEventModel:
         if debug:
             print(f"seqs_failed_to_convert: {seqs_failed_to_convert}")
 
-        # Generated portions only (prefix excluded) for all simulated sequences
-        trajectories = [seq[patient_history_length:] for seq in all_simulated_seqs]
-
-        tte = (
-            create_time_to_event(time_event_tuples, len(time_event_tuples))
+        # Count the occurrences of each time tokens for each concept
+        return (
+            create_time_to_event(
+                time_event_tuples, len(time_event_tuples), generated_trajectories
+            )
             if len(time_event_tuples) > 0
             else None
         )
-        return tte, trajectories
 
     @staticmethod
     def get_generation_config(

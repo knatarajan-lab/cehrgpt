@@ -9,7 +9,7 @@ import pandas as pd
 import torch
 from cehrbert.runners.runner_util import load_parquet_as_dataset
 from transformers import GenerationConfig
-from transformers.utils import is_flash_attn_2_available, logging
+from transformers.utils import logging
 
 from cehrgpt.cehrgpt_args import create_inference_base_arg_parser
 from cehrgpt.generation.omop_converter_batch import START_TOKEN_SIZE
@@ -20,6 +20,10 @@ from cehrgpt.models.tokenization_hf_cehrgpt import (
     NA,
     CehrGptTokenizer,
     is_valid_valid_bin,
+)
+from cehrgpt.runners.gpt_runner_util import (
+    read_backbone,
+    resolve_attn_implementation,
 )
 
 LOG = logging.get_logger("transformers")
@@ -98,9 +102,9 @@ def generate_single_batch(
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
-            bos_token_id=model.generation_config.bos_token_id,
-            eos_token_id=model.generation_config.eos_token_id,
-            pad_token_id=model.generation_config.pad_token_id,
+            bos_token_id=cehrgpt_tokenizer.end_token_id,
+            eos_token_id=cehrgpt_tokenizer.end_token_id,
+            pad_token_id=cehrgpt_tokenizer.pad_token_id,
             do_sample=True,
             use_cache=True,
             return_dict_in_generate=True,
@@ -165,8 +169,8 @@ def main(args):
     cehrgpt_model = (
         CEHRGPT2LMHeadModel.from_pretrained(
             args.model_folder,
-            attn_implementation=(
-                "flash_attention_2" if is_flash_attn_2_available() else "eager"
+            attn_implementation=resolve_attn_implementation(
+                backbone=read_backbone(args.model_folder)
             ),
         )
         .eval()

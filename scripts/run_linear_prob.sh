@@ -7,8 +7,13 @@ usage() {
     echo "Options:"
     echo "  --base_dir=DIR                 Base directory containing cohorts (required)"
     echo "  --dataset_prepared_path=PATH   Path to prepared dataset (required)"
-    echo "  --model_path=PATH              Path to pre-trained model (required)
-  --tokenizer_path=PATH          Path to tokenizer (optional, defaults to model_path)"
+    echo "  --tokenized_full_dataset_path=PATH  Path to the fully tokenized dataset, used to slice out"
+    echo "                                 cohort sequences instead of re-tokenizing per cohort (optional)"
+    echo "  --cohort_folder=DIR            Base directory containing per-cohort subdirectories used to"
+    echo "                                 resolve person_ids/labels for --tokenized_full_dataset_path"
+    echo "                                 (optional, defaults to --base_dir)"
+    echo "  --model_path=PATH              Path to pre-trained model (required)"
+    echo "  --tokenizer_path=PATH          Path to tokenizer (optional, defaults to model_path)"
     echo "  --preprocessing_workers=NUM    Number of preprocessing workers (required)"
     echo "  --batch_size=NUM               Batch size for evaluation (required)"
     echo "  --output_dir=DIR               Output directory for results (required)"
@@ -18,11 +23,16 @@ usage() {
     echo "  --disable_sample_packing       Disable sample packing (enabled by default)"
     echo "  --disable_combine_global_local Disable combining global and local features (enabled by default)"
     echo "  --add_random_token             Enable adding random token (disabled by default)"
-    echo "  --tokenized_full_dataset_path=PATH Path to a pre-tokenized full dataset (optional)"
-    echo "  --observation_window=NUM       Observation window in days (optional, default: None)"
     echo "  --preprocessing_batch_size=NUM Batch size for dataset preprocessing (optional, default: 1000)"
-    echo "  --refresh_processed_dataset    Delete and rebuild the cached prepared dataset (disabled by default)
-  --is_data_in_meds              Indicate that the data is in MEDS format (disabled by default)"
+    echo "  --refresh_processed_dataset    Delete and rebuild the cached prepared dataset (disabled by default)"
+    echo "  --is_data_in_meds              Indicate that the data is in MEDS format (disabled by default)"
+    echo "  --force_attn_implementation=IMPL  Force the attention implementation: eager, sdpa or"
+    echo "                                 flash_attention_2 (optional; default: flash_attention_2 for"
+    echo "                                 gpt2 when installed, sdpa for qwen2)"
+    echo "  --observation_window=NUM       Observation window in days (optional, default: None)"
+    echo "  --allow_missing_tokenized_persons  Skip cohort persons that are missing from the tokenized"
+    echo "                                 dataset (with a warning) instead of failing; only used with"
+    echo "                                 --tokenized_full_dataset_path (disabled by default)"
     echo ""
     echo "Example:"
     echo "  $0 --base_dir=/path/to/cohorts --dataset_prepared_path=/path/to/dataset_prepared \\"
@@ -44,6 +54,7 @@ TOKENIZED_FULL_DATASET_PATH=""
 OBSERVATION_WINDOW=""
 TOKENIZER_PATH=""
 PREPROCESSING_BATCH_SIZE="1000"
+ALLOW_MISSING_TOKENIZED_PERSONS="false"
 
 # Parse command line arguments
 for arg in "$@"; do
@@ -53,6 +64,15 @@ for arg in "$@"; do
             ;;
         --dataset_prepared_path=*)
             DATASET_PREPARED_PATH="${arg#*=}"
+            ;;
+        --tokenized_full_dataset_path=*)
+            TOKENIZED_FULL_DATASET_PATH="${arg#*=}"
+            ;;
+        --cohort_folder=*)
+            COHORT_FOLDER="${arg#*=}"
+            ;;
+        --observation_window=*)
+            OBSERVATION_WINDOW="${arg#*=}"
             ;;
         --model_path=*)
             MODEL_PATH="${arg#*=}"
@@ -87,12 +107,6 @@ for arg in "$@"; do
         --add_random_token)
             ADD_RANDOM_TOKEN="true"
             ;;
-        --tokenized_full_dataset_path=*)
-            TOKENIZED_FULL_DATASET_PATH="${arg#*=}"
-            ;;
-        --observation_window=*)
-            OBSERVATION_WINDOW="${arg#*=}"
-            ;;
         --preprocessing_batch_size=*)
             PREPROCESSING_BATCH_SIZE="${arg#*=}"
             ;;
@@ -101,6 +115,12 @@ for arg in "$@"; do
             ;;
         --is_data_in_meds)
             IS_DATA_IN_MEDS="true"
+            ;;
+        --allow_missing_tokenized_persons)
+            ALLOW_MISSING_TOKENIZED_PERSONS="true"
+            ;;
+        --force_attn_implementation=*)
+            FORCE_ATTN_IMPLEMENTATION="${arg#*=}"
             ;;
         --help|-h)
             usage
@@ -126,6 +146,19 @@ fi
 
 if [ ! -d "$DATASET_PREPARED_PATH" ]; then
     echo "Error: Dataset prepared path does not exist: $DATASET_PREPARED_PATH"
+    exit 1
+fi
+
+if [ -n "$TOKENIZED_FULL_DATASET_PATH" ] && [ ! -d "$TOKENIZED_FULL_DATASET_PATH" ]; then
+    echo "Error: Tokenized full dataset path does not exist: $TOKENIZED_FULL_DATASET_PATH"
+    exit 1
+fi
+
+# Default cohort_folder to base_dir if not explicitly provided
+if [ -z "$COHORT_FOLDER" ]; then
+    COHORT_FOLDER="$BASE_DIR"
+elif [ ! -d "$COHORT_FOLDER" ]; then
+    echo "Error: Cohort folder does not exist: $COHORT_FOLDER"
     exit 1
 fi
 
@@ -207,6 +240,8 @@ log "Starting feature extraction and model training process"
 log "Configuration:"
 log "  --base_dir=$BASE_DIR"
 log "  --dataset_prepared_path=$DATASET_PREPARED_PATH"
+log "  --tokenized_full_dataset_path=$TOKENIZED_FULL_DATASET_PATH"
+log "  --cohort_folder=$COHORT_FOLDER"
 log "  --model_path=$MODEL_PATH"
 log "  --tokenizer_path=$TOKENIZER_PATH"
 log "  --preprocessing_workers=$PREPROCESSING_WORKERS"
@@ -218,27 +253,28 @@ log "  --torch_type=$TORCH_TYPE"
 log "  --disable_sample_packing=$DISABLE_SAMPLE_PACKING"
 log "  --disable_combine_global_local=$DISABLE_COMBINE_GLOBAL_LOCAL"
 log "  --add_random_token=$ADD_RANDOM_TOKEN"
-log "  --tokenized_full_dataset_path=$TOKENIZED_FULL_DATASET_PATH"
-log "  --observation_window=$OBSERVATION_WINDOW"
 log "  --preprocessing_batch_size=$PREPROCESSING_BATCH_SIZE"
 log "  --refresh_processed_dataset=$REFRESH_PROCESSED_DATASET"
 log "  --is_data_in_meds=$IS_DATA_IN_MEDS"
+log "  --observation_window=$OBSERVATION_WINDOW"
+log "  --allow_missing_tokenized_persons=$ALLOW_MISSING_TOKENIZED_PERSONS"
 
 # Find valid cohorts and write to a temp file
 TEMP_COHORT_LIST="$LOG_DIR/cohort_list_${TIMESTAMP}.txt"
 > "$TEMP_COHORT_LIST" # Clear the file
 
-# Find all valid cohorts
-# When tokenized_full_dataset_path is set, any subdirectory is a valid cohort.
-# Otherwise require train/ and test/ subdirectories.
+# Find all valid cohorts.
+# When --tokenized_full_dataset_path is set, cohort sequences are sliced out of the
+# pre-tokenized dataset (see extract_cohort_sequences), so any subdirectory is a valid
+# cohort. Otherwise require train/ and test/ subdirectories.
 for cohort_dir in "$BASE_DIR"/*; do
+    [ -d "$cohort_dir" ] || continue
+    cohort_name=$(basename "$cohort_dir")
+    # LOG_DIR lives directly under BASE_DIR, so it would otherwise be picked up as a cohort
+    [ "$cohort_name" = "logs" ] && continue
     if [ -n "$TOKENIZED_FULL_DATASET_PATH" ]; then
-        if [ -d "$cohort_dir" ]; then
-            cohort_name=$(basename "$cohort_dir")
-            echo "$cohort_name" >> "$TEMP_COHORT_LIST"
-        fi
-    elif [ -d "$cohort_dir" ] && [ -d "$cohort_dir/train" ] && [ -d "$cohort_dir/test" ]; then
-        cohort_name=$(basename "$cohort_dir")
+        echo "$cohort_name" >> "$TEMP_COHORT_LIST"
+    elif [ -d "$cohort_dir/train" ] && [ -d "$cohort_dir/test" ]; then
         echo "$cohort_name" >> "$TEMP_COHORT_LIST"
     fi
 done
@@ -280,10 +316,21 @@ while read -r cohort_name; do
     # Create output directory if it doesn't exist
     mkdir -p "$output_dir"
 
-    # Prepare base command for feature extraction
+    # --data_folder/--test_data_folder assume a per-cohort train/ and test/ directory
+    # layout. That doesn't apply when --tokenized_full_dataset_path is set (the cohort
+    # may be a single flat directory, and the train/test split comes from the
+    # pre-tokenized dataset instead) -- --data_folder is a required argument, so we still
+    # pass it (pointing at the cohort dir itself), but --test_data_folder is dropped since
+    # it's unused in that mode.
+    if [ -n "$TOKENIZED_FULL_DATASET_PATH" ]; then
+        DATA_FOLDER_ARG="--data_folder \"$COHORT_FOLDER/$cohort_name\""
+    else
+        DATA_FOLDER_ARG="--data_folder \"$BASE_DIR/$cohort_name/train/\" --test_data_folder \"$BASE_DIR/$cohort_name/test/\""
+    fi
+
+    # Prepare command for feature extraction
     FEATURE_CMD="python -u -m cehrgpt.tools.linear_prob.compute_cehrgpt_features \
-        --data_folder \"$BASE_DIR/$cohort_name/train/\" \
-        --test_data_folder \"$BASE_DIR/$cohort_name/test/\" \
+        $DATA_FOLDER_ARG \
         --dataset_prepared_path \"$DATASET_PREPARED_PATH\" \
         --model_name_or_path \"$MODEL_PATH\" \
         --tokenizer_name_or_path \"$TOKENIZER_PATH\" \
@@ -307,12 +354,18 @@ while read -r cohort_name; do
         FEATURE_CMD="$FEATURE_CMD --add_random_token"
     fi
 
+    # Add tokenized_full_dataset_path if provided, so the cohort sequences are sliced
+    # out of the fully tokenized dataset instead of being re-tokenized per cohort.
+    # --cohort_folder points at the per-cohort dir (parquet files may be nested in
+    # subdirectories, e.g. train/+test/ or a single data/ folder -- extract_cohort_sequences
+    # globs recursively) so it can pull person_ids from all of them at once.
     if [ -n "$TOKENIZED_FULL_DATASET_PATH" ]; then
         FEATURE_CMD="$FEATURE_CMD \
         --tokenized_full_dataset_path \"$TOKENIZED_FULL_DATASET_PATH\" \
-        --cohort_folder \"$BASE_DIR/$cohort_name\""
+        --cohort_folder \"$COHORT_FOLDER/$cohort_name\""
     fi
 
+    # Add observation_window if provided
     if [ -n "$OBSERVATION_WINDOW" ]; then
         FEATURE_CMD="$FEATURE_CMD --observation_window \"$OBSERVATION_WINDOW\""
     fi
@@ -323,6 +376,16 @@ while read -r cohort_name; do
 
     if [ "$IS_DATA_IN_MEDS" = "true" ]; then
         FEATURE_CMD="$FEATURE_CMD --is_data_in_meds"
+    fi
+
+    # Skip cohort persons that are missing from the tokenized dataset instead of failing
+    if [ "$ALLOW_MISSING_TOKENIZED_PERSONS" = "true" ]; then
+        FEATURE_CMD="$FEATURE_CMD --allow_missing_tokenized_persons"
+    fi
+
+    # Add force_attn_implementation if provided
+    if [ -n "$FORCE_ATTN_IMPLEMENTATION" ]; then
+        FEATURE_CMD="$FEATURE_CMD --force_attn_implementation \"$FORCE_ATTN_IMPLEMENTATION\""
     fi
 
     # Step 1: Feature extraction

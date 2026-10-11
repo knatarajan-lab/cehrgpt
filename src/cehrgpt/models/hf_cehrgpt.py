@@ -1,6 +1,6 @@
 import math
 import warnings
-from typing import List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -8,13 +8,10 @@ import torch.nn.functional as f
 from torch import nn
 from torch.distributions import Gamma
 from torch.nn import CrossEntropyLoss
-from transformers import PretrainedConfig, PreTrainedModel
+from transformers import GenerationConfig, PretrainedConfig, PreTrainedModel
 from transformers.activations import gelu_new
 from transformers.generation.logits_process import LogitsProcessorList
-from transformers.generation.stopping_criteria import (
-    StoppingCriteriaList,
-    validate_stopping_criteria,
-)
+from transformers.generation.stopping_criteria import StoppingCriteriaList
 from transformers.generation.streamers import BaseStreamer
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.pytorch_utils import Conv1D
@@ -42,8 +39,30 @@ from cehrgpt.models.hf_modeling_outputs import (
     CehrGptSequenceClassifierOutput,
 )
 from cehrgpt.models.linear_prob import LinearProbBlock
+from cehrgpt.models.qwen2 import Qwen2Block
 
 logger = logging.get_logger(__name__)
+
+
+def replace_nonfinite_loss(
+    loss: torch.Tensor, name: str, anchor_parameters: Iterable[nn.Parameter]
+) -> torch.Tensor:
+    """
+    Return `loss` unchanged if it is finite, else log a warning and return an exact 0.0.
+
+    The replacement is the anchor parameters (NaN/inf mapped to finite values) multiplied by
+    0 rather than a bare constant: it keeps them in the autograd graph, so DDP does not flag
+    them as unused, and it back-propagates an exactly-zero gradient instead of NaN.
+    """
+    if torch.isfinite(loss).all():
+        return loss
+    logger.warning(
+        "Non-finite %s (%s); replacing it with 0.0 for this step.", name, loss.item()
+    )
+    anchor = sum(
+        torch.nan_to_num(p).sum().to(loss.device) for p in anchor_parameters
+    )
+    return (anchor * 0.0).to(loss.dtype)
 
 
 def extract_features_from_packed_sequence(
@@ -330,6 +349,9 @@ class MotorTaskHead(nn.Module):
 
 
 class VisitTimeToEventHead(nn.Module):
+    PARAM_MIN = 1e-3
+    PARAM_MAX = 1e3
+
     def __init__(self, input_dim):
         super(VisitTimeToEventHead, self).__init__()
         self.linear1 = nn.Sequential(
@@ -340,13 +362,19 @@ class VisitTimeToEventHead(nn.Module):
         )
 
     def forward(self, x):
-        lambda_param = f.softplus(self.linear1(x))  # Ensure scale is positive
-        k_param = f.softplus(self.linear2(x))  # Ensure shape is positive
+        # Compute in float32 and bound the Gamma parameters: softplus underflows to 0 (or
+        # grows without limit) at the extremes, which makes the Gamma log-prob NaN/inf.
+        lambda_param = f.softplus(self.linear1(x).float()).clamp(
+            self.PARAM_MIN, self.PARAM_MAX
+        )
+        k_param = f.softplus(self.linear2(x).float()).clamp(
+            self.PARAM_MIN, self.PARAM_MAX
+        )
         # Check for NaN values
         if torch.isnan(lambda_param).any():
-            logger.warning(f"NaN values found in scale_param. x: {x}")
+            logger.warning("NaN values found in scale_param.")
         if torch.isnan(k_param).any():
-            logger.warning(f"NaN values found in k_param. x: {x}")
+            logger.warning("NaN values found in k_param.")
         return lambda_param, k_param
 
 
@@ -397,9 +425,12 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
     base_model_prefix = "cehrgpt"
     is_parallelizable = True
     supports_gradient_checkpointing = True
-    _no_split_modules = ["GPT2Block"]
+    _no_split_modules = ["GPT2Block", "Qwen2Block"]
     _skip_keys_device_placement = "past_key_values"
     _supports_flash_attn_2 = True
+    # SDPA is implemented by the qwen2 backbone only; resolve_attn_implementation
+    # refuses to select it for the gpt2 backbone, whose attention always runs eager.
+    _supports_sdpa = True
 
     def __init__(self, *inputs, **kwargs):
         super().__init__(*inputs, **kwargs)
@@ -419,6 +450,8 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
         elif isinstance(module, nn.LayerNorm):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
+        elif isinstance(module, RMSNorm):
+            module.weight.data.fill_(1.0)
 
         # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
         #   > A modified initialization which accounts for the accumulation on the residual path with model depth. Scale
@@ -426,8 +459,12 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
         #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
         #
         # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
+        #
+        # "c_proj" covers the GPT-2 block (attention output and MLP output); "o_proj" and
+        # "down_proj" are the corresponding residual-path projections in the Qwen2 block
+        # and the Llama-style MLP, which would otherwise miss this scaling entirely.
         for name, p in module.named_parameters():
-            if name == "c_proj.weight":
+            if name in ("c_proj.weight", "o_proj.weight", "down_proj.weight"):
                 # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
                 p.data.normal_(
                     mean=0.0,
@@ -752,13 +789,30 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             )
 
         self.drop = nn.Dropout(config.embd_pdrop)
+        # The decoder stack is the only backbone-specific part of this model; the
+        # embedding logic above and every head/output object downstream are shared.
+        backbone = getattr(config, "backbone", "gpt2")
+        # Declaring `_supports_sdpa` makes transformers auto-select "sdpa" for every
+        # CEHR-GPT model, but only the qwen2 block implements it - GPT2AttentionRoPE
+        # always runs eager math. Normalise so the config does not claim otherwise and
+        # the gpt2 backbone keeps its previous behaviour exactly.
+        if (
+            backbone != "qwen2"
+            and getattr(config, "_attn_implementation", "eager") == "sdpa"
+        ):
+            config._attn_implementation = "eager"
+        block_class = Qwen2Block if backbone == "qwen2" else GPT2Block
         gpt_blocks = []
         for i in range(config.num_hidden_layers):
-            gpt_block = GPT2Block(config, layer_idx=i)
+            gpt_block = block_class(config, layer_idx=i)
             gpt_block.is_causal = True
             gpt_blocks.append(gpt_block)
         self.h = nn.ModuleList(gpt_blocks)
-        self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        self.ln_f = (
+            RMSNorm(self.embed_dim, eps=getattr(config, "rms_norm_eps", 1e-6))
+            if backbone == "qwen2"
+            else nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        )
 
         if getattr(config, "use_local_attention", False):
             logger.info(
@@ -957,11 +1011,46 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         is_full_forward = past_key_values is None  # False during KV-cache generation steps
         if past_key_values is None:
             past_key_values = tuple([None] * len(self.h))
+            past_length = 0
         else:
-            past_key_values[0][0].size(-2)
+            past_length = past_key_values[0][0].size(-2)
 
         raw_attention_mask = attention_mask  # save before conversion for local-attention window
         attention_mask = self.prepare_attention_mask(input_ids, attention_mask)
+
+        # SDPA cannot take `is_causal=True` together with an explicit mask, so causality
+        # has to be folded into the mask. Done once here rather than per layer: at a 16k
+        # packed sequence length the combined mask is a sizeable tensor, and every layer
+        # would otherwise rebuild an identical copy. The eager path does not need this -
+        # it applies its own `bias` buffer inside the attention module.
+        if (
+            attention_mask is not None
+            and getattr(self.config, "backbone", "gpt2") == "qwen2"
+            and getattr(self.config, "_attn_implementation", "eager") == "sdpa"
+        ):
+            query_length = input_shape[-1]
+            key_length = past_length + query_length
+            causal_mask = self.h[0].attn.bias[
+                :, :, key_length - query_length : key_length, :key_length
+            ]
+            attention_mask = attention_mask.masked_fill(
+                ~causal_mask, torch.finfo(self.dtype).min
+            )
+            # Sample packing zeroes the entire row of every separator position, leaving
+            # it attending to nothing. SDPA's fused kernels return NaN for such rows (the
+            # math backend returns a finite average, which is why this only shows up on
+            # GPU), and that NaN spreads to every position in later layers via `0 * NaN`
+            # when their column is weighted. Let those positions attend to themselves so
+            # no row is ever empty. Rows that already attend somewhere are unaffected,
+            # because a position's own diagonal entry is unmasked whenever it is a real
+            # token. The values produced at separator positions are discarded downstream:
+            # their labels are -100 and their columns stay masked for every other query,
+            # so nothing can leak.
+            query_indices = torch.arange(query_length, device=attention_mask.device)
+            attention_mask[
+                ..., query_indices, query_indices + (key_length - query_length)
+            ] = 0.0
+
         # Build visit-local attention mask when configured and fold it into attention_mask.
         # When use_local_attention is True, flash attention is never used; xformers (or
         # vanilla _attn) handles the mask instead.
@@ -1089,6 +1178,26 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             )
 
         hidden_states = self.drop(input_embeddings)
+
+        if getattr(self.config, "backbone", "gpt2") == "qwen2":
+            # The Qwen2 backbone uses standard sequential positions for its rotary
+            # embeddings. `position_ids` arrives here holding patient ages (that is what
+            # the GPT-2 backbone's age-based rotary consumes), so it is deliberately
+            # replaced rather than reused. Built after the causal-SFM expansion above so
+            # the length always matches `hidden_states`.
+            # Under sample packing the positions run continuously across packed segments;
+            # that is harmless because rotary embeddings are relative and the
+            # block-diagonal attention mask already prevents cross-segment attention.
+            position_ids = (
+                torch.arange(
+                    past_length,
+                    past_length + hidden_states.shape[1],
+                    dtype=torch.long,
+                    device=hidden_states.device,
+                )
+                .unsqueeze(0)
+                .expand(hidden_states.shape[0], -1)
+            )
 
         output_shape = (-1,) + input_shape[1:] + (hidden_states.size(-1),)
 
@@ -1925,16 +2034,37 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 # Move to the same device as lambda_param
                 shift_time_to_visits = shift_time_to_visits.to(lambda_param.device)
                 time_to_visit_indicator = shift_time_to_visits >= 0
-                # Define the Gamma distribution
-                dist = Gamma(
-                    shifted_k_param.squeeze(-1), shifted_lambda_param.squeeze(-1)
+                # Replace the parameters and targets at masked positions with safe values
+                # before building the distribution. torch.where on the output alone still
+                # back-propagates NaN/inf from the unselected (padding) positions.
+                safe_k = torch.where(
+                    time_to_visit_indicator,
+                    shifted_k_param.squeeze(-1).float(),
+                    torch.ones_like(shift_time_to_visits, dtype=torch.float32),
                 )
+                safe_lambda = torch.where(
+                    time_to_visit_indicator,
+                    shifted_lambda_param.squeeze(-1).float(),
+                    torch.ones_like(shift_time_to_visits, dtype=torch.float32),
+                )
+                safe_targets = torch.where(
+                    time_to_visit_indicator,
+                    torch.clamp(shift_time_to_visits.float(), min=1e-3) + 1e-6,
+                    torch.ones_like(shift_time_to_visits, dtype=torch.float32),
+                )
+                # Define the Gamma distribution. Argument validation is off on purpose: with
+                # it on, a NaN parameter raises a ValueError here and crashes the run before
+                # the non-finite-loss guard below gets a chance to handle it.
+                dist = Gamma(safe_k, safe_lambda, validate_args=False)
                 # Compute log-probs and apply the time_to_visit_indicator
-                log_probs = dist.log_prob(
-                    torch.clamp(shift_time_to_visits, min=1e-3) + 1e-6
+                log_probs = dist.log_prob(safe_targets)
+                log_probs = torch.where(
+                    time_to_visit_indicator, log_probs, torch.zeros_like(log_probs)
                 )
-                log_probs = torch.where(time_to_visit_indicator, log_probs, 0)
                 time_to_visit_loss = -log_probs.sum() / total_num_tokens
+                time_to_visit_loss = replace_nonfinite_loss(
+                    time_to_visit_loss, "time_to_visit_loss", self.tte_head.parameters()
+                )
                 # Compute the loss
                 loss += (
                     time_to_visit_loss
@@ -2001,6 +2131,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     * float(not self.config.freeze_cehrgpt_generation_model)
                 )
 
+            # Last line of defence: whatever produced a NaN/inf (activations, any loss term),
+            # skip this step's update instead of letting it poison the weights.
+            loss = replace_nonfinite_loss(loss, "loss", self.parameters())
+
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]
             return ((loss,) + output) if loss is not None else output
@@ -2044,96 +2178,25 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
     def _sample(
         self,
         input_ids: torch.LongTensor,
-        logits_processor: Optional[LogitsProcessorList] = None,
-        stopping_criteria: Optional[StoppingCriteriaList] = None,
-        logits_warper: Optional[LogitsProcessorList] = None,
-        max_length: Optional[int] = None,
-        pad_token_id: Optional[int] = None,
-        eos_token_id: Optional[Union[int, List[int]]] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        output_scores: Optional[bool] = None,
-        output_logits: Optional[bool] = None,
-        return_dict_in_generate: Optional[bool] = None,
-        synced_gpus: bool = False,
-        streamer: Optional["BaseStreamer"] = None,
+        logits_processor: LogitsProcessorList,
+        stopping_criteria: StoppingCriteriaList,
+        generation_config: GenerationConfig,
+        synced_gpus: bool,
+        streamer: Optional["BaseStreamer"],
+        logits_warper: Optional[LogitsProcessorList],
         **model_kwargs,
     ) -> Union[CehrGptGenerateDecoderOnlyOutput, torch.LongTensor]:
-        # init values
-        logits_processor = (
-            logits_processor if logits_processor is not None else LogitsProcessorList()
-        )
-        stopping_criteria = (
-            stopping_criteria
-            if stopping_criteria is not None
-            else StoppingCriteriaList()
-        )
-        if max_length is not None:
-            warnings.warn(
-                "`max_length` is deprecated in this function, use"
-                " `stopping_criteria=StoppingCriteriaList([MaxLengthCriteria(max_length=max_length)])` instead.",
-                UserWarning,
-            )
-            stopping_criteria = validate_stopping_criteria(
-                stopping_criteria, max_length
-            )
-        logits_warper = (
-            logits_warper if logits_warper is not None else LogitsProcessorList()
-        )
-        # HuggingFace >= 4.44 passes generation settings via a `generation_config`
-        # kwarg rather than explicit scalar arguments.  Extract pad/eos token IDs
-        # from it so that the attention-mask and stopping logic work correctly.
-        _gen_cfg = model_kwargs.get("generation_config", None)
-        pad_token_id = (
-            pad_token_id
-            if pad_token_id is not None
-            else getattr(_gen_cfg, "pad_token_id", None)
-            if _gen_cfg is not None
-            else self.generation_config.pad_token_id
-        )
-        if pad_token_id is None:
-            pad_token_id = self.generation_config.pad_token_id
-        eos_token_id = (
-            eos_token_id
-            if eos_token_id is not None
-            else getattr(_gen_cfg, "eos_token_id", None)
-            if _gen_cfg is not None
-            else self.generation_config.eos_token_id
-        )
-        if eos_token_id is None:
-            eos_token_id = self.generation_config.eos_token_id
-        if isinstance(eos_token_id, int):
-            eos_token_id = [eos_token_id]
-        eos_token_id_tensor = (
-            torch.tensor(eos_token_id).to(input_ids.device)
-            if eos_token_id is not None
-            else None
-        )
-        output_scores = (
-            output_scores
-            if output_scores is not None
-            else self.generation_config.output_scores
-        )
-        output_logits = (
-            output_logits
-            if output_logits is not None
-            else self.generation_config.output_logits
-        )
-        output_attentions = (
-            output_attentions
-            if output_attentions is not None
-            else self.generation_config.output_attentions
-        )
-        output_hidden_states = (
-            output_hidden_states
-            if output_hidden_states is not None
-            else self.generation_config.output_hidden_states
-        )
-        return_dict_in_generate = (
-            return_dict_in_generate
-            if return_dict_in_generate is not None
-            else self.generation_config.return_dict_in_generate
-        )
+        # `generate` resolves missing special tokens (for example, using EOS as
+        # padding) without mutating the public integer config fields. Consume the
+        # prepared tensors so checkpoints with no explicit pad_token_id still work.
+        pad_token_id = generation_config._pad_token_tensor
+        eos_token_id_tensor = generation_config._eos_token_tensor
+        do_sample = generation_config.do_sample
+        output_scores = generation_config.output_scores
+        output_logits = generation_config.output_logits
+        output_attentions = generation_config.output_attentions
+        output_hidden_states = generation_config.output_hidden_states
+        return_dict_in_generate = generation_config.return_dict_in_generate
 
         if "cehrgpt_tokenizer" not in model_kwargs:
             raise RuntimeError(
@@ -2159,12 +2222,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         # keep track of which sequences are already finished
         batch_size, cur_len = input_ids.shape
-        if pad_token_id is not None:
-            model_kwargs["attention_mask"] = (input_ids != pad_token_id).long()
-        else:
-            model_kwargs["attention_mask"] = torch.ones(
-                batch_size, cur_len, dtype=torch.long, device=input_ids.device
-            )
+        model_kwargs["attention_mask"] = (
+            input_ids != pad_token_id
+            if pad_token_id is not None
+            else torch.ones_like(input_ids, dtype=torch.bool)
+        )
         if "inputs_embeds" in model_kwargs:
             cur_len = model_kwargs["inputs_embeds"].shape[1]
         this_peer_finished = False
@@ -2245,7 +2307,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             # pre-process distribution
             next_token_scores = logits_processor(input_ids, next_token_logits)
-            next_token_scores = logits_warper(input_ids, next_token_scores)
+            if do_sample:
+                if logits_warper is None:
+                    raise ValueError(
+                        "Sampling requires a LogitsProcessorList logits_warper"
+                    )
+                next_token_scores = logits_warper(input_ids, next_token_scores)
 
             # Store scores, attentions and hidden_states when required
             if return_dict_in_generate:
@@ -2269,9 +2336,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                         else (outputs.hidden_states,)
                     )
 
-            # sample
-            probs = nn.functional.softmax(next_token_scores, dim=-1)
-            next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+            if do_sample:
+                probs = nn.functional.softmax(next_token_scores, dim=-1)
+                next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+            else:
+                next_tokens = torch.argmax(next_token_scores, dim=-1)
 
             # TODO: decode to get time tokens and recalculate the age at this time step
             # Look for a potential time token
@@ -2290,7 +2359,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             model_kwargs["ages"] = torch.tensor(batched_ages).to(input_ids.device)
 
             # finished sentences should have their next token be a padding token
-            if eos_token_id is not None:
+            if eos_token_id_tensor is not None:
                 if pad_token_id is None:
                     raise ValueError(
                         "If `eos_token_id` is defined, make sure that `pad_token_id` is defined."

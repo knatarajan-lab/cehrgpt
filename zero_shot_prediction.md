@@ -43,6 +43,13 @@ python -m cehrgpt.time_to_event.time_to_event_prediction \
 - `--dataset_folder`: Directory containing test patient sequences
 - `--num_return_sequences 50`: Number of prediction sequences to generate per patient
 - `--task_config`: YAML configuration file defining the prediction task
+- `--gpu_ids all` (optional): Split the predictions across multiple GPUs. Use `all` or a comma-separated
+  list of visible GPU indices such as `0,1,3` (indices are relative to `CUDA_VISIBLE_DEVICES` when set).
+  The pending samples are divided into disjoint shards, one worker process per GPU; each worker writes
+  to its own `<output_folder>/<sampling folder>/<task_name>/shard_<i>/` folder and logs to
+  `<output_folder>/<sampling folder>/worker_logs/`. Predictions are incremental: re-running the same
+  command skips every sample that already has a prediction in any previous session, including
+  from an interrupted run (use `--buffer_size 1` to lose at most the sample being predicted).
 
 ### Task Configuration
 

@@ -1,0 +1,13 @@
+task_name: "30_day_readmission_prediction"
+# Each outcome is a token as it is in the tokenizer's vocabulary. The admission visits: Visit/IP (9201), Visit/ERIP (262) and the
+# CMS places of service 51 (8971) and 61 (8920).
+outcome_events:
+  - "Visit/IP"
+  - "Visit/ERIP"
+  - "CMS_Place_of_Service/51"
+  - "CMS_Place_of_Service/61"
+future_visit_start: 0
+future_visit_end: -1
+prediction_window_start: 0
+prediction_window_end: 30
+max_new_tokens: 512
