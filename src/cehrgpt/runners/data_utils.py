@@ -1,4 +1,3 @@
-import math
 import os
 from datetime import datetime
 from typing import Dict, List, Optional, Union, Tuple
@@ -24,7 +23,6 @@ from cehrgpt.data.hf_cehrgpt_dataset_mapping import (
     ExtractTokenizedSequenceDataMapping,
     MedToCehrGPTDatasetMapping,
 )
-from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 
 LOG = logging.get_logger("transformers")
@@ -140,14 +138,6 @@ def prepare_finetune_dataset(
     return final_splits
 
 
-def _clamp_num_proc(dataset_len: int, num_proc: Optional[int], batch_size: int) -> Optional[int]:
-    """Clamp num_proc so we don't spawn more workers than there are batches."""
-    if num_proc is None:
-        return None
-    return min(num_proc, max(1, math.ceil(dataset_len / batch_size)))
-
-
-# Helper function to apply patient-based filtering
 def filter_by_patient_ids(
         dataset: Dataset,
         patient_ids: List[Union[str, int]],
@@ -156,7 +146,7 @@ def filter_by_patient_ids(
     unique_ids = set(patient_ids)
     return dataset.filter(
         lambda batch: [pid in unique_ids for pid in batch["person_id"]],
-        num_proc=_clamp_num_proc(len(dataset), data_args.preprocessing_num_workers, data_args.preprocessing_batch_size),
+        num_proc=data_args.preprocessing_num_workers,
         batched=True,
         batch_size=data_args.preprocessing_batch_size,
     )
@@ -342,7 +332,7 @@ def create_dataset_splits(
 def extract_cohort_sequences(
     data_args: DataTrainingArguments,
     cehrgpt_args: CehrGPTArguments,
-    tokenizer: Optional[CehrGptTokenizer] = None,
+    cache_file_collector: Optional[CacheFileCollector] = None,
 ) -> DatasetDict:
     """
     Extracts and processes cohort-specific tokenized sequences from a pre-tokenized dataset,.
@@ -357,17 +347,15 @@ def extract_cohort_sequences(
     4. Aggregates each person's index date and label into a mapping.
     5. Checks for consistency to ensure all cohort person_ids are present in the tokenized dataset.
     6. Applies a transformation (`ExtractTokenizedSequenceDataMapping`) to generate
-       observation-window-constrained patient sequences, with recalculated demographic tokens
-       prepended to each extracted slice.
+       observation-window-constrained patient sequences.
     7. Caches both the filtered and processed datasets using the provided `cache_file_collector`.
 
     Args:
         data_args (DataTrainingArguments): Configuration parameters for data processing,
             including cohort folder, observation window, batch size, and parallelism.
         cehrgpt_args (CehrGPTArguments): Contains paths to pre-tokenized datasets and CEHR-GPT-specific arguments.
-        tokenizer (Optional[CehrGptTokenizer]): Tokenizer used to encode the recalculated demographic
-            tokens (year, age) for the `input_ids` column. If ``None``, the original demographic
-            token ids are reused as a fallback.
+        cache_file_collector (CacheFileCollector): Utility to register and manage dataset cache files.
+
     Returns:
         DatasetDict: A Hugging Face `DatasetDict` containing the processed datasets (e.g., train/validation/test),
                      where each entry includes sequences filtered and truncated by the observation window.
@@ -407,18 +395,12 @@ def extract_cohort_sequences(
 
     # data_args.observation_window
     tokenized_dataset = load_from_disk(cehrgpt_args.tokenized_full_dataset_path)
-
-    all_person_ids_set = set(all_person_ids)
-    filtered_tokenized_dataset = DatasetDict({
-        split: ds.filter(
-            lambda batch: [pid in all_person_ids_set for pid in batch["person_id"]],
-            batched=True,
-            batch_size=data_args.preprocessing_batch_size,
-            num_proc=_clamp_num_proc(len(ds), data_args.preprocessing_num_workers, data_args.preprocessing_batch_size),
-        )
-        for split, ds in tokenized_dataset.items()
-    })
-
+    filtered_tokenized_dataset = tokenized_dataset.filter(
+        lambda batch: [person_id in all_person_ids for person_id in batch["person_id"]],
+        batched=True,
+        batch_size=data_args.preprocessing_batch_size,
+        num_proc=data_args.preprocessing_num_workers,
+    )
     person_index_date_agg = cohort.group_by("person_id").agg(
         pl.struct("index_date", "label").alias("index_date_label")
     )
@@ -430,9 +412,9 @@ def extract_cohort_sequences(
         )
     )
     LOG.info(f"person_index_date_agg: {person_index_date_agg}")
-    tokenized_person_ids = set()
+    tokenized_person_ids = []
     for _, dataset in filtered_tokenized_dataset.items():
-        tokenized_person_ids.update(dataset["person_id"])
+        tokenized_person_ids.extend(dataset["person_id"])
     missing_person_ids = [
         person_id
         for person_id in person_index_date_map.keys()
@@ -458,21 +440,13 @@ def extract_cohort_sequences(
                 "None of the cohort persons exist in the tokenized dataset, "
                 "so there is nothing to extract."
             )
-    transform = ExtractTokenizedSequenceDataMapping(
-        person_index_date_map, data_args.observation_window, tokenizer
+    processed_dataset = filtered_tokenized_dataset.map(
+        ExtractTokenizedSequenceDataMapping(
+            person_index_date_map, data_args.observation_window
+        ).batch_transform,
+        batched=True,
+        batch_size=data_args.preprocessing_batch_size,
+        num_proc=data_args.preprocessing_num_workers,
+        remove_columns=filtered_tokenized_dataset["train"].column_names,
     )
-    processed_dataset = DatasetDict({
-        split: ds.map(
-            transform.batch_transform,
-            batched=True,
-            batch_size=data_args.preprocessing_batch_size,
-            # Cap writer_batch_size independently: clinical sequences can be very
-            # long, and matching it to preprocessing_batch_size can exceed the
-            # 2 GB Arrow write limit for large cohorts.
-            writer_batch_size=min(data_args.preprocessing_batch_size, 500),
-            num_proc=_clamp_num_proc(len(ds), data_args.preprocessing_num_workers, data_args.preprocessing_batch_size),
-            remove_columns=ds.column_names,
-        )
-        for split, ds in filtered_tokenized_dataset.items()
-    })
     return processed_dataset
