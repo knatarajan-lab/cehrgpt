@@ -59,7 +59,7 @@ class TestExtractCohortSequencesMissingPersons(unittest.TestCase):
         ).to_parquet(os.path.join(cohort_folder, "cohort.parquet"))
         return cohort_folder
 
-    def _extract(self, cohort_folder, allow_missing):
+    def _extract(self, cohort_folder, allow_missing, tokenizer=None):
         data_args = DataTrainingArguments(
             data_folder=cohort_folder,
             dataset_prepared_path=self.tmp,
@@ -70,7 +70,7 @@ class TestExtractCohortSequencesMissingPersons(unittest.TestCase):
             tokenized_full_dataset_path=self.tokenized_path,
             allow_missing_tokenized_persons=allow_missing,
         )
-        return extract_cohort_sequences(data_args, cehrgpt_args)
+        return extract_cohort_sequences(data_args, cehrgpt_args, tokenizer)
 
     def test_missing_persons_raise_by_default(self):
         cohort_folder = self._cohort([1, 2, 3, 4, 98, 99])
@@ -98,6 +98,13 @@ class TestExtractCohortSequencesMissingPersons(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             self._extract(cohort_folder, allow_missing=True)
         self.assertIn("None of the cohort persons", str(ctx.exception))
+
+    def test_a_non_tokenizer_third_argument_fails_with_a_clear_error(self):
+        # The third argument used to be a CacheFileCollector
+        cohort_folder = self._cohort([1, 2, 3, 4])
+        with self.assertRaises(TypeError) as ctx:
+            self._extract(cohort_folder, allow_missing=False, tokenizer=object())
+        self.assertIn("CehrGptTokenizer", str(ctx.exception))
 
 
 if __name__ == "__main__":

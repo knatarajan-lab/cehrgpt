@@ -464,6 +464,13 @@ def extract_cohort_sequences(
                 "None of the cohort persons exist in the tokenized dataset, "
                 "so there is nothing to extract."
             )
+    if tokenizer is not None and not hasattr(tokenizer, "encode"):
+        # The third argument used to be a CacheFileCollector; fail here with a clear message
+        # instead of an AttributeError inside a datasets.map worker process.
+        raise TypeError(
+            "extract_cohort_sequences expects a CehrGptTokenizer as its third argument, "
+            f"got {type(tokenizer).__name__}"
+        )
     transform = ExtractTokenizedSequenceDataMapping(
         person_index_date_map, data_args.observation_window, tokenizer
     )

@@ -12,7 +12,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import pandas as pd
 import torch
 import yaml
-from cehrbert.data_generators.hf_data_generator.cache_util import CacheFileCollector
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from cehrbert.runners.runner_util import load_parquet_as_dataset
 from datasets import Dataset, concatenate_datasets, load_from_disk
@@ -122,9 +121,9 @@ def load_time_to_event_dataset(args) -> Dataset:
             tokenized_full_dataset_path=args.tokenized_full_dataset_path,
             allow_missing_tokenized_persons=args.allow_missing_tokenized_persons,
         )
-        processed_dataset = extract_cohort_sequences(
-            data_args, cehrgpt_args, CacheFileCollector()
-        )
+        # The tokenizer re-encodes the demographics after the observation window slicing
+        tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer_folder)
+        processed_dataset = extract_cohort_sequences(data_args, cehrgpt_args, tokenizer)
         dataset = concatenate_datasets(list(processed_dataset.values()))
         dataset = dataset.rename_column("classifier_label", "label")
         # num_of_concepts (if present) reflects the patient's full history length before
