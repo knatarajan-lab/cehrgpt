@@ -55,53 +55,34 @@ class AsyncParquetWriter:
             self._pool.shutdown(wait=True)
 
 
-def _to_naive_day(values: pd.Series) -> pd.Series:
-    values = pd.to_datetime(values)
-    if values.dt.tz is not None:
-        values = values.dt.tz_convert("UTC").dt.tz_localize(None)
-    return values.dt.normalize()
-
-
 class DemographicsLookup:
     """
-    Maps (person_id, calendar day of the prediction time) to gender/race concept ids.
+    Maps person_id to gender/race concept ids.
 
     Lookups are vectorized: a batch is resolved with one index probe instead of a Python loop
-    over a dictionary. Pairs that are missing resolve to 0. If several rows share a
-    (person_id, day), the last one wins.
+    over a dictionary. Unknown persons resolve to 0. If a person appears more than once, the
+    last row wins.
     """
 
     def __init__(self, demographics_df: Optional[pd.DataFrame]):
+        self._index: Optional[pd.Index] = None
         self._gender = np.zeros(0, dtype=np.int64)
         self._race = np.zeros(0, dtype=np.int64)
-        self._index: Optional[pd.MultiIndex] = None
         if demographics_df is None or demographics_df.empty:
             return
-        frame = pd.DataFrame(
-            {
-                "person_id": demographics_df["person_id"].astype("int64").to_numpy(),
-                "day": _to_naive_day(demographics_df["index_date"]).to_numpy(),
-                "gender_concept_id": demographics_df["gender_concept_id"].to_numpy(),
-                "race_concept_id": demographics_df["race_concept_id"].to_numpy(),
-            }
-        ).drop_duplicates(["person_id", "day"], keep="last")
-        self._index = pd.MultiIndex.from_arrays([frame["person_id"], frame["day"]])
+        frame = demographics_df[
+            ["person_id", "gender_concept_id", "race_concept_id"]
+        ].drop_duplicates("person_id", keep="last")
+        self._index = pd.Index(frame["person_id"].astype("int64").to_numpy())
         self._gender = frame["gender_concept_id"].to_numpy()
         self._race = frame["race_concept_id"].to_numpy()
 
-    def lookup(
-        self, person_ids: Sequence[int], prediction_times: Sequence
-    ) -> Tuple[List[int], List[int]]:
+    def lookup(self, person_ids: Sequence[int]) -> Tuple[List[int], List[int]]:
         person_ids = np.asarray(person_ids, dtype="int64")
         if self._index is None:
             zeros = [0] * len(person_ids)
             return zeros, list(zeros)
-        days = pd.DatetimeIndex(prediction_times)
-        if days.tz is not None:
-            days = days.tz_convert("UTC").tz_localize(None)
-        positions = self._index.get_indexer(
-            pd.MultiIndex.from_arrays([person_ids, days.normalize()])
-        )
+        positions = self._index.get_indexer(person_ids)
         found = positions >= 0
         safe = np.where(found, positions, 0)
         gender = np.where(found, self._gender[safe], 0)

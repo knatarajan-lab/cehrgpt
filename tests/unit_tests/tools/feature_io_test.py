@@ -96,62 +96,47 @@ def make_demographics():
     return pd.DataFrame(
         {
             "person_id": [1, 2, 2, 3],
-            "index_date": pd.to_datetime(
-                ["2020-03-05", "2021-07-01", "2021-07-01", "2019-01-01 13:30:00"],
-                format="mixed",
-            ),
             "gender_concept_id": [8507, 8532, 8507, 8532],
             "race_concept_id": [8527, 8516, 8527, 8515],
         }
     )
 
 
-def test_demographics_lookup_matches_person_and_day():
+def test_demographics_lookup_by_person_id():
     lookup = DemographicsLookup(make_demographics())
-    times = pd.to_datetime(
-        ["2020-03-05 09:15:00", "2021-07-01", "2019-01-01", "2020-03-06", "2020-03-05"],
-        format="mixed",
-    )
-    gender, race = lookup.lookup([1, 2, 3, 1, 99], list(times))
-    # person 1 (any time that day), person 2 (duplicate -> last wins), person 3 (the day, not
-    # the time of day), then a different day and an unknown person fall back to 0
-    assert gender == [8507, 8507, 8532, 0, 0]
-    assert race == [8527, 8527, 8515, 0, 0]
+    gender, race = lookup.lookup([1, 2, 3, 99])
+    # person 2 appears twice, the last row wins; an unknown person falls back to 0
+    assert gender == [8507, 8507, 8532, 0]
+    assert race == [8527, 8527, 8515, 0]
+
+
+def test_demographics_lookup_ignores_extra_columns_and_accepts_numpy_ids():
+    df = make_demographics()
+    df["index_date"] = pd.Timestamp("2020-01-01")
+    gender, race = DemographicsLookup(df).lookup(np.array([3, 1]))
+    assert gender == [8532, 8507] and race == [8515, 8527]
 
 
 def test_demographics_lookup_without_data_returns_zeros():
     for lookup in (DemographicsLookup(None), DemographicsLookup(make_demographics().iloc[0:0])):
-        gender, race = lookup.lookup([1, 2], list(pd.to_datetime(["2020-03-05", "2021-07-01"])))
+        gender, race = lookup.lookup([1, 2])
         assert gender == [0, 0] and race == [0, 0]
 
 
-def test_demographics_lookup_handles_timezone_aware_dates():
-    df = make_demographics()
-    df["index_date"] = df["index_date"].dt.tz_localize("UTC")
-    gender, _ = DemographicsLookup(df).lookup([1], list(pd.to_datetime(["2020-03-05"])))
-    assert gender == [8507]
-
-
-def test_demographics_lookup_matches_a_reference_loop_on_random_data():
+def test_demographics_lookup_matches_a_reference_dict_on_random_data():
     rng = np.random.default_rng(0)
     n = 5000
-    days = pd.Timestamp("2018-01-01") + pd.to_timedelta(rng.integers(0, 400, n), unit="D")
     df = pd.DataFrame(
         {
-            "person_id": rng.integers(0, 300, n),
-            "index_date": days,
+            "person_id": rng.integers(0, 3000, n),
             "gender_concept_id": rng.choice([8507, 8532], n),
             "race_concept_id": rng.choice([8527, 8516, 8515], n),
         }
     )
-    reference = {}
-    for row in df.itertuples():
-        reference[(row.person_id, row.index_date.date())] = (
-            row.gender_concept_id,
-            row.race_concept_id,
-        )
-    query_ids = rng.integers(0, 350, 2000)
-    query_days = pd.Timestamp("2018-01-01") + pd.to_timedelta(rng.integers(0, 450, 2000), unit="D")
-    gender, race = DemographicsLookup(df).lookup(query_ids, list(query_days))
-    expected = [reference.get((int(i), d.date()), (0, 0)) for i, d in zip(query_ids, query_days)]
-    assert list(zip(gender, race)) == expected
+    reference = {
+        row.person_id: (row.gender_concept_id, row.race_concept_id)
+        for row in df.itertuples()
+    }
+    query = rng.integers(0, 3500, 2000)
+    gender, race = DemographicsLookup(df).lookup(query)
+    assert list(zip(gender, race)) == [reference.get(int(i), (0, 0)) for i in query]

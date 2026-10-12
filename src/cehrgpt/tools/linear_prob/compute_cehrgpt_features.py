@@ -329,17 +329,11 @@ def main():
     )
     # Auto-detect MEDS format from the actual schema, regardless of the is_data_in_meds flag
     is_meds = data_args.is_data_in_meds or "subject_id" in demographics_df.columns
-    id_col, time_col = (
-        ("subject_id", "prediction_time") if is_meds else ("person_id", "index_date")
-    )
+    id_col = "subject_id" if is_meds else "person_id"
     if {"gender_concept_id", "race_concept_id"}.issubset(demographics_df.columns):
         demographics_df = demographics_df[
-            [id_col, time_col, "gender_concept_id", "race_concept_id"]
-        ]
-        if is_meds:
-            demographics_df = demographics_df.rename(
-                columns={id_col: "person_id", time_col: "index_date"}
-            )
+            [id_col, "gender_concept_id", "race_concept_id"]
+        ].rename(columns={id_col: "person_id"})
         demographics_lookup = DemographicsLookup(demographics_df)
     else:
         demographics_lookup = DemographicsLookup(None)
@@ -471,7 +465,7 @@ def main():
                 # Flatten features or handle them as a list of arrays (one array per row)
                 features_list = [feature for feature in features]
                 gender_concept_ids, race_concept_ids = demographics_lookup.lookup(
-                    person_ids, prediction_time
+                    person_ids
                 )
 
                 features_pd = pd.DataFrame(
