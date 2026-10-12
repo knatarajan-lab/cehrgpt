@@ -45,7 +45,7 @@ from cehrgpt.runners.gpt_runner_util import (
     resolve_attn_implementation,
 )
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
-from cehrgpt.tools.linear_prob.feature_io import AsyncParquetWriter
+from cehrgpt.tools.linear_prob.feature_io import AsyncParquetWriter, DemographicsLookup
 
 LOG = logging.get_logger("transformers")
 
@@ -340,21 +340,9 @@ def main():
             demographics_df = demographics_df.rename(
                 columns={id_col: "person_id", time_col: "index_date"}
             )
-
-        demographics_df["index_date"] = (
-            demographics_df["index_date"].dt.tz_localize("UTC")
-            - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
-        ).dt.total_seconds()
-
-        demographics_dict = {
-            (row["person_id"], row["index_date"]): {
-                "gender_concept_id": row["gender_concept_id"],
-                "race_concept_id": row["race_concept_id"],
-            }
-            for _, row in demographics_df.iterrows()
-        }
+        demographics_lookup = DemographicsLookup(demographics_df)
     else:
-        demographics_dict = dict()
+        demographics_lookup = DemographicsLookup(None)
 
     data_loaders = [("train", train_loader), ("test", test_dataloader)]
     # Write the parquet files from background threads so the GPU loop does not wait on disk
@@ -482,17 +470,9 @@ def main():
 
                 # Flatten features or handle them as a list of arrays (one array per row)
                 features_list = [feature for feature in features]
-                race_concept_ids = []
-                gender_concept_ids = []
-                for person_id, index_date in zip(person_ids, prediction_time):
-                    key = (person_id, index_date.date())
-                    if key in demographics_dict:
-                        demographics = demographics_dict[key]
-                        gender_concept_ids.append(demographics["gender_concept_id"])
-                        race_concept_ids.append(demographics["race_concept_id"])
-                    else:
-                        gender_concept_ids.append(0)
-                        race_concept_ids.append(0)
+                gender_concept_ids, race_concept_ids = demographics_lookup.lookup(
+                    person_ids, prediction_time
+                )
 
                 features_pd = pd.DataFrame(
                     {
