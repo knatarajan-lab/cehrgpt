@@ -20,6 +20,10 @@ usage() {
     echo "  --max_tokens_per_batch=NUM     Maximum tokens per batch (default: 16384)"
     echo "  --torch_type=TYPE              Torch data type (default: float32)"
     echo "  --disable_sample_packing       Disable sample packing (enabled by default)"
+    echo "  --gpu_ids=IDS                  Extract features on several GPUs: 'all' or comma separated GPU"
+    echo "                                 indices, e.g. 0,1 (optional; default: a single process)"
+    echo "  --workers_per_gpu=NUM          Worker processes per GPU in --gpu_ids (default: 1). Several"
+    echo "                                 workers keep one GPU busy while the others are on the CPU"
     echo "  --dataloader_num_workers=NUM   DataLoader worker processes for feature extraction (default: 0,"
     echo "                                 i.e. batches are built in the main process while the GPU waits)"
     echo "  --dataloader_prefetch_factor=NUM  Batches prefetched per worker (needs --dataloader_num_workers > 0)"
@@ -86,6 +90,12 @@ for arg in "$@"; do
             ;;
         --disable_sample_packing)
             DISABLE_SAMPLE_PACKING="true"
+            ;;
+        --gpu_ids=*)
+            GPU_IDS="${arg#*=}"
+            ;;
+        --workers_per_gpu=*)
+            WORKERS_PER_GPU="${arg#*=}"
             ;;
         --dataloader_num_workers=*)
             DATALOADER_NUM_WORKERS="${arg#*=}"
@@ -306,6 +316,12 @@ while read -r cohort_name; do
         --cohort_folder \"$COHORT_FOLDER/$cohort_name\""
     fi
 
+    if [ -n "$GPU_IDS" ]; then
+        FEATURE_CMD="$FEATURE_CMD --gpu_ids \"$GPU_IDS\""
+    fi
+    if [ -n "$WORKERS_PER_GPU" ]; then
+        FEATURE_CMD="$FEATURE_CMD --workers_per_gpu \"$WORKERS_PER_GPU\""
+    fi
     if [ -n "$DATALOADER_NUM_WORKERS" ]; then
         FEATURE_CMD="$FEATURE_CMD --dataloader_num_workers \"$DATALOADER_NUM_WORKERS\""
     fi

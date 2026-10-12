@@ -2,10 +2,11 @@ import datetime
 import glob
 import os
 import shutil
+import sys
 import uuid
 from functools import partial
 from pathlib import Path
-from typing import Optional, Union
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -14,7 +15,7 @@ import torch
 import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
 from cehrbert.runners.runner_util import generate_prepared_ds_path
-from datasets import concatenate_datasets, load_from_disk
+from datasets import DatasetDict, concatenate_datasets, load_from_disk
 from torch.distributed.algorithms.ddp_comm_hooks.powerSGD_hook import (
     batched_powerSGD_hook,
 )
@@ -45,6 +46,12 @@ from cehrgpt.runners.gpt_runner_util import (
     resolve_attn_implementation,
 )
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
+from cehrgpt.runners.multi_gpu_util import (
+    expand_gpu_workers,
+    resolve_gpu_ids,
+    run_workers,
+    strip_cli_option,
+)
 from cehrgpt.tools.linear_prob.feature_io import AsyncParquetWriter, DemographicsLookup
 
 LOG = logging.get_logger("transformers")
@@ -103,38 +110,24 @@ def extract_averaged_embeddings_from_packed_sequence(
     return sample_embeddings
 
 
-def main():
-    cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
-        device = torch.device("cpu")
+def prepare_processed_dataset(
+    cehrgpt_args,
+    data_args,
+    model_args,
+    training_args,
+    cehrgpt_tokenizer: CehrGptTokenizer,
+) -> Tuple[DatasetDict, CehrGptTokenizer, str]:
+    """
+    Load the tokenized cohort dataset from disk, or create it, and drop already extracted rows.
 
-    cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
-        model_args.tokenizer_name_or_path
-    )
-    torch_dtype = get_torch_dtype(model_args.torch_dtype)
-    cehrgpt_model = (
-        CEHRGPT2Model.from_pretrained(
-            model_args.model_name_or_path,
-            attn_implementation=resolve_attn_implementation(
-                backbone=read_backbone(model_args.model_name_or_path),
-                requested=cehrgpt_args.force_attn_implementation,
-            ),
-            torch_dtype=torch_dtype,
-        )
-        .eval()
-        .to(device)
-    )
-
-    if LINEAR_PROB_TOKEN not in cehrgpt_tokenizer.get_vocab():
-        cehrgpt_tokenizer.add_tokens(LINEAR_PROB_TOKEN)
-        cehrgpt_model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)
-
+    Returns the dataset, the tokenizer to use with it (it is reloaded from the output folder
+    when the dataset was prepared earlier with expand_tokenizer), and that tokenizer's path.
+    """
     prepared_ds_path = generate_prepared_ds_path(
         data_args, model_args, data_folder=data_args.cohort_folder
     )
     cache_file_collector = CacheFileCollector()
+    tokenizer_path = model_args.tokenizer_name_or_path
     processed_dataset = None
     if any(prepared_ds_path.glob("*")):
         LOG.info(f"Loading prepared dataset from disk at {prepared_ds_path}...")
@@ -145,6 +138,7 @@ def main():
                 cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
                     training_args.output_dir
                 )
+                tokenizer_path = training_args.output_dir
             else:
                 LOG.warning(
                     f"CehrGptTokenizer must exist in {training_args.output_dir} "
@@ -229,6 +223,163 @@ def main():
             len(processed_dataset["test"]),
         )
 
+    return processed_dataset, cehrgpt_tokenizer, tokenizer_path
+
+
+def shard_processed_dataset(
+    processed_dataset: DatasetDict, num_shards: int, shard_root: str
+) -> List[str]:
+    """
+    Split train+validation and test into `num_shards` disjoint, round-robin shards.
+
+    Round-robin (not contiguous) keeps the sequence length distribution of every shard close
+    to the full dataset, which keeps the sample packing batches comparable across workers.
+    Each shard is saved as a DatasetDict with a "train" and a "test" split.
+    """
+    train_set = concatenate_datasets(
+        [processed_dataset[s] for s in ("train", "validation") if s in processed_dataset]
+    )
+    test_set = processed_dataset["test"]
+    shard_paths = []
+    for index in range(num_shards):
+        shard_path = os.path.join(shard_root, f"shard_{index}")
+        DatasetDict(
+            {
+                "train": train_set.shard(num_shards, index, contiguous=False),
+                "test": test_set.shard(num_shards, index, contiguous=False),
+            }
+        ).save_to_disk(shard_path)
+        shard_paths.append(shard_path)
+    return shard_paths
+
+
+def run_on_multiple_gpus(
+    cehrgpt_args, data_args, model_args, training_args, cuda_devices: List[str]
+) -> int:
+    """
+    Tokenize the dataset once, split it into disjoint shards, and extract each on its own worker.
+
+    The dataset is prepared here, without loading the model, so the workers don't race on
+    the datasets cache. Each worker re-runs this module on one shard with CUDA_VISIBLE_DEVICES
+    pinned to one GPU. The feature files have unique names, so all workers write into the same
+    features_with_label folders.
+    """
+    cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
+        model_args.tokenizer_name_or_path
+    )
+    if LINEAR_PROB_TOKEN not in cehrgpt_tokenizer.get_vocab():
+        cehrgpt_tokenizer.add_tokens(LINEAR_PROB_TOKEN)
+    processed_dataset, _, tokenizer_path = prepare_processed_dataset(
+        cehrgpt_args, data_args, model_args, training_args, cehrgpt_tokenizer
+    )
+
+    non_empty_sizes = [
+        len(dataset)
+        for dataset in (
+            concatenate_datasets(
+                [
+                    processed_dataset[s]
+                    for s in ("train", "validation")
+                    if s in processed_dataset
+                ]
+            ),
+            processed_dataset["test"],
+        )
+        if len(dataset) > 0
+    ]
+    num_workers = max(1, min([len(cuda_devices)] + non_empty_sizes))
+    cuda_devices = cuda_devices[:num_workers]
+    LOG.info("Extracting features with %s workers on GPUs %s", num_workers, cuda_devices)
+    if training_args.dataloader_num_workers:
+        LOG.info(
+            "Each worker also starts %s DataLoader processes (%s in total)",
+            training_args.dataloader_num_workers,
+            training_args.dataloader_num_workers * num_workers,
+        )
+
+    shard_root = os.path.join(training_args.output_dir, "temp", "shards")
+    # Shards left over from an interrupted run are stale
+    shutil.rmtree(shard_root, ignore_errors=True)
+    shard_paths = shard_processed_dataset(processed_dataset, num_workers, shard_root)
+
+    worker_argv = sys.argv[1:]
+    for option in ("--gpu_ids", "--workers_per_gpu", "--tokenizer_name_or_path"):
+        worker_argv = strip_cli_option(worker_argv, option)
+    # The dataset was tokenized with this tokenizer, so the workers must load the same one
+    worker_argv += ["--tokenizer_name_or_path", tokenizer_path]
+    exit_codes, log_paths = run_workers(
+        module="cehrgpt.tools.linear_prob.compute_cehrgpt_features",
+        worker_argv=worker_argv,
+        shard_option="--shard_dataset_path",
+        shard_paths=shard_paths,
+        cuda_devices=cuda_devices,
+        log_folder=os.path.join(training_args.output_dir, "worker_logs"),
+    )
+    failed = [i for i, code in enumerate(exit_codes) if code != 0]
+    if failed:
+        for i in failed:
+            LOG.error(
+                "Worker %s exited with code %s, see %s", i, exit_codes[i], log_paths[i]
+            )
+        return 1
+    shutil.rmtree(shard_root, ignore_errors=True)
+    try:
+        os.rmdir(os.path.dirname(shard_root))
+    except OSError:
+        pass
+    LOG.info("All %s workers finished", num_workers)
+    return 0
+
+
+def main():
+    cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
+    is_shard_worker = cehrgpt_args.shard_dataset_path is not None
+    if (cehrgpt_args.gpu_ids or cehrgpt_args.workers_per_gpu > 1) and not is_shard_worker:
+        cuda_devices = expand_gpu_workers(
+            resolve_gpu_ids(cehrgpt_args.gpu_ids or "0"), cehrgpt_args.workers_per_gpu
+        )
+        if len(cuda_devices) > 1:
+            exit_code = run_on_multiple_gpus(
+                cehrgpt_args, data_args, model_args, training_args, cuda_devices
+            )
+            if exit_code:
+                sys.exit(exit_code)
+            return
+        # CUDA has not been initialized yet, so this pins the single requested GPU
+        os.environ["CUDA_VISIBLE_DEVICES"] = cuda_devices[0]
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+
+    cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
+        model_args.tokenizer_name_or_path
+    )
+    torch_dtype = get_torch_dtype(model_args.torch_dtype)
+    cehrgpt_model = (
+        CEHRGPT2Model.from_pretrained(
+            model_args.model_name_or_path,
+            attn_implementation=resolve_attn_implementation(
+                backbone=read_backbone(model_args.model_name_or_path),
+                requested=cehrgpt_args.force_attn_implementation,
+            ),
+            torch_dtype=torch_dtype,
+        )
+        .eval()
+        .to(device)
+    )
+
+    if LINEAR_PROB_TOKEN not in cehrgpt_tokenizer.get_vocab():
+        cehrgpt_tokenizer.add_tokens(LINEAR_PROB_TOKEN)
+        cehrgpt_model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)
+
+    if is_shard_worker:
+        processed_dataset = load_from_disk(cehrgpt_args.shard_dataset_path)
+    else:
+        processed_dataset, cehrgpt_tokenizer, _ = prepare_processed_dataset(
+            cehrgpt_args, data_args, model_args, training_args, cehrgpt_tokenizer
+        )
+
     if (
         cehrgpt_model.config.max_position_embeddings
         < model_args.max_position_embeddings
@@ -242,7 +393,7 @@ def main():
         cehrgpt_model.resize_position_embeddings(model_args.max_position_embeddings)
 
     train_set = concatenate_datasets(
-        [processed_dataset["train"], processed_dataset["validation"]]
+        [processed_dataset[s] for s in ("train", "validation") if s in processed_dataset]
     )
 
     if cehrgpt_args.sample_packing:

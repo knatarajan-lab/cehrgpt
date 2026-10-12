@@ -309,6 +309,29 @@ class CehrGPTArguments:
         default=False,
         metadata={"help": "Whether or not to average tokens per sequence"},
     )
+    gpu_ids: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "Linear probing only: run feature extraction on several GPUs. 'all' or "
+            "comma separated GPU indices (relative to CUDA_VISIBLE_DEVICES). The dataset is "
+            "tokenized once, split into disjoint shards, and each worker process extracts "
+            "the features of one shard on its own GPU."
+        },
+    )
+    workers_per_gpu: int = dataclasses.field(
+        default=1,
+        metadata={
+            "help": "Linear probing only: number of worker processes per GPU in --gpu_ids "
+            "(or on the single GPU given). More than one worker keeps a GPU busy while the "
+            "others are on the CPU, at the cost of one model copy per worker."
+        },
+    )
+    shard_dataset_path: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "Internal: path to the dataset shard a --gpu_ids worker processes."
+        },
+    )
     apply_entropy_filter: Optional[bool] = dataclasses.field(
         default=False,
         metadata={"help": "A flag to indicate whether we want to use entropy filter."},
