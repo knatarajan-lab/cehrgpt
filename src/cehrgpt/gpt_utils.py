@@ -155,6 +155,9 @@ def construct_time_sequence(
     return epoch_times
 
 
+_warned_about_missing_age_token = False
+
+
 def construct_age_sequence(
     concept_ids: List[str], ages: Optional[List[int]] = None
 ) -> List[int]:
@@ -177,13 +180,18 @@ def construct_age_sequence(
             ages.append(age + time_delta // 365)
         return ages
     else:
-        logger.warning(
-            "The second token is not a valid age token. The first 4 tokens are: %s. "
-            "Trying to fall back to ages, but it is not valid either %s. "
-            "Fall back to a zero vector [0, 0, 0, ...., 0]",
-            concept_ids[:4],
-            ages,
-        )
+        # Generation calls this once per sequence in every batch, so only warn the first time
+        global _warned_about_missing_age_token
+        if not _warned_about_missing_age_token:
+            _warned_about_missing_age_token = True
+            logger.warning(
+                "The second token is not a valid age token. The first 4 tokens are: %s. "
+                "Trying to fall back to ages, but it is not valid either %s. "
+                "Fall back to a zero vector [0, 0, 0, ...., 0]. "
+                "This warning is only shown once per process.",
+                concept_ids[:4],
+                ages,
+            )
         return np.zeros_like(concept_ids, dtype=int).tolist()
 
 

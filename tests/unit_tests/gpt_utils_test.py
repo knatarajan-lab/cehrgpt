@@ -1,9 +1,11 @@
 import random
 import unittest
 
+from cehrgpt import gpt_utils
 from cehrgpt.gpt_utils import (
     ETHOS_TIME_BUCKET_TO_DAYS,
     RandomSampleCache,
+    construct_age_sequence,
     convert_time_interval_to_time_tuple,
     extract_time_interval_in_days,
     generate_artificial_time_tokens,
@@ -193,6 +195,28 @@ class TestEthosTimeTokens(unittest.TestCase):
     def test_non_time_tokens_are_not_time_buckets(self):
         for token in ("ICD9CM/0/311", "Visit/OP", "VALUE_BIN/8", "Gender/F"):
             self.assertFalse(is_ethos_time_bucket_token(token), token)
+
+
+class TestConstructAgeSequenceWarning(unittest.TestCase):
+    def setUp(self):
+        gpt_utils._warned_about_missing_age_token = False
+
+    def test_missing_age_token_warns_once_and_still_returns_zeros(self):
+        prompt = ["[VS]", "9202", "193782", "43021974", "[VE]"]
+        with self.assertLogs(gpt_utils.logger.name, level="WARNING") as logs:
+            results = [construct_age_sequence(prompt) for _ in range(50)]
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("not a valid age token", logs.output[0])
+        self.assertTrue(all(result == [0] * len(prompt) for result in results))
+
+    def test_valid_age_token_never_warns(self):
+        with self.assertNoLogs(gpt_utils.logger.name, level="WARNING"):
+            ages = construct_age_sequence(["year:2020", "age:40", "8507", "8527", "[VS]", "D400"])
+        self.assertEqual(ages, [40, 40, 40, 40, 40, 41])
+
+    def test_stored_ages_are_returned_without_a_warning(self):
+        with self.assertNoLogs(gpt_utils.logger.name, level="WARNING"):
+            self.assertEqual(construct_age_sequence(["[VS]", "9202"], [3, 4]), [3, 4])
 
 
 if __name__ == "__main__":
