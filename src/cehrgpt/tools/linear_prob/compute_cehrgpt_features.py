@@ -45,6 +45,7 @@ from cehrgpt.runners.gpt_runner_util import (
     resolve_attn_implementation,
 )
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
+from cehrgpt.tools.linear_prob.feature_io import AsyncParquetWriter
 
 LOG = logging.get_logger("transformers")
 
@@ -287,6 +288,13 @@ def main():
         add_linear_prob_token=True,
     )
 
+    # prefetch_factor is only valid with worker processes; with 0 workers batches are built
+    # in the main process, which leaves the GPU idle while the collator runs.
+    prefetch_factor = (
+        training_args.dataloader_prefetch_factor
+        if training_args.dataloader_num_workers > 0
+        else None
+    )
     train_loader = DataLoader(
         dataset=train_set,
         batch_size=per_device_eval_batch_size,
@@ -294,6 +302,7 @@ def main():
         collate_fn=data_collator,
         pin_memory=training_args.dataloader_pin_memory,
         batch_sampler=train_batch_sampler,
+        prefetch_factor=prefetch_factor,
     )
 
     test_dataloader = DataLoader(
@@ -303,6 +312,7 @@ def main():
         collate_fn=data_collator,
         pin_memory=training_args.dataloader_pin_memory,
         batch_sampler=test_batch_sampler,
+        prefetch_factor=prefetch_factor,
     )
 
     # Loading demographics
@@ -347,6 +357,8 @@ def main():
         demographics_dict = dict()
 
     data_loaders = [("train", train_loader), ("test", test_dataloader)]
+    # Write the parquet files from background threads so the GPU loop does not wait on disk
+    writer = AsyncParquetWriter()
 
     ve_token_id = cehrgpt_tokenizer.ve_token_id
     for split, data_loader in data_loaders:
@@ -495,9 +507,11 @@ def main():
                 features_pd["features"] = features_list
                 features_pd["race_concept_id"] = race_concept_ids
                 features_pd["gender_concept_id"] = gender_concept_ids
-                features_pd.to_parquet(
-                    feature_output_folder / f"{uuid.uuid4()}.parquet"
-                )
+                writer.write(features_pd, feature_output_folder / f"{uuid.uuid4()}.parquet")
+
+        writer.flush()
+
+    writer.close()
 
 
 if __name__ == "__main__":
