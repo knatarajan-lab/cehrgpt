@@ -19,7 +19,12 @@ from tqdm import tqdm
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.cehrgpt_args import create_inference_base_arg_parser
-from cehrgpt.gpt_utils import get_cehrgpt_output_folder, is_visit_end, is_visit_start
+from cehrgpt.gpt_utils import (
+    get_cehrgpt_output_folder,
+    is_visit_end,
+    is_visit_start,
+    truncate_history_keeping_demographics,
+)
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.data_utils import extract_cohort_sequences
@@ -427,20 +432,12 @@ def main(args):
         ]
         label = record["label"]
         time_to_event = record["time_to_event"] if "time_to_event" in record else None
-        seq_length = len(partial_history)
-        if (
-            generation_config.max_length
-            <= seq_length + generation_config.max_new_tokens
-        ):
-            start_index = seq_length - (
-                generation_config.max_length - generation_config.max_new_tokens
-            )
-            # Make sure the first token starts on VS
-            for i, token in enumerate(partial_history[start_index:]):
-                if is_visit_start(token):
-                    start_index += i
-                    break
-            partial_history = partial_history[start_index:]
+        # Keep the most recent history that leaves room for the tokens to generate. The
+        # demographic header is kept (and moved forward in time) so the model still sees it.
+        partial_history = truncate_history_keeping_demographics(
+            partial_history,
+            generation_config.max_length - generation_config.max_new_tokens,
+        )
 
         concept_time_to_event = ts_pred_model.predict_time_to_events(
             partial_history,

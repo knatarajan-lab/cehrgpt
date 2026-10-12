@@ -14,6 +14,7 @@ from cehrgpt.gpt_utils import (
     is_inpatient_att_token,
     is_visit_start,
     random_slice_gpt_sequence,
+    truncate_history_keeping_demographics,
 )
 
 
@@ -217,6 +218,69 @@ class TestConstructAgeSequenceWarning(unittest.TestCase):
     def test_stored_ages_are_returned_without_a_warning(self):
         with self.assertNoLogs(gpt_utils.logger.name, level="WARNING"):
             self.assertEqual(construct_age_sequence(["[VS]", "9202"], [3, 4]), [3, 4])
+
+
+def make_history(num_visits, att="M6", header=("year:2000", "age:30", "8507", "8527")):
+    tokens = list(header)
+    for visit in range(num_visits):
+        if visit:
+            tokens.append(att)
+        tokens += ["[VS]", "9202", f"c{visit}a", f"c{visit}b", "[VE]"]
+    return tokens
+
+
+class TestTruncateHistoryKeepingDemographics(unittest.TestCase):
+    def test_history_that_fits_is_unchanged(self):
+        history = make_history(3)
+        self.assertEqual(truncate_history_keeping_demographics(history, len(history)), history)
+        self.assertEqual(truncate_history_keeping_demographics(history, 1000), history)
+
+    def test_truncated_history_keeps_a_rebuilt_header_and_starts_on_a_visit(self):
+        history = make_history(40)  # 40 visits, 6 months apart: 19.5 years
+        result = truncate_history_keeping_demographics(history, 60)
+        self.assertLessEqual(len(result), 60)
+        self.assertEqual(result[2:4], ["8507", "8527"])
+        self.assertTrue(result[0].startswith("year:") and result[1].startswith("age:"))
+        self.assertEqual(result[4], "[VS]")
+        # the rest is the most recent part of the original history
+        recent = result[4:]
+        self.assertEqual(history[-len(recent):], recent)
+
+    def test_year_and_age_move_forward_by_the_dropped_time(self):
+        history = make_history(40, att="Y1")  # one year between visits
+        result = truncate_history_keeping_demographics(history, 40)
+        dropped_visits = (len(history) - 4 - (len(result) - 4)) // 6  # 6 tokens per visit+ATT
+        # each dropped visit (with its ATT token) is one year
+        self.assertGreater(dropped_visits, 0)
+        self.assertEqual(result[0], f"year:{2000 + dropped_visits}")
+        self.assertEqual(result[1], f"age:{30 + dropped_visits}")
+
+    def test_rebuilt_header_reproduces_the_ages_of_the_full_history(self):
+        history = make_history(40, att="Y1")
+        truncated = truncate_history_keeping_demographics(history, 40)
+        full_ages = construct_age_sequence(history)
+        truncated_ages = construct_age_sequence(truncated)
+        # the last tokens are the same tokens of the same patient, so the ages must agree
+        n = len(truncated) - 4
+        self.assertEqual(truncated_ages[-n:], full_ages[-n:])
+
+    def test_history_without_a_header_is_only_truncated(self):
+        history = ["[VS]", "9202", "a", "[VE]", "M1"] * 20
+        result = truncate_history_keeping_demographics(history, 30)
+        self.assertLessEqual(len(result), 30)
+        self.assertEqual(result[0], "[VS]")
+        self.assertEqual(history[-len(result):], result)
+
+    def test_invalid_age_token_is_treated_as_no_header(self):
+        history = make_history(40, header=("year:2000", "age:oops", "8507", "8527"))
+        result = truncate_history_keeping_demographics(history, 60)
+        self.assertEqual(result[0], "[VS]")
+        self.assertNotIn("year:2000", result)
+
+    def test_window_too_small_for_a_header_falls_back_to_plain_truncation(self):
+        result = truncate_history_keeping_demographics(make_history(10), 4)
+        self.assertLessEqual(len(result), 4)
+        self.assertFalse(any(token.startswith("year:") for token in result))
 
 
 if __name__ == "__main__":

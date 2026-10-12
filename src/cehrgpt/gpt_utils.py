@@ -195,6 +195,66 @@ def construct_age_sequence(
         return np.zeros_like(concept_ids, dtype=int).tolist()
 
 
+def truncate_history_keeping_demographics(
+    concept_ids: List[str], max_tokens: int
+) -> List[str]:
+    """
+    Keep the most recent part of a patient history that fits in `max_tokens`, starting on a [VS].
+
+    A history that starts with the demographic header (year:YYYY, age:NN, gender, race) keeps
+    it: the header is re-attached with the year and age moved forward by the time elapsed in
+    the dropped part of the history, so the model still sees the patient's demographics and
+    construct_age_sequence reproduces the right ages. That elapsed time is the sum of the
+    dropped ATT tokens, the same bookkeeping construct_age_sequence uses, so it is exact up
+    to the resolution of the ATT tokens (and to rounding down to whole years). Histories
+    without a valid header are just truncated.
+
+    :param concept_ids: The patient history as concept ids/tokens.
+    :param max_tokens: The maximum length of the returned history.
+    :return: The history unchanged if it fits, otherwise the truncated history.
+    """
+    if len(concept_ids) <= max_tokens:
+        return concept_ids
+
+    header = concept_ids[:DEMOGRAPHIC_PROMPT_SIZE]
+    try:
+        has_header = (
+            len(header) == DEMOGRAPHIC_PROMPT_SIZE
+            and header[0].lower().startswith("year")
+            and header[1].lower().startswith("age")
+        )
+        year = int(header[0].split(":")[1]) if has_header else None
+        age = int(header[1].split(":")[1]) if has_header else None
+    except (IndexError, ValueError):
+        has_header = False
+    if has_header and max_tokens <= DEMOGRAPHIC_PROMPT_SIZE:
+        has_header = False
+
+    num_recent_tokens = max_tokens - (DEMOGRAPHIC_PROMPT_SIZE if has_header else 0)
+    start_index = len(concept_ids) - num_recent_tokens
+    # Make sure the history starts on a visit start
+    for offset, token in enumerate(concept_ids[start_index:]):
+        if is_visit_start(token):
+            start_index += offset
+            break
+    recent_history = concept_ids[start_index:]
+    if not has_header:
+        return recent_history
+
+    dropped_days = sum(
+        extract_time_interval_in_days(token)
+        for token in concept_ids[DEMOGRAPHIC_PROMPT_SIZE:start_index]
+        if is_att_token(token)
+    )
+    elapsed_years = dropped_days // 365
+    return [
+        f"year:{year + elapsed_years}",
+        f"age:{age + elapsed_years}",
+        header[2],
+        header[3],
+    ] + recent_history
+
+
 def multiple_of_10(n: int) -> int:
     return ((n // 10) + 1) * 10
 
