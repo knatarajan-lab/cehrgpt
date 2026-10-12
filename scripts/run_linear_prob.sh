@@ -20,6 +20,13 @@ usage() {
     echo "  --max_tokens_per_batch=NUM     Maximum tokens per batch (default: 16384)"
     echo "  --torch_type=TYPE              Torch data type (default: float32)"
     echo "  --disable_sample_packing       Disable sample packing (enabled by default)"
+    echo "  --gpu_ids=IDS                  Extract features on several GPUs: 'all' or comma separated GPU"
+    echo "                                 indices, e.g. 0,1 (optional; default: a single process)"
+    echo "  --workers_per_gpu=NUM          Worker processes per GPU in --gpu_ids (default: 1). Several"
+    echo "                                 workers keep one GPU busy while the others are on the CPU"
+    echo "  --dataloader_num_workers=NUM   DataLoader worker processes for feature extraction (default: 0,"
+    echo "                                 i.e. batches are built in the main process while the GPU waits)"
+    echo "  --dataloader_prefetch_factor=NUM  Batches prefetched per worker (needs --dataloader_num_workers > 0)"
     echo "  --force_attn_implementation=IMPL  Force the attention implementation: eager, sdpa or"
     echo "                                 flash_attention_2 (optional; default: flash_attention_2 for"
     echo "                                 gpt2 when installed, sdpa for qwen2)"
@@ -83,6 +90,18 @@ for arg in "$@"; do
             ;;
         --disable_sample_packing)
             DISABLE_SAMPLE_PACKING="true"
+            ;;
+        --gpu_ids=*)
+            GPU_IDS="${arg#*=}"
+            ;;
+        --workers_per_gpu=*)
+            WORKERS_PER_GPU="${arg#*=}"
+            ;;
+        --dataloader_num_workers=*)
+            DATALOADER_NUM_WORKERS="${arg#*=}"
+            ;;
+        --dataloader_prefetch_factor=*)
+            DATALOADER_PREFETCH_FACTOR="${arg#*=}"
             ;;
         --allow_missing_tokenized_persons)
             ALLOW_MISSING_TOKENIZED_PERSONS="true"
@@ -295,6 +314,19 @@ while read -r cohort_name; do
         FEATURE_CMD="$FEATURE_CMD \
         --tokenized_full_dataset_path \"$TOKENIZED_FULL_DATASET_PATH\" \
         --cohort_folder \"$COHORT_FOLDER/$cohort_name\""
+    fi
+
+    if [ -n "$GPU_IDS" ]; then
+        FEATURE_CMD="$FEATURE_CMD --gpu_ids \"$GPU_IDS\""
+    fi
+    if [ -n "$WORKERS_PER_GPU" ]; then
+        FEATURE_CMD="$FEATURE_CMD --workers_per_gpu \"$WORKERS_PER_GPU\""
+    fi
+    if [ -n "$DATALOADER_NUM_WORKERS" ]; then
+        FEATURE_CMD="$FEATURE_CMD --dataloader_num_workers \"$DATALOADER_NUM_WORKERS\""
+    fi
+    if [ -n "$DATALOADER_PREFETCH_FACTOR" ]; then
+        FEATURE_CMD="$FEATURE_CMD --dataloader_prefetch_factor \"$DATALOADER_PREFETCH_FACTOR\""
     fi
 
     # Add observation_window if provided
