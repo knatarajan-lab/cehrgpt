@@ -433,7 +433,8 @@ def main(args):
         label = record["label"]
         time_to_event = record["time_to_event"] if "time_to_event" in record else None
         # Keep the most recent history that leaves room for the tokens to generate. The
-        # demographic header is kept (and moved forward in time) so the model still sees it.
+        # demographic header is kept (moved forward in time) and is not part of this budget,
+        # so the prompt can be DEMOGRAPHIC_PROMPT_SIZE tokens longer than the budget.
         partial_history = truncate_history_keeping_demographics(
             partial_history,
             generation_config.max_length - generation_config.max_new_tokens,

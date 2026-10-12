@@ -201,21 +201,20 @@ def truncate_history_keeping_demographics(
     """
     Keep the most recent part of a patient history that fits in `max_tokens`, starting on a [VS].
 
-    A history that starts with the demographic header (year:YYYY, age:NN, gender, race) keeps
-    it: the header is re-attached with the year and age moved forward by the time elapsed in
-    the dropped part of the history, so the model still sees the patient's demographics and
-    construct_age_sequence reproduces the right ages. That elapsed time is the sum of the
-    dropped ATT tokens, the same bookkeeping construct_age_sequence uses, so it is exact up
-    to the resolution of the ATT tokens (and to rounding down to whole years). Histories
-    without a valid header are just truncated.
+    The token budget `max_tokens` only counts the history itself: a history that starts with the
+    demographic header (year:YYYY, age:NN, gender, race) keeps it on top of the budget, so the
+    result can have up to DEMOGRAPHIC_PROMPT_SIZE more tokens than `max_tokens`. The header is
+    re-attached with the year and age moved forward by the time elapsed in the dropped part of
+    the history, so the model still sees the patient's demographics and construct_age_sequence
+    reproduces the right ages. That elapsed time is the sum of the dropped ATT tokens, the same
+    bookkeeping construct_age_sequence uses, so it is exact up to the resolution of the ATT
+    tokens (and to rounding down to whole years). Histories without a valid header are just
+    truncated to `max_tokens`.
 
     :param concept_ids: The patient history as concept ids/tokens.
-    :param max_tokens: The maximum length of the returned history.
+    :param max_tokens: The maximum number of history tokens, not counting the demographic header.
     :return: The history unchanged if it fits, otherwise the truncated history.
     """
-    if len(concept_ids) <= max_tokens:
-        return concept_ids
-
     header = concept_ids[:DEMOGRAPHIC_PROMPT_SIZE]
     try:
         has_header = (
@@ -227,11 +226,12 @@ def truncate_history_keeping_demographics(
         age = int(header[1].split(":")[1]) if has_header else None
     except (IndexError, ValueError):
         has_header = False
-    if has_header and max_tokens <= DEMOGRAPHIC_PROMPT_SIZE:
-        has_header = False
 
-    num_recent_tokens = max_tokens - (DEMOGRAPHIC_PROMPT_SIZE if has_header else 0)
-    start_index = len(concept_ids) - num_recent_tokens
+    num_header_tokens = DEMOGRAPHIC_PROMPT_SIZE if has_header else 0
+    if len(concept_ids) - num_header_tokens <= max_tokens:
+        return concept_ids
+
+    start_index = len(concept_ids) - max_tokens
     # Make sure the history starts on a visit start
     for offset, token in enumerate(concept_ids[start_index:]):
         if is_visit_start(token):

@@ -230,15 +230,30 @@ def make_history(num_visits, att="M6", header=("year:2000", "age:30", "8507", "8
 
 
 class TestTruncateHistoryKeepingDemographics(unittest.TestCase):
+    HEADER_SIZE = 4
+
     def test_history_that_fits_is_unchanged(self):
         history = make_history(3)
-        self.assertEqual(truncate_history_keeping_demographics(history, len(history)), history)
         self.assertEqual(truncate_history_keeping_demographics(history, 1000), history)
+        # the budget only counts the history, not the 4 header tokens
+        budget = len(history) - self.HEADER_SIZE
+        self.assertEqual(truncate_history_keeping_demographics(history, budget), history)
+        self.assertNotEqual(
+            truncate_history_keeping_demographics(history, budget - 1), history
+        )
+
+    def test_budget_does_not_count_the_header(self):
+        history = make_history(40)
+        result = truncate_history_keeping_demographics(history, 60)
+        history_tokens = result[self.HEADER_SIZE:]
+        self.assertLessEqual(len(history_tokens), 60)
+        # the result is the header on top of the budget, not squeezed into it
+        self.assertGreater(len(result), 60)
+        self.assertLessEqual(len(result), 60 + self.HEADER_SIZE)
 
     def test_truncated_history_keeps_a_rebuilt_header_and_starts_on_a_visit(self):
         history = make_history(40)  # 40 visits, 6 months apart: 19.5 years
         result = truncate_history_keeping_demographics(history, 60)
-        self.assertLessEqual(len(result), 60)
         self.assertEqual(result[2:4], ["8507", "8527"])
         self.assertTrue(result[0].startswith("year:") and result[1].startswith("age:"))
         self.assertEqual(result[4], "[VS]")
@@ -249,7 +264,8 @@ class TestTruncateHistoryKeepingDemographics(unittest.TestCase):
     def test_year_and_age_move_forward_by_the_dropped_time(self):
         history = make_history(40, att="Y1")  # one year between visits
         result = truncate_history_keeping_demographics(history, 40)
-        dropped_visits = (len(history) - 4 - (len(result) - 4)) // 6  # 6 tokens per visit+ATT
+        recent = result[self.HEADER_SIZE:]
+        dropped_visits = (len(history) - self.HEADER_SIZE - len(recent)) // 6
         # each dropped visit (with its ATT token) is one year
         self.assertGreater(dropped_visits, 0)
         self.assertEqual(result[0], f"year:{2000 + dropped_visits}")
@@ -261,10 +277,10 @@ class TestTruncateHistoryKeepingDemographics(unittest.TestCase):
         full_ages = construct_age_sequence(history)
         truncated_ages = construct_age_sequence(truncated)
         # the last tokens are the same tokens of the same patient, so the ages must agree
-        n = len(truncated) - 4
+        n = len(truncated) - self.HEADER_SIZE
         self.assertEqual(truncated_ages[-n:], full_ages[-n:])
 
-    def test_history_without_a_header_is_only_truncated(self):
+    def test_history_without_a_header_is_truncated_to_the_budget(self):
         history = ["[VS]", "9202", "a", "[VE]", "M1"] * 20
         result = truncate_history_keeping_demographics(history, 30)
         self.assertLessEqual(len(result), 30)
@@ -274,13 +290,14 @@ class TestTruncateHistoryKeepingDemographics(unittest.TestCase):
     def test_invalid_age_token_is_treated_as_no_header(self):
         history = make_history(40, header=("year:2000", "age:oops", "8507", "8527"))
         result = truncate_history_keeping_demographics(history, 60)
+        self.assertLessEqual(len(result), 60)
         self.assertEqual(result[0], "[VS]")
         self.assertNotIn("year:2000", result)
 
-    def test_window_too_small_for_a_header_falls_back_to_plain_truncation(self):
+    def test_a_tiny_budget_still_keeps_the_header(self):
         result = truncate_history_keeping_demographics(make_history(10), 4)
-        self.assertLessEqual(len(result), 4)
-        self.assertFalse(any(token.startswith("year:") for token in result))
+        self.assertTrue(result[0].startswith("year:"))
+        self.assertLessEqual(len(result), 4 + self.HEADER_SIZE)
 
 
 if __name__ == "__main__":
