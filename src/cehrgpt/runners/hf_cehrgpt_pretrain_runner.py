@@ -246,6 +246,7 @@ def load_and_create_model(
             motor_tte_vocab_size=tokenizer.motor_tte_vocab_size,
             motor_time_to_event_weight=cehrgpt_args.motor_time_to_event_weight,
             motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
+            motor_fused_loss=cehrgpt_args.motor_fused_loss,
             motor_time_bins=tokenizer.get_motor_time_bins(
                 cehrgpt_args.motor_num_time_pieces
             ),
@@ -633,6 +634,9 @@ def main():
         cehrgpt_tokenizer.save_pretrained(tokenizer_save_path)
 
     model = load_and_create_model(model_args, cehrgpt_args, cehrgpt_tokenizer)
+
+    # A runtime setting, so it also applies to models loaded from a checkpoint's saved config
+    model.config.motor_fused_loss = bool(cehrgpt_args.motor_fused_loss)
 
     # Try to update motor tte vocab size if the new configuration is different from the existing one
     if cehrgpt_args.include_motor_time_to_event:

@@ -297,6 +297,15 @@ class CehrGPTArguments:
             "help": "The number of times each motor_num_time_pieces piece has to be"
         },
     )
+    motor_fused_loss: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "Compute the MOTOR time-to-event loss with one fused kernel (torch.compile) "
+            "instead of about ten separate (rows, motor_num_time_pieces, motor vocab) tensors. "
+            "Same loss, much less GPU memory traffic. Needs Triton on CUDA; falls back to the "
+            "eager implementation otherwise."
+        },
+    )
     motor_use_ontology: Optional[bool] = dataclasses.field(
         default=False,
         metadata={

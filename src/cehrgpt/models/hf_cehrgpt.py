@@ -1432,6 +1432,56 @@ class LinearProbModule(CEHRGPTPreTrainedModel):
         return linear_prob_hidden_state
 
 
+def motor_loss_terms(
+    logits: torch.Tensor,
+    time_vectors: torch.Tensor,
+    event_indicators: torch.Tensor,
+    start_times: torch.Tensor,
+    end_times: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    The dense part of the MOTOR loss: the summed hazard and the summed log-hazard of the events.
+
+    Everything here is elementwise over (rows, time bins, motor vocab) followed by a sum, so
+    torch.compile fuses it into a single kernel and never materializes the intermediates. The
+    arithmetic is in float32 (times are in days and lose too much in bfloat16) and keeps the
+    log-space form exp2(logit + log2(time in bin)) of the unfused implementation.
+
+    :param logits: (rows, bins, vocab) output of the MOTOR head.
+    :param time_vectors: (rows, vocab) time to the event, or to censoring, in days.
+    :param event_indicators: (rows, vocab) True where the event was observed.
+    :param start_times: (bins,) start of every time bin.
+    :param end_times: (bins,) end of every time bin (the last one may be inf).
+    :return: (sum of the hazard, sum of the logits of the events that fall in their bin).
+    """
+    logits = logits.float()
+    t = time_vectors.float()[:, None, :]
+    start = start_times.float()[None, :, None]
+    end = end_times.float()[None, :, None]
+    time_in_bin = torch.minimum((t - start).clamp(min=0), end - start)
+    hazard = torch.where(
+        time_in_bin > 0,
+        torch.exp2(logits + torch.log2(time_in_bin.clamp(min=1e-8))),
+        0.0,
+    )
+    event_in_bin = event_indicators[:, None, :] & (t >= start) & (t < end)
+    return hazard.sum(), torch.where(event_in_bin, logits, 0.0).sum()
+
+
+_compiled_motor_loss_terms = None
+
+
+def get_motor_loss_terms(use_compile: bool):
+    """The compiled MOTOR loss terms, or the eager function when compiling is not possible."""
+    global _compiled_motor_loss_terms
+    if not use_compile:
+        return motor_loss_terms
+    if _compiled_motor_loss_terms is None:
+        # The number of rows changes every batch, so the shapes must be dynamic
+        _compiled_motor_loss_terms = torch.compile(motor_loss_terms, dynamic=True)
+    return _compiled_motor_loss_terms
+
+
 class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight", "value_head.weight"]
 
@@ -1670,6 +1720,43 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         return model_inputs
 
+    def _motor_nll_loss_fused(
+        self,
+        hidden_states,
+        motor_tte_task_indicators,
+        time_vectors,
+        event_indicators,
+    ):
+        tte_features = hidden_states[motor_tte_task_indicators].view(
+            (-1, self.config.n_embd)
+        )
+        time_dependent_logits = self.motor_tte(tte_features)
+        start_times = self.motor_time_bins[:-1].to(hidden_states.device)
+        end_times = self.motor_time_bins[1:].to(hidden_states.device)
+        normalizer = time_vectors.shape[0] * self.config.motor_tte_vocab_size
+        arguments = (
+            time_dependent_logits,
+            time_vectors,
+            event_indicators,
+            start_times,
+            end_times,
+        )
+        global _compiled_motor_loss_terms
+        use_compile = time_dependent_logits.is_cuda
+        try:
+            hazard, event_logits = get_motor_loss_terms(use_compile)(*arguments)
+        except Exception as error:  # noqa: BLE001 - e.g. no Triton on this machine
+            if not use_compile:
+                raise
+            logger.warning(
+                "Could not compile the fused MOTOR loss (%s: %s); using the eager version.",
+                type(error).__name__,
+                error,
+            )
+            _compiled_motor_loss_terms = motor_loss_terms
+            hazard, event_logits = motor_loss_terms(*arguments)
+        return hazard / normalizer - math.log(2) * event_logits / normalizer
+
     def motor_nll_loss(
         self,
         hidden_states,
@@ -1703,6 +1790,14 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             device=hidden_states.device,
         )
         event_indicators[motor_row_indices, motor_col_indices] = True
+
+        if getattr(self.config, "motor_fused_loss", False):
+            return self._motor_nll_loss_fused(
+                hidden_states,
+                motor_tte_task_indicators,
+                time_vectors,
+                event_indicators,
+            )
         event_indicators_3d = event_indicators[:, None, :]
 
         start_times = self.motor_time_bins[:-1].to(hidden_states.device)

@@ -170,6 +170,7 @@ class CEHRGPTConfig(PretrainedConfig):
         motor_tte_vocab_size=None,
         motor_time_to_event_weight=1.0,
         motor_num_time_pieces=16,
+        motor_fused_loss=False,
         motor_time_bins: Optional[List[float]] = None,
         motor_task_prevalence_rates: Optional[List[float]] = None,
         linear_prob_token_id=None,
@@ -320,6 +321,7 @@ class CEHRGPTConfig(PretrainedConfig):
         self.local_attention_n_prev_visits = local_attention_n_prev_visits
         self.motor_time_to_event_weight = motor_time_to_event_weight
         self.motor_num_time_pieces = motor_num_time_pieces
+        self.motor_fused_loss = motor_fused_loss
         self.linear_prob_token_id = linear_prob_token_id
         self.motor_time_bins = motor_time_bins
         self.motor_task_prevalence_rates = motor_task_prevalence_rates
