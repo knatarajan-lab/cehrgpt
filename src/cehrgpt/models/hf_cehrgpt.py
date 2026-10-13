@@ -1468,18 +1468,59 @@ def motor_loss_terms(
     return hazard.sum(), torch.where(event_in_bin, logits, 0.0).sum()
 
 
-_compiled_motor_loss_terms = None
+_motor_loss_terms_in_use = None
 
 
-def get_motor_loss_terms(use_compile: bool):
-    """The compiled MOTOR loss terms, or the eager function when compiling is not possible."""
-    global _compiled_motor_loss_terms
-    if not use_compile:
+def compile_motor_loss_terms(device: torch.device, compile_fn=torch.compile):
+    """
+    Compile motor_loss_terms and prove it works, or fall back to the eager function.
+
+    torch.compile is lazy: the forward is compiled on the first call and the backward on the
+    first backward(). Exercising both here, on tiny tensors, means a missing Triton, compiler
+    or headers surfaces as a clear warning and an eager fallback instead of a crash in the
+    middle of training.
+    """
+    compiled = compile_fn(motor_loss_terms, dynamic=True)
+    try:
+        logits = torch.randn(5, 4, 8, device=device, requires_grad=True)
+        times = torch.rand(5, 8, device=device) * 10
+        events = torch.rand(5, 8, device=device) < 0.3
+        start = torch.tensor([0.0, 1.0, 3.0, 7.0], device=device)
+        end = torch.tensor([1.0, 3.0, 7.0, float("inf")], device=device)
+        hazard, event_logits = compiled(logits, times, events, start, end)
+        (hazard + event_logits).backward()
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+    except Exception as error:  # noqa: BLE001 - e.g. no Triton/compiler on this machine
+        logger.warning(
+            "Could not compile the fused MOTOR loss (%s: %s); using the eager version, "
+            "which is not faster than the unfused loss.",
+            type(error).__name__,
+            error,
+        )
         return motor_loss_terms
-    if _compiled_motor_loss_terms is None:
-        # The number of rows changes every batch, so the shapes must be dynamic
-        _compiled_motor_loss_terms = torch.compile(motor_loss_terms, dynamic=True)
-    return _compiled_motor_loss_terms
+    logger.info(
+        "Fused MOTOR loss: compiled with torch.compile on %s and verified with a "
+        "forward/backward warm-up.",
+        device,
+    )
+    return compiled
+
+
+def get_motor_loss_terms(device: torch.device):
+    """The MOTOR loss terms to use on `device`, resolved (and logged) once per process."""
+    global _motor_loss_terms_in_use
+    if _motor_loss_terms_in_use is None:
+        if device.type == "cuda":
+            _motor_loss_terms_in_use = compile_motor_loss_terms(device)
+        else:
+            logger.info(
+                "Fused MOTOR loss on %s: using the eager version (compiling is only "
+                "done on CUDA).",
+                device.type,
+            )
+            _motor_loss_terms_in_use = motor_loss_terms
+    return _motor_loss_terms_in_use
 
 
 class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
@@ -1741,20 +1782,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             start_times,
             end_times,
         )
-        global _compiled_motor_loss_terms
-        use_compile = time_dependent_logits.is_cuda
-        try:
-            hazard, event_logits = get_motor_loss_terms(use_compile)(*arguments)
-        except Exception as error:  # noqa: BLE001 - e.g. no Triton on this machine
-            if not use_compile:
-                raise
-            logger.warning(
-                "Could not compile the fused MOTOR loss (%s: %s); using the eager version.",
-                type(error).__name__,
-                error,
-            )
-            _compiled_motor_loss_terms = motor_loss_terms
-            hazard, event_logits = motor_loss_terms(*arguments)
+        hazard, event_logits = get_motor_loss_terms(time_dependent_logits.device)(
+            *arguments
+        )
         return hazard / normalizer - math.log(2) * event_logits / normalizer
 
     def motor_nll_loss(

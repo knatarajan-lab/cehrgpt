@@ -1,9 +1,16 @@
+import functools
 import unittest
 
 import torch
 
 from cehrgpt.models.config import CEHRGPTConfig
-from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel, motor_loss_terms
+from cehrgpt.models import hf_cehrgpt
+from cehrgpt.models.hf_cehrgpt import (
+    CEHRGPT2LMHeadModel,
+    compile_motor_loss_terms,
+    get_motor_loss_terms,
+    motor_loss_terms,
+)
 
 VOCAB_SIZE = 64
 MOTOR_VOCAB = 40
@@ -154,6 +161,62 @@ class TestMotorLossTermsCompile(unittest.TestCase):
         self.assertEqual(event_logits.dtype, torch.float32)
         expected = motor_loss_terms(logits.bfloat16().float(), times, events, start, end)
         torch.testing.assert_close(hazard, expected[0])
+
+
+class TestCompileMotorLossTerms(unittest.TestCase):
+    def setUp(self):
+        hf_cehrgpt._motor_loss_terms_in_use = None
+
+    tearDown = setUp
+
+    def test_a_working_compile_is_verified_and_logged(self):
+        compile_fn = functools.partial(torch.compile, backend="aot_eager")
+        with self.assertLogs(hf_cehrgpt.logger.name, level="INFO") as logs:
+            result = compile_motor_loss_terms(torch.device("cpu"), compile_fn=compile_fn)
+        self.assertIsNot(result, motor_loss_terms)
+        self.assertTrue(any("compiled with torch.compile" in line for line in logs.output))
+
+    def test_a_forward_failure_falls_back_with_a_warning(self):
+        def broken_compile(function, **kwargs):
+            def call(*args):
+                raise RuntimeError("no triton")
+            return call
+
+        with self.assertLogs(hf_cehrgpt.logger.name, level="WARNING") as logs:
+            result = compile_motor_loss_terms(torch.device("cpu"), compile_fn=broken_compile)
+        self.assertIs(result, motor_loss_terms)
+        self.assertTrue(any("Could not compile" in line and "no triton" in line for line in logs.output))
+
+    def test_a_backward_failure_is_caught_too(self):
+        class FailsOnBackward(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x):
+                return x * 1
+
+            @staticmethod
+            def backward(ctx, grad):
+                raise RuntimeError("backward could not be compiled")
+
+        def compile_with_bad_backward(function, **kwargs):
+            def call(logits, *args):
+                hazard, event_logits = function(FailsOnBackward.apply(logits), *args)
+                return hazard, event_logits
+            return call
+
+        with self.assertLogs(hf_cehrgpt.logger.name, level="WARNING") as logs:
+            result = compile_motor_loss_terms(
+                torch.device("cpu"), compile_fn=compile_with_bad_backward
+            )
+        self.assertIs(result, motor_loss_terms)
+        self.assertTrue(any("backward could not be compiled" in line for line in logs.output))
+
+    def test_cpu_uses_the_eager_function_and_resolves_once(self):
+        with self.assertLogs(hf_cehrgpt.logger.name, level="INFO") as logs:
+            first = get_motor_loss_terms(torch.device("cpu"))
+            second = get_motor_loss_terms(torch.device("cpu"))
+        self.assertIs(first, motor_loss_terms)
+        self.assertIs(second, first)
+        self.assertEqual(sum("eager version" in line for line in logs.output), 1)
 
 
 if __name__ == "__main__":
