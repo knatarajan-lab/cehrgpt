@@ -1502,7 +1502,7 @@ def compile_motor_loss_terms(device: torch.device, compile_fn=torch.compile):
     or headers surfaces as a clear warning and an eager fallback instead of a crash in the
     middle of training. The warm-up runs with `device` as the current CUDA device: Triton
     launches kernels on the thread's current CUDA context and fails with "invalid device
-    context" when there is none.
+    context" when there is none, which is also why the backward below starts with a multiply.
     """
     compiled = compile_fn(motor_loss_terms, dynamic=True)
     device_context = (
@@ -1516,7 +1516,12 @@ def compile_motor_loss_terms(device: torch.device, compile_fn=torch.compile):
             start = torch.tensor([0.0, 1.0, 3.0, 7.0], device=device)
             end = torch.tensor([1.0, 3.0, 7.0, float("inf")], device=device)
             hazard, event_logits = compiled(logits, times, events, start, end)
-            (hazard + event_logits).backward()
+            # Backward runs on the autograd engine's own thread, and a Triton kernel launched
+            # first on a thread that has not run a regular CUDA op fails with "invalid device
+            # context". As in training, where the loss is scaled by a weight, put a CUDA
+            # multiply ahead of the compiled node.
+            weight = torch.ones((), device=device)
+            (hazard * weight + event_logits * weight).backward()
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
     except Exception as error:  # noqa: BLE001 - e.g. no Triton/compiler on this machine
