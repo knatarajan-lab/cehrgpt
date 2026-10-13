@@ -46,6 +46,7 @@ class PretrainMotorFusedLossIntegrationTest(unittest.TestCase):
             "--pretrained_embedding_path", self.model_folder,
             "--vocab_dir", self.vocab_dir,
             "--max_steps", "3",
+            "--logging_steps", "1",
             "--save_steps", "3",
             "--save_strategy", "steps",
             "--hidden_size", "96",
@@ -74,6 +75,7 @@ class PretrainMotorFusedLossIntegrationTest(unittest.TestCase):
         # the loss was finite throughout training
         state = json.load(open(checkpoints[-1] / "trainer_state.json"))
         losses = [entry["loss"] for entry in state["log_history"] if "loss" in entry]
+        self.assertTrue(losses, "no loss was logged")
         self.assertTrue(all(loss == loss and abs(loss) != float("inf") for loss in losses))
 
 
