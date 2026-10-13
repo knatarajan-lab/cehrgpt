@@ -171,7 +171,7 @@ class TestCompileMotorLossTerms(unittest.TestCase):
 
     def test_a_working_compile_is_verified_and_logged(self):
         compile_fn = functools.partial(torch.compile, backend="aot_eager")
-        with self.assertLogs(hf_cehrgpt.logger.name, level="INFO") as logs:
+        with self.assertLogs(hf_cehrgpt.MOTOR_LOG.name, level="INFO") as logs:
             result = compile_motor_loss_terms(torch.device("cpu"), compile_fn=compile_fn)
         self.assertIsNot(result, motor_loss_terms)
         self.assertTrue(any("compiled with torch.compile" in line for line in logs.output))
@@ -182,7 +182,7 @@ class TestCompileMotorLossTerms(unittest.TestCase):
                 raise RuntimeError("no triton")
             return call
 
-        with self.assertLogs(hf_cehrgpt.logger.name, level="WARNING") as logs:
+        with self.assertLogs(hf_cehrgpt.MOTOR_LOG.name, level="WARNING") as logs:
             result = compile_motor_loss_terms(torch.device("cpu"), compile_fn=broken_compile)
         self.assertIs(result, motor_loss_terms)
         self.assertTrue(any("Could not compile" in line and "no triton" in line for line in logs.output))
@@ -203,7 +203,7 @@ class TestCompileMotorLossTerms(unittest.TestCase):
                 return hazard, event_logits
             return call
 
-        with self.assertLogs(hf_cehrgpt.logger.name, level="WARNING") as logs:
+        with self.assertLogs(hf_cehrgpt.MOTOR_LOG.name, level="WARNING") as logs:
             result = compile_motor_loss_terms(
                 torch.device("cpu"), compile_fn=compile_with_bad_backward
             )
@@ -211,7 +211,7 @@ class TestCompileMotorLossTerms(unittest.TestCase):
         self.assertTrue(any("backward could not be compiled" in line for line in logs.output))
 
     def test_cpu_uses_the_eager_function_and_resolves_once(self):
-        with self.assertLogs(hf_cehrgpt.logger.name, level="INFO") as logs:
+        with self.assertLogs(hf_cehrgpt.MOTOR_LOG.name, level="INFO") as logs:
             first = get_motor_loss_terms(torch.device("cpu"))
             second = get_motor_loss_terms(torch.device("cpu"))
         self.assertIs(first, motor_loss_terms)

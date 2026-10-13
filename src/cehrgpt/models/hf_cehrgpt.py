@@ -1468,6 +1468,9 @@ def motor_loss_terms(
     return hazard.sum(), torch.where(event_in_bin, logits, 0.0).sum()
 
 
+# The same logger the runners use; the module logger below would drop INFO messages
+MOTOR_LOG = logging.get_logger("transformers")
+
 _motor_loss_terms_in_use = None
 
 
@@ -1492,14 +1495,14 @@ def compile_motor_loss_terms(device: torch.device, compile_fn=torch.compile):
         if device.type == "cuda":
             torch.cuda.synchronize(device)
     except Exception as error:  # noqa: BLE001 - e.g. no Triton/compiler on this machine
-        logger.warning(
+        MOTOR_LOG.warning(
             "Could not compile the fused MOTOR loss (%s: %s); using the eager version, "
             "which is not faster than the unfused loss.",
             type(error).__name__,
             error,
         )
         return motor_loss_terms
-    logger.info(
+    MOTOR_LOG.info(
         "Fused MOTOR loss: compiled with torch.compile on %s and verified with a "
         "forward/backward warm-up.",
         device,
@@ -1514,7 +1517,7 @@ def get_motor_loss_terms(device: torch.device):
         if device.type == "cuda":
             _motor_loss_terms_in_use = compile_motor_loss_terms(device)
         else:
-            logger.info(
+            MOTOR_LOG.info(
                 "Fused MOTOR loss on %s: using the eager version (compiling is only "
                 "done on CUDA).",
                 device.type,
@@ -1787,7 +1790,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         )
         return hazard / normalizer - math.log(2) * event_logits / normalizer
 
-    def motor_nll_loss(
+    def motor_nll_loss(self, *args, **kwargs):
+        # A named range, so a GPU profile shows how much of a step the MOTOR loss takes
+        with torch.profiler.record_function("motor_loss"):
+            return self._motor_nll_loss(*args, **kwargs)
+
+    def _motor_nll_loss(
         self,
         hidden_states,
         motor_row_indices,

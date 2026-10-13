@@ -46,6 +46,7 @@ from cehrgpt.runners.gpt_runner_util import (
 )
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.runners.sample_packing_trainer import CehrGptTrainer, SamplePackingTrainer
+from cehrgpt.tools.gpu_profile import GpuProfileCallback
 from cehrgpt.tools.instability_probe import InstabilityProbe
 
 LOG = logging.get_logger("transformers")
@@ -637,6 +638,7 @@ def main():
 
     # A runtime setting, so it also applies to models loaded from a checkpoint's saved config
     model.config.motor_fused_loss = bool(cehrgpt_args.motor_fused_loss)
+    LOG.info("Model motor_fused_loss: %s", model.config.motor_fused_loss)
 
     # Try to update motor tte vocab size if the new configuration is different from the existing one
     if cehrgpt_args.include_motor_time_to_event:
@@ -726,6 +728,13 @@ def main():
     if cehrgpt_args.instability_probe:
         callbacks.append(
             InstabilityProbe(every=cehrgpt_args.instability_probe_every)
+        )
+    if cehrgpt_args.profile_gpu_steps > 0:
+        callbacks.append(
+            GpuProfileCallback(
+                num_steps=cehrgpt_args.profile_gpu_steps,
+                start_step=cehrgpt_args.profile_gpu_start_step,
+            )
         )
 
     if cehrgpt_args.sample_packing:

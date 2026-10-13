@@ -57,12 +57,15 @@ class PretrainMotorFusedLossIntegrationTest(unittest.TestCase):
             "--include_motor_time_to_event", "true",
             "--motor_sampling_probability", "0.5",
             "--motor_fused_loss", "true",
+            "--profile_gpu_steps", "1",
+            "--profile_gpu_start_step", "1",
             "--exclude_position_ids", "true",
             "--apply_rotary", "true",
             "--apply_entropy_filter",
             "--min_prevalence", "0.01",
         ]
         train_main()
+        self.assertTrue(os.path.exists(os.path.join(self.model_folder, "gpu_profile_trace.json")))
         checkpoints = sorted(Path(self.model_folder).glob("checkpoint-*"))
         self.assertTrue(checkpoints, "no checkpoint was saved")
         config = json.load(open(checkpoints[-1] / "config.json"))
