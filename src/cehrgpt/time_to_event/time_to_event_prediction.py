@@ -21,6 +21,7 @@ from transformers.utils import is_flash_attn_2_available, logging
 from cehrgpt.cehrgpt_args import create_inference_base_arg_parser
 from cehrgpt.gpt_utils import (
     get_cehrgpt_output_folder,
+    index_numeric_tokens,
     is_visit_end,
     is_visit_start,
     truncate_history_keeping_demographics,
@@ -410,6 +411,8 @@ def main(args):
     else:
         test_dataset = prepare_test_dataset(args, prediction_output_folder_name)
     vocab = cehrgpt_tokenizer.get_vocab()
+    # The year/age values that exist as tokens, for the rebuilt demographic header
+    known_numeric_tokens = index_numeric_tokens(vocab)
     tte_outputs = []
     for record in tqdm(test_dataset, total=len(test_dataset)):
         index_date = record["index_date"]
@@ -438,6 +441,7 @@ def main(args):
         partial_history = truncate_history_keeping_demographics(
             partial_history,
             generation_config.max_length - generation_config.max_new_tokens,
+            known_numeric_tokens,
         )
 
         concept_time_to_event = ts_pred_model.predict_time_to_events(

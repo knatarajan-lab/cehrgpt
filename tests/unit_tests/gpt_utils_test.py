@@ -13,6 +13,8 @@ from cehrgpt.gpt_utils import (
     is_ethos_time_bucket_token,
     is_inpatient_att_token,
     is_visit_start,
+    index_numeric_tokens,
+    nearest_known_value,
     random_slice_gpt_sequence,
     truncate_history_keeping_demographics,
 )
@@ -298,6 +300,49 @@ class TestTruncateHistoryKeepingDemographics(unittest.TestCase):
         result = truncate_history_keeping_demographics(make_history(10), 4)
         self.assertTrue(result[0].startswith("year:"))
         self.assertLessEqual(len(result), 4 + self.HEADER_SIZE)
+
+
+class TestNeighboringYearAndAgeTokens(unittest.TestCase):
+    def test_index_numeric_tokens(self):
+        vocab = {"year:2001": 1, "year:1999": 2, "age:5": 3, "age:-1": 4, "age:x": 5, "8507": 6, "year:": 7}
+        self.assertEqual(
+            index_numeric_tokens(vocab), {"year": [1999, 2001], "age": [-1, 5]}
+        )
+
+    def test_nearest_known_value(self):
+        known = [10, 20, 40]
+        self.assertEqual(nearest_known_value(20, known), 20)
+        self.assertEqual(nearest_known_value(23, known), 20)
+        self.assertEqual(nearest_known_value(31, known), 40)
+        self.assertEqual(nearest_known_value(30, known), 20)  # a tie goes to the smaller value
+        self.assertEqual(nearest_known_value(1, known), 10)  # below everything
+        self.assertEqual(nearest_known_value(99, known), 40)  # above everything
+        self.assertEqual(nearest_known_value(7, []), 7)  # nothing known: unchanged
+
+    def truncate(self, known, att="Y1"):
+        return truncate_history_keeping_demographics(
+            make_history(40, att=att), 40, known
+        )
+
+    def test_unseen_year_and_age_use_the_neighbouring_values(self):
+        without_vocab = self.truncate(None)
+        year, age = int(without_vocab[0][5:]), int(without_vocab[1][4:])
+        # the vocabulary stops one short of the rebuilt year and age
+        known = {"year": [1990, year - 1], "age": [20, age - 1]}
+        result = self.truncate(known)
+        self.assertEqual(result[:2], [f"year:{year - 1}", f"age:{age - 1}"])
+        self.assertEqual(result[2:], without_vocab[2:])
+
+    def test_values_that_exist_are_kept(self):
+        without_vocab = self.truncate(None)
+        year, age = int(without_vocab[0][5:]), int(without_vocab[1][4:])
+        known = {"year": [1990, year, year + 5], "age": [20, age, age + 5]}
+        self.assertEqual(self.truncate(known), without_vocab)
+
+    def test_missing_prefix_in_the_vocab_leaves_the_header_alone(self):
+        without_vocab = self.truncate(None)
+        self.assertEqual(self.truncate({"year": [], "age": []}), without_vocab)
+        self.assertEqual(self.truncate({}), without_vocab)
 
 
 if __name__ == "__main__":

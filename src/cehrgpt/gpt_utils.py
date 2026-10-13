@@ -1,7 +1,8 @@
+import bisect
 import random
 import re
 from datetime import date, datetime, timedelta, timezone
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from cehrbert_data.const.artificial_tokens import DEATH_TOKEN
@@ -195,8 +196,44 @@ def construct_age_sequence(
         return np.zeros_like(concept_ids, dtype=int).tolist()
 
 
+def index_numeric_tokens(
+    vocab: Iterable[str], prefixes: Sequence[str] = ("year", "age")
+) -> Dict[str, List[int]]:
+    """
+    Collect the sorted numeric values of the "<prefix>:<int>" tokens (year:2020, age:45) in a vocab.
+
+    :param vocab: The tokenizer vocabulary (the tokens, e.g. the keys of get_vocab()).
+    :param prefixes: The token prefixes to index.
+    :return: For each prefix, the sorted list of integers that exist as tokens.
+    """
+    values: Dict[str, List[int]] = {prefix: [] for prefix in prefixes}
+    for token in vocab:
+        prefix, separator, number = token.partition(":")
+        if separator and prefix in values:
+            try:
+                values[prefix].append(int(number))
+            except ValueError:
+                continue
+    return {prefix: sorted(numbers) for prefix, numbers in values.items()}
+
+
+def nearest_known_value(value: int, known_values: Sequence[int]) -> int:
+    """The element of the sorted `known_values` closest to `value`; ties go to the smaller one."""
+    if not known_values:
+        return value
+    position = bisect.bisect_left(known_values, value)
+    if position == 0:
+        return known_values[0]
+    if position == len(known_values):
+        return known_values[-1]
+    before, after = known_values[position - 1], known_values[position]
+    return after if after - value < value - before else before
+
+
 def truncate_history_keeping_demographics(
-    concept_ids: List[str], max_tokens: int
+    concept_ids: List[str],
+    max_tokens: int,
+    known_numeric_tokens: Optional[Dict[str, List[int]]] = None,
 ) -> List[str]:
     """
     Keep the most recent part of a patient history that fits in `max_tokens`, starting on a [VS].
@@ -211,8 +248,13 @@ def truncate_history_keeping_demographics(
     tokens (and to rounding down to whole years). Histories without a valid header are just
     truncated to `max_tokens`.
 
+    If `known_numeric_tokens` (from index_numeric_tokens) is given and the rebuilt year or age is
+    not a token in the vocabulary, the closest year or age that is one is used instead; ties go to
+    the smaller value.
+
     :param concept_ids: The patient history as concept ids/tokens.
     :param max_tokens: The maximum number of history tokens, not counting the demographic header.
+    :param known_numeric_tokens: The year/age values that exist in the vocabulary, if known.
     :return: The history unchanged if it fits, otherwise the truncated history.
     """
     header = concept_ids[:DEMOGRAPHIC_PROMPT_SIZE]
@@ -247,12 +289,11 @@ def truncate_history_keeping_demographics(
         if is_att_token(token)
     )
     elapsed_years = dropped_days // 365
-    return [
-        f"year:{year + elapsed_years}",
-        f"age:{age + elapsed_years}",
-        header[2],
-        header[3],
-    ] + recent_history
+    new_year, new_age = year + elapsed_years, age + elapsed_years
+    if known_numeric_tokens:
+        new_year = nearest_known_value(new_year, known_numeric_tokens.get("year", []))
+        new_age = nearest_known_value(new_age, known_numeric_tokens.get("age", []))
+    return [f"year:{new_year}", f"age:{new_age}", header[2], header[3]] + recent_history
 
 
 def multiple_of_10(n: int) -> int:
