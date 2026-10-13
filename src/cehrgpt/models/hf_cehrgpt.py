@@ -1,4 +1,8 @@
+import contextlib
 import math
+import os
+import threading
+import traceback
 import warnings
 from typing import Iterable, List, Optional, Tuple, Union
 
@@ -1474,6 +1478,21 @@ MOTOR_LOG = logging.get_logger("transformers")
 _motor_loss_terms_in_use = None
 
 
+def _describe_compile_environment(device: torch.device) -> str:
+    try:
+        import triton
+
+        triton_version = triton.__version__
+    except Exception:  # noqa: BLE001
+        triton_version = "not importable"
+    current_device = torch.cuda.current_device() if torch.cuda.is_available() else None
+    return (
+        f"torch={torch.__version__} triton={triton_version} device={device} "
+        f"current_device={current_device} thread={threading.current_thread().name} "
+        f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}"
+    )
+
+
 def compile_motor_loss_terms(device: torch.device, compile_fn=torch.compile):
     """
     Compile motor_loss_terms and prove it works, or fall back to the eager function.
@@ -1481,25 +1500,33 @@ def compile_motor_loss_terms(device: torch.device, compile_fn=torch.compile):
     torch.compile is lazy: the forward is compiled on the first call and the backward on the
     first backward(). Exercising both here, on tiny tensors, means a missing Triton, compiler
     or headers surfaces as a clear warning and an eager fallback instead of a crash in the
-    middle of training.
+    middle of training. The warm-up runs with `device` as the current CUDA device: Triton
+    launches kernels on the thread's current CUDA context and fails with "invalid device
+    context" when there is none.
     """
     compiled = compile_fn(motor_loss_terms, dynamic=True)
+    device_context = (
+        torch.cuda.device(device) if device.type == "cuda" else contextlib.nullcontext()
+    )
     try:
-        logits = torch.randn(5, 4, 8, device=device, requires_grad=True)
-        times = torch.rand(5, 8, device=device) * 10
-        events = torch.rand(5, 8, device=device) < 0.3
-        start = torch.tensor([0.0, 1.0, 3.0, 7.0], device=device)
-        end = torch.tensor([1.0, 3.0, 7.0, float("inf")], device=device)
-        hazard, event_logits = compiled(logits, times, events, start, end)
-        (hazard + event_logits).backward()
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
+        with device_context:
+            logits = torch.randn(5, 4, 8, device=device, requires_grad=True)
+            times = torch.rand(5, 8, device=device) * 10
+            events = torch.rand(5, 8, device=device) < 0.3
+            start = torch.tensor([0.0, 1.0, 3.0, 7.0], device=device)
+            end = torch.tensor([1.0, 3.0, 7.0, float("inf")], device=device)
+            hazard, event_logits = compiled(logits, times, events, start, end)
+            (hazard + event_logits).backward()
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
     except Exception as error:  # noqa: BLE001 - e.g. no Triton/compiler on this machine
         MOTOR_LOG.warning(
             "Could not compile the fused MOTOR loss (%s: %s); using the eager version, "
-            "which is not faster than the unfused loss.",
+            "which is not faster than the unfused loss.\nEnvironment: %s\n%s",
             type(error).__name__,
             error,
+            _describe_compile_environment(device),
+            traceback.format_exc(),
         )
         return motor_loss_terms
     MOTOR_LOG.info(

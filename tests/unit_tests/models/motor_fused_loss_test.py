@@ -186,6 +186,11 @@ class TestCompileMotorLossTerms(unittest.TestCase):
             result = compile_motor_loss_terms(torch.device("cpu"), compile_fn=broken_compile)
         self.assertIs(result, motor_loss_terms)
         self.assertTrue(any("Could not compile" in line and "no triton" in line for line in logs.output))
+        # the warning carries the traceback and the environment, to diagnose it from a log
+        text = "\n".join(logs.output)
+        self.assertIn("Traceback", text)
+        self.assertIn("Environment:", text)
+        self.assertIn("torch=", text)
 
     def test_a_backward_failure_is_caught_too(self):
         class FailsOnBackward(torch.autograd.Function):
