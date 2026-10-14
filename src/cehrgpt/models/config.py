@@ -112,6 +112,30 @@ class CEHRGPTConfig(PretrainedConfig):
         "num_hidden_layers": "n_layer",
     }
 
+    def __repr__(self) -> str:
+        """Return a concise summary for Transformers' INFO-level config logging.
+
+        ``PretrainedConfig.__repr__`` serializes the complete configuration. CEHR-GPT
+        stores vocabulary-sized metadata such as ``time_token_values`` and
+        ``_token_to_time_token_mapping`` in that configuration, so the default
+        representation can produce thousands of log lines during checkpoint loading.
+        This does not alter ``to_dict``/``to_json_string`` or checkpoint persistence.
+        """
+        time_token_count = len(set(self.token_to_time_token_mapping) - {-1})
+        return (
+            f"{self.__class__.__name__}("
+            f"backbone={getattr(self, 'backbone', 'gpt2')!r}, "
+            f"vocab_size={self.vocab_size}, "
+            f"hidden_size={self.hidden_size}, "
+            f"num_hidden_layers={self.num_hidden_layers}, "
+            f"num_attention_heads={self.num_attention_heads}, "
+            f"max_position_embeddings={self.max_position_embeddings}, "
+            f"time_token_embedding_type="
+            f"{getattr(self, 'time_token_embedding_type', 'concept')!r}, "
+            f"time_token_count={time_token_count}, "
+            f"tie_word_embeddings={self.tie_word_embeddings})"
+        )
+
     @property
     def token_to_time_token_mapping(self) -> Dict[int, List[int]]:
         # The saved _token_to_time_token_mapping converts the key to string, so we need to convert it back to int
@@ -168,6 +192,10 @@ class CEHRGPTConfig(PretrainedConfig):
         n_pretrained_embeddings_layers=2,
         pretrained_embedding_dim=768,
         pretrained_token_ids: List[int] = None,
+        time_token_embedding_type="concept",
+        time_token_values: Dict[int, float] = None,
+        sinusoidal_time_base=10000.0,
+        sinusoidal_time_scale=None,
         next_token_prediction_loss_weight=1.0,
         time_token_loss_weight=1.0,
         time_to_visit_loss_weight=1.0,
@@ -186,6 +214,12 @@ class CEHRGPTConfig(PretrainedConfig):
             token_to_time_token_mapping = {}
         if pretrained_token_ids is None:
             pretrained_token_ids = list()
+        if time_token_values is None:
+            time_token_values = dict()
+        if time_token_embedding_type not in {"concept", "sinusoidal"}:
+            raise ValueError(
+                "time_token_embedding_type must be either 'concept' or 'sinusoidal'"
+            )
         self.vocab_size = vocab_size
         self.time_token_vocab_size = time_token_vocab_size
         self.n_positions = n_positions
@@ -264,6 +298,17 @@ class CEHRGPTConfig(PretrainedConfig):
         self.pretrained_embedding_dim = pretrained_embedding_dim
         self.pretrained_token_ids = pretrained_token_ids
         self.n_pretrained_embeddings_layers = n_pretrained_embeddings_layers
+        self.time_token_embedding_type = time_token_embedding_type
+        self.time_token_values = {
+            int(token_id): float(days)
+            for token_id, days in time_token_values.items()
+        }
+        self.sinusoidal_time_base = sinusoidal_time_base
+        self.sinusoidal_time_scale = (
+            initializer_range
+            if sinusoidal_time_scale is None
+            else sinusoidal_time_scale
+        )
         # self.tie_word_embeddings = not use_pretrained_embeddings
 
         self.lab_token_penalty = lab_token_penalty
