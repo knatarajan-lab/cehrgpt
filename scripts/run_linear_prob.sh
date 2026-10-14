@@ -365,8 +365,11 @@ while read -r cohort_name; do
         FEATURE_CMD="$FEATURE_CMD --sample_packing"
     fi
 
-    if [ "$DISABLE_COMBINE_GLOBAL_LOCAL" = "false" ]; then
-        FEATURE_CMD="$FEATURE_CMD --combine_global_local_features"
+    # The argument defaults to true, so the disabled case has to be passed explicitly
+    if [ "$DISABLE_COMBINE_GLOBAL_LOCAL" = "true" ]; then
+        FEATURE_CMD="$FEATURE_CMD --combine_global_local_features false"
+    else
+        FEATURE_CMD="$FEATURE_CMD --combine_global_local_features true"
     fi
 
     if [ "$ADD_RANDOM_TOKEN" = "true" ]; then
