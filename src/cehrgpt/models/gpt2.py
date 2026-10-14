@@ -1,3 +1,6 @@
+import contextlib
+import functools
+import threading
 from typing import Optional, Tuple, Union
 
 import torch.nn.functional as f
@@ -72,7 +75,7 @@ def is_sample_pack(attention_mask: torch.Tensor) -> bool:
 
 
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data
-def _get_unpad_data(attention_mask):
+def _compute_unpad_data(attention_mask):
     # This infers sample packing
     if is_sample_pack(attention_mask):
         # Assume input: attention_mask shape = (batch, seq_len)
@@ -116,6 +119,73 @@ def _get_unpad_data(attention_mask):
         cu_seqlens,
         max_seqlen_in_batch,
     )
+
+
+_unpad_cache_state = threading.local()
+# The transformers logger: the module logger would not show INFO messages in a training log
+_UNPAD_LOG = logging.get_logger("transformers")
+_logged_unpad_reuse = False
+
+
+@contextlib.contextmanager
+def reuse_unpad_data():
+    """
+    Within the block, compute _get_unpad_data once per distinct attention mask tensor.
+
+    Every layer of a forward pass gets the same attention mask, but _get_unpad_data derives
+    the same indices and sequence lengths from it in every layer with about six GPU-to-CPU
+    syncs (`.item()`, `nonzero`, boolean-mask indexing). Each sync stalls the CPU until the
+    GPU has drained, so the CPU cannot launch kernels ahead of it. With 21 attention layers
+    that is ~130 syncs per training step.
+
+    The cache is created fresh for every block and holds a reference to the mask, so an
+    address that the allocator recycles for a different mask can never produce a stale hit.
+    Outside the block (e.g. in gradient checkpointing's recomputation) nothing is cached.
+    """
+    previous = getattr(_unpad_cache_state, "cache", None)
+    _unpad_cache_state.cache = {}
+    try:
+        yield
+    finally:
+        _unpad_cache_state.cache = previous
+
+
+def reuse_unpad_data_during_forward(forward):
+    """Decorator: run a module's forward inside reuse_unpad_data()."""
+
+    @functools.wraps(forward)
+    def wrapper(*args, **kwargs):
+        with reuse_unpad_data():
+            return forward(*args, **kwargs)
+
+    return wrapper
+
+
+def _tensor_version(tensor):
+    try:
+        return tensor._version
+    except RuntimeError:  # inference tensors do not track a version
+        return None
+
+
+def _get_unpad_data(attention_mask):
+    cache = getattr(_unpad_cache_state, "cache", None)
+    version = _tensor_version(attention_mask) if cache is not None else None
+    if cache is not None and version is not None:
+        entry = cache.get(id(attention_mask))
+        if entry is not None and entry[0] is attention_mask and entry[1] == version:
+            global _logged_unpad_reuse
+            if not _logged_unpad_reuse:
+                _logged_unpad_reuse = True
+                _UNPAD_LOG.info(
+                    "Sharing the flash-attention unpad data across the attention layers of a "
+                    "forward pass (computed once per attention mask, not once per layer)."
+                )
+            return entry[2]
+    result = _compute_unpad_data(attention_mask)
+    if cache is not None and version is not None:
+        cache[id(attention_mask)] = (attention_mask, version, result)
+    return result
 
 
 class RotaryPositionEmbedding(nn.Module):
