@@ -562,6 +562,59 @@ class HFFineTuningMapping(HFCehrGptTokenizationMapping):
         return columns
 
 
+class _PredictionTimeIndex:
+    """
+    The (index_date, label) pairs of every person as flat numpy arrays.
+
+    Equivalent to a ``{person_id: [{"index_date": datetime, "label": ...}, ...]}`` dict, but
+    cheap to pickle and hash, which matters because datasets.map serializes the mapping object
+    for every worker job. index_date is stored as the POSIX timestamp of the naive/aware
+    datetime read as UTC, which is what the extraction needs.
+    """
+
+    def __init__(self, person_index_date_map: Dict[int, List[Dict[str, Any]]]):
+        person_ids = np.fromiter(
+            person_index_date_map.keys(),
+            dtype=np.int64,
+            count=len(person_index_date_map),
+        )
+        order = np.argsort(person_ids, kind="stable")
+        self._person_ids = person_ids[order]
+        keys = list(person_index_date_map.keys())
+        timestamps: List[float] = []
+        labels: List[Any] = []
+        offsets = [0]
+        for position in order:
+            for entry in person_index_date_map[keys[position]]:
+                timestamps.append(
+                    entry["index_date"]
+                    .replace(tzinfo=datetime.timezone.utc)
+                    .timestamp()
+                )
+                labels.append(entry["label"])
+            offsets.append(len(timestamps))
+        self._offsets = np.asarray(offsets, dtype=np.int64)
+        self._timestamps = np.asarray(timestamps, dtype=np.float64)
+        self._labels = np.asarray(labels)
+
+    def __len__(self) -> int:
+        return len(self._person_ids)
+
+    def get(self, person_id: int):
+        """Return (index date timestamps, labels) of a person as python lists."""
+        position = int(np.searchsorted(self._person_ids, person_id))
+        if (
+            position >= len(self._person_ids)
+            or self._person_ids[position] != person_id
+        ):
+            raise KeyError(person_id)
+        start, end = self._offsets[position], self._offsets[position + 1]
+        return (
+            self._timestamps[start:end].tolist(),
+            self._labels[start:end].tolist(),
+        )
+
+
 class ExtractTokenizedSequenceDataMapping:
     def __init__(
         self,
@@ -569,7 +622,11 @@ class ExtractTokenizedSequenceDataMapping:
         observation_window: int = 0,
         tokenizer: Optional["CehrGptTokenizer"] = None,
     ):
-        self.person_index_date_map = person_index_date_map
+        # datasets pickles this object once per Map job and hashes it for the cache fingerprint.
+        # A dict of 1M persons, each holding a list of dicts with datetimes, takes tens of seconds
+        # to pickle, so the prediction times are stored as flat numpy arrays instead (see
+        # _PredictionTimeIndex), which pickle in milliseconds.
+        self._prediction_times = _PredictionTimeIndex(person_index_date_map)
         # Pre-compute the offset once so the inner loop does no arithmetic.
         self._obs_window_seconds = (
             observation_window * 24 * 3600
@@ -580,20 +637,17 @@ class ExtractTokenizedSequenceDataMapping:
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
         person_id = record["person_id"]
-        prediction_times = self.person_index_date_map[person_id]
+        index_date_timestamps, labels = self._prediction_times.get(person_id)
 
         obs_window_seconds = self._obs_window_seconds
         prediction_start_end_times = []
-        for ptm in prediction_times:
-            index_date_ts = (
-                ptm["index_date"].replace(tzinfo=datetime.timezone.utc).timestamp()
-            )
+        for index_date_ts, label in zip(index_date_timestamps, labels):
             feature_start = (
                 max(index_date_ts - obs_window_seconds, 0)
                 if obs_window_seconds > 0
                 else 0
             )
-            prediction_start_end_times.append((feature_start, index_date_ts, ptm["label"]))
+            prediction_start_end_times.append((feature_start, index_date_ts, label))
 
         concept_ids = record["concept_ids"]
         epoch_times = np.asarray(record["epoch_times"], dtype=float)
