@@ -3,8 +3,10 @@ Trainer callback that profiles a few training steps and logs where the GPU time 
 
 Enable it with --profile_gpu_steps N. After --profile_gpu_start_step steps of warm-up (the
 first steps include compilation and allocator warm-up, which would drown everything else),
-it profiles the next N steps, logs the average seconds per step and a table of the most
-expensive operations, and writes a Chrome trace next to the checkpoints.
+it profiles the next N steps, logs the average seconds per step, the process's own peak GPU
+memory and a table of the most expensive operations, and writes a Chrome trace next to the
+checkpoints. Run it on a GPU nothing else is using: a second process on the card stretches
+kernel times and inflates nvidia-smi's memory total.
 
 How to read the table:
   * the `motor_loss` row is the forward of the MOTOR loss (head matmuls and loss);
@@ -59,6 +61,14 @@ class GpuProfileCallback(TrainerCallback):
         elapsed = time.perf_counter() - self._started_at
         self._profiler.__exit__(None, None, None)
         profiler, self._profiler, self.done = self._profiler, None, True
+        if torch.cuda.is_available():
+            # This process's own peak, unlike nvidia-smi's per-GPU total, which also counts
+            # every other process on the card.
+            LOG.info(
+                "GPU memory of this process: peak allocated %.2f GiB, peak reserved %.2f GiB",
+                torch.cuda.max_memory_allocated() / 2**30,
+                torch.cuda.max_memory_reserved() / 2**30,
+            )
         sort_key = "self_cuda_time_total" if torch.cuda.is_available() else "self_cpu_time_total"
         LOG.info(
             "Profiled %s steps: %.3f seconds per step on average",
