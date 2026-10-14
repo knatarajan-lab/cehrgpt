@@ -31,7 +31,12 @@ from cehrgpt.gpt_utils import (
 )
 from cehrgpt.models.activations import RMSNorm
 from cehrgpt.models.config import CEHRGPTConfig
-from cehrgpt.models.gpt2 import GPT2Block, HAS_XFORMERS, is_sample_pack
+from cehrgpt.models.gpt2 import (
+    GPT2Block,
+    HAS_XFORMERS,
+    is_sample_pack,
+    reuse_unpad_data_during_forward,
+)
 from cehrgpt.models.hf_modeling_outputs import (
     CehrGptCausalLMOutput,
     CehrGptGenerateDecoderOnlyOutput,
@@ -960,6 +965,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         for layer, heads in heads_to_prune.items():
             self.h[layer].attn.prune_heads(heads)
 
+    @reuse_unpad_data_during_forward
     def forward(
         self,
         input_ids: Optional[torch.LongTensor],
@@ -1380,6 +1386,7 @@ class LinearProbModule(CEHRGPTPreTrainedModel):
                 persistent=False,
             )
 
+    @reuse_unpad_data_during_forward
     def forward(
         self,
         linear_prob_hidden_state: Optional[torch.LongTensor],
@@ -1461,6 +1468,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             )
 
         self.motor_time_bins = None
+        self._motor_time_bins_on_device = None
         self.linear_prob = None
         self.motor_tte = None
 
@@ -1567,6 +1575,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         self.motor_time_bins = torch.tensor(
             self.config.motor_time_bins, dtype=torch.float32
         )
+        self._motor_time_bins_on_device = None
         self.linear_prob = LinearProbModule(self.config)
         self.motor_tte = MotorTaskHead(
             input_dim=self.config.n_embd,
@@ -1670,7 +1679,26 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         return model_inputs
 
-    def motor_nll_loss(
+    def _get_motor_time_bins(self, device: torch.device) -> torch.Tensor:
+        """
+        The MOTOR time bins on `device`, copied once.
+
+        They live on the CPU, and copying them in every loss call is a blocking host-to-device
+        transfer that makes the CPU wait for the GPU each step. A plain attribute, not a buffer,
+        so that model.to(dtype) cannot round the bin edges (bfloat16 cannot hold 365 exactly).
+        """
+        cached = self._motor_time_bins_on_device
+        if cached is None or cached.device != device:
+            cached = self.motor_time_bins.to(device)
+            self._motor_time_bins_on_device = cached
+        return cached
+
+    def motor_nll_loss(self, *args, **kwargs):
+        # A named range, so a GPU profile shows how much of a step the MOTOR loss takes
+        with torch.profiler.record_function("motor_loss"):
+            return self._motor_nll_loss(*args, **kwargs)
+
+    def _motor_nll_loss(
         self,
         hidden_states,
         motor_row_indices,
@@ -1703,10 +1731,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             device=hidden_states.device,
         )
         event_indicators[motor_row_indices, motor_col_indices] = True
+
         event_indicators_3d = event_indicators[:, None, :]
 
-        start_times = self.motor_time_bins[:-1].to(hidden_states.device)
-        end_times = self.motor_time_bins[1:].to(hidden_states.device)
+        motor_time_bins = self._get_motor_time_bins(hidden_states.device)
+        start_times = motor_time_bins[:-1]
+        end_times = motor_time_bins[1:]
         bin_widths = end_times - start_times
         bin_widths_broadcast = bin_widths[None, :, None]  # (1, n_bins, 1)
         start_times_broadcast = start_times[None, :, None]  # (1, n_bins, 1)

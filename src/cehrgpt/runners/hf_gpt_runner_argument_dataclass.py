@@ -60,6 +60,20 @@ class CehrGPTArguments:
             "reads gradients and does not modify training."
         },
     )
+    profile_gpu_steps: int = dataclasses.field(
+        default=0,
+        metadata={
+            "help": "Profile this many training steps (after --profile_gpu_start_step) and log "
+            "the seconds per step and the most expensive GPU operations. 0 disables it."
+        },
+    )
+    profile_gpu_start_step: int = dataclasses.field(
+        default=20,
+        metadata={
+            "help": "Training steps to run before profiling starts, so that compilation and "
+            "allocator warm-up are not in the profile."
+        },
+    )
     instability_probe_every: Optional[int] = dataclasses.field(
         default=25,
         metadata={"help": "Step interval for InstabilityProbe logging"},
