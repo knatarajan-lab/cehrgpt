@@ -10,10 +10,9 @@ kernel times and inflates nvidia-smi's memory total.
 
 How to read the table:
   * the `motor_loss` row is the forward of the MOTOR loss (head matmuls and loss);
-  * kernels named `triton_...` come from torch.compile; if --motor_fused_loss is working you
-    see fused `triton_*` reductions and not a long list of aten elementwise kernels with
-    (rows, bins, vocab)-sized outputs;
-  * the dense matmuls (`aten::mm`, `aten::bmm`, `flash_attn`) are the transformer itself.
+  * the dense matmuls (`aten::mm`, `aten::addmm`, `flash_attn`) are the transformer itself;
+  * `aten::copy_` is dtype casts and copies, and the elementwise kernels are the cheap ops
+    between the matmuls, which are the first thing to fuse when a step is memory-bound.
 """
 import os
 import time

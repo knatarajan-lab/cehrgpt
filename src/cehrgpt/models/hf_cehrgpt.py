@@ -1,8 +1,4 @@
-import contextlib
 import math
-import os
-import threading
-import traceback
 import warnings
 from typing import Iterable, List, Optional, Tuple, Union
 
@@ -1436,128 +1432,6 @@ class LinearProbModule(CEHRGPTPreTrainedModel):
         return linear_prob_hidden_state
 
 
-def motor_loss_terms(
-    logits: torch.Tensor,
-    time_vectors: torch.Tensor,
-    event_indicators: torch.Tensor,
-    start_times: torch.Tensor,
-    end_times: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    The dense part of the MOTOR loss: the summed hazard and the summed log-hazard of the events.
-
-    Everything here is elementwise over (rows, time bins, motor vocab) followed by a sum, so
-    torch.compile fuses it into a single kernel and never materializes the intermediates. The
-    arithmetic is in float32 (times are in days and lose too much in bfloat16) and keeps the
-    log-space form exp2(logit + log2(time in bin)) of the unfused implementation.
-
-    :param logits: (rows, bins, vocab) output of the MOTOR head.
-    :param time_vectors: (rows, vocab) time to the event, or to censoring, in days.
-    :param event_indicators: (rows, vocab) True where the event was observed.
-    :param start_times: (bins,) start of every time bin.
-    :param end_times: (bins,) end of every time bin (the last one may be inf).
-    :return: (sum of the hazard, sum of the logits of the events that fall in their bin).
-    """
-    logits = logits.float()
-    t = time_vectors.float()[:, None, :]
-    start = start_times.float()[None, :, None]
-    end = end_times.float()[None, :, None]
-    time_in_bin = torch.minimum((t - start).clamp(min=0), end - start)
-    hazard = torch.where(
-        time_in_bin > 0,
-        torch.exp2(logits + torch.log2(time_in_bin.clamp(min=1e-8))),
-        0.0,
-    )
-    event_in_bin = event_indicators[:, None, :] & (t >= start) & (t < end)
-    return hazard.sum(), torch.where(event_in_bin, logits, 0.0).sum()
-
-
-# The same logger the runners use; the module logger below would drop INFO messages
-MOTOR_LOG = logging.get_logger("transformers")
-
-_motor_loss_terms_in_use = None
-
-
-def _describe_compile_environment(device: torch.device) -> str:
-    try:
-        import triton
-
-        triton_version = triton.__version__
-    except Exception:  # noqa: BLE001
-        triton_version = "not importable"
-    current_device = torch.cuda.current_device() if torch.cuda.is_available() else None
-    return (
-        f"torch={torch.__version__} triton={triton_version} device={device} "
-        f"current_device={current_device} thread={threading.current_thread().name} "
-        f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}"
-    )
-
-
-def compile_motor_loss_terms(device: torch.device, compile_fn=torch.compile):
-    """
-    Compile motor_loss_terms and prove it works, or fall back to the eager function.
-
-    torch.compile is lazy: the forward is compiled on the first call and the backward on the
-    first backward(). Exercising both here, on tiny tensors, means a missing Triton, compiler
-    or headers surfaces as a clear warning and an eager fallback instead of a crash in the
-    middle of training. The warm-up runs with `device` as the current CUDA device: Triton
-    launches kernels on the thread's current CUDA context and fails with "invalid device
-    context" when there is none, which is also why the backward below starts with a multiply.
-    """
-    compiled = compile_fn(motor_loss_terms, dynamic=True)
-    device_context = (
-        torch.cuda.device(device) if device.type == "cuda" else contextlib.nullcontext()
-    )
-    try:
-        with device_context:
-            logits = torch.randn(5, 4, 8, device=device, requires_grad=True)
-            times = torch.rand(5, 8, device=device) * 10
-            events = torch.rand(5, 8, device=device) < 0.3
-            start = torch.tensor([0.0, 1.0, 3.0, 7.0], device=device)
-            end = torch.tensor([1.0, 3.0, 7.0, float("inf")], device=device)
-            hazard, event_logits = compiled(logits, times, events, start, end)
-            # Backward runs on the autograd engine's own thread, and a Triton kernel launched
-            # first on a thread that has not run a regular CUDA op fails with "invalid device
-            # context". As in training, where the loss is scaled by a weight, put a CUDA
-            # multiply ahead of the compiled node.
-            weight = torch.ones((), device=device)
-            (hazard * weight + event_logits * weight).backward()
-            if device.type == "cuda":
-                torch.cuda.synchronize(device)
-    except Exception as error:  # noqa: BLE001 - e.g. no Triton/compiler on this machine
-        MOTOR_LOG.warning(
-            "Could not compile the fused MOTOR loss (%s: %s); using the eager version, "
-            "which is not faster than the unfused loss.\nEnvironment: %s\n%s",
-            type(error).__name__,
-            error,
-            _describe_compile_environment(device),
-            traceback.format_exc(),
-        )
-        return motor_loss_terms
-    MOTOR_LOG.info(
-        "Fused MOTOR loss: compiled with torch.compile on %s and verified with a "
-        "forward/backward warm-up.",
-        device,
-    )
-    return compiled
-
-
-def get_motor_loss_terms(device: torch.device):
-    """The MOTOR loss terms to use on `device`, resolved (and logged) once per process."""
-    global _motor_loss_terms_in_use
-    if _motor_loss_terms_in_use is None:
-        if device.type == "cuda":
-            _motor_loss_terms_in_use = compile_motor_loss_terms(device)
-        else:
-            MOTOR_LOG.info(
-                "Fused MOTOR loss on %s: using the eager version (compiling is only "
-                "done on CUDA).",
-                device.type,
-            )
-            _motor_loss_terms_in_use = motor_loss_terms
-    return _motor_loss_terms_in_use
-
-
 class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight", "value_head.weight"]
 
@@ -1796,32 +1670,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         return model_inputs
 
-    def _motor_nll_loss_fused(
-        self,
-        hidden_states,
-        motor_tte_task_indicators,
-        time_vectors,
-        event_indicators,
-    ):
-        tte_features = hidden_states[motor_tte_task_indicators].view(
-            (-1, self.config.n_embd)
-        )
-        time_dependent_logits = self.motor_tte(tte_features)
-        start_times = self.motor_time_bins[:-1].to(hidden_states.device)
-        end_times = self.motor_time_bins[1:].to(hidden_states.device)
-        normalizer = time_vectors.shape[0] * self.config.motor_tte_vocab_size
-        arguments = (
-            time_dependent_logits,
-            time_vectors,
-            event_indicators,
-            start_times,
-            end_times,
-        )
-        hazard, event_logits = get_motor_loss_terms(time_dependent_logits.device)(
-            *arguments
-        )
-        return hazard / normalizer - math.log(2) * event_logits / normalizer
-
     def motor_nll_loss(self, *args, **kwargs):
         # A named range, so a GPU profile shows how much of a step the MOTOR loss takes
         with torch.profiler.record_function("motor_loss"):
@@ -1861,13 +1709,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         )
         event_indicators[motor_row_indices, motor_col_indices] = True
 
-        if getattr(self.config, "motor_fused_loss", False):
-            return self._motor_nll_loss_fused(
-                hidden_states,
-                motor_tte_task_indicators,
-                time_vectors,
-                event_indicators,
-            )
         event_indicators_3d = event_indicators[:, None, :]
 
         start_times = self.motor_time_bins[:-1].to(hidden_states.device)

@@ -52,6 +52,8 @@ class PretrainSpeedOptionsIntegrationTest(unittest.TestCase):
             "--vocab_dir", self.vocab_dir,
             "--max_steps", "4",
             "--logging_steps", "1",
+            "--profile_gpu_steps", "1",
+            "--profile_gpu_start_step", "1",
             "--save_steps", "4",
             "--save_strategy", "steps",
             "--hidden_size", "96",
@@ -72,6 +74,7 @@ class PretrainSpeedOptionsIntegrationTest(unittest.TestCase):
             "--activation_function", "gelu_pytorch_tanh",
         ]
         train_main()
+        self.assertTrue(os.path.exists(os.path.join(self.model_folder, "gpu_profile_trace.json")))
         checkpoint = sorted(Path(self.model_folder).glob("checkpoint-*"))[-1]
 
         config = json.load(open(checkpoint / "config.json"))
