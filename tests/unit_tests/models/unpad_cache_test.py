@@ -114,6 +114,27 @@ class TestUnpadCache(unittest.TestCase):
         self.assertEqual(results["calls"], 1)
 
 
+class TestUnpadReuseIsVisibleInTheLog(unittest.TestCase):
+    def setUp(self):
+        gpt2._logged_unpad_reuse = False
+
+    def test_the_first_reuse_is_logged_once(self):
+        mask = packed_mask()
+        with self.assertLogs(gpt2._UNPAD_LOG.name, level="INFO") as logs:
+            with reuse_unpad_data():
+                for _ in range(5):
+                    _get_unpad_data(mask)
+            with reuse_unpad_data():
+                for _ in range(5):
+                    _get_unpad_data(mask)
+        self.assertEqual(sum("Sharing the flash-attention unpad data" in l for l in logs.output), 1)
+
+    def test_no_reuse_no_message(self):
+        with self.assertNoLogs(gpt2._UNPAD_LOG.name, level="INFO"):
+            for _ in range(3):
+                _get_unpad_data(packed_mask())
+
+
 class TestDecorator(unittest.TestCase):
     def test_forward_runs_inside_the_block_and_keeps_its_signature(self):
         class Layer(torch.nn.Module):

@@ -122,6 +122,9 @@ def _compute_unpad_data(attention_mask):
 
 
 _unpad_cache_state = threading.local()
+# The transformers logger: the module logger would not show INFO messages in a training log
+_UNPAD_LOG = logging.get_logger("transformers")
+_logged_unpad_reuse = False
 
 
 @contextlib.contextmanager
@@ -171,6 +174,13 @@ def _get_unpad_data(attention_mask):
     if cache is not None and version is not None:
         entry = cache.get(id(attention_mask))
         if entry is not None and entry[0] is attention_mask and entry[1] == version:
+            global _logged_unpad_reuse
+            if not _logged_unpad_reuse:
+                _logged_unpad_reuse = True
+                _UNPAD_LOG.info(
+                    "Sharing the flash-attention unpad data across the attention layers of a "
+                    "forward pass (computed once per attention mask, not once per layer)."
+                )
             return entry[2]
     result = _compute_unpad_data(attention_mask)
     if cache is not None and version is not None:
