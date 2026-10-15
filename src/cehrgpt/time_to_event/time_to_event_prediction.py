@@ -58,7 +58,7 @@ def load_task_config_from_yaml(task_config_yaml_file_path: str) -> TaskConfig:
         with open(task_config_yaml_file_path, "r") as stream:
             task_definition = yaml.safe_load(stream)
             return TaskConfig(**task_definition)
-    except yaml.YAMLError | OSError as e:
+    except (yaml.YAMLError, OSError) as e:
         raise ValueError(
             f"Could not open the task_config yaml file from {task_config_yaml_file_path}"
         ) from e

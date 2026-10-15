@@ -8,6 +8,7 @@ import unittest
 import numpy as np
 import pandas as pd
 import torch
+import yaml
 from datasets import Dataset
 
 from cehrgpt.models.config import CEHRGPTConfig
@@ -106,6 +107,90 @@ class WindowTest(unittest.TestCase):
         self.assertAlmostEqual(p / 1e-9, 1.0, places=3)
 
 
+TASK_CONFIGS = os.path.join(REPO, "src", "cehrgpt", "time_to_event", "config")
+
+
+class TaskConfigTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def write(self, **fields):
+        path = os.path.join(self.tmp, "task.yaml")
+        with open(path, "w") as f:
+            yaml.safe_dump({"task_name": "demo", **fields}, f)
+        return path
+
+    def load(self, name, **kwargs):
+        return zs.outcome_from_task_config(os.path.join(TASK_CONFIGS, name), **kwargs)
+
+    def test_the_readmission_file_as_shipped(self):
+        task = self.load("30_day_readmission.yaml")
+        self.assertEqual(task.task_name, "30_day_readmission_prediction")
+        self.assertEqual(task.outcome_events, ["9201", "262", "8971", "8920"])
+        self.assertFalse(task.include_descendants)
+        self.assertEqual(task.window, "0-30")
+        self.assertEqual(zs.parse_window(task.window), (0.0, 30.0))
+
+    def test_the_cabg_file_includes_descendants(self):
+        task = self.load("1_year_cabg.yaml")
+        self.assertTrue(task.include_descendants)
+        self.assertEqual(task.window, "0-365")
+        self.assertEqual(len(task.outcome_events), 14)
+        self.assertEqual(task.outcome_events[0], "43528001")
+
+    def test_a_window_without_an_end_needs_a_horizon(self):
+        with self.assertRaisesRegex(ValueError, "open_window_days"):
+            self.load("t2dm_hf.yaml")
+        task = self.load("t2dm_hf.yaml", open_window_days=365)
+        self.assertEqual(task.window, "30-365")
+        self.assertEqual(task.outcome_events, ["316139"])
+
+    def test_a_visit_limit_cannot_be_expressed(self):
+        with self.assertRaisesRegex(ValueError, "future visits"):
+            self.load("next_visit_type_prediction.yaml")
+        task = self.load("next_visit_type_prediction.yaml", ignore_visit_limits=True)
+        self.assertEqual(task.window, "0-365")  # the default window of the file
+
+    def test_every_shipped_file_loads_or_says_why(self):
+        for name in sorted(os.listdir(TASK_CONFIGS)):
+            with self.subTest(name=name):
+                try:
+                    task = self.load(name, open_window_days=365, ignore_visit_limits=True)
+                except ValueError as error:
+                    self.fail(f"{name}: {error}")
+                self.assertTrue(task.outcome_events)
+                start, end = zs.parse_window(task.window)
+                self.assertLess(start, end)
+
+    def test_unquoted_ids_become_strings(self):
+        task = zs.outcome_from_task_config(self.write(outcome_events=[9201, 262], prediction_window_end=90))
+        self.assertEqual(task.outcome_events, ["9201", "262"])
+        self.assertEqual(task.window, "0-90")
+
+    def test_tokens_cannot_have_descendants_expanded(self):
+        path = self.write(outcome_events=["Visit/IP"], include_descendants=True)
+        with self.assertRaisesRegex(ValueError, "include_descendants"):
+            zs.outcome_from_task_config(path)
+
+    def test_invalid_files(self):
+        with self.assertRaisesRegex(ValueError, "does not exist"):
+            zs.outcome_from_task_config(os.path.join(self.tmp, "missing.yaml"))
+        with self.assertRaisesRegex(ValueError, "empty"):
+            zs.outcome_from_task_config(self.write(outcome_events=[]))
+        with self.assertRaisesRegex(ValueError, "not valid"):
+            zs.outcome_from_task_config(self.write(outcome_events=["1"], prediction_window_start=50, prediction_window_end=20))
+        with self.assertRaisesRegex(ValueError, "mix"):
+            zs.outcome_from_task_config(self.write(outcome_events=["1", "Visit/IP"]))
+
+    def test_the_shared_loader_reports_a_missing_file(self):
+        # it used to raise a TypeError from a malformed except clause
+        from cehrgpt.time_to_event.time_to_event_prediction import load_task_config_from_yaml
+
+        with self.assertRaisesRegex(ValueError, "Could not open the task_config"):
+            load_task_config_from_yaml(os.path.join(self.tmp, "missing.yaml"))
+
+
 class OutcomeHelpersTest(unittest.TestCase):
     def test_combine_probabilities(self):
         p = np.array([[0.5, 0.5], [0.1, 0.0], [1.0, 0.3]])
@@ -115,6 +200,35 @@ class OutcomeHelpersTest(unittest.TestCase):
         self.assertTrue(np.isfinite(zs.combine_probabilities(p, "independent_or")).all())
         with self.assertRaises(ValueError):
             zs.combine_probabilities(p, "mean")
+
+    def test_sampled_events_estimate_the_combined_probability(self):
+        rng = np.random.RandomState(0)
+        p = np.clip(rng.rand(40, 3) * 0.6, 0, 1)
+        exact = zs.combine_probabilities(p, "independent_or")
+        any_event, mean_events = zs.sample_outcome_events(p, num_trials=20000, seed=1)
+        # within four standard errors of the closed form, and the mean count is the sum of the probabilities
+        self.assertTrue((np.abs(any_event - exact) < 4 * np.sqrt(exact * (1 - exact) / 20000) + 1e-3).all())
+        self.assertTrue((np.abs(mean_events - p.sum(axis=1)) < 0.05).all())
+        # the same seed gives the same draws, another seed does not
+        again, _ = zs.sample_outcome_events(p, num_trials=100, seed=1)
+        np.testing.assert_array_equal(again, zs.sample_outcome_events(p, num_trials=100, seed=1)[0])
+        self.assertFalse(np.array_equal(again, zs.sample_outcome_events(p, num_trials=100, seed=2)[0]))
+        # the estimates are multiples of 1 / num_trials
+        np.testing.assert_allclose(again * 100, np.round(again * 100), atol=1e-9)
+
+    def test_sampling_edge_cases(self):
+        certain = np.array([[1.0, 0.0], [0.0, 0.0], [1.0, 1.0]])
+        any_event, mean_events = zs.sample_outcome_events(certain, num_trials=50)
+        np.testing.assert_array_equal(any_event, [1.0, 0.0, 1.0])
+        np.testing.assert_array_equal(mean_events, [1.0, 0.0, 2.0])
+        # chunking the rows does not change what is estimated
+        big = np.full((50, 2), 0.3)
+        a, _ = zs.sample_outcome_events(big, num_trials=5000, chunk_rows=7)
+        self.assertAlmostEqual(a.mean(), 1 - 0.7 ** 2, delta=0.01)
+        with self.assertRaises(ValueError):
+            zs.sample_outcome_events(big, num_trials=0)
+        # a single task is not sampled: its probability is used as it is
+        np.testing.assert_allclose(zs.combine_probabilities(np.array([[0.3], [0.8]]), "sampled"), [0.3, 0.8])
 
     def test_a_concept_that_is_a_task_covers_its_descendants_itself(self):
         # a > b > c is a chain of tasks, d is unrelated; ancestors include the concept itself
@@ -257,15 +371,15 @@ class EndToEndTest(unittest.TestCase):
             data, names, args, PretrainedEmbeddings(os.path.join(sample, "pretrained_embeddings")),
             num_motor_tasks=40, ontology=None,
         )
-        # An ontology over the tasks: c1 and c3 are below c0, c2 is below c1; "broad" is a concept
-        # that is not a task and sits above c0 and c5
+        # An ontology over the tasks: c1 and c3 are below c0, c2 is below c1; "999001" is a concept
+        # that is not a task (a numeric id, as a real concept) and sits above c0 and c5
         from cehrgpt.omop.ontology import Ontology
 
         codes = sorted(cls.tokenizer._motor_time_to_event_codes)
         ontology = Ontology.__new__(Ontology)
         ontology.parents_map = {
             codes[1]: {codes[0]}, codes[2]: {codes[1]}, codes[3]: {codes[0]},
-            codes[0]: {"broad"}, codes[5]: {"broad"},
+            codes[0]: {"999001"}, codes[5]: {"999001"},
         }
         ontology.all_parents_map = {}
         ontology.concept_domain_map = {}
@@ -427,6 +541,39 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(set(both["outcome"]["per_concept"]), set(concepts))
         self.assertTrue((combined["probability"] >= wide.max(axis=1) - 1e-7).all())
 
+    def test_sampled_combination_from_the_command_line(self):
+        concepts = [self.codes[0], self.codes[1], self.codes[2]]
+        metrics, output, _ = self.run_cli(
+            "--outcome_concepts", *concepts, "--windows", "365", "--combine", "sampled",
+            "--num_trials", "200", "--seed", "3", out="sampled",
+        )
+        outcome = metrics["outcome"]
+        self.assertEqual(outcome["combine"], "sampled")
+        self.assertEqual(outcome["num_trials"], 200)
+        by_count = outcome["zero_shot_by_mean_events"]
+        self.assertIsNotNone(by_count)
+        # an expected number of events is a ranking score, not a probability
+        self.assertIsNone(by_count["brier_score"])
+        self.assertIsNone(by_count["mean_predicted_probability"])
+        self.assertIsNotNone(outcome["zero_shot"]["brier_score"])
+        scores = pd.read_parquet(os.path.join(output, "outcome_scores.parquet")).sort_values("subject_id")
+        self.assertIn("mean_events_per_trial", scores.columns)
+        np.testing.assert_allclose(scores["probability"] * 200, np.round(scores["probability"] * 200), atol=1e-4)
+        # close to the closed form, which is what it estimates
+        exact, out_exact, _ = self.run_cli("--outcome_concepts", *concepts, "--windows", "365", out="exact")
+        closed = pd.read_parquet(os.path.join(out_exact, "outcome_scores.parquet")).sort_values("subject_id")
+        self.assertLess(np.abs(scores["probability"].to_numpy() - closed["probability"].to_numpy()).max(), 0.2)
+        self.assertIsNone(exact["outcome"]["zero_shot_by_mean_events"])
+        # reproducible
+        again, out_again, _ = self.run_cli(
+            "--outcome_concepts", *concepts, "--windows", "365", "--combine", "sampled",
+            "--num_trials", "200", "--seed", "3", out="sampled_again",
+        )
+        pd.testing.assert_frame_equal(
+            scores.reset_index(drop=True),
+            pd.read_parquet(os.path.join(out_again, "outcome_scores.parquet")).sort_values("subject_id").reset_index(drop=True),
+        )
+
     def test_the_supervised_baseline(self):
         train, _ = self.features(n=400, folder="train", seed=1, signal=True)
         path, _ = self.features(n=200, folder="evalset", seed=2, signal=True)
@@ -450,16 +597,16 @@ class EndToEndTest(unittest.TestCase):
     def test_descendants_are_covered_through_the_tasks_below_a_concept(self):
         c = self.codes
         ancestors_of = zs.tokenizer_ancestors(self.tokenizer)
-        self.assertEqual(ancestors_of(c[2]), {c[2], c[1], c[0], "broad"})
+        self.assertEqual(ancestors_of(c[2]), {c[2], c[1], c[0], "999001"})
         # a concept that is a task covers its descendants itself
         metrics, _, _ = self.run_cli("--outcome_concepts", c[0], "--expand_descendants", out="expand_task")
         self.assertEqual(metrics["outcome"]["concepts"], [c[0]])
-        # "broad" is not a task: its highest tasks are c0 (with c1, c2, c3 below it) and c5
-        metrics, output, _ = self.run_cli("--outcome_concepts", "broad", "--expand_descendants", out="expand_broad")
+        # "999001" is not a task: its highest tasks are c0 (with c1, c2, c3 below it) and c5
+        metrics, output, _ = self.run_cli("--outcome_concepts", "999001", "--expand_descendants", out="expand_broad")
         outcome = metrics["outcome"]
         self.assertEqual(set(outcome["concepts"]), {c[0], c[5]})
-        self.assertEqual(outcome["outcome_input"], ["broad"])
-        self.assertEqual(set(outcome["tasks_per_input_concept"]["broad"]), {c[0], c[5]})
+        self.assertEqual(outcome["outcome_input"], ["999001"])
+        self.assertEqual(set(outcome["tasks_per_input_concept"]["999001"]), {c[0], c[5]})
         self.assertEqual(set(pd.read_parquet(os.path.join(output, "predictions.parquet"))["concept_id"]), {c[0], c[5]})
         # a set of concepts from a file; c1 is below c0, so only c0 and c5 remain
         listing = os.path.join(self.tmp, "set.txt")
@@ -471,6 +618,87 @@ class EndToEndTest(unittest.TestCase):
              "--outcome_concepts_file", listing, "--expand_descendants"]
         )
         self.assertEqual(set(zs.run(args)["outcome"]["concepts"]), {c[0], c[5]})
+
+    def write_task(self, **fields):
+        path = os.path.join(self.tmp, "task.yaml")
+        with open(path, "w") as f:
+            yaml.safe_dump({"task_name": "demo_task", **fields}, f)
+        return path
+
+    def test_the_time_to_event_task_file_defines_the_outcome(self):
+        c = self.codes
+        task = self.write_task(outcome_events=[c[1]], prediction_window_start=0, prediction_window_end=60)
+        path, frame = self.features()
+        out = os.path.join(self.tmp, "from_task")
+        metrics = zs.run(zs.create_arg_parser().parse_args(
+            ["--model_path", self.model_dir, "--features_folder", path, "--output_dir", out, "--task_config", task]
+        ))
+        self.assertEqual(metrics["task_name"], "demo_task")
+        self.assertEqual(metrics["outcome"]["concepts"], [c[1]])
+        self.assertEqual(metrics["outcome"]["window_days"], "0-60")
+        # the same numbers as asking for it on the command line
+        direct, _, _ = self.run_cli("--outcome_concepts", c[1], "--outcome_window", "0-60", out="direct")
+        self.assertEqual(metrics["outcome"]["zero_shot"], direct["outcome"]["zero_shot"])
+        self.assertIsNone(direct["task_name"])
+
+    def test_the_file_can_include_descendants_and_the_command_line_wins(self):
+        c = self.codes
+        task = self.write_task(outcome_events=["999001"], include_descendants=True, prediction_window_end=45)
+        path, _ = self.features()
+        base = ["--model_path", self.model_dir, "--features_folder", path, "--task_config", task]
+        parse = zs.create_arg_parser().parse_args
+        resolved = zs.run(parse(base + ["--output_dir", os.path.join(self.tmp, "t1")]))["outcome"]
+        self.assertEqual(set(resolved["concepts"]), {c[0], c[5]})
+        self.assertEqual(resolved["window_days"], "0-45")
+        # --outcome_window and --outcome_concepts override the file
+        overridden = zs.run(parse(base + ["--output_dir", os.path.join(self.tmp, "t2"), "--outcome_window", "10-20", "--outcome_concepts", c[2]]))["outcome"]
+        self.assertEqual(overridden["window_days"], "10-20")
+        self.assertEqual(set(overridden["concepts"]), {c[2]})  # c2 is itself a task; its descendants are in it
+
+    def test_an_open_window_needs_a_horizon_on_the_command_line(self):
+        task = self.write_task(outcome_events=[self.codes[0]], prediction_window_start=30, prediction_window_end=-1)
+        path, _ = self.features()
+        base = ["--model_path", self.model_dir, "--features_folder", path, "--task_config", task]
+        parse = zs.create_arg_parser().parse_args
+        with self.assertRaisesRegex(ValueError, "open_window_days"):
+            zs.run(parse(base + ["--output_dir", os.path.join(self.tmp, "o1")]))
+        metrics = zs.run(parse(base + ["--output_dir", os.path.join(self.tmp, "o2"), "--open_window_days", "365"]))
+        self.assertEqual(metrics["outcome"]["window_days"], "30-365")
+
+    def test_descendants_from_an_omop_concept_ancestor_table(self):
+        c = self.codes
+        # a numeric stand-in for the broad concept, and the same hierarchy as the tokenizer's ontology
+        broad = 999001
+        parents = {c[1]: [c[0]], c[2]: [c[1]], c[3]: [c[0]], c[0]: [str(broad)], c[5]: [str(broad)]}
+        nodes = set(c) | {str(broad)}
+        rows = []
+        for node in nodes:
+            distance, queue = {node: 0}, [node]
+            while queue:
+                current = queue.pop(0)
+                for parent in parents.get(current, []):
+                    if parent not in distance:
+                        distance[parent] = distance[current] + 1
+                        queue.append(parent)
+            rows += [{"ancestor_concept_id": int(a), "descendant_concept_id": int(node),
+                      "min_levels_of_separation": d, "max_levels_of_separation": d} for a, d in distance.items()]
+        table = os.path.join(self.tmp, "concept_ancestor.parquet")
+        pd.DataFrame(rows).to_parquet(table)
+        ancestors_of = zs.ancestors_from_table(table, c)
+        self.assertEqual(ancestors_of(c[2]), {c[2], c[1], c[0], str(broad)})
+        self.assertEqual(ancestors_of("not a task"), {"not a task"})
+        # a tokenizer without an ontology: the table is what makes the expansion possible
+        bare = os.path.join(self.tmp, "bare_tokenizer")
+        self.tokenizer.save_pretrained(bare)
+        os.remove(os.path.join(bare, "ontology.pickle"))
+        path, _ = self.features()
+        base = ["--model_path", self.model_dir, "--tokenizer_path", bare, "--features_folder", path,
+                "--outcome_concepts", str(broad), "--expand_descendants"]
+        parse = zs.create_arg_parser().parse_args
+        with self.assertRaisesRegex(ValueError, "concept_ancestor"):
+            zs.run(parse(base + ["--output_dir", os.path.join(self.tmp, "nt")]))
+        resolved = zs.run(parse(base + ["--output_dir", os.path.join(self.tmp, "yt"), "--concept_ancestor", table]))["outcome"]
+        self.assertEqual(set(resolved["concepts"]), {c[0], c[5]})
 
     def test_a_concept_without_any_task_cannot_be_expanded(self):
         path, _ = self.features()
@@ -493,6 +721,11 @@ class EndToEndTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "ontology"):
             zs.run(args)
+
+    def test_a_score_that_is_not_a_probability_gets_ranking_metrics_only(self):
+        result = zs.evaluate_predictions(np.array([0, 1, 1, 0]), np.array([0.5, 2.0, 1.5, 0.0]), is_probability=False)
+        self.assertEqual(result["auroc"], 1.0)
+        self.assertIsNone(result["brier_score"])
 
     def test_evaluate_metrics_function(self):
         result = zs.evaluate_predictions(np.array([0, 0, 1, 1]), np.array([0.1, 0.2, 0.8, 0.9]))
