@@ -1226,9 +1226,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
 
         # Create the tokenizer now
         LOG.info("Training the tokenizer for concepts")
-        concept_tokenizer = cls.train_concept_tokenizer(
-            dataset,
-            feature_name="concept_ids",
+        concept_tokenizer = cls.train_concept_tokenizer_from_counts(
+            cehrgpt_data_statistics["concept_token_counts"],
             special_tokens=[
                 PAD_TOKEN,
                 OUT_OF_VOCABULARY_TOKEN,
@@ -1240,15 +1239,9 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             data_args=data_args,
             qualified_codes=qualified_codes,
         )
-        concept_value_column = "concept_as_values"
-        for row in dataset:
-            if concept_value_column not in row:
-                concept_value_column = "concept_values"
-            break
         LOG.info("Training the tokenizer for values")
-        value_tokenizer = cls.train_concept_tokenizer(
-            dataset,
-            feature_name=concept_value_column,
+        value_tokenizer = cls.train_concept_tokenizer_from_counts(
+            cehrgpt_data_statistics["value_token_counts"],
             special_tokens=[OUT_OF_VOCABULARY_TOKEN, PAD_TOKEN],
             unk_token=OUT_OF_VOCABULARY_TOKEN,
             data_args=data_args,
@@ -1371,6 +1364,53 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             race_map,
             ontology,
         )
+
+    @classmethod
+    def train_concept_tokenizer_from_counts(
+            cls,
+            token_counts: Dict[str, int],
+            special_tokens: List[str],
+            unk_token: str,
+            data_args: DataTrainingArguments,
+            qualified_codes: Optional[Sequence[str]] = None,
+    ) -> Tokenizer:
+        """Construct a WordLevel tokenizer from counts gathered during statistics.
+
+        ``WordLevelTrainer`` assigns special tokens first, then orders observed tokens by
+        decreasing frequency and lexicographically for ties. Reproducing that ordering avoids
+        two full ``dataset.map`` passes while preserving the token ids produced by the trainer.
+        """
+        special_tokens = list(dict.fromkeys(special_tokens))
+        special_token_set = set(special_tokens)
+        qualified_code_set = set(qualified_codes) if qualified_codes else None
+        word_counts = collections.defaultdict(int)
+        for value, count in token_counts.items():
+            # The existing map filters complete values before joining them. Split only after this
+            # check to retain that behavior if a value itself contains whitespace.
+            if qualified_code_set is not None and value not in qualified_code_set:
+                continue
+            for token in value.split():
+                word_counts[token] += count
+        candidates = [
+            (token, count)
+            for token, count in word_counts.items()
+            if token not in special_token_set
+            and count >= data_args.min_frequency
+        ]
+        candidates.sort(key=lambda item: (-item[1], item[0]))
+        available_slots = max(0, data_args.vocab_size - len(special_tokens))
+        candidates = candidates[:available_slots]
+
+        vocab = {token: token_id for token_id, token in enumerate(special_tokens)}
+        vocab.update(
+            (token, len(special_tokens) + token_id)
+            for token_id, (token, _) in enumerate(candidates)
+        )
+        tokenizer = Tokenizer(WordLevel(unk_token=unk_token, vocab=vocab))
+        tokenizer.pre_tokenizer = WhitespaceSplit()
+        # Mark the already indexed tokens as special so decoding keeps the trainer's behavior.
+        tokenizer.add_special_tokens(special_tokens)
+        return tokenizer
 
     @classmethod
     def train_concept_tokenizer(
