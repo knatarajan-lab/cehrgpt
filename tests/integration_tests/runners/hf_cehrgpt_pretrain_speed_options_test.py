@@ -67,7 +67,7 @@ class PretrainSpeedOptionsIntegrationTest(unittest.TestCase):
             "--exclude_position_ids", "true",
             "--apply_rotary", "true",
             "--apply_entropy_filter",
-            "--min_prevalence", "0.01",
+            "--min_patient_count", "1",
             # fused AdamW supports cuda and cpu, not mps, which the Trainer picks on a Mac
             "--use_cpu", "true",
             "--optim", "adamw_torch_fused",

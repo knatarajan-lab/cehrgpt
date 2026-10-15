@@ -1,3 +1,4 @@
+import dataclasses
 import os
 import unittest
 from collections import Counter
@@ -69,20 +70,62 @@ class PatientCountsTest(unittest.TestCase):
             self.assertIsInstance(count, int)
             self.assertAlmostEqual(count / 4, statistics["all_concept_code_stats"][token], places=9)
 
-    def test_counts_stay_at_the_token_with_an_ontology(self):
-        # The prevalence is summed up the ontology; the patient count of a token is its own
+    @staticmethod
+    def ontology(parents):
         from cehrgpt.omop.ontology import Ontology
 
         ontology = Ontology.__new__(Ontology)
-        ontology.parents_map = {"100": {"900"}, "200": {"900"}}
+        ontology.parents_map = parents
         ontology.all_parents_map = {}
         ontology.concept_domain_map = {}
         ontology.concept_vocabulary_map = {}
-        statistics = compute_statistics(self.dataset, data_args(100), ontology)
-        counts = statistics["concept_patient_counts"]
+        return ontology
+
+    def test_descendants_count_towards_their_ancestors_once_per_patient(self):
+        # 100 and 200 are below 900; patient 1 has both, patient 2 has 100, patient 4 neither
+        counts = compute_statistics(self.dataset, data_args(100), self.ontology({"100": {"900"}, "200": {"900"}}))["concept_patient_counts"]
+        self.assertEqual(counts["100"], 3)           # a token still counts its own patients
+        self.assertEqual(counts["200"], 1)
+        self.assertEqual(counts["900"], 3)           # patients 1, 2, 3: not 3 + 1, patient 1 counts once
+        self.assertEqual(counts["300"], 2)           # unrelated tokens are unchanged
+        # the prevalence that is summed up the ontology would have said 4 / 4 patients
+        statistics = compute_statistics(self.dataset, data_args(100), self.ontology({"100": {"900"}, "200": {"900"}}))
+        self.assertAlmostEqual(statistics["all_concept_code_stats"]["900"], 4 / 4)
+
+    def test_chains_and_diamonds(self):
+        # 100 < 900 < 950, and 300 sits below both 900 and 500
+        ontology = self.ontology({"100": {"900"}, "900": {"950"}, "300": {"900", "500"}})
+        counts = compute_statistics(self.dataset, data_args(100), ontology)["concept_patient_counts"]
+        self.assertEqual(counts["900"], 4)   # patients 1, 2, 3 (via 100) and 4 (via 300): patient 2 has both, once
+        self.assertEqual(counts["950"], 4)   # a grandparent counts the same patients
+        self.assertEqual(counts["500"], 2)   # only through 300: patients 2 and 4
+
+    def test_a_token_that_is_also_an_ancestor_counts_its_own_patients_too(self):
+        dataset = Dataset.from_list([patient(1, ["900"]), patient(2, ["100"]), patient(3, ["100", "900"])])
+        counts = compute_statistics(dataset, data_args(100), self.ontology({"100": {"900"}}))["concept_patient_counts"]
+        self.assertEqual(counts["900"], 3)   # patient 3 has the parent and the child, once
+
+    def test_the_counts_do_not_depend_on_the_batching(self):
+        ontology = self.ontology({"100": {"900"}, "200": {"900"}, "300": {"900", "500"}})
+        reference = compute_statistics(self.dataset, data_args(100), ontology)["concept_patient_counts"]
+        for batch_size in (1, 2, 3):
+            self.assertEqual(compute_statistics(self.dataset, data_args(batch_size), ontology)["concept_patient_counts"], reference)
+
+    def test_without_an_ontology_only_the_token_counts(self):
+        counts = self.counts(100)
         self.assertNotIn("900", counts)
         self.assertEqual(counts["100"], 3)
-        self.assertGreater(statistics["all_concept_code_stats"]["900"], 0)
+
+    def test_the_ancestors_helper(self):
+        from cehrgpt.tokenization.tokenization_statistics import get_ancestors_by_code
+
+        ontology = self.ontology({"100": {"900"}, "900": {"950"}, "300": {"900", "500"}})
+        found = get_ancestors_by_code(ontology)
+        self.assertEqual(found["100"], ("900", "950"))
+        self.assertEqual(found["300"], ("500", "900", "950"))
+        self.assertEqual(found["900"], ("950",))
+        self.assertNotIn("950", found)
+        self.assertEqual(get_ancestors_by_code(None), {})
 
 
 class TokenizerFilterTest(unittest.TestCase):
@@ -154,12 +197,75 @@ class TokenizerFilterTest(unittest.TestCase):
         self.assertEqual(tokenizer.encode([removed[0]])[0], oov)
         self.assertNotEqual(tokenizer.encode([kept_clinical[0]])[0], oov)
 
-    def test_it_combines_with_the_prevalence_filter(self):
-        by_prevalence = self.vocabulary(self.build(min_prevalence=0.08))
-        by_count = self.vocabulary(self.build(min_patient_count=5))
-        both = self.vocabulary(self.build(min_prevalence=0.08, min_patient_count=5))
-        self.assertEqual(both, by_prevalence & by_count)
-        self.assertLess(len(both), len(self.vocabulary(self.baseline)))
+    def test_the_entropy_filter_takes_its_cutoff_from_the_patient_count(self):
+        import numpy as np
+
+        statistics = compute_statistics(self.dataset, data_args())
+        total, entropies = statistics["total"], statistics["all_concept_code_entropies"]
+
+        def expected(threshold):
+            share = max(1e-8, threshold / total)
+            cutoff = np.log(1 - share) * (1 - share) + np.log(share) * share
+            return {
+                t for t in statistics["original_concept_codes"]
+                if not is_clinical_event(t)
+                or (entropies.get(t, 0.0) <= cutoff and self.patients_per_token[t] >= threshold)
+            }
+
+        sizes = []
+        for threshold in (0, 3, 10):
+            vocabulary = self.vocabulary(self.build(apply_entropy_filter=True, min_patient_count=threshold))
+            clinical = {t for t in vocabulary if is_clinical_event(t)}
+            self.assertEqual(clinical, {t for t in expected(threshold) if is_clinical_event(t)}, threshold)
+            sizes.append(len(clinical))
+        self.assertGreaterEqual(sizes[0], sizes[1])
+        self.assertGreaterEqual(sizes[1], sizes[2])
+        # the filter does something: it keeps fewer clinical tokens than no filter at all
+        self.assertLess(sizes[0], len([t for t in self.vocabulary(self.baseline) if is_clinical_event(t)]))
+
+    def test_min_prevalence_is_gone(self):
+        import inspect
+
+        self.assertNotIn("min_prevalence", inspect.signature(CehrGptTokenizer.train_tokenizer).parameters)
+        self.assertNotIn("min_prevalence", inspect.signature(CehrGptTokenizer.expand_trained_tokenizer).parameters)
+        self.assertNotIn("min_prevalence", {f.name for f in dataclasses.fields(CehrGPTArguments)})
+        with self.assertRaisesRegex(ValueError, "min_prevalence"):
+            HfArgumentParser(CehrGPTArguments).parse_dict({"min_prevalence": 0.001})
+
+    def test_a_prevalence_is_a_patient_count_of_the_same_share(self):
+        # what min_prevalence=p kept (without an ontology) is what min_patient_count=ceil(p * patients) keeps
+        n_patients = len(self.frame)
+        for share in (0.05, 0.2):
+            count = -(-int(round(share * n_patients * 1000)) // 1000)
+            kept = {t for t in self.vocabulary(self.baseline)
+                    if not is_clinical_event(t) or self.patients_per_token.get(t, 0) / n_patients >= share - 1e-12}
+            self.assertEqual(self.vocabulary(self.build(min_patient_count=count)), kept)
+
+    def test_a_parent_is_kept_through_its_descendants(self):
+        # a rare clinical token above a common one is kept when descendants count towards it
+        from cehrgpt.omop.ontology import Ontology
+
+        clinical = [t for t in self.patients_per_token if is_clinical_event(t)]
+        child = max(clinical, key=lambda t: self.patients_per_token[t])
+        rare = min((t for t in clinical if t != child), key=lambda t: self.patients_per_token[t])
+        threshold = self.patients_per_token[rare] + 1
+        self.assertGreaterEqual(self.patients_per_token[child], threshold)
+        ontology = Ontology.__new__(Ontology)
+        ontology.parents_map = {child: {rare}}
+        ontology.all_parents_map = {}
+        ontology.concept_domain_map = {}
+        ontology.concept_vocabulary_map = {}
+        # on its own the token is too rare ...
+        self.assertNotIn(rare, self.vocabulary(self.build(min_patient_count=threshold)))
+        # ... with the descendant it is had by every patient who has either of them
+        with_ontology = self.build(min_patient_count=threshold, ontology=ontology)
+        self.assertIn(rare, self.vocabulary(with_ontology))
+        union = sum(
+            1 for tokens in self.frame["concept_ids"] if {rare, child} & set(map(str, tokens))
+        )
+        self.assertGreaterEqual(union, threshold)
+        # a threshold above the union removes it again
+        self.assertNotIn(rare, self.vocabulary(self.build(min_patient_count=union + 1, ontology=ontology)))
 
     def test_motor_tasks_come_only_from_the_kept_tokens(self):
         tokenizer = self.build(min_patient_count=30, num_motor_tasks=40)

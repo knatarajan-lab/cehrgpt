@@ -948,8 +948,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             pretrained_concept_embedding_model: PretrainedEmbeddings = None,
             num_motor_tasks: Optional[int] = None,
             apply_entropy_filter: bool = False,
-            min_prevalence: float = 1 / 1000,
             min_patient_count: int = 0,
+            ontology: Optional[Ontology] = None,
     ):
         if not isinstance(cehrgpt_tokenizer, CehrGptTokenizer):
             raise ValueError(
@@ -964,8 +964,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             data_args=data_args,
             num_motor_tasks=num_motor_tasks,
             apply_entropy_filter=apply_entropy_filter,
-            min_prevalence=min_prevalence,
             min_patient_count=min_patient_count,
+            ontology=ontology,
         )
 
         new_tokens = set(new_tokenizer.get_vocab().keys()) - set(
@@ -1143,7 +1143,6 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             pretrained_concept_embedding_model: PretrainedEmbeddings = None,
             num_motor_tasks: Optional[int] = None,
             apply_entropy_filter: bool = False,
-            min_prevalence: float = 1 / 1000,
             ontology: Optional[Ontology] = None,
             min_patient_count: int = 0,
     ):
@@ -1154,12 +1153,14 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         together and treat it as a sequence.
 
         Args:
-            min_prevalence: a clinical token must occur in at least this fraction of the patients
-                (counting its descendants too when an ontology is given)
-            min_patient_count: a clinical token must occur in at least this many patients of the
-                dataset, counting the token itself only. 0 keeps every token. Tokens that are
-                not clinical events (time, visit, demographic tokens) are never removed. Both
-                thresholds apply when both are given.
+            min_patient_count: a clinical token must be had by at least this many patients of the
+                dataset. With an ontology a patient counts for a token when they have the token or
+                any of its descendants, once however many; without one, only the token itself
+                counts. 0 keeps every token. Tokens that are not clinical events (time, visit,
+                demographic tokens) are never removed.
+            apply_entropy_filter: also keep only the clinical tokens whose entropy is at least that
+                of a token that occurs in min_patient_count of the patients (as a share of the
+                dataset). It applies on top of min_patient_count.
         """
         if min_patient_count is None:
             min_patient_count = 0
@@ -1180,10 +1181,11 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         ]
 
         if apply_entropy_filter:
-            min_prevalence = max(1e-8, min_prevalence)
+            # The cut-off is the entropy of a token that occurs in min_patient_count of the patients
+            threshold_share = max(1e-8, min_patient_count / cehrgpt_data_statistics["total"])
             min_entropy = (
-                    np.log(1 - min_prevalence) * (1 - min_prevalence)
-                    + np.log(min_prevalence) * min_prevalence
+                    np.log(1 - threshold_share) * (1 - threshold_share)
+                    + np.log(threshold_share) * threshold_share
             )
             qualified_codes = [
                 k
@@ -1192,12 +1194,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                    or not is_clinical_event(k, data_args.is_data_in_meds)
             ]
         else:
-            qualified_codes = [
-                k
-                for k in original_concept_codes
-                if min_prevalence <= all_concept_code_stats[k]
-                   or not is_clinical_event(k, data_args.is_data_in_meds)
-            ]
+            qualified_codes = list(original_concept_codes)
 
         if min_patient_count > 0:
             patient_counts = cehrgpt_data_statistics["concept_patient_counts"]
@@ -1209,7 +1206,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                    or patient_counts.get(k, 0) >= min_patient_count
             ]
             LOG.info(
-                "min_patient_count=%s removed %s of the %s tokens that passed the other filters",
+                "min_patient_count=%s removed %s of the %s tokens that were left",
                 min_patient_count,
                 before - len(qualified_codes),
                 before,

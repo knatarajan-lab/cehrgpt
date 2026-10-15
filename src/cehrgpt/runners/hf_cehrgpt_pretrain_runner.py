@@ -134,7 +134,6 @@ def load_and_create_tokenizer(
                 else None
             ),
             apply_entropy_filter=cehrgpt_args.apply_entropy_filter,
-            min_prevalence=cehrgpt_args.min_prevalence,
             ontology=ontology,
             min_patient_count=cehrgpt_args.min_patient_count,
         )
@@ -544,7 +543,6 @@ def main():
                             cehrgpt_args.pretrained_embedding_path
                         ),
                         apply_entropy_filter=cehrgpt_args.apply_entropy_filter,
-                        min_prevalence=cehrgpt_args.min_prevalence,
                         min_patient_count=cehrgpt_args.min_patient_count,
                     )
                     cehrgpt_tokenizer.save_pretrained(
