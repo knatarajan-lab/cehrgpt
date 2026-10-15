@@ -141,6 +141,11 @@ def load_and_create_tokenizer(
         LOG.info("Finished training the tokenizer ...")
         tokenizer.save_pretrained(tokenizer_abspath)
         LOG.info("Saved the tokenizer to %s", tokenizer_abspath)
+        # The freshly trained tokenizer still owns the full lab statistics, MOTOR
+        # metadata, and ontology in memory. Reloading the saved tokenizer converts
+        # those large fields to lazy file references before the tokenizer is copied
+        # into multiprocessing dataset mappings.
+        tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_abspath)
     else:
         LOG.info("The tokenizer exists and will be loaded from %s", tokenizer_abspath)
         tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_abspath)

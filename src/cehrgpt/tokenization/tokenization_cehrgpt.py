@@ -52,6 +52,7 @@ from cehrgpt.tokenization.tokenization_constants import (
     LEGACY_LAB_STATS_FILE_NAME,
     MOTOR_TIME_TO_EVENT_TASK_INFO_FILE_NAME,
     NONE_BIN,
+    NUMERIC_VALUE_BINS_FILE_NAME,
     NUM_OF_BINS,
     ONTOLOGY_FILE_NAME,
     TIME_TOKENIZER_FILE_NAME,
@@ -106,6 +107,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     _numeric_event_statistics = _LazyAttribute("lab_stats")
     _numeric_concept_ids = _LazyAttribute("lab_stats")
     _categorical_concept_ids = _LazyAttribute("lab_stats")
+    _numeric_normalization_bins = _LazyAttribute("normalization_bins")
     _motor_task_info = _LazyAttribute("motor_task_info")
     _motor_time_to_event_codes = _LazyAttribute("motor_task_info")
     _motor_code_to_id_mapping = _LazyAttribute("motor_task_info")
@@ -152,6 +154,10 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             )
             self._categorical_concept_ids = list(
                 {t[0] for t in self._categorical_lab_stats.keys()}
+            )
+        if "normalization_bins" not in self._lazy_files:
+            self._numeric_normalization_bins = self._create_numeric_normalization_bins(
+                numeric_lab_stats or []
             )
         self._concept_name_mapping = concept_name_mapping
         self._oov_token_id = self._tokenizer.token_to_id(OUT_OF_VOCABULARY_TOKEN)
@@ -238,6 +244,24 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                     code: i for i, code in enumerate(sorted(codes))
                 },
             }
+        elif group == "normalization_bins":
+            if kind == "legacy":
+                values = {
+                    "_numeric_normalization_bins": self._create_numeric_normalization_bins(
+                        load_json_file(path)
+                    )
+                }
+            else:
+                with open(path, "rb") as file:
+                    data = pickle.load(file)
+                if kind == "pickle":
+                    values = {"_numeric_normalization_bins": data}
+                else:
+                    values = {
+                        "_numeric_normalization_bins": self._create_numeric_normalization_bins(
+                            data["numeric_lab_stats"]
+                        )
+                    }
         elif group == "ontology":
             with open(path, "rb") as file:
                 values = {"_ontology": pickle.load(file)}
@@ -256,6 +280,34 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             if self.__dict__.get(name) is value:
                 del self.__dict__[name]
         self._lazy_loaded = {}
+
+    def create_lightweight_tokenizer(self) -> "CehrGptTokenizer":
+        """Return a copy containing only the state needed for dataset tokenization."""
+        numeric_normalization_bins = self.numeric_normalization_bins
+        tokenizer = copy.copy(self)
+        for name in (
+            "_token_to_sub_time_token_mapping",
+            "_concept_code_stats",
+            "_numeric_lab_stats",
+            "_categorical_lab_stats",
+            "_numeric_event_statistics",
+            "_numeric_concept_ids",
+            "_categorical_concept_ids",
+            "_concept_name_mapping",
+            "_pretrained_concept_embedding_model",
+            "_pretrained_concept_ids",
+            "_motor_task_info",
+            "_motor_time_to_event_codes",
+            "_motor_code_to_id_mapping",
+            "_gender_map",
+            "_race_map",
+            "_ontology",
+        ):
+            tokenizer.__dict__.pop(name, None)
+        tokenizer._numeric_normalization_bins = numeric_normalization_bins
+        tokenizer._lazy_files = {}
+        tokenizer._lazy_loaded = {}
+        return tokenizer
 
     def __getstate__(self):
         # Lazily loaded data is re-read from disk by the unpickled copy
@@ -482,6 +534,25 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     @property
     def numeric_concept_ids(self):
         return self._numeric_concept_ids
+
+    @staticmethod
+    def _create_numeric_normalization_bins(numeric_lab_stats):
+        return {
+            (lab_stat["concept_id"], lab_stat["unit"]): tuple(
+                (
+                    value_bin["start_val"],
+                    value_bin["end_val"],
+                    create_value_bin(value_bin["bin_index"]),
+                )
+                for value_bin in lab_stat["bins"]
+            )
+            for lab_stat in numeric_lab_stats
+            if lab_stat["bins"]
+        }
+
+    @property
+    def numeric_normalization_bins(self):
+        return self._numeric_normalization_bins
 
     @property
     def categorical_concept_ids(self):
@@ -723,6 +794,11 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             pickle.dump(lab_stats, f)
 
         with open(
+                os.path.join(save_directory, NUMERIC_VALUE_BINS_FILE_NAME), "wb"
+        ) as f:
+            pickle.dump(self._numeric_normalization_bins, f)
+
+        with open(
                 os.path.join(save_directory, DEMOGRAPHICS_STATS_FILE_NAME), "wb"
         ) as f:
             pickle.dump(
@@ -833,6 +909,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             if not legacy_lab_stats_file:
                 return None
             lazy_files["lab_stats"] = ("legacy", legacy_lab_stats_file)
+            normalization_fallback = ("legacy", legacy_lab_stats_file)
         else:
             lab_stats_file = transformers.utils.hub.cached_file(
                 pretrained_model_name_or_path, LAB_STATS_FILE_NAME, **kwargs
@@ -840,6 +917,20 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             if not lab_stats_file:
                 return None
             lazy_files["lab_stats"] = ("pickle", lab_stats_file)
+            normalization_fallback = ("lab_stats", lab_stats_file)
+        try:
+            numeric_value_bins_file = transformers.utils.hub.cached_file(
+                pretrained_model_name_or_path,
+                NUMERIC_VALUE_BINS_FILE_NAME,
+                **kwargs,
+            )
+        except EnvironmentError:
+            numeric_value_bins_file = None
+        lazy_files["normalization_bins"] = (
+            ("pickle", numeric_value_bins_file)
+            if numeric_value_bins_file
+            else normalization_fallback
+        )
         try:
             # Load the demographics stats json file
             demographics_stats_file = transformers.utils.hub.cached_file(
@@ -1481,7 +1572,12 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         return concept_tokenizer
 
     def normalize(self, concept_id: str, unit: str, concept_value: float) -> str:
-        return self._numeric_event_statistics.normalize(concept_id, unit, concept_value)
+        if isinstance(concept_value, float):
+            bins = self._numeric_normalization_bins.get((concept_id, unit), ())
+            for start, end, value_bin in bins:
+                if start <= concept_value <= end:
+                    return value_bin
+        return UNKNOWN_BIN
 
     def denormalize(self, concept_id: str, value_bin: str) -> Tuple[float, str]:
         return self._numeric_event_statistics.denormalize(concept_id, value_bin)

@@ -1,6 +1,7 @@
 import datetime
+import hashlib
+import pickle
 from collections import defaultdict
-from copy import deepcopy
 from typing import Any, Dict, Generator, List, Optional, Union
 
 import numpy as np
@@ -81,17 +82,37 @@ class DatasetMappingDecorator(DatasetMapping):
         """
         if isinstance(records, LazyBatch):
             table = records.pa_table
-
             if "index_date" in table.column_names:
                 index_col = table.column("index_date")
                 if index_col.null_count > 0:
                     table = table.drop(["index_date"])
-            records = LazyBatch(pa_table=table, formatter=records.formatter)
+            records = table.to_pydict()
         else:
             if "index_date" in records:
                 if pd.isna(records["index_date"][0]):
+                    records = dict(records)
                     del records["index_date"]
-        return super().batch_transform(records=records)
+
+        if not records:
+            return {}
+        batch_size = len(next(iter(records.values())))
+        transformed_records = []
+        for row_index in range(batch_size):
+            record = {name: values[row_index] for name, values in records.items()}
+            transformed = self.transform(record)
+            transformed_records.append(
+                transformed.to_dict()
+                if isinstance(transformed, Series)
+                else transformed
+            )
+
+        output_columns = {
+            name for record in transformed_records for name in record.keys()
+        }
+        return {
+            name: [record.get(name) for record in transformed_records]
+            for name in output_columns
+        }
 
     def transform(self, record: Dict[str, Any]) -> Union[Dict[str, Any], Series]:
         raise NotImplemented("Must be implemented")
@@ -416,16 +437,21 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         self,
         concept_tokenizer: CehrGptTokenizer,
     ):
-        self._concept_tokenizer = deepcopy(concept_tokenizer)
-        self._concept_tokenizer._ontology = None
-        self._concept_tokenizer._motor_task_info = {}
-        self._concept_tokenizer._motor_time_to_event_codes = []
-        self._concept_tokenizer._motor_code_to_id_mapping = {}
-        self._lab_token_ids = self._concept_tokenizer.lab_token_ids
-        # Reading lab_token_ids loaded the lab statistics, which can be hundreds of MB. Drop
-        # them again so the pickled mapping stays small; the workers read them back from
-        # disk if they need to bin a numeric value.
-        self._concept_tokenizer.release_lazy_data()
+        self._concept_tokenizer = concept_tokenizer.create_lightweight_tokenizer()
+        concept_tokenizer.release_lazy_data()
+        tokenizer_payload = pickle.dumps(
+            self._concept_tokenizer, protocol=pickle.HIGHEST_PROTOCOL
+        )
+        self._tokenization_fingerprint = hashlib.sha256(
+            b"cehrgpt-tokenization-v2:" + tokenizer_payload
+        ).hexdigest()
+
+    def cache_fingerprint(self, dataset_fingerprint: str) -> str:
+        """Return a stable cache key without hashing the tokenizer object graph."""
+        return hashlib.sha256(
+            f"{dataset_fingerprint}:{type(self).__qualname__}:"
+            f"{self._tokenization_fingerprint}".encode()
+        ).hexdigest()[:16]
 
     def remove_columns(self):
         return [
@@ -452,11 +478,10 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
                 continue
             if isinstance(v, (list, np.ndarray)) and len(v) == seq_length:
                 column_names.append(k)
-        valid_concept_ids = self._concept_tokenizer.get_vocab().keys()
         valid_indices = [
             idx
             for idx, concept_id in enumerate(record["concept_ids"])
-            if concept_id in valid_concept_ids
+            if concept_id in self._concept_tokenizer.get_vocab()
         ]
         if len(valid_indices) != len(record["concept_ids"]):
             for column in column_names:
@@ -515,10 +540,9 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
                 if concept_value_mask == 1:
                     value = UNKNOWN_BIN
                     if is_numeric_type == 1:
-                        if concept_id in self._concept_tokenizer.numeric_concept_ids:
-                            value = self._concept_tokenizer.normalize(
-                                concept_id, unit, number_as_value
-                            )
+                        value = self._concept_tokenizer.normalize(
+                            concept_id, unit, number_as_value
+                        )
                     elif isinstance(concept_as_value, str):
                         value = concept_as_value
                     values.append(value)
