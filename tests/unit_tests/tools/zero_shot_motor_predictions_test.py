@@ -106,6 +106,40 @@ class WindowTest(unittest.TestCase):
         self.assertAlmostEqual(p / 1e-9, 1.0, places=3)
 
 
+class OutcomeHelpersTest(unittest.TestCase):
+    def test_combine_probabilities(self):
+        p = np.array([[0.5, 0.5], [0.1, 0.0], [1.0, 0.3]])
+        np.testing.assert_allclose(zs.combine_probabilities(p, "independent_or"), [0.75, 0.1, 1.0], atol=1e-9)
+        np.testing.assert_allclose(zs.combine_probabilities(p, "max"), [0.5, 0.1, 1.0])
+        np.testing.assert_allclose(zs.combine_probabilities(p[:, :1], "max"), p[:, 0])
+        self.assertTrue(np.isfinite(zs.combine_probabilities(p, "independent_or")).all())
+        with self.assertRaises(ValueError):
+            zs.combine_probabilities(p, "mean")
+
+    def test_a_concept_that_is_a_task_covers_its_descendants_itself(self):
+        # a > b > c is a chain of tasks, d is unrelated; ancestors include the concept itself
+        ancestors = {"a": {"a"}, "b": {"b", "a"}, "c": {"c", "b", "a"}, "d": {"d"}}
+        tasks = ["a", "b", "c", "d"]
+        expand = lambda concepts: zs.expand_to_tasks(concepts, tasks, ancestors.__getitem__)  # noqa: E731
+        self.assertEqual(expand(["a"]), ["a"])
+        self.assertEqual(expand(["b"]), ["b"])   # c is below b, so b alone covers it
+        self.assertEqual(expand(["c"]), ["c"])
+        self.assertEqual(expand(["a", "d"]), ["a", "d"])
+        self.assertEqual(expand(["c", "b"]), ["b"])  # one concept's task contains the other's
+        self.assertEqual(expand(["nothing"]), [])
+
+    def test_a_broad_concept_that_is_not_a_task_is_covered_by_the_highest_tasks_below_it(self):
+        ancestors = {
+            "a": {"a", "x"}, "b": {"b", "a", "x"}, "c": {"c", "b", "a", "x"},
+            "d": {"d", "x"}, "e": {"e", "b", "a", "d", "x"},  # e is below both b and d
+            "f": {"f"},
+        }
+        tasks = ["a", "b", "c", "d", "e", "f"]
+        self.assertEqual(zs.expand_to_tasks(["x"], tasks, ancestors.__getitem__), ["a", "d"])
+        # without a covering parent, siblings stay separate
+        self.assertEqual(zs.expand_to_tasks(["b", "d"], tasks, ancestors.__getitem__), ["b", "d"])
+
+
 class HeadTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -223,6 +257,20 @@ class EndToEndTest(unittest.TestCase):
             data, names, args, PretrainedEmbeddings(os.path.join(sample, "pretrained_embeddings")),
             num_motor_tasks=40, ontology=None,
         )
+        # An ontology over the tasks: c1 and c3 are below c0, c2 is below c1; "broad" is a concept
+        # that is not a task and sits above c0 and c5
+        from cehrgpt.omop.ontology import Ontology
+
+        codes = sorted(cls.tokenizer._motor_time_to_event_codes)
+        ontology = Ontology.__new__(Ontology)
+        ontology.parents_map = {
+            codes[1]: {codes[0]}, codes[2]: {codes[1]}, codes[3]: {codes[0]},
+            codes[0]: {"broad"}, codes[5]: {"broad"},
+        }
+        ontology.all_parents_map = {}
+        ontology.concept_domain_map = {}
+        ontology.concept_vocabulary_map = {}
+        cls.tokenizer._ontology = ontology
         cls.model_dir = os.path.join(cls.tmp, "model")
         cls.bins = [float(b) for b in cls.tokenizer.get_motor_time_bins(4)]
         model = randomise_head(
@@ -237,16 +285,19 @@ class EndToEndTest(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def features(self, n=30, dim=N_EMBD, folder="features", seed=0):
+    def features(self, n=30, dim=N_EMBD, folder="features", seed=0, signal=False):
         rng = np.random.RandomState(seed)
         path = os.path.join(self.tmp, folder)
         os.makedirs(path, exist_ok=True)
+        vectors = [rng.randn(dim).astype(np.float32) for _ in range(n)]
+        # with a signal the label is a linear function of the features, so a fitted model finds it
+        labels = np.array([int(v[0] + 0.5 * v[1] > 0) for v in vectors]) if signal else rng.randint(0, 2, n)
         frame = pd.DataFrame(
             {
                 "subject_id": np.arange(n),
                 "prediction_time_posix": np.full(n, 1.6e9),
-                "boolean_value": rng.randint(0, 2, n),
-                "features": [rng.randn(dim).astype(np.float32) for _ in range(n)],
+                "boolean_value": labels,
+                "features": vectors,
             }
         )
         frame.iloc[: n // 2].to_parquet(os.path.join(path, "a.parquet"))
@@ -333,25 +384,115 @@ class EndToEndTest(unittest.TestCase):
         np.testing.assert_allclose(p.loc[odd].to_numpy(), q.loc[odd].to_numpy(), rtol=1e-5)  # gap 0: unchanged
         self.assertFalse(np.allclose(p.loc[even].to_numpy(), q.loc[even].to_numpy()))
 
-    def test_evaluation_against_the_label(self):
+    def test_binary_outcome_against_the_label(self):
         metrics, output, frame = self.run_cli(
-            "--concepts", self.codes[0], self.codes[1], "--windows", "30", "90",
-            "--evaluate_concept", self.codes[1], "--evaluate_window", "0-90",
+            "--outcome_concepts", self.codes[1], "--windows", "30", "90", "--outcome_window", "90",
         )
-        evaluation = metrics["evaluation"]
-        self.assertEqual(evaluation["concept_id"], self.codes[1])
-        self.assertEqual(evaluation["window_days"], "0-90")
-        self.assertEqual(evaluation["n"], 30)
-        self.assertEqual(evaluation["positives"], int(frame["boolean_value"].sum()))
-        self.assertTrue(0 <= evaluation["auroc"] <= 1)
-        # the same number from the written predictions
-        p = pd.read_parquet(os.path.join(output, "predictions.parquet"))
-        p = p[(p.concept_id == self.codes[1]) & (p.window_days == "0-90")].sort_values("subject_id")
+        outcome = metrics["outcome"]
+        self.assertEqual(outcome["concepts"], [self.codes[1]])
+        self.assertEqual(outcome["window_days"], "0-90")
+        self.assertEqual(outcome["combine"], "single task")
+        self.assertEqual(outcome["zero_shot"]["n"], 30)
+        self.assertEqual(outcome["zero_shot"]["positives"], int(frame["boolean_value"].sum()))
+        self.assertTrue(0 <= outcome["zero_shot"]["auroc"] <= 1)
+        # the same number from the written scores
+        scores = pd.read_parquet(os.path.join(output, "outcome_scores.parquet")).sort_values("subject_id")
         from sklearn.metrics import roc_auc_score
 
-        self.assertAlmostEqual(evaluation["auroc"], roc_auc_score(p["label"], p["probability"]), places=6)
+        self.assertAlmostEqual(outcome["zero_shot"]["auroc"], roc_auc_score(scores["label"], scores["probability"]), places=6)
+        self.assertEqual(list(scores.columns), ["subject_id", "prediction_time_posix", "probability", "label"])
+        # the per-concept predictions are written as well
+        p = pd.read_parquet(os.path.join(output, "predictions.parquet"))
+        self.assertEqual(set(p["concept_id"]), {self.codes[1]})
         with open(os.path.join(output, "metrics.json")) as f:
-            self.assertEqual(json.load(f)["evaluation"]["n"], 30)
+            self.assertEqual(json.load(f)["outcome"]["zero_shot"]["n"], 30)
+
+    def test_the_outcome_window_is_predicted_even_if_not_listed(self):
+        metrics, output, _ = self.run_cli("--outcome_concepts", self.codes[0], "--windows", "30", "--outcome_window", "60-120")
+        self.assertIn("60-120", metrics["windows"])
+        self.assertEqual(metrics["outcome"]["window_days"], "60-120")
+
+    def test_several_outcome_concepts_are_combined(self):
+        concepts = [self.codes[0], self.codes[1]]
+        both, out_both, _ = self.run_cli("--outcome_concepts", *concepts, "--windows", "90")
+        biggest, out_max, _ = self.run_cli("--outcome_concepts", *concepts, "--windows", "90", "--combine", "max", out="out_max")
+        self.assertEqual(both["outcome"]["combine"], "independent_or")
+        p = pd.read_parquet(os.path.join(out_both, "predictions.parquet"))
+        wide = p.pivot(index="subject_id", columns="concept_id", values="probability").sort_index()
+        expected = 1 - (1 - wide[concepts[0]]) * (1 - wide[concepts[1]])
+        combined = pd.read_parquet(os.path.join(out_both, "outcome_scores.parquet")).set_index("subject_id").sort_index()
+        np.testing.assert_allclose(combined["probability"].to_numpy(), expected.to_numpy(), atol=1e-6)
+        as_max = pd.read_parquet(os.path.join(out_max, "outcome_scores.parquet")).set_index("subject_id").sort_index()
+        np.testing.assert_allclose(as_max["probability"].to_numpy(), wide.max(axis=1).to_numpy(), atol=1e-6)
+        self.assertEqual(set(both["outcome"]["per_concept"]), set(concepts))
+        self.assertTrue((combined["probability"] >= wide.max(axis=1) - 1e-7).all())
+
+    def test_the_supervised_baseline(self):
+        train, _ = self.features(n=400, folder="train", seed=1, signal=True)
+        path, _ = self.features(n=200, folder="evalset", seed=2, signal=True)
+        out = os.path.join(self.tmp, "baseline_out")
+        metrics = zs.run(zs.create_arg_parser().parse_args(
+            ["--model_path", self.model_dir, "--features_folder", path, "--output_dir", out,
+             "--outcome_concepts", self.codes[0], "--baseline_train_features", train]
+        ))["outcome"]
+        baseline = metrics["supervised_baseline"]
+        self.assertEqual(baseline["num_train_rows"], 400)
+        self.assertEqual(baseline["n"], 200)
+        self.assertGreater(baseline["auroc"], 0.95)       # the label is a linear function of the features
+        self.assertLess(abs(metrics["zero_shot"]["auroc"] - 0.5), 0.2)  # a random head knows nothing about it
+        # a limit on the training rows
+        limited = zs.run(zs.create_arg_parser().parse_args(
+            ["--model_path", self.model_dir, "--features_folder", path, "--output_dir", out,
+             "--outcome_concepts", self.codes[0], "--baseline_train_features", train, "--baseline_max_rows", "100"]
+        ))["outcome"]["supervised_baseline"]
+        self.assertLess(limited["num_train_rows"], 200)
+
+    def test_descendants_are_covered_through_the_tasks_below_a_concept(self):
+        c = self.codes
+        ancestors_of = zs.tokenizer_ancestors(self.tokenizer)
+        self.assertEqual(ancestors_of(c[2]), {c[2], c[1], c[0], "broad"})
+        # a concept that is a task covers its descendants itself
+        metrics, _, _ = self.run_cli("--outcome_concepts", c[0], "--expand_descendants", out="expand_task")
+        self.assertEqual(metrics["outcome"]["concepts"], [c[0]])
+        # "broad" is not a task: its highest tasks are c0 (with c1, c2, c3 below it) and c5
+        metrics, output, _ = self.run_cli("--outcome_concepts", "broad", "--expand_descendants", out="expand_broad")
+        outcome = metrics["outcome"]
+        self.assertEqual(set(outcome["concepts"]), {c[0], c[5]})
+        self.assertEqual(outcome["outcome_input"], ["broad"])
+        self.assertEqual(set(outcome["tasks_per_input_concept"]["broad"]), {c[0], c[5]})
+        self.assertEqual(set(pd.read_parquet(os.path.join(output, "predictions.parquet"))["concept_id"]), {c[0], c[5]})
+        # a set of concepts from a file; c1 is below c0, so only c0 and c5 remain
+        listing = os.path.join(self.tmp, "set.txt")
+        with open(listing, "w") as f:
+            f.write(f"{c[1]}\n{c[0]}\n\n{c[5]}\n")
+        path, _ = self.features()
+        args = zs.create_arg_parser().parse_args(
+            ["--model_path", self.model_dir, "--features_folder", path, "--output_dir", os.path.join(self.tmp, "from_file"),
+             "--outcome_concepts_file", listing, "--expand_descendants"]
+        )
+        self.assertEqual(set(zs.run(args)["outcome"]["concepts"]), {c[0], c[5]})
+
+    def test_a_concept_without_any_task_cannot_be_expanded(self):
+        path, _ = self.features()
+        args = zs.create_arg_parser().parse_args(
+            ["--model_path", self.model_dir, "--features_folder", path, "--output_dir", os.path.join(self.tmp, "err_expand"),
+             "--outcome_concepts", "123456789", "--expand_descendants"]
+        )
+        with self.assertRaisesRegex(ValueError, "No MOTOR task is the concept"):
+            zs.run(args)
+
+    def test_expanding_needs_an_ontology(self):
+        no_ontology = os.path.join(self.tmp, "tok_without_ontology")
+        tokenizer_copy = os.path.join(self.tmp, "tok_copy")
+        self.tokenizer.save_pretrained(tokenizer_copy)
+        os.remove(os.path.join(tokenizer_copy, "ontology.pickle"))
+        path, _ = self.features()
+        args = zs.create_arg_parser().parse_args(
+            ["--model_path", self.model_dir, "--tokenizer_path", tokenizer_copy, "--features_folder", path,
+             "--output_dir", no_ontology, "--outcome_concepts", self.codes[0], "--expand_descendants"]
+        )
+        with self.assertRaisesRegex(ValueError, "ontology"):
+            zs.run(args)
 
     def test_evaluate_metrics_function(self):
         result = zs.evaluate_predictions(np.array([0, 0, 1, 1]), np.array([0.1, 0.2, 0.8, 0.9]))
@@ -385,8 +526,13 @@ class EndToEndTest(unittest.TestCase):
             zs.run(parse(base + ["--concepts", "123456789"]))
         with self.assertRaisesRegex(ValueError, "Give the concepts"):
             zs.run(parse(base))
-        with self.assertRaisesRegex(ValueError, "must be one of the predicted"):
-            zs.run(parse(base + ["--concepts", self.codes[0], "--evaluate_concept", self.codes[1]]))
+        with self.assertRaisesRegex(ValueError, "--expand_descendants"):
+            zs.run(parse(base + ["--concepts", "123456789"]))
+        unlabeled = os.path.join(self.tmp, "unlabeled")
+        os.makedirs(unlabeled)
+        pd.read_parquet(os.path.join(path, "a.parquet")).drop(columns=["boolean_value"]).to_parquet(os.path.join(unlabeled, "u.parquet"))
+        with self.assertRaisesRegex(ValueError, "label column"):
+            zs.run(parse(["--model_path", self.model_dir, "--features_folder", unlabeled, "--output_dir", out, "--outcome_concepts", self.codes[0]]))
         wide, _ = self.features(dim=2 * N_EMBD, folder="wide")
         with self.assertRaisesRegex(ValueError, "disable_combine_global_local"):
             zs.run(parse(["--model_path", self.model_dir, "--features_folder", wide, "--output_dir", out, "--concepts", self.codes[0]]))

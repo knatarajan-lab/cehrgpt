@@ -23,12 +23,20 @@ input (default 0: the prediction time is the time of the last event).
 Only the MOTOR tasks can be asked about. A task that stands for an ontology ancestor also
 covers its descendants, because that is how its training labels were built.
 
-Examples:
-    python -m cehrgpt.tools.zero_shot_motor_predictions --model_path MODEL --list_tasks --search asthma
+Binary classification: the outcome of a cohort is one or more MOTOR tasks and a window. The
+probability that the outcome happens is compared with the cohort label (AUROC, AUPRC, Brier,
+calibration), and optionally with a logistic regression trained on the same features, to show
+what the pretrained head gives without any training. With several concepts the probability of
+"any of them" is combined as 1 - prod(1 - p) (independent tasks, the default) or as max(p)
+(safer when one concept contains another).
 
-    python -m cehrgpt.tools.zero_shot_motor_predictions --model_path MODEL \\
-        --features_folder FEATURES --output_dir OUT --concepts 9201 --windows 30 90 \\
-        --evaluate_concept 9201 --evaluate_window 0-30
+Examples:
+    python -m cehrgpt.tools.zero_shot_motor_predictions --model_path MODEL --list_tasks --search hospital
+
+    python -m cehrgpt.tools.zero_shot_motor_predictions --model_path MODEL \
+        --features_folder FEATURES/test_features --output_dir OUT \
+        --outcome_concepts 9201 262 --outcome_window 30 \
+        --baseline_train_features FEATURES/train_features
 """
 
 import argparse
@@ -241,7 +249,8 @@ def resolve_tasks(
     if missing:
         raise ValueError(
             f"Not MOTOR tasks: {missing[:10]}. Only the tasks the model was pretrained on can be "
-            "asked about; list them with --list_tasks (and --search to filter by name)."
+            "asked about; list them with --list_tasks (and --search to filter by name). For an "
+            "outcome, --expand_descendants asks about a concept through the tasks at or below it."
         )
     return [(tokenizer.get_motor_token_id(c), c, names.get(c, "")) for c in concepts]
 
@@ -298,6 +307,118 @@ def evaluate_predictions(labels: np.ndarray, probabilities: np.ndarray) -> Dict[
     return result
 
 
+def expand_to_tasks(
+    concepts: Sequence[str],
+    task_codes: Sequence[str],
+    ancestors_of,
+) -> List[str]:
+    """
+    The MOTOR tasks that together cover the concepts and everything below them.
+
+    A task for an ancestor already counts the events of its descendants (that is how its labels
+    were built). So the tasks that cover a concept are the tasks at or below it, and of those
+    only the highest are kept: a task below another one adds nothing, and listing both would
+    count its events twice. When a concept is itself a task, the result is that task alone.
+
+    Args:
+        concepts: the concept ids that define the outcome
+        task_codes: the MOTOR tasks
+        ancestors_of: concept id -> a set with the concept itself and all its ancestors
+    """
+    wanted = set(concepts)
+    covering = [t for t in task_codes if wanted & set(ancestors_of(t))]
+    covered = set(covering)
+    return [
+        t for t in covering
+        if not any(other != t and other in ancestors_of(t) for other in covered)
+    ]
+
+
+def tokenizer_ancestors(tokenizer: CehrGptTokenizer):
+    """concept -> the concept and its ancestors, from the ontology saved with the tokenizer."""
+    ontology = tokenizer._ontology
+    if ontology is None:
+        raise ValueError(
+            "--expand_descendants needs the ontology (ontology.pickle) in the tokenizer folder, "
+            "and this tokenizer has none"
+        )
+    cache: Dict[str, frozenset] = {}
+
+    def ancestors_of(code: str) -> frozenset:
+        if code not in cache:
+            cache[code] = frozenset(ontology.get_all_parents(code)) | {code}
+        return cache[code]
+
+    return ancestors_of
+
+
+def combine_probabilities(probabilities: np.ndarray, how: str) -> np.ndarray:
+    """
+    The probability of "any of these tasks" from one column per task, shape (rows, tasks).
+
+    independent_or: 1 - prod(1 - p), exact when the tasks are independent. It counts an event
+    twice when one task contains another (a parent and its descendant), where max is the safer
+    choice.
+    """
+    if how not in ("independent_or", "max"):
+        raise ValueError("--combine must be independent_or or max")
+    probabilities = np.asarray(probabilities, dtype=np.float64)
+    if probabilities.shape[1] == 1:
+        return probabilities[:, 0]
+    if how == "max":
+        return probabilities.max(axis=1)
+    return -np.expm1(np.log1p(-np.clip(probabilities, 0.0, 1.0 - 1e-12)).sum(axis=1))
+
+
+def load_features_and_labels(
+    folder: str, label_column: str, max_rows: int = 0, seed: int = 0
+) -> Tuple[np.ndarray, np.ndarray]:
+    """The feature vectors and labels of a folder, as a random sample of at most max_rows rows."""
+    files = sorted(glob.glob(os.path.join(os.path.expanduser(folder), "**", "*.parquet"), recursive=True))
+    if not files:
+        raise FileNotFoundError(f"No parquet files under {folder}")
+    total = sum(pq.ParquetFile(f).metadata.num_rows for f in files)
+    fraction = 1.0 if not max_rows else min(1.0, max_rows / max(total, 1))
+    rng = np.random.RandomState(seed)
+    features, labels = [], []
+    for batch in iter_feature_batches(folder, 8192, [label_column]):
+        if label_column not in batch:
+            raise ValueError(f"The training features have no column {label_column!r}")
+        keep = rng.rand(len(batch["features"])) < fraction if fraction < 1.0 else np.ones(len(batch["features"]), bool)
+        features.append(batch["features"][keep])
+        labels.append(batch[label_column][keep])
+    return np.concatenate(features), np.concatenate(labels).astype(int)
+
+
+def supervised_baseline(
+    train_folder: str,
+    label_column: str,
+    eval_features: np.ndarray,
+    eval_labels: np.ndarray,
+    max_rows: int = 200_000,
+    seed: int = 0,
+) -> Dict[str, object]:
+    """
+    A logistic regression on the same features, trained on another folder, for comparison.
+
+    A quick baseline (standardised features, default regularisation), not the tuned linear
+    probing pipeline.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    features, labels = load_features_and_labels(train_folder, label_column, max_rows, seed)
+    if features.shape[1] != eval_features.shape[1]:
+        raise ValueError("The training and the evaluation features have different widths")
+    if labels.min() == labels.max():
+        raise ValueError("The training labels have a single class, so there is nothing to fit")
+    model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
+    model.fit(features, labels)
+    scores = model.predict_proba(eval_features)[:, 1]
+    return {"num_train_rows": int(len(labels)), **evaluate_predictions(eval_labels, scores)}
+
+
 def run(args: argparse.Namespace) -> Dict[str, object]:
     head, config, bins = load_motor_head(args.model_path)
     tokenizer = CehrGptTokenizer.from_pretrained(os.path.expanduser(args.tokenizer_path or args.model_path))
@@ -315,33 +436,54 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
                 print(f"{code}\t{name}")
         return {}
 
+    outcome_input = list(args.outcome_concepts or [])
+    if args.outcome_concepts_file:
+        with open(args.outcome_concepts_file) as f:
+            outcome_input += [line.strip() for line in f if line.strip()]
+    outcome = list(dict.fromkeys(outcome_input))
+    outcome_resolution: Dict[str, List[str]] = {}
+    if outcome and args.expand_descendants:
+        ancestors_of = tokenizer_ancestors(tokenizer)
+        task_codes = sorted(tokenizer._motor_time_to_event_codes)
+        for concept in outcome:
+            outcome_resolution[concept] = expand_to_tasks([concept], task_codes, ancestors_of)
+            if not outcome_resolution[concept]:
+                raise ValueError(
+                    f"No MOTOR task is the concept {concept} or one of its descendants, so it "
+                    "cannot be predicted"
+                )
+        # across the whole set, again only the highest tasks: one concept's task may contain another's
+        outcome = expand_to_tasks(outcome, task_codes, ancestors_of)
+        LOG.info(
+            "The outcome concepts %s (with descendants) are covered by %s MOTOR task(s): %s",
+            outcome_input, len(outcome), [(c, names.get(c, "")) for c in outcome],
+        )
     concepts = list(args.concepts or [])
     if args.concepts_file:
         with open(args.concepts_file) as f:
             concepts += [line.strip() for line in f if line.strip()]
+    concepts += [c for c in outcome if c not in concepts]
     if not concepts:
-        raise ValueError("Give the concepts to predict with --concepts or --concepts_file")
+        raise ValueError("Give the concepts to predict with --outcome_concepts, --concepts or --concepts_file")
     windows = [parse_window(w) for w in args.windows]
+    outcome_window = parse_window(args.outcome_window) if args.outcome_window else windows[0]
+    if outcome and outcome_window not in windows:
+        windows.append(outcome_window)
     tasks = resolve_tasks(tokenizer, names, concepts)
     task_indices = [index for index, _, _ in tasks]
-
-    evaluate_at = None
-    if args.evaluate_concept:
-        window = parse_window(args.evaluate_window or args.windows[0])
-        if args.evaluate_concept not in concepts:
-            raise ValueError("--evaluate_concept must be one of the predicted concepts")
-        if window not in windows:
-            raise ValueError("--evaluate_window must be one of the predicted windows")
-        evaluate_at = (concepts.index(args.evaluate_concept), windows.index(window))
+    outcome_columns = [concepts.index(c) for c in outcome]
+    outcome_at = windows.index(outcome_window) if outcome else None
 
     os.makedirs(args.output_dir, exist_ok=True)
     predictor = MotorPredictor(head, bins, args.device)
     extra = [args.label_column, args.gap_days_column] if args.gap_days_column else [args.label_column]
     writer = None
-    eval_labels: List[np.ndarray] = []
-    eval_scores: List[np.ndarray] = []
+    outcome_probabilities: List[np.ndarray] = []
+    outcome_labels: List[np.ndarray] = []
+    outcome_subjects: List[np.ndarray] = []
+    outcome_times: List[np.ndarray] = []
+    outcome_features: List[np.ndarray] = []
     total = 0
-    has_labels = False
     for batch in iter_feature_batches(args.features_folder, args.batch_size, extra):
         features = batch["features"]
         if features.shape[1] != config.n_embd:
@@ -350,12 +492,11 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
                 f"{config.n_embd}. If they are twice as wide, they were extracted with the global and "
                 "local states combined; re-run the extraction with --disable_combine_global_local."
             )
-        gap = torch.as_tensor(batch[args.gap_days_column], dtype=torch.float32) if args.gap_days_column else None
+        gap = torch.from_numpy(np.array(batch[args.gap_days_column], dtype=np.float32)) if args.gap_days_column else None
         if gap is None and args.gap_days:
             gap = torch.full((features.shape[0],), float(args.gap_days))
         probabilities = predictor.probabilities(torch.from_numpy(features), task_indices, windows, gap).cpu().numpy()
         labels = batch.get(args.label_column)
-        has_labels = has_labels or labels is not None
         rows = features.shape[0]
         n_windows, n_tasks = len(windows), len(tasks)
         # long format: one row per (patient, window, task), patient major
@@ -377,9 +518,17 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
             writer = pq.ParquetWriter(os.path.join(args.output_dir, "predictions.parquet"), out_table.schema)
         writer.write_table(out_table)
         total += rows
-        if evaluate_at is not None and labels is not None:
-            eval_labels.append(labels)
-            eval_scores.append(probabilities[:, evaluate_at[1], evaluate_at[0]])
+        if outcome:
+            if labels is None:
+                raise ValueError(
+                    f"--outcome_concepts needs the label column {args.label_column!r} in the features"
+                )
+            outcome_probabilities.append(probabilities[:, outcome_at, outcome_columns])
+            outcome_labels.append(labels)
+            outcome_subjects.append(batch["subject_id"])
+            outcome_times.append(batch["prediction_time_posix"])
+            if args.baseline_train_features:
+                outcome_features.append(features)
     if writer is not None:
         writer.close()
     metrics: Dict[str, object] = {
@@ -388,14 +537,39 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
         "windows": [window_name(w) for w in windows],
         "model_path": args.model_path,
     }
-    if evaluate_at is not None:
-        if not eval_labels:
-            raise ValueError(f"--evaluate_concept needs the label column {args.label_column!r} in the features")
-        metrics["evaluation"] = {
-            "concept_id": args.evaluate_concept,
-            "window_days": window_name(windows[evaluate_at[1]]),
-            **evaluate_predictions(np.concatenate(eval_labels), np.concatenate(eval_scores)),
+    if outcome:
+        probabilities_of_outcome = np.concatenate(outcome_probabilities)
+        labels_of_outcome = np.concatenate(outcome_labels)
+        combined = combine_probabilities(probabilities_of_outcome, args.combine)
+        pq.write_table(
+            pa.table(
+                {
+                    "subject_id": pa.array(np.concatenate(outcome_subjects).astype(np.int64)),
+                    "prediction_time_posix": pa.array(np.concatenate(outcome_times).astype(np.float64)),
+                    "probability": pa.array(combined.astype(np.float32)),
+                    "label": pa.array(labels_of_outcome.astype(np.int8)),
+                }
+            ),
+            os.path.join(args.output_dir, "outcome_scores.parquet"),
+        )
+        outcome_metrics: Dict[str, object] = {
+            "concepts": outcome,
+            "outcome_input": outcome_input,
+            "tasks_per_input_concept": outcome_resolution or None,
+            "window_days": window_name(outcome_window),
+            "combine": args.combine if len(outcome) > 1 else "single task",
+            "zero_shot": evaluate_predictions(labels_of_outcome, combined),
+            "per_concept": {
+                c: evaluate_predictions(labels_of_outcome, probabilities_of_outcome[:, i])
+                for i, c in enumerate(outcome)
+            },
         }
+        if args.baseline_train_features:
+            outcome_metrics["supervised_baseline"] = supervised_baseline(
+                args.baseline_train_features, args.label_column,
+                np.concatenate(outcome_features), labels_of_outcome, args.baseline_max_rows,
+            )
+        metrics["outcome"] = outcome_metrics
     with open(os.path.join(args.output_dir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
     LOG.info("%s", json.dumps(metrics, indent=2))
@@ -413,9 +587,14 @@ def create_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--windows", nargs="+", default=["30", "90", "365"], help='Days after the prediction time: "90" is 0-90, "30-90" is days 30 to 90')
     parser.add_argument("--gap_days", type=float, default=0.0, help="Days between the last event and the prediction time, for every patient")
     parser.add_argument("--gap_days_column", default=None, help="A column with the gap per patient (overrides --gap_days)")
-    parser.add_argument("--label_column", default="boolean_value", help="A column with the observed outcome, written next to the predictions and used by --evaluate_concept")
-    parser.add_argument("--evaluate_concept", default=None, help="Compare this task's probability with the label column: AUROC, AUPRC, Brier, calibration")
-    parser.add_argument("--evaluate_window", default=None, help="The window to evaluate (default: the first one)")
+    parser.add_argument("--label_column", default="boolean_value", help="A column with the observed outcome, written next to the predictions and used by --outcome_concepts")
+    parser.add_argument("--outcome_concepts", nargs="+", default=None, help="MOTOR task(s) that define the binary outcome of the cohort; the label column is the truth")
+    parser.add_argument("--outcome_concepts_file", default=None, help="A file with one outcome concept id per line (a concept set)")
+    parser.add_argument("--expand_descendants", action="store_true", help="Treat each outcome concept as the concept and all its descendants: it is covered by the MOTOR tasks at or below it (only the highest ones are used). Needs the ontology in the tokenizer folder")
+    parser.add_argument("--outcome_window", default=None, help='The cohort horizon, e.g. "30" or "30-90" (default: the first of --windows)')
+    parser.add_argument("--combine", choices=["independent_or", "max"], default="independent_or", help="How the probabilities of several outcome concepts become the probability of any of them")
+    parser.add_argument("--baseline_train_features", default=None, help="Features of the training split: a logistic regression is fitted on them and evaluated on the same rows, to compare with the zero-shot result")
+    parser.add_argument("--baseline_max_rows", type=int, default=200_000, help="Rows of the training features used by the baseline")
     parser.add_argument("--batch_size", type=int, default=4096)
     parser.add_argument("--device", default=None)
     parser.add_argument("--list_tasks", action="store_true", help="Print the MOTOR tasks (concept id and name) and exit")
