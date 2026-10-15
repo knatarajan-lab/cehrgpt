@@ -105,8 +105,10 @@ def get_motor_code_ancestors(
 
 def map_motor_tte_statistics(
         batch: Dict[str, Any],
-        allowed_motor_codes: List[str],
-        ancestors_by_code: Optional[Dict[str, Tuple[str, ...]]] = None,
+        allowed_motor_codes: Optional[List[str]],
+        ancestors_by_code: Optional[
+            Union[Dict[str, Tuple[str, ...]], "_AncestorIndex"]
+        ] = None,
 ) -> Dict[str, Any]:
     """
     Count events and censoring per MOTOR code, for a batch of patients.
@@ -123,14 +125,36 @@ def map_motor_tte_statistics(
         ancestors_by_code: code -> the code and its ancestors (see get_motor_code_ancestors);
             None means every code only covers itself
     """
-    allowed_motor_codes_set = set(allowed_motor_codes)
-    if ancestors_by_code is None:
-        ancestors_by_code = {code: (code,) for code in allowed_motor_codes}
-    # Every code that gets statistics: the allowed codes and their ancestors
-    all_codes = sorted({a for code in allowed_motor_codes for a in ancestors_by_code[code]})
+    if isinstance(ancestors_by_code, _AncestorIndex):
+        allowed_motor_codes_set = ancestors_by_code.codes
+        all_codes = ancestors_by_code.all_codes
+    else:
+        allowed_motor_codes_set = set(allowed_motor_codes or ())
+        if ancestors_by_code is None:
+            ancestors_by_code = {
+                code: (code,) for code in allowed_motor_codes_set
+            }
+        all_codes = tuple(
+            sorted(
+                {
+                    ancestor
+                    for code in allowed_motor_codes_set
+                    for ancestor in ancestors_by_code[code]
+                }
+            )
+        )
+    prediction_token_cache: Dict[str, bool] = {}
+
+    def is_prediction_token(token: str) -> bool:
+        result = prediction_token_cache.get(token)
+        if result is None:
+            result = is_att_token(token) and extract_time_interval_in_days(token) > 0
+            prediction_token_cache[token] = result
+        return result
+
     motor_event_times = femr.stat_utils.ReservoirSampler(100_000)
     task_tte_stats: Dict[str, int] = collections.defaultdict(int)
-    task_censor_stats: Dict[str, int] = collections.defaultdict(int)
+    total_prediction_points = 0
     # Per-task OnlineStatistics for TTE (events only). Used together with
     # task_tte_stats / task_censor_stats to compute a per-task hazard rate
     # for MotorTaskHead bias initialisation:
@@ -139,38 +163,65 @@ def map_motor_tte_statistics(
         femr.stat_utils.OnlineStatistics
     )
     for concept_ids, epoch_times in zip(batch["concept_ids"], batch["epoch_times"]):
-        # Reverse walk through concept_ids to calculate TTE from each prediction point
-        # code (or one of its descendants) -> time of its nearest occurrence after the point
-        code_time_dict: Dict[str, float] = {}
-        # The allowed codes themselves, for the global sample of event times: this stays at
-        # the level of the codes that occur, whatever the ontology
+        prediction_positions = []
+        prediction_times = []
+        event_positions_by_code = collections.defaultdict(list)
+        event_times_by_code = collections.defaultdict(list)
+        for position, (concept_id, current_time) in enumerate(
+            zip(concept_ids, epoch_times)
+        ):
+            if is_prediction_token(concept_id):
+                prediction_positions.append(position)
+                prediction_times.append(current_time)
+            elif concept_id in allowed_motor_codes_set:
+                for code in ancestors_by_code[concept_id]:
+                    event_positions_by_code[code].append(position)
+                    event_times_by_code[code].append(current_time)
+
+        prediction_positions = np.asarray(prediction_positions, dtype=np.int64)
+        prediction_times = np.asarray(prediction_times, dtype=np.float64)
+        total_prediction_points += len(prediction_positions)
+        for code, event_positions in event_positions_by_code.items():
+            event_positions = np.asarray(event_positions, dtype=np.int64)
+            event_times = np.asarray(event_times_by_code[code], dtype=np.float64)
+            next_event_indices = np.searchsorted(
+                event_positions, prediction_positions, side="right"
+            )
+            has_future_event = next_event_indices < len(event_positions)
+            if not np.any(has_future_event):
+                continue
+            ttes = (
+                event_times[next_event_indices[has_future_event]]
+                - prediction_times[has_future_event]
+            ) / 86400
+            task_tte_stats[code] += len(ttes)
+            patient_stats = femr.stat_utils.OnlineStatistics()
+            patient_stats.count = len(ttes)
+            patient_stats.current_mean = float(np.mean(ttes))
+            patient_stats.variance = float(
+                np.sum((ttes - patient_stats.current_mean) ** 2)
+            )
+            task_tte_time_stats[code].combine(patient_stats)
+
+        # Retain the original traversal order for deterministic reservoir sampling of global
+        # event times. This stays at the level of codes that occur, not their ancestors.
         token_time_dict: Dict[str, float] = {}
-        num_predictions = 0
         for concept_id, current_time in zip(reversed(concept_ids), reversed(epoch_times)):
-            if is_att_token(concept_id) and extract_time_interval_in_days(concept_id) > 0:
-                num_predictions += 1
-                # Only iterate over observed codes: O(observed), not O(all motor codes)
-                for code, code_time in code_time_dict.items():
-                    tte = (code_time - current_time) / 86400
-                    task_tte_stats[code] += 1
-                    task_tte_time_stats[code].add(1, tte)
+            if is_prediction_token(concept_id):
                 for token_time in token_time_dict.values():
                     motor_event_times.add((token_time - current_time) / 86400, 1)
             elif concept_id in allowed_motor_codes_set:
                 token_time_dict[concept_id] = current_time
-                for code in ancestors_by_code[concept_id]:
-                    if code not in code_time_dict:
-                        # First (nearest) occurrence in reverse walk = last occurrence in
-                        # forward. num_predictions is the count of ATTs seen so far, all of
-                        # which occur *after* this position in forward time, so the code was
-                        # censored at each of them.
-                        task_censor_stats[code] += num_predictions
-                    code_time_dict[code] = current_time
 
-        # Codes never observed: every prediction point was censored
-        for code in all_codes:
-            if code not in code_time_dict:
-                task_censor_stats[code] += num_predictions
+    # Every task is either event-positive or censored at every prediction point. Deriving
+    # censoring from the event counts avoids iterating over every task for every patient.
+    task_censor_stats = collections.defaultdict(
+        int,
+        {
+            code: total_prediction_points - task_tte_stats.get(code, 0)
+            for code in all_codes
+        },
+    )
 
     return {
         "motor_event_times": motor_event_times,
@@ -188,10 +239,18 @@ def compute_motor_tte_statistics(
 ) -> Dict[str, Any]:
     # The statistics of an ancestor are counted directly (see map_motor_tte_statistics), so
     # there is nothing to add up afterwards
+    ancestor_index = _AncestorIndex(
+        get_motor_code_ancestors(allowed_motor_codes, ontology)
+    )
+    LOG.info(
+        "Prepared compact MOTOR ancestor lookup for %s codes (%s serialized bytes)",
+        len(ancestor_index.codes),
+        len(pickle.dumps(ancestor_index, protocol=pickle.HIGHEST_PROTOCOL)),
+    )
     map_motor_tte_statistics_partial = partial(
         map_motor_tte_statistics,
-        allowed_motor_codes=allowed_motor_codes,
-        ancestors_by_code=get_motor_code_ancestors(allowed_motor_codes, ontology),
+        allowed_motor_codes=None,
+        ancestors_by_code=ancestor_index,
     )
     if data_args.streaming:
         first_example = next(iter(dataset))
@@ -266,11 +325,21 @@ class _AncestorIndex:
     """
 
     def __init__(self, ancestors_by_code: Dict[str, Tuple[str, ...]]):
-        concept_ids = sorted(ancestors_by_code, key=int)
+        numeric_mapping = {
+            concept_id: ancestors
+            for concept_id, ancestors in ancestors_by_code.items()
+            if concept_id.isnumeric() and all(ancestor.isnumeric() for ancestor in ancestors)
+        }
+        self._fallback = {
+            concept_id: tuple(ancestors)
+            for concept_id, ancestors in ancestors_by_code.items()
+            if concept_id not in numeric_mapping
+        }
+        concept_ids = sorted(numeric_mapping, key=int)
         offsets = [0]
         ancestors: List[int] = []
         for concept_id in concept_ids:
-            ancestors.extend(int(ancestor) for ancestor in ancestors_by_code[concept_id])
+            ancestors.extend(int(ancestor) for ancestor in numeric_mapping[concept_id])
             offsets.append(len(ancestors))
         self._concept_ids = np.fromiter(
             (int(concept_id) for concept_id in concept_ids),
@@ -279,16 +348,43 @@ class _AncestorIndex:
         )
         self._offsets = np.asarray(offsets, dtype=np.int64)
         self._ancestors = np.asarray(ancestors, dtype=np.int64)
+        self._initialize_derived_state()
+
+    def _initialize_derived_state(self) -> None:
+        self.codes = {str(concept_id) for concept_id in self._concept_ids.tolist()}
+        self.codes.update(self._fallback)
+        all_codes = {str(ancestor) for ancestor in self._ancestors.tolist()}
+        for ancestors in self._fallback.values():
+            all_codes.update(ancestors)
+        self.all_codes = tuple(sorted(all_codes))
+        self._cache: Dict[str, List[str]] = {}
+
+    def __getstate__(self):
+        return self._concept_ids, self._offsets, self._ancestors, self._fallback
+
+    def __setstate__(self, state) -> None:
+        self._concept_ids, self._offsets, self._ancestors, self._fallback = state
+        self._initialize_derived_state()
 
     def __len__(self) -> int:
-        return len(self._concept_ids)
+        return len(self._concept_ids) + len(self._fallback)
 
     @property
     def relationship_count(self) -> int:
-        return len(self._ancestors)
+        return len(self._ancestors) + sum(
+            len(ancestors) for ancestors in self._fallback.values()
+        )
 
     def get(self, concept_id: str, default=()):
-        if not isinstance(concept_id, str) or not concept_id.isnumeric():
+        if not isinstance(concept_id, str):
+            return default
+        if concept_id in self._cache:
+            return self._cache[concept_id]
+        if concept_id in self._fallback:
+            result = list(self._fallback[concept_id])
+            self._cache[concept_id] = result
+            return result
+        if not concept_id.isnumeric():
             return default
         numeric_concept_id = int(concept_id)
         position = int(np.searchsorted(self._concept_ids, numeric_concept_id))
@@ -298,7 +394,9 @@ class _AncestorIndex:
         ):
             return default
         start, end = self._offsets[position], self._offsets[position + 1]
-        return [str(ancestor) for ancestor in self._ancestors[start:end].tolist()]
+        result = [str(ancestor) for ancestor in self._ancestors[start:end].tolist()]
+        self._cache[concept_id] = result
+        return result
 
     def __getitem__(self, concept_id: str) -> List[str]:
         missing = object()
