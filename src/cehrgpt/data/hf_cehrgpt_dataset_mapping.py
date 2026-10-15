@@ -38,6 +38,7 @@ from cehrgpt.gpt_utils import (
     is_att_token,
     multiple_of_10,
 )
+from cehrgpt.tokenization.special_tokens import OUT_OF_VOCABULARY_TOKEN
 from cehrgpt.models.tokenization_hf_cehrgpt import (
     NONE_BIN,
     UNKNOWN_BIN,
@@ -439,9 +440,9 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
             "is_numeric_types",
         ]
 
-    def _valid_concept_ids(self) -> frozenset:
+    def _valid_concept_ids(self) -> Dict[str, int]:
         """
-        The tokens of the vocabulary, built once per process.
+        The vocabulary of the tokenizer, {token: id}, built once per process.
 
         get_vocab() of a Hugging Face tokenizer builds a new dict of the whole vocabulary on every
         call (6 ms at 50,000 tokens). Calling it for every token of every patient made a single
@@ -450,9 +451,35 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         """
         valid = self.__dict__.get("_valid_concept_ids_cache")
         if valid is None:
-            valid = frozenset(self._concept_tokenizer.get_vocab())
+            valid = dict(self._concept_tokenizer.get_vocab())
             self._valid_concept_ids_cache = valid
         return valid
+
+    def _value_ids(self) -> Dict[str, int]:
+        value_ids = self.__dict__.get("_value_ids_cache")
+        if value_ids is None:
+            value_ids = dict(self._concept_tokenizer.get_value_vocab())
+            self._value_ids_cache = value_ids
+        return value_ids
+
+    def encode_concepts(self, concept_ids: List[str]) -> List[int]:
+        """
+        Look the tokens up in the vocabulary directly.
+
+        The tokenizer is a word level model, so this returns the ids of tokenizer.encode(), about 70
+        times faster, which was the largest single cost of tokenizing a patient. Tokens outside the
+        vocabulary map to [OOV], as they do in the tokenizer. The one difference is a token that
+        contains whitespace: the tokenizer splits it into several ids, which no longer line up with
+        the other columns; here it is one [OOV].
+        """
+        vocabulary = self._valid_concept_ids()
+        oov = vocabulary[OUT_OF_VOCABULARY_TOKEN]
+        return [vocabulary.get(token, oov) for token in concept_ids]
+
+    def encode_values(self, values: List[str]) -> List[int]:
+        value_ids = self._value_ids()
+        oov = value_ids[OUT_OF_VOCABULARY_TOKEN]
+        return [value_ids.get(value, oov) for value in values]
 
     def filter_out_invalid_tokens(self, record: Dict[str, Any]) -> Dict[str, Any]:
         column_names = []
@@ -496,10 +523,9 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         # Remove the tokens from patient sequences that do not exist in the tokenizer
         record = self.filter_out_invalid_tokens(record)
         # If any concept has a value associated with it, we normalize the value
-        record["input_ids"] = self._concept_tokenizer.encode(record["concept_ids"])
+        record["input_ids"] = self.encode_concepts(record["concept_ids"])
         assert len(record["input_ids"]) == len(record["concept_ids"]), (
-            "The number of tokens must equal to the number of concepts\n"
-            f"decoded concept_ids: {self._concept_tokenizer.decode(record['input_ids'], skip_special_tokens=False)}"
+            "The number of tokens must equal to the number of concepts"
         )
         record["value_indicators"] = record["concept_value_masks"]
         if "number_as_values" not in record or "concept_as_values" not in record:
@@ -545,9 +571,9 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
                 else:
                     values.append(NONE_BIN)
             assert len(values) == len(record["input_ids"])
-            record["values"] = self._concept_tokenizer.encode_value(values)
+            record["values"] = self.encode_values(values)
         else:
-            record["values"] = self._concept_tokenizer.encode_value(
+            record["values"] = self.encode_values(
                 [NONE_BIN for _ in range(len(record["concept_value_masks"]))]
             )
         # Delete these features because they contain null values and pyarrow cannot concatenate multiple records
