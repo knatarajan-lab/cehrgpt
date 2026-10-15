@@ -302,9 +302,11 @@ def evaluate_predictions(
     """
     How well a score matches an observed label.
 
-    AUROC and AUPRC only need the ranking. The Brier score and the mean predicted probability
-    need a probability, so they are left out (None) for a score that is not one, such as an
-    expected number of events.
+    AUROC and AUPRC only need the ranking. AUROC is the chance that a patient with the outcome
+    scores higher than one without (0.5 is chance, 1 is perfect); AUPRC is compared with the
+    prevalence, which is what a random score gets. The Brier score and the mean predicted
+    probability need a probability, so they are left out (None) for a score that is not one, such
+    as an expected number of events.
     """
     from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 
@@ -315,12 +317,21 @@ def evaluate_predictions(
         "prevalence": float(labels.mean()) if len(labels) else None,
         "mean_predicted_probability": None,
         "brier_score": None,
+        "brier_score_of_the_prevalence": None,
+        "brier_skill_score": None,
         "auroc": None,
         "auprc": None,
     }
     if len(labels) and is_probability:
         result["mean_predicted_probability"] = float(np.mean(scores))
         result["brier_score"] = float(brier_score_loss(labels, scores))
+        # The line to beat: predicting the prevalence for everyone scores prevalence * (1 - prevalence).
+        # The skill score is 1 - brier / that: above 0 is better than the constant, 1 is perfect, and
+        # below 0 means the probabilities are worse than not using the model at all.
+        reference = float(labels.mean() * (1 - labels.mean()))
+        result["brier_score_of_the_prevalence"] = reference
+        if reference > 0:
+            result["brier_skill_score"] = 1.0 - result["brier_score"] / reference
     if len(labels) and labels.min() != labels.max():
         result["auroc"] = float(roc_auc_score(labels, scores))
         result["auprc"] = float(average_precision_score(labels, scores))

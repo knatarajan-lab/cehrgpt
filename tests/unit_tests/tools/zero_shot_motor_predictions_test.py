@@ -722,10 +722,26 @@ class EndToEndTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ontology"):
             zs.run(args)
 
+    def test_the_brier_score_is_read_against_the_prevalence(self):
+        labels = np.array([0, 0, 0, 1])
+        # the same probability for everyone, equal to the prevalence, is the line to beat
+        constant = zs.evaluate_predictions(labels, np.full(4, 0.25))
+        self.assertAlmostEqual(constant["brier_score_of_the_prevalence"], 0.25 * 0.75)
+        self.assertAlmostEqual(constant["brier_score"], 0.25 * 0.75)
+        self.assertAlmostEqual(constant["brier_skill_score"], 0.0, places=9)
+        perfect = zs.evaluate_predictions(labels, labels.astype(float))
+        self.assertAlmostEqual(perfect["brier_skill_score"], 1.0)
+        # probabilities that are worse than not using the model are below zero
+        wrong = zs.evaluate_predictions(labels, np.array([0.9, 0.9, 0.9, 0.0]))
+        self.assertLess(wrong["brier_skill_score"], 0)
+        # with no variation in the labels there is no reference
+        self.assertIsNone(zs.evaluate_predictions(np.zeros(4), np.full(4, 0.1))["brier_skill_score"])
+
     def test_a_score_that_is_not_a_probability_gets_ranking_metrics_only(self):
         result = zs.evaluate_predictions(np.array([0, 1, 1, 0]), np.array([0.5, 2.0, 1.5, 0.0]), is_probability=False)
         self.assertEqual(result["auroc"], 1.0)
         self.assertIsNone(result["brier_score"])
+        self.assertIsNone(result["brier_skill_score"])
 
     def test_evaluate_metrics_function(self):
         result = zs.evaluate_predictions(np.array([0, 0, 1, 1]), np.array([0.1, 0.2, 0.8, 0.9]))
