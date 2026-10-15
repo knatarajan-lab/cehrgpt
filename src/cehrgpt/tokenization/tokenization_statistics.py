@@ -42,6 +42,11 @@ def get_dataset_len(dataset: Union[Dataset, IterableDataset]) -> int:
     )
 
 
+# OMOP's "No matching concept". It stands in for a missing value (an unknown discharge
+# destination or race), not for something that happened, so it is never a MOTOR task.
+NO_MATCHING_CONCEPT_ID = "0"
+
+
 def get_allowed_motor_codes(
         original_concept_codes: List[str],
         data_args: DataTrainingArguments,
@@ -51,7 +56,8 @@ def get_allowed_motor_codes(
     filtered_original_concept_codes = [
         concept_code
         for concept_code in original_concept_codes
-        if is_clinical_event(concept_code, data_args.is_data_in_meds)
+        if concept_code != NO_MATCHING_CONCEPT_ID
+        and is_clinical_event(concept_code, data_args.is_data_in_meds)
     ]
     if ontology:
         allowed_motor_codes = []
