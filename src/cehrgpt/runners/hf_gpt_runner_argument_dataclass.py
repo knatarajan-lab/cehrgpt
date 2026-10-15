@@ -342,7 +342,7 @@ class CehrGPTArguments:
             "help": "Keep a clinical concept in the tokenizer only if at least this many patients "
             "of the tokenizer training data have it. With an ontology (motor_use_ontology) the "
             "descendants count towards their ancestors, once per patient. 0 keeps every concept. "
-            "Time, visit and demographic tokens are always kept"
+            "Time and visit markers and the demographic tokens (year, age, gender, race) are always kept"
         },
     )
     class_weights: Optional[List[int]] = dataclasses.field(
