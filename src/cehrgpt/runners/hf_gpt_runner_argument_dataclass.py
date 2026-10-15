@@ -356,6 +356,14 @@ class CehrGPTArguments:
         default=False,
         metadata={"help": "A flag to indicate whether we want to use entropy filter."},
     )
+    keep_unused_parquet_columns: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "Load every column of the parquet patient sequences. By default the per-token "
+            "columns that tokenization and pretraining never read (orders, record_ranks, priorities, "
+            "...) are left out, which roughly halves the datasets cache and the tokenization map."
+        },
+    )
     min_patient_count: Optional[int] = dataclasses.field(
         default=0,
         metadata={
