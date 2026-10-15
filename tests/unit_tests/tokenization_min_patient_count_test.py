@@ -146,6 +146,79 @@ class TokenizationPerformanceEquivalenceTest(unittest.TestCase):
             {"concept_ids": ["100 200 D1"]},
         )
 
+    def test_statistics_collect_exact_word_level_counts(self):
+        dataset = Dataset.from_list(
+            [
+                {
+                    **patient(1, ["100", "100", "two words"]),
+                    "concept_values": [None, None, None, None, "red blue", "red", None],
+                },
+                {
+                    **patient(2, ["200"]),
+                    "concept_values": [None, None, None, None, "blue"],
+                },
+            ]
+        )
+        statistics = compute_statistics(dataset, data_args(2))
+        self.assertEqual(statistics["concept_token_counts"]["100"], 2)
+        self.assertEqual(statistics["concept_token_counts"]["two words"], 1)
+        self.assertEqual(
+            statistics["value_token_counts"],
+            {"red blue": 1, "red": 1, "blue": 1},
+        )
+
+    def test_streaming_statistics_collect_the_same_counts(self):
+        dataset = Dataset.from_list(
+            [patient(1, ["100", "100"]), patient(2, ["200"])]
+        )
+        args = data_args(1)
+        args.streaming = True
+        expected = compute_statistics(dataset, data_args(1))
+        actual = compute_statistics(dataset.to_iterable_dataset(), args)
+        self.assertEqual(actual["concept_token_counts"], expected["concept_token_counts"])
+        self.assertEqual(actual["value_token_counts"], expected["value_token_counts"])
+
+    def test_count_based_tokenizer_has_the_same_vocabulary_as_the_trainer(self):
+        dataset = Dataset.from_dict(
+            {
+                "tokens": [
+                    ["b", "a", "two words", "a", "drop"],
+                    ["b", "words", "c"],
+                    ["d"],
+                ]
+            }
+        )
+        args = data_args(batch_size=2)
+        args.vocab_size = 8
+        args.min_frequency = 1
+        special_tokens = ["[UNK]", "[PAD]"]
+        with self.assertWarnsRegex(DeprecationWarning, "from_counts"):
+            expected = CehrGptTokenizer.train_concept_tokenizer(
+                dataset,
+                feature_name="tokens",
+                special_tokens=special_tokens,
+                unk_token="[UNK]",
+                data_args=args,
+                qualified_codes={"a", "b", "c", "d", "two words", "words"},
+            )
+        counts = Counter(
+            value
+            for row in dataset["tokens"]
+            for value in row
+        )
+        actual = CehrGptTokenizer.train_concept_tokenizer_from_counts(
+            counts,
+            special_tokens=special_tokens,
+            unk_token="[UNK]",
+            data_args=args,
+            qualified_codes={"a", "b", "c", "d", "two words", "words"},
+        )
+        self.assertEqual(actual.get_vocab(), expected.get_vocab())
+        self.assertEqual(
+            actual.decode(actual.encode("[UNK] a [PAD]").ids),
+            expected.decode(expected.encode("[UNK] a [PAD]").ids),
+        )
+
 
 class AncestorLookupOptimizationTest(unittest.TestCase):
     def test_only_observed_concepts_are_added_to_the_worker_lookup(self):

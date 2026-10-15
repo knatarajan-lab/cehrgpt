@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import femr.stat_utils
 import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 from cehrbert.models.hf_models.tokenization_utils import agg_helper
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from cehrbert_data.const.artificial_tokens import DEATH_TOKEN
@@ -243,6 +245,10 @@ def agg_statistics(stats1, stats2):
     if stats1.get("concept_patient_counts"):
         for concept_id, count in stats2["concept_patient_counts"].items():
             stats1["concept_patient_counts"][concept_id] += count
+    for token, count in stats2.get("concept_token_counts", {}).items():
+        stats1["concept_token_counts"][token] += count
+    for token, count in stats2.get("value_token_counts", {}).items():
+        stats1["value_token_counts"][token] += count
     if stats1.get("gender_list"):
         stats1.get("gender_list").update(stats2.get("gender_list"))
     if stats1.get("race_list"):
@@ -334,6 +340,7 @@ def map_statistics(
     total_size,
     size=10_000,
     ancestors_by_code: Optional[_AncestorIndex] = None,
+    collect_token_counts: bool = False,
 ) -> Dict[str, Any]:
     if "units" in batch:
         batch_value_units = batch["units"]
@@ -359,6 +366,10 @@ def map_statistics(
     numeric_stats_by_lab = collections.defaultdict(partial(ReservoirSampler, size=size))
     categorical_stats_by_lab = collections.defaultdict(int)
     concept_code_stats = collections.defaultdict(int)
+    # Iterable datasets cannot expose their Arrow columns for the optimized counting path below,
+    # so collect their tokenizer counts as part of this single streaming pass.
+    concept_token_counts = collections.Counter()
+    value_token_counts = collections.Counter()
     # The number of patients (rows) that have a token, or a descendant of it when an ontology is
     # given, however often they have it
     concept_patient_counts = collections.defaultdict(int)
@@ -381,6 +392,14 @@ def map_statistics(
         gender, race = concept_ids[2:4]
         gender_list.add(gender)
         race_list.add(race)
+
+        if collect_token_counts:
+            concept_token_counts.update(
+                value for value in concept_ids if isinstance(value, str)
+            )
+            value_token_counts.update(
+                value for value in concept_as_values if isinstance(value, str)
+            )
 
         unique_codes = set()
         for (
@@ -420,8 +439,22 @@ def map_statistics(
         "categorical_stats_by_lab": categorical_stats_by_lab,
         "concept_code_stats": concept_code_stats,
         "concept_patient_counts": concept_patient_counts,
+        "concept_token_counts": concept_token_counts,
+        "value_token_counts": value_token_counts,
         "gender_list": gender_list,
         "race_list": race_list,
+    }
+
+
+def count_string_list_values(dataset: Dataset, feature_name: str) -> Dict[str, int]:
+    """Count strings in an Arrow list column without a Python-level dataset map."""
+    flattened = pc.list_flatten(dataset.data.column(feature_name))
+    if not (pa.types.is_string(flattened.type) or pa.types.is_large_string(flattened.type)):
+        return {}
+    return {
+        row["values"]: row["counts"]
+        for row in pc.value_counts(flattened).to_pylist()
+        if row["values"] is not None
     }
 
 
@@ -445,6 +478,7 @@ def compute_statistics(
         total_size=total,
         size=SAMPLE_SIZE,
         ancestors_by_code=ancestors_by_code,
+        collect_token_counts=data_args.streaming,
     )
     if data_args.streaming:
         first_example = next(iter(dataset))
@@ -471,6 +505,18 @@ def compute_statistics(
             current = fixed_stat
         else:
             current = agg_statistics(current, fixed_stat)
+
+    if data_args.streaming:
+        concept_token_counts = dict(current["concept_token_counts"])
+        value_token_counts = dict(current["value_token_counts"])
+    else:
+        concept_token_counts = count_string_list_values(dataset, "concept_ids")
+        value_feature = (
+            "concept_as_values"
+            if "concept_as_values" in dataset.column_names
+            else "concept_values"
+        )
+        value_token_counts = count_string_list_values(dataset, value_feature)
 
     numeric_lab_stats = []
     for (concept_id, unit), online_stats in current["numeric_stats_by_lab"].items():
@@ -536,6 +582,8 @@ def compute_statistics(
         # patient is counted once however many descendants they have, unlike the prevalence in
         # all_concept_code_stats, which adds the descendants' prevalences up
         "concept_patient_counts": dict(current["concept_patient_counts"]),
+        "concept_token_counts": concept_token_counts,
+        "value_token_counts": value_token_counts,
         "all_concept_code_entropies": all_concept_code_entropies,
         "gender_list": current["gender_list"],
         "race_list": current["race_list"],
