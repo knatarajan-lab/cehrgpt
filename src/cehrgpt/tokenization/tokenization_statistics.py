@@ -78,11 +78,50 @@ def get_allowed_motor_codes(
     return allowed_motor_codes
 
 
+def get_motor_code_ancestors(
+        allowed_motor_codes: List[str],
+        ontology: Optional[Ontology],
+) -> Dict[str, Tuple[str, ...]]:
+    """
+    For every allowed code, the code itself and all its ancestors in the ontology.
+
+    An event of a code is an event of each of these, which is also how the training labels are
+    built (see CehrGptTokenizer.get_motor_parents). Without an ontology a code only covers
+    itself.
+    """
+    if ontology is None:
+        return {code: (code,) for code in allowed_motor_codes}
+    return {
+        code: tuple(sorted(ontology.get_all_parents(code) | {code}))
+        for code in allowed_motor_codes
+    }
+
+
 def map_motor_tte_statistics(
         batch: Dict[str, Any],
         allowed_motor_codes: List[str],
+        ancestors_by_code: Optional[Dict[str, Tuple[str, ...]]] = None,
 ) -> Dict[str, Any]:
+    """
+    Count events and censoring per MOTOR code, for a batch of patients.
+
+    Every ATT token that spans a positive interval is a prediction point. A code has an event
+    at a prediction point if it, or any code it covers (a descendant when ancestors_by_code is
+    given), occurs later, and is censored otherwise. Counting the covered codes here, per
+    prediction point, makes an ancestor count once per prediction point however many of its
+    descendants occur, which adding the children's counts together afterwards would not.
+
+    Args:
+        batch: sequences with concept_ids and epoch_times
+        allowed_motor_codes: the codes that can be tasks
+        ancestors_by_code: code -> the code and its ancestors (see get_motor_code_ancestors);
+            None means every code only covers itself
+    """
     allowed_motor_codes_set = set(allowed_motor_codes)
+    if ancestors_by_code is None:
+        ancestors_by_code = {code: (code,) for code in allowed_motor_codes}
+    # Every code that gets statistics: the allowed codes and their ancestors
+    all_codes = sorted({a for code in allowed_motor_codes for a in ancestors_by_code[code]})
     motor_event_times = femr.stat_utils.ReservoirSampler(100_000)
     task_tte_stats: Dict[str, int] = collections.defaultdict(int)
     task_censor_stats: Dict[str, int] = collections.defaultdict(int)
@@ -95,29 +134,37 @@ def map_motor_tte_statistics(
     )
     for concept_ids, epoch_times in zip(batch["concept_ids"], batch["epoch_times"]):
         # Reverse walk through concept_ids to calculate TTE from each prediction point
+        # code (or one of its descendants) -> time of its nearest occurrence after the point
         code_time_dict: Dict[str, float] = {}
+        # The allowed codes themselves, for the global sample of event times: this stays at
+        # the level of the codes that occur, whatever the ontology
+        token_time_dict: Dict[str, float] = {}
         num_predictions = 0
         for concept_id, current_time in zip(reversed(concept_ids), reversed(epoch_times)):
             if is_att_token(concept_id) and extract_time_interval_in_days(concept_id) > 0:
                 num_predictions += 1
-                # Only iterate over observed motor codes — O(observed) not O(all motor codes)
-                for motor_code, motor_time in code_time_dict.items():
-                    tte = (motor_time - current_time) / 86400
-                    motor_event_times.add(tte, 1)
-                    task_tte_stats[motor_code] += 1
-                    task_tte_time_stats[motor_code].add(1, tte)
+                # Only iterate over observed codes: O(observed), not O(all motor codes)
+                for code, code_time in code_time_dict.items():
+                    tte = (code_time - current_time) / 86400
+                    task_tte_stats[code] += 1
+                    task_tte_time_stats[code].add(1, tte)
+                for token_time in token_time_dict.values():
+                    motor_event_times.add((token_time - current_time) / 86400, 1)
             elif concept_id in allowed_motor_codes_set:
-                if concept_id not in code_time_dict:
-                    # First (nearest) occurrence in reverse walk = last occurrence in forward.
-                    # num_predictions is the count of ATTs seen so far, all of which occur
-                    # *after* this position in forward time — so the code was censored at each.
-                    task_censor_stats[concept_id] += num_predictions
-                code_time_dict[concept_id] = current_time
+                token_time_dict[concept_id] = current_time
+                for code in ancestors_by_code[concept_id]:
+                    if code not in code_time_dict:
+                        # First (nearest) occurrence in reverse walk = last occurrence in
+                        # forward. num_predictions is the count of ATTs seen so far, all of
+                        # which occur *after* this position in forward time, so the code was
+                        # censored at each of them.
+                        task_censor_stats[code] += num_predictions
+                    code_time_dict[code] = current_time
 
-        # Motor codes never observed: every prediction point was censored
-        for motor_code in allowed_motor_codes:
-            if motor_code not in code_time_dict:
-                task_censor_stats[motor_code] += num_predictions
+        # Codes never observed: every prediction point was censored
+        for code in all_codes:
+            if code not in code_time_dict:
+                task_censor_stats[code] += num_predictions
 
     return {
         "motor_event_times": motor_event_times,
@@ -133,9 +180,12 @@ def compute_motor_tte_statistics(
         allowed_motor_codes: List[str],
         ontology: Optional[Ontology] = None,
 ) -> Dict[str, Any]:
+    # The statistics of an ancestor are counted directly (see map_motor_tte_statistics), so
+    # there is nothing to add up afterwards
     map_motor_tte_statistics_partial = partial(
         map_motor_tte_statistics,
         allowed_motor_codes=allowed_motor_codes,
+        ancestors_by_code=get_motor_code_ancestors(allowed_motor_codes, ontology),
     )
     if data_args.streaming:
         first_example = next(iter(dataset))
@@ -171,31 +221,6 @@ def compute_motor_tte_statistics(
                     current["task_tte_time_stats"][k].combine(v)
                 else:
                     current["task_tte_time_stats"][k] = v
-
-    # Aggregate the counts for the parent concepts
-    if ontology is not None:
-        for k in list(current["task_tte_stats"].keys()):
-            for parent in ontology.get_all_parents(k):
-                if parent != k:
-                    current["task_tte_stats"][parent] += current["task_tte_stats"][k]
-        for k in list(current["task_censor_stats"].keys()):
-            for parent in ontology.get_all_parents(k):
-                if parent != k:
-                    current["task_censor_stats"][parent] += current[
-                        "task_censor_stats"
-                    ][k]
-        for k in list(current["task_tte_time_stats"].keys()):
-            for parent in ontology.get_all_parents(k):
-                if parent != k:
-                    if parent in current["task_tte_time_stats"]:
-                        current["task_tte_time_stats"][parent].combine(
-                            current["task_tte_time_stats"][k]
-                        )
-                    else:
-                        import copy
-                        current["task_tte_time_stats"][parent] = copy.deepcopy(
-                            current["task_tte_time_stats"][k]
-                        )
     return current
 
 
