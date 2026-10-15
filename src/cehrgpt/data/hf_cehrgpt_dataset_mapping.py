@@ -82,37 +82,17 @@ class DatasetMappingDecorator(DatasetMapping):
         """
         if isinstance(records, LazyBatch):
             table = records.pa_table
+
             if "index_date" in table.column_names:
                 index_col = table.column("index_date")
                 if index_col.null_count > 0:
                     table = table.drop(["index_date"])
-            records = table.to_pydict()
+            records = LazyBatch(pa_table=table, formatter=records.formatter)
         else:
             if "index_date" in records:
                 if pd.isna(records["index_date"][0]):
-                    records = dict(records)
                     del records["index_date"]
-
-        if not records:
-            return {}
-        batch_size = len(next(iter(records.values())))
-        transformed_records = []
-        for row_index in range(batch_size):
-            record = {name: values[row_index] for name, values in records.items()}
-            transformed = self.transform(record)
-            transformed_records.append(
-                transformed.to_dict()
-                if isinstance(transformed, Series)
-                else transformed
-            )
-
-        output_columns = {
-            name for record in transformed_records for name in record.keys()
-        }
-        return {
-            name: [record.get(name) for record in transformed_records]
-            for name in output_columns
-        }
+        return super().batch_transform(records=records)
 
     def transform(self, record: Dict[str, Any]) -> Union[Dict[str, Any], Series]:
         raise NotImplemented("Must be implemented")
@@ -459,6 +439,21 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
             "is_numeric_types",
         ]
 
+    def _valid_concept_ids(self) -> frozenset:
+        """
+        The tokens of the vocabulary, built once per process.
+
+        get_vocab() of a Hugging Face tokenizer builds a new dict of the whole vocabulary on every
+        call (6 ms at 50,000 tokens). Calling it for every token of every patient made a single
+        patient with 3,000 tokens take 20 seconds, and the first batch of a dataset.map never ends.
+        Built on first use, so it is not part of what is pickled to the workers.
+        """
+        valid = self.__dict__.get("_valid_concept_ids_cache")
+        if valid is None:
+            valid = frozenset(self._concept_tokenizer.get_vocab())
+            self._valid_concept_ids_cache = valid
+        return valid
+
     def filter_out_invalid_tokens(self, record: Dict[str, Any]) -> Dict[str, Any]:
         column_names = []
         seq_length = len(record["concept_ids"])
@@ -478,10 +473,11 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
                 continue
             if isinstance(v, (list, np.ndarray)) and len(v) == seq_length:
                 column_names.append(k)
+        valid_concept_ids = self._valid_concept_ids()
         valid_indices = [
             idx
             for idx, concept_id in enumerate(record["concept_ids"])
-            if concept_id in self._concept_tokenizer.get_vocab()
+            if concept_id in valid_concept_ids
         ]
         if len(valid_indices) != len(record["concept_ids"]):
             for column in column_names:
