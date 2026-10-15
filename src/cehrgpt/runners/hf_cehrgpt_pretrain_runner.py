@@ -116,6 +116,7 @@ def load_and_create_tokenizer(
                 ontology.prune_to_dataset(
                     train_val_dataset,
                     num_proc=data_args.preprocessing_num_workers,
+                    batch_size=data_args.preprocessing_batch_size,
                     remove_ontologies={"SPL", "HemOnc", "LOINC"},
                 )
 

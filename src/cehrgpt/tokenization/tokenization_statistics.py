@@ -1,6 +1,8 @@
 import collections
+import logging
 import math
 import pickle
+import time
 from functools import partial
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -30,6 +32,8 @@ from cehrgpt.tokenization.tokenization_constants import (
     SAMPLE_SIZE,
 )
 from cehrgpt.omop.ontology import Ontology
+
+LOG = logging.getLogger(__name__)
 
 
 def get_dataset_len(dataset: Union[Dataset, IterableDataset]) -> int:
@@ -246,28 +250,90 @@ def agg_statistics(stats1, stats2):
     return stats1
 
 
-def get_ancestors_by_code(ontology: Optional[Ontology]) -> Dict[str, Tuple[str, ...]]:
+class _AncestorIndex:
+    """
+    A concept-to-ancestors mapping stored as flat NumPy arrays.
+
+    This is equivalent to a ``dict[str, tuple[str, ...]]``, but is substantially cheaper for
+    ``datasets.map`` to hash and pickle for each worker. It follows the same sorted-key/offset
+    representation used by ``_PredictionTimeIndex``.
+    """
+
+    def __init__(self, ancestors_by_code: Dict[str, Tuple[str, ...]]):
+        concept_ids = sorted(ancestors_by_code, key=int)
+        offsets = [0]
+        ancestors: List[int] = []
+        for concept_id in concept_ids:
+            ancestors.extend(int(ancestor) for ancestor in ancestors_by_code[concept_id])
+            offsets.append(len(ancestors))
+        self._concept_ids = np.fromiter(
+            (int(concept_id) for concept_id in concept_ids),
+            dtype=np.int64,
+            count=len(concept_ids),
+        )
+        self._offsets = np.asarray(offsets, dtype=np.int64)
+        self._ancestors = np.asarray(ancestors, dtype=np.int64)
+
+    def __len__(self) -> int:
+        return len(self._concept_ids)
+
+    @property
+    def relationship_count(self) -> int:
+        return len(self._ancestors)
+
+    def get(self, concept_id: str, default=()):
+        if not isinstance(concept_id, str) or not concept_id.isnumeric():
+            return default
+        numeric_concept_id = int(concept_id)
+        position = int(np.searchsorted(self._concept_ids, numeric_concept_id))
+        if (
+            position >= len(self._concept_ids)
+            or self._concept_ids[position] != numeric_concept_id
+        ):
+            return default
+        start, end = self._offsets[position], self._offsets[position + 1]
+        return [str(ancestor) for ancestor in self._ancestors[start:end].tolist()]
+
+    def __getitem__(self, concept_id: str) -> List[str]:
+        missing = object()
+        result = self.get(concept_id, missing)
+        if result is missing:
+            raise KeyError(concept_id)
+        return result
+
+    def __contains__(self, concept_id: str) -> bool:
+        missing = object()
+        return self.get(concept_id, missing) is not missing
+
+
+def get_ancestors_by_code(ontology: Optional[Ontology]) -> _AncestorIndex:
     """
     For every concept of the ontology that has parents, all its ancestors (not the concept itself).
 
-    Used to count a patient once for every ancestor of the concepts the patient has. It is a plain
-    dict of tuples so that it can be sent to the worker processes of a dataset map.
+    Used to count a patient once for every ancestor of the concepts the patient has. It is a
+    flat-array index so that it can be sent cheaply to dataset-map worker processes.
     """
     if ontology is None:
-        return {}
+        return _AncestorIndex({})
     ancestors: Dict[str, Tuple[str, ...]] = {}
-    for concept_id in list(ontology.parents_map.keys()):
+    # A pruned ontology remembers which concepts actually occurred in the dataset. Ancestor-only
+    # nodes never appear in a patient sequence, so including them in this worker lookup only makes
+    # the multiprocessing callback more expensive to hash, pickle, copy, and retain.
+    concept_ids = getattr(ontology, "dataset_concept_ids", None)
+    if not concept_ids:
+        concept_ids = ontology.parents_map.keys()
+    for concept_id in concept_ids:
         found = tuple(sorted(a for a in ontology.get_all_parents(concept_id) if a != concept_id))
         if found:
             ancestors[concept_id] = found
-    return ancestors
+    return _AncestorIndex(ancestors)
 
 
 def map_statistics(
     batch: Dict[str, Any],
     total_size,
     size=10_000,
-    ancestors_by_code: Optional[Dict[str, Tuple[str, ...]]] = None,
+    ancestors_by_code: Optional[_AncestorIndex] = None,
 ) -> Dict[str, Any]:
     if "units" in batch:
         batch_value_units = batch["units"]
@@ -365,11 +431,20 @@ def compute_statistics(
         ontology: Optional[Ontology] = None,
 ) -> Dict[str, Any]:
     total = get_dataset_len(dataset)
+    ancestor_lookup_start = time.perf_counter()
+    ancestors_by_code = get_ancestors_by_code(ontology)
+    if ontology is not None:
+        LOG.info(
+            "Prepared ancestor lookup with %s observed concepts and %s relationships in %.2f seconds",
+            len(ancestors_by_code),
+            ancestors_by_code.relationship_count,
+            time.perf_counter() - ancestor_lookup_start,
+        )
     map_statistics_partial = partial(
         map_statistics,
         total_size=total,
         size=SAMPLE_SIZE,
-        ancestors_by_code=get_ancestors_by_code(ontology),
+        ancestors_by_code=ancestors_by_code,
     )
     if data_args.streaming:
         first_example = next(iter(dataset))

@@ -1,5 +1,6 @@
 import dataclasses
 import os
+import pickle
 import unittest
 from collections import Counter
 
@@ -77,6 +78,7 @@ class PatientCountsTest(unittest.TestCase):
         ontology = Ontology.__new__(Ontology)
         ontology.parents_map = parents
         ontology.all_parents_map = {}
+        ontology.dataset_concept_ids = set()
         ontology.concept_domain_map = {}
         ontology.concept_vocabulary_map = {}
         return ontology
@@ -121,11 +123,45 @@ class PatientCountsTest(unittest.TestCase):
 
         ontology = self.ontology({"100": {"900"}, "900": {"950"}, "300": {"900", "500"}})
         found = get_ancestors_by_code(ontology)
-        self.assertEqual(found["100"], ("900", "950"))
-        self.assertEqual(found["300"], ("500", "900", "950"))
-        self.assertEqual(found["900"], ("950",))
+        self.assertEqual(found["100"], ["900", "950"])
+        self.assertEqual(found["300"], ["500", "900", "950"])
+        self.assertEqual(found["900"], ["950"])
         self.assertNotIn("950", found)
-        self.assertEqual(get_ancestors_by_code(None), {})
+        self.assertEqual(len(get_ancestors_by_code(None)), 0)
+
+
+class TokenizationPerformanceEquivalenceTest(unittest.TestCase):
+    def test_concept_filter_accepts_a_set(self):
+        records = {"concept_ids": [["100", "200", "D1"]]}
+        self.assertEqual(
+            CehrGptTokenizer.batch_concat_concepts(
+                records, "concept_ids", {"100", "D1"}
+            ),
+            {"concept_ids": ["100 D1"]},
+        )
+        self.assertEqual(
+            CehrGptTokenizer.batch_concat_concepts(
+                records, "concept_ids", set()
+            ),
+            {"concept_ids": ["100 200 D1"]},
+        )
+
+
+class AncestorLookupOptimizationTest(unittest.TestCase):
+    def test_only_observed_concepts_are_added_to_the_worker_lookup(self):
+        from cehrgpt.tokenization.tokenization_statistics import get_ancestors_by_code
+
+        ontology = PatientCountsTest.ontology(
+            {"100": {"900"}, "200": {"900"}, "900": {"950"}}
+        )
+        ontology.dataset_concept_ids = {"100", "200"}
+        found = get_ancestors_by_code(ontology)
+        self.assertEqual(len(found), 2)
+        self.assertEqual(found["100"], ["900", "950"])
+        self.assertEqual(found["200"], ["900", "950"])
+        restored = pickle.loads(pickle.dumps(found))
+        self.assertEqual(restored["100"], ["900", "950"])
+        self.assertEqual(restored.get("D1", ()), ())
 
 
 class TokenizerFilterTest(unittest.TestCase):
