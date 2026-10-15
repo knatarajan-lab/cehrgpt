@@ -82,37 +82,17 @@ class DatasetMappingDecorator(DatasetMapping):
         """
         if isinstance(records, LazyBatch):
             table = records.pa_table
+
             if "index_date" in table.column_names:
                 index_col = table.column("index_date")
                 if index_col.null_count > 0:
                     table = table.drop(["index_date"])
-            records = table.to_pydict()
+            records = LazyBatch(pa_table=table, formatter=records.formatter)
         else:
             if "index_date" in records:
                 if pd.isna(records["index_date"][0]):
-                    records = dict(records)
                     del records["index_date"]
-
-        if not records:
-            return {}
-        batch_size = len(next(iter(records.values())))
-        transformed_records = []
-        for row_index in range(batch_size):
-            record = {name: values[row_index] for name, values in records.items()}
-            transformed = self.transform(record)
-            transformed_records.append(
-                transformed.to_dict()
-                if isinstance(transformed, Series)
-                else transformed
-            )
-
-        output_columns = {
-            name for record in transformed_records for name in record.keys()
-        }
-        return {
-            name: [record.get(name) for record in transformed_records]
-            for name in output_columns
-        }
+        return super().batch_transform(records=records)
 
     def transform(self, record: Dict[str, Any]) -> Union[Dict[str, Any], Series]:
         raise NotImplemented("Must be implemented")
