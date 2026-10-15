@@ -4,6 +4,7 @@ import json
 import os
 import re
 import pickle
+import warnings
 from functools import partial
 from itertools import islice
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
@@ -1422,6 +1423,13 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             data_args,
             qualified_codes: Optional[List[str]] = None,
     ):
+        """Deprecated: use :meth:`train_concept_tokenizer_from_counts` instead."""
+        warnings.warn(
+            "train_concept_tokenizer is deprecated; use "
+            "train_concept_tokenizer_from_counts instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         # Use the Fast Tokenizer from the Huggingface tokenizers Rust implementation.
         # https://github.com/huggingface/tokenizers
         concept_tokenizer = Tokenizer(WordLevel(unk_token=unk_token, vocab=dict()))

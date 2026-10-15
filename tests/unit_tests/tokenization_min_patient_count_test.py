@@ -192,14 +192,15 @@ class TokenizationPerformanceEquivalenceTest(unittest.TestCase):
         args.vocab_size = 8
         args.min_frequency = 1
         special_tokens = ["[UNK]", "[PAD]"]
-        expected = CehrGptTokenizer.train_concept_tokenizer(
-            dataset,
-            feature_name="tokens",
-            special_tokens=special_tokens,
-            unk_token="[UNK]",
-            data_args=args,
-            qualified_codes={"a", "b", "c", "d", "two words", "words"},
-        )
+        with self.assertWarnsRegex(DeprecationWarning, "from_counts"):
+            expected = CehrGptTokenizer.train_concept_tokenizer(
+                dataset,
+                feature_name="tokens",
+                special_tokens=special_tokens,
+                unk_token="[UNK]",
+                data_args=args,
+                qualified_codes={"a", "b", "c", "d", "two words", "words"},
+            )
         counts = Counter(
             value
             for row in dataset["tokens"]
