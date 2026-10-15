@@ -126,18 +126,42 @@ class Ontology:
                 (ontology not in remove_ontologies) and (c in all_parents)
             )
 
-        # Keep the existing pruning behavior so tokenizer outputs remain identical. The observed
-        # concept IDs recorded above are used only to reduce the ancestor lookup sent to workers.
-        concept_ids = set(self.parents_map.keys())
-        for concept_id in concept_ids:
-            m: Any
-            if is_valid(concept_id):
-                for m in (self.parents_map, self.concept_vocabulary_map):
-                    m[concept_id] = {a for a in m[concept_id] if is_valid(a)}
-            else:
-                for m in (self.parents_map, self.concept_vocabulary_map):
-                    if concept_id in m:
-                        del m[concept_id]
+        retained_concept_ids = valid_concept_ids | {
+            concept_id for concept_id in all_parents if is_valid(concept_id)
+        }
+
+        # Prune each map according to its value type. The previous implementation treated
+        # vocabulary-name strings as collections of concept IDs and replaced them with sets of
+        # characters. Besides corrupting the metadata, that made subsequent is_valid calls depend
+        # on the unordered iteration order of parents_map.
+        self.parents_map = collections.defaultdict(
+            set,
+            {
+                concept_id: {
+                    parent
+                    for parent in parents
+                    if parent in retained_concept_ids
+                }
+                for concept_id, parents in self.parents_map.items()
+                if concept_id in retained_concept_ids
+            },
+        )
+        self.concept_vocabulary_map = collections.defaultdict(
+            str,
+            {
+                concept_id: vocabulary
+                for concept_id, vocabulary in self.concept_vocabulary_map.items()
+                if concept_id in retained_concept_ids
+            },
+        )
+        self.concept_domain_map = collections.defaultdict(
+            str,
+            {
+                concept_id: domain
+                for concept_id, domain in self.concept_domain_map.items()
+                if concept_id in retained_concept_ids
+            },
+        )
 
         self.all_parents_map = {}
 

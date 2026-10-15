@@ -164,6 +164,87 @@ class AncestorLookupOptimizationTest(unittest.TestCase):
         self.assertEqual(restored.get("D1", ()), ())
 
 
+class OntologyPruningTest(unittest.TestCase):
+    @staticmethod
+    def ontology():
+        from cehrgpt.omop.ontology import Ontology
+
+        ontology = Ontology.__new__(Ontology)
+        ontology.parents_map = {
+            "100": {"900", "901"},
+            "200": {"901"},
+            "900": {"950"},
+            "777": {"778"},
+        }
+        ontology.all_parents_map = {}
+        ontology.dataset_concept_ids = set()
+        ontology.concept_vocabulary_map = {
+            "100": "SNOMED",
+            "200": "SNOMED",
+            "900": "SNOMED",
+            "901": "LOINC",
+            "950": "SNOMED",
+            "777": "SNOMED",
+            "778": "SNOMED",
+        }
+        ontology.concept_domain_map = {
+            concept_id: "Condition"
+            for concept_id in ontology.concept_vocabulary_map
+        }
+        return ontology
+
+    def test_pruning_keeps_observed_concepts_and_allowed_ancestors(self):
+        ontology = self.ontology()
+        dataset = Dataset.from_list(
+            [
+                {"concept_ids": ["100", "D1", "not-numeric"]},
+                {"concept_ids": ["200"]},
+            ]
+        )
+
+        ontology.prune_to_dataset(
+            dataset,
+            remove_ontologies={"LOINC"},
+            num_proc=1,
+            batch_size=1,
+        )
+
+        self.assertEqual(set(ontology.parents_map), {"100", "200", "900"})
+        self.assertEqual(ontology.parents_map["100"], {"900"})
+        self.assertEqual(ontology.parents_map["200"], set())
+        self.assertEqual(ontology.parents_map["900"], {"950"})
+        self.assertEqual(
+            dict(ontology.concept_vocabulary_map),
+            {"100": "SNOMED", "200": "SNOMED", "900": "SNOMED", "950": "SNOMED"},
+        )
+        self.assertTrue(
+            all(
+                isinstance(vocabulary, str)
+                for vocabulary in ontology.concept_vocabulary_map.values()
+            )
+        )
+        self.assertEqual(
+            set(ontology.concept_domain_map), {"100", "200", "900", "950"}
+        )
+        self.assertEqual(ontology.get_all_parents("100"), {"100", "900", "950"})
+        self.assertEqual(ontology.dataset_concept_ids, {"100", "200"})
+
+    def test_an_observed_concept_is_kept_even_from_an_excluded_vocabulary(self):
+        ontology = self.ontology()
+        dataset = Dataset.from_list([{"concept_ids": ["901"]}])
+
+        ontology.prune_to_dataset(
+            dataset,
+            remove_ontologies={"LOINC"},
+            num_proc=1,
+            batch_size=1,
+        )
+
+        self.assertEqual(ontology.dataset_concept_ids, {"901"})
+        self.assertEqual(ontology.concept_vocabulary_map["901"], "LOINC")
+        self.assertEqual(ontology.concept_domain_map["901"], "Condition")
+
+
 class TokenizerFilterTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
