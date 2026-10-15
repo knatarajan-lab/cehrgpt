@@ -87,3 +87,38 @@ class FilterOutInvalidTokensTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EncodingMatchesTheTokenizerTest(unittest.TestCase):
+    """The dictionary lookup must return the ids the tokenizer returns."""
+
+    setUpClass = classmethod(FilterOutInvalidTokensTest.setUpClass.__func__)
+    record = FilterOutInvalidTokensTest.record
+
+    def test_concept_ids_match_tokenizer_encode_including_out_of_vocabulary_tokens(self):
+        mapping = HFCehrGptTokenizationMapping(self.tokenizer)
+        vocabulary = list(self.tokenizer.get_vocab())
+        tokens = vocabulary + ["not in the vocabulary", "x", "[OOV]"]
+        tokens = [t for t in tokens if t.strip() and " " not in t]
+        self.assertEqual(mapping.encode_concepts(tokens), list(self.tokenizer.encode(tokens)))
+
+    def test_value_ids_match_tokenizer_encode_value(self):
+        mapping = HFCehrGptTokenizationMapping(self.tokenizer)
+        values = list(self.tokenizer.get_value_vocab()) + ["BIN:999", "something else"]
+        values = [v for v in values if " " not in v]
+        self.assertEqual(mapping.encode_values(values), list(self.tokenizer.encode_value(values)))
+
+    def test_transform_output_is_unchanged_for_a_patient_with_numeric_values(self):
+        mapping = HFCehrGptTokenizationMapping(self.tokenizer)
+        record = self.record()
+        n = len(record["concept_ids"])
+        marked = set(range(4, n, 3))
+        record["concept_value_masks"] = [int(i in marked) for i in range(n)]
+        record["concept_values"] = [float(i) if i in marked else None for i in range(n)]
+        record["units"] = ["mg/dL" if i in marked else None for i in range(n)]
+        out = mapping.transform(dict(record))
+        kept = out["concept_ids"]
+        self.assertEqual(list(out["input_ids"]), list(self.tokenizer.encode(kept)))
+        self.assertEqual(len(out["values"]), len(out["input_ids"]))
+        self.assertEqual(len(out["values"]), len(record["concept_ids"]))
+        self.assertIn(self.tokenizer.get_value_vocab()["BIN:unknown"], list(out["values"]))
