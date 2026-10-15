@@ -236,6 +236,9 @@ def agg_statistics(stats1, stats2):
     if stats1.get("concept_code_stats"):
         for concept_id, weight in stats2["concept_code_stats"].items():
             stats1["concept_code_stats"][concept_id] += weight
+    if stats1.get("concept_patient_counts"):
+        for concept_id, count in stats2["concept_patient_counts"].items():
+            stats1["concept_patient_counts"][concept_id] += count
     if stats1.get("gender_list"):
         stats1.get("gender_list").update(stats2.get("gender_list"))
     if stats1.get("race_list"):
@@ -268,6 +271,8 @@ def map_statistics(batch: Dict[str, Any], total_size, size=10_000) -> Dict[str, 
     numeric_stats_by_lab = collections.defaultdict(partial(ReservoirSampler, size=size))
     categorical_stats_by_lab = collections.defaultdict(int)
     concept_code_stats = collections.defaultdict(int)
+    # The number of patients (rows) a token occurs in, however often it occurs in each
+    concept_patient_counts = collections.defaultdict(int)
     gender_list = set()
     race_list = set()
     for (
@@ -311,11 +316,13 @@ def map_statistics(batch: Dict[str, Any], total_size, size=10_000) -> Dict[str, 
 
         for code in unique_codes:
             concept_code_stats[code] += 1 / total_size
+            concept_patient_counts[code] += 1
 
     return {
         "numeric_stats_by_lab": numeric_stats_by_lab,
         "categorical_stats_by_lab": categorical_stats_by_lab,
         "concept_code_stats": concept_code_stats,
+        "concept_patient_counts": concept_patient_counts,
         "gender_list": gender_list,
         "race_list": race_list,
     }
@@ -414,6 +421,9 @@ def compute_statistics(
         "categorical_lab_stats": categorical_lab_stats,
         "original_concept_codes": list(current["concept_code_stats"].keys()),
         "all_concept_code_stats": all_concept_code_stats,
+        # How many patients each token itself occurs in (not summed up the ontology, unlike the
+        # prevalence in all_concept_code_stats)
+        "concept_patient_counts": dict(current["concept_patient_counts"]),
         "all_concept_code_entropies": all_concept_code_entropies,
         "gender_list": current["gender_list"],
         "race_list": current["race_list"],

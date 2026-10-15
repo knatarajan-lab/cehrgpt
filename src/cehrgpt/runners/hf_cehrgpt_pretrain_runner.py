@@ -136,6 +136,7 @@ def load_and_create_tokenizer(
             apply_entropy_filter=cehrgpt_args.apply_entropy_filter,
             min_prevalence=cehrgpt_args.min_prevalence,
             ontology=ontology,
+            min_patient_count=cehrgpt_args.min_patient_count,
         )
         LOG.info("Finished training the tokenizer ...")
         tokenizer.save_pretrained(tokenizer_abspath)
@@ -544,6 +545,7 @@ def main():
                         ),
                         apply_entropy_filter=cehrgpt_args.apply_entropy_filter,
                         min_prevalence=cehrgpt_args.min_prevalence,
+                        min_patient_count=cehrgpt_args.min_patient_count,
                     )
                     cehrgpt_tokenizer.save_pretrained(
                         os.path.expanduser(training_args.output_dir)

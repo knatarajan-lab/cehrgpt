@@ -949,6 +949,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             num_motor_tasks: Optional[int] = None,
             apply_entropy_filter: bool = False,
             min_prevalence: float = 1 / 1000,
+            min_patient_count: int = 0,
     ):
         if not isinstance(cehrgpt_tokenizer, CehrGptTokenizer):
             raise ValueError(
@@ -964,6 +965,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             num_motor_tasks=num_motor_tasks,
             apply_entropy_filter=apply_entropy_filter,
             min_prevalence=min_prevalence,
+            min_patient_count=min_patient_count,
         )
 
         new_tokens = set(new_tokenizer.get_vocab().keys()) - set(
@@ -1143,13 +1145,26 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             apply_entropy_filter: bool = False,
             min_prevalence: float = 1 / 1000,
             ontology: Optional[Ontology] = None,
+            min_patient_count: int = 0,
     ):
         """
         Train a huggingface word level tokenizer.
 
         To use their tokenizer, we need to concatenate all the concepts
         together and treat it as a sequence.
+
+        Args:
+            min_prevalence: a clinical token must occur in at least this fraction of the patients
+                (counting its descendants too when an ontology is given)
+            min_patient_count: a clinical token must occur in at least this many patients of the
+                dataset, counting the token itself only. 0 keeps every token. Tokens that are
+                not clinical events (time, visit, demographic tokens) are never removed. Both
+                thresholds apply when both are given.
         """
+        if min_patient_count is None:
+            min_patient_count = 0
+        if min_patient_count < 0:
+            raise ValueError(f"min_patient_count cannot be negative, got {min_patient_count}")
 
         if isinstance(dataset, DatasetDict):
             dataset = dataset["train"]
@@ -1183,6 +1198,22 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                 if min_prevalence <= all_concept_code_stats[k]
                    or not is_clinical_event(k, data_args.is_data_in_meds)
             ]
+
+        if min_patient_count > 0:
+            patient_counts = cehrgpt_data_statistics["concept_patient_counts"]
+            before = len(qualified_codes)
+            qualified_codes = [
+                k
+                for k in qualified_codes
+                if not is_clinical_event(k, data_args.is_data_in_meds)
+                   or patient_counts.get(k, 0) >= min_patient_count
+            ]
+            LOG.info(
+                "min_patient_count=%s removed %s of the %s tokens that passed the other filters",
+                min_patient_count,
+                before - len(qualified_codes),
+                before,
+            )
 
         # Create the tokenizer now
         LOG.info("Training the tokenizer for concepts")
@@ -1263,6 +1294,10 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             allowed_motor_codes = get_allowed_motor_codes(
                 original_concept_codes, data_args, ontology, measurement_concept_ids
             )
+            if min_patient_count > 0:
+                # A token that was removed from the vocabulary must not be a task either
+                kept = set(qualified_codes)
+                allowed_motor_codes = [c for c in allowed_motor_codes if c in kept]
             motor_tte_statistics = compute_motor_tte_statistics(
                 dataset, data_args, allowed_motor_codes, ontology
             )
