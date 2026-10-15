@@ -700,14 +700,53 @@ class EndToEndTest(unittest.TestCase):
         resolved = zs.run(parse(base + ["--output_dir", os.path.join(self.tmp, "yt"), "--concept_ancestor", table]))["outcome"]
         self.assertEqual(set(resolved["concepts"]), {c[0], c[5]})
 
-    def test_a_concept_without_any_task_cannot_be_expanded(self):
+    def not_task_but_in_vocabulary(self):
+        tasks = set(self.codes)
+        return next(t for t in sorted(self.tokenizer.get_vocab()) if t.isdigit() and t not in tasks)
+
+    def test_concepts_without_a_task_are_removed_with_a_warning(self):
+        c = self.codes
+        in_vocabulary_concept = self.not_task_but_in_vocabulary()
         path, _ = self.features()
-        args = zs.create_arg_parser().parse_args(
-            ["--model_path", self.model_dir, "--features_folder", path, "--output_dir", os.path.join(self.tmp, "err_expand"),
-             "--outcome_concepts", "123456789", "--expand_descendants"]
-        )
-        with self.assertRaisesRegex(ValueError, "No MOTOR task is the concept"):
-            zs.run(args)
+        for expand in (False, True):
+            with self.subTest(expand=expand):
+                args = zs.create_arg_parser().parse_args(
+                    ["--model_path", self.model_dir, "--features_folder", path,
+                     "--output_dir", os.path.join(self.tmp, f"removed_{expand}"),
+                     "--outcome_concepts", c[0], "123456789", in_vocabulary_concept, c[1]]
+                    + (["--expand_descendants"] if expand else [])
+                )
+                with self.assertLogs("cehrgpt.tools.zero_shot_motor_predictions", level="WARNING") as logs:
+                    metrics = zs.run(args)
+                outcome = metrics["outcome"]
+                # the run goes on with the concepts that have a task ...
+                self.assertEqual(set(outcome["concepts"]), {c[0]} if expand else {c[0], c[1]})  # c1 is below c0
+                # ... and says which ones were left out, and why
+                self.assertEqual(set(outcome["removed_concepts"]), {"123456789", in_vocabulary_concept})
+                self.assertIn("not in the tokenizer vocabulary", outcome["removed_concepts"]["123456789"])
+                self.assertIn("in the vocabulary, but", outcome["removed_concepts"][in_vocabulary_concept])
+                warning = "\n".join(logs.output)
+                self.assertIn("Removed 2 of 4 outcome concepts", warning)
+                self.assertIn("123456789", warning)
+                self.assertIn(in_vocabulary_concept, warning)
+
+    def test_nothing_is_removed_when_every_concept_has_a_task(self):
+        metrics, _, _ = self.run_cli("--outcome_concepts", self.codes[0], self.codes[1], out="nothing_removed")
+        self.assertIsNone(metrics["outcome"]["removed_concepts"])
+
+    def test_a_set_where_nothing_has_a_task_cannot_be_predicted(self):
+        path, _ = self.features()
+        for expand in (False, True):
+            with self.subTest(expand=expand):
+                args = zs.create_arg_parser().parse_args(
+                    ["--model_path", self.model_dir, "--features_folder", path,
+                     "--output_dir", os.path.join(self.tmp, f"err_expand_{expand}"),
+                     "--outcome_concepts", "123456789", "987654321"] + (["--expand_descendants"] if expand else [])
+                )
+                with self.assertRaisesRegex(ValueError, "None of the outcome concepts can be predicted") as error:
+                    zs.run(args)
+                self.assertIn("123456789", str(error.exception))
+                self.assertIn("987654321", str(error.exception))
 
     def test_expanding_needs_an_ontology(self):
         no_ontology = os.path.join(self.tmp, "tok_without_ontology")

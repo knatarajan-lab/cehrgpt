@@ -438,6 +438,17 @@ def ancestors_from_table(path: str, task_codes: Sequence[str]):
     return lambda code: cache.get(str(code), frozenset({str(code)}))
 
 
+def explain_uncovered(tokenizer: CehrGptTokenizer, concept: str, expanded: bool) -> str:
+    """Why no MOTOR task covers a concept, for the warning."""
+    if concept not in tokenizer.get_vocab():
+        return (
+            "not in the tokenizer vocabulary, so the model never saw it as an event"
+        )
+    if expanded:
+        return "in the vocabulary, but no MOTOR task is this concept or one of its descendants"
+    return "in the vocabulary, but not a MOTOR task (--expand_descendants covers it through the tasks below it)"
+
+
 def tokenizer_ancestors(tokenizer: CehrGptTokenizer):
     """concept -> the concept and its ancestors, from the ontology saved with the tokenizer."""
     ontology = tokenizer._ontology
@@ -595,25 +606,41 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
             outcome_input += [line.strip() for line in f if line.strip()]
     outcome = list(dict.fromkeys(outcome_input))
     outcome_resolution: Dict[str, List[str]] = {}
-    if outcome and args.expand_descendants:
+    uncovered: Dict[str, str] = {}
+    if outcome:
         task_codes = sorted(tokenizer._motor_time_to_event_codes)
-        ancestors_of = (
-            ancestors_from_table(args.concept_ancestor, task_codes)
-            if args.concept_ancestor else tokenizer_ancestors(tokenizer)
-        )
-        for concept in outcome:
-            outcome_resolution[concept] = expand_to_tasks([concept], task_codes, ancestors_of)
-            if not outcome_resolution[concept]:
+        if args.expand_descendants:
+            ancestors_of = (
+                ancestors_from_table(args.concept_ancestor, task_codes)
+                if args.concept_ancestor else tokenizer_ancestors(tokenizer)
+            )
+            resolved = {c: expand_to_tasks([c], task_codes, ancestors_of) for c in outcome}
+            covered = [c for c in outcome if resolved[c]]
+            outcome_resolution = {c: resolved[c] for c in covered}
+        else:
+            covered = [c for c in outcome if tokenizer.is_motor_time_to_event_code(c)]
+        uncovered = {c: explain_uncovered(tokenizer, c, args.expand_descendants) for c in outcome if c not in covered}
+        if uncovered:
+            if not covered:
                 raise ValueError(
-                    f"No MOTOR task is the concept {concept} or one of its descendants, so it "
-                    "cannot be predicted"
+                    "None of the outcome concepts can be predicted, because no MOTOR task covers any of "
+                    f"them: {uncovered}. Find the tasks with --list_tasks (and --search)."
                 )
-        # across the whole set, again only the highest tasks: one concept's task may contain another's
-        outcome = expand_to_tasks(outcome, task_codes, ancestors_of)
-        LOG.info(
-            "The outcome concepts %s (with descendants) are covered by %s MOTOR task(s): %s",
-            outcome_input, len(outcome), [(c, names.get(c, "")) for c in outcome],
-        )
+            # The predicted outcome is narrower than the label whenever a removed concept has events
+            LOG.warning(
+                "Removed %s of %s outcome concepts that no MOTOR task covers; the prediction is for the other "
+                "%s, so it misses the events of the removed ones: %s",
+                len(uncovered), len(outcome), len(covered), uncovered,
+            )
+        if args.expand_descendants:
+            # across the whole set, again only the highest tasks: one concept's task may contain another's
+            outcome = expand_to_tasks(covered, task_codes, ancestors_of)
+            LOG.info(
+                "The outcome concepts %s (with descendants) are covered by %s MOTOR task(s): %s",
+                covered, len(outcome), [(c, names.get(c, "")) for c in outcome],
+            )
+        else:
+            outcome = covered
     concepts = list(args.concepts or [])
     if args.concepts_file:
         with open(args.concepts_file) as f:
@@ -715,6 +742,7 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
         outcome_metrics: Dict[str, object] = {
             "concepts": outcome,
             "outcome_input": outcome_input,
+            "removed_concepts": uncovered or None,
             "tasks_per_input_concept": outcome_resolution or None,
             "window_days": window_name(outcome_window),
             "combine": args.combine if len(outcome) > 1 else "single task",
