@@ -140,7 +140,15 @@ class TokenizerFilterTest(unittest.TestCase):
         cls.patients_per_token = Counter()
         for tokens in cls.frame["concept_ids"]:
             cls.patients_per_token.update(set(map(str, tokens)))
+        # The gender and race tokens are numeric ids but the demographic prompt, not clinical events
+        cls.demographic = {str(t[2]) for t in cls.frame["concept_ids"]} | {
+            str(t[3]) for t in cls.frame["concept_ids"]
+        }
         cls.baseline = cls.build()
+
+    def is_filtered(self, token):
+        """A clinical event, which the filters apply to."""
+        return is_clinical_event(token) and token not in self.demographic
 
     @classmethod
     def build(cls, dataset=None, **kwargs):
@@ -166,33 +174,33 @@ class TokenizerFilterTest(unittest.TestCase):
         removed = baseline - kept
         self.assertTrue(removed, "the sample has no token that rare, so the test says nothing")
         for token in removed:
-            self.assertTrue(is_clinical_event(token), token)
+            self.assertTrue(self.is_filtered(token), token)
             self.assertLess(self.patients_per_token[token], threshold, token)
         for token in kept:
-            if is_clinical_event(token) and token in self.patients_per_token:
+            if self.is_filtered(token) and token in self.patients_per_token:
                 self.assertGreaterEqual(self.patients_per_token[token], threshold, token)
         # nothing that qualifies was lost
         expected_removed = {
             t for t in baseline
-            if is_clinical_event(t) and self.patients_per_token.get(t, 0) < threshold
+            if self.is_filtered(t) and self.patients_per_token.get(t, 0) < threshold
         }
         self.assertEqual(removed, expected_removed)
 
     def test_structural_tokens_are_never_removed(self):
         kept = self.vocabulary(self.build(min_patient_count=10_000))
         baseline = self.vocabulary(self.baseline)
-        structural = {t for t in baseline if not is_clinical_event(t)}
+        structural = {t for t in baseline if not self.is_filtered(t)}
         self.assertTrue(structural)
         self.assertTrue(structural <= kept)
         self.assertIn("[VS]", kept)
         # with a threshold no token can reach, no clinical token is left
-        self.assertFalse({t for t in kept if is_clinical_event(t)})
+        self.assertFalse({t for t in kept if self.is_filtered(t)})
 
     def test_a_removed_token_is_out_of_vocabulary(self):
         tokenizer = self.build(min_patient_count=10)
         baseline = self.vocabulary(self.baseline)
         removed = sorted(baseline - self.vocabulary(tokenizer))
-        kept_clinical = sorted(t for t in self.vocabulary(tokenizer) if is_clinical_event(t))
+        kept_clinical = sorted(t for t in self.vocabulary(tokenizer) if self.is_filtered(t))
         oov = tokenizer.oov_token_id if hasattr(tokenizer, "oov_token_id") else tokenizer.encode(["not a token"])[0]
         self.assertEqual(tokenizer.encode([removed[0]])[0], oov)
         self.assertNotEqual(tokenizer.encode([kept_clinical[0]])[0], oov)
@@ -208,20 +216,54 @@ class TokenizerFilterTest(unittest.TestCase):
             cutoff = np.log(1 - share) * (1 - share) + np.log(share) * share
             return {
                 t for t in statistics["original_concept_codes"]
-                if not is_clinical_event(t)
+                if not self.is_filtered(t)
                 or (entropies.get(t, 0.0) <= cutoff and self.patients_per_token[t] >= threshold)
             }
 
         sizes = []
         for threshold in (0, 3, 10):
             vocabulary = self.vocabulary(self.build(apply_entropy_filter=True, min_patient_count=threshold))
-            clinical = {t for t in vocabulary if is_clinical_event(t)}
-            self.assertEqual(clinical, {t for t in expected(threshold) if is_clinical_event(t)}, threshold)
+            clinical = {t for t in vocabulary if self.is_filtered(t)}
+            self.assertEqual(clinical, {t for t in expected(threshold) if self.is_filtered(t)}, threshold)
             sizes.append(len(clinical))
         self.assertGreaterEqual(sizes[0], sizes[1])
         self.assertGreaterEqual(sizes[1], sizes[2])
         # the filter does something: it keeps fewer clinical tokens than no filter at all
-        self.assertLess(sizes[0], len([t for t in self.vocabulary(self.baseline) if is_clinical_event(t)]))
+        self.assertLess(sizes[0], len([t for t in self.vocabulary(self.baseline) if self.is_filtered(t)]))
+
+    def test_the_gender_and_race_tokens_are_never_filtered(self):
+        # numeric concept ids like the clinical events, but the fixed demographic prompt of every patient
+        demographic = {str(t[2]) for t in self.frame["concept_ids"]} | {str(t[3]) for t in self.frame["concept_ids"]}
+        rarest = min(demographic, key=lambda t: self.patients_per_token[t])
+        self.assertLess(self.patients_per_token[rarest], 10, "the sample has no rare race token")
+        for kwargs in ({"min_patient_count": 10}, {"min_patient_count": 10_000},
+                       {"min_patient_count": 10, "apply_entropy_filter": True}):
+            with self.subTest(**kwargs):
+                vocabulary = self.vocabulary(self.build(**kwargs))
+                self.assertTrue(demographic <= vocabulary, demographic - vocabulary)
+                # while the clinical events of the same kind of id are filtered
+                self.assertTrue(
+                    any(self.is_filtered(t) and self.patients_per_token[t] < 10
+                        for t in self.vocabulary(self.baseline) - vocabulary)
+                )
+
+    def test_a_patient_keeps_the_four_token_demographic_prompt(self):
+        # the dataset mapping drops tokens that are not in the vocabulary, so a filtered gender or race
+        # would shorten the prompt of the patients who have it
+        from cehrgpt.data.hf_cehrgpt_dataset_mapping import HFCehrGptTokenizationMapping
+
+        tokenizer = self.build(min_patient_count=10)
+        mapping = HFCehrGptTokenizationMapping(tokenizer)
+        rare_race = min(
+            {str(t[3]) for t in self.frame["concept_ids"] if str(t[3]) != "0"},
+            key=lambda t: self.patients_per_token[t],
+        )
+        self.assertLess(self.patients_per_token[rare_race], 10)
+        row = next(r for _, r in self.frame.iterrows() if str(r["concept_ids"][3]) == rare_race)
+        record = {k: (list(v) if hasattr(v, "__len__") and not isinstance(v, str) else v) for k, v in row.items()}
+        out = mapping.transform(record)
+        self.assertEqual(list(map(str, out["concept_ids"][:4])), list(map(str, row["concept_ids"][:4])))
+        self.assertEqual(out["concept_ids"][3], rare_race)
 
     def test_min_prevalence_is_gone(self):
         import inspect
@@ -238,14 +280,14 @@ class TokenizerFilterTest(unittest.TestCase):
         for share in (0.05, 0.2):
             count = -(-int(round(share * n_patients * 1000)) // 1000)
             kept = {t for t in self.vocabulary(self.baseline)
-                    if not is_clinical_event(t) or self.patients_per_token.get(t, 0) / n_patients >= share - 1e-12}
+                    if not self.is_filtered(t) or self.patients_per_token.get(t, 0) / n_patients >= share - 1e-12}
             self.assertEqual(self.vocabulary(self.build(min_patient_count=count)), kept)
 
     def test_a_parent_is_kept_through_its_descendants(self):
         # a rare clinical token above a common one is kept when descendants count towards it
         from cehrgpt.omop.ontology import Ontology
 
-        clinical = [t for t in self.patients_per_token if is_clinical_event(t)]
+        clinical = [t for t in self.patients_per_token if self.is_filtered(t)]
         child = max(clinical, key=lambda t: self.patients_per_token[t])
         rare = min((t for t in clinical if t != child), key=lambda t: self.patients_per_token[t])
         threshold = self.patients_per_token[rare] + 1
@@ -292,7 +334,7 @@ class TokenizerFilterTest(unittest.TestCase):
         second_counts = Counter()
         for tokens in self.frame["concept_ids"].iloc[50:]:
             second_counts.update(set(map(str, tokens)))
-        clinical_new = [t for t in new_tokens if is_clinical_event(t)]
+        clinical_new = [t for t in new_tokens if self.is_filtered(t)]
         self.assertTrue(clinical_new, "no clinical token was added, so the test says nothing")
         for token in clinical_new:
             self.assertGreaterEqual(second_counts[token], 5, token)

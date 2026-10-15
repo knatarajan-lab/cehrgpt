@@ -1156,8 +1156,9 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             min_patient_count: a clinical token must be had by at least this many patients of the
                 dataset. With an ontology a patient counts for a token when they have the token or
                 any of its descendants, once however many; without one, only the token itself
-                counts. 0 keeps every token. Tokens that are not clinical events (time, visit,
-                demographic tokens) are never removed.
+                counts. 0 keeps every token. Tokens that are not clinical events (time and visit
+                markers, year and age) and the gender and race tokens of the demographic prompt are
+                never removed.
             apply_entropy_filter: also keep only the clinical tokens whose entropy is at least that
                 of a token that occurs in min_patient_count of the patients (as a share of the
                 dataset). It applies on top of min_patient_count.
@@ -1180,6 +1181,19 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             "all_concept_code_entropies"
         ]
 
+        # Only the real clinical events are filtered. The gender and race tokens are numeric concept
+        # ids as well, but they are the fixed demographic prompt of every patient: a rare race removed
+        # from the vocabulary would be dropped from the sequence and leave the prompt a token short.
+        demographic_tokens = set(cehrgpt_data_statistics["gender_list"]) | set(
+            cehrgpt_data_statistics["race_list"]
+        )
+
+        def is_filtered(token: str) -> bool:
+            return (
+                is_clinical_event(token, data_args.is_data_in_meds)
+                and token not in demographic_tokens
+            )
+
         if apply_entropy_filter:
             # The cut-off is the entropy of a token that occurs in min_patient_count of the patients
             threshold_share = max(1e-8, min_patient_count / cehrgpt_data_statistics["total"])
@@ -1190,8 +1204,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             qualified_codes = [
                 k
                 for k in original_concept_codes
-                if all_concept_code_entropies[k] <= min_entropy
-                   or not is_clinical_event(k, data_args.is_data_in_meds)
+                if all_concept_code_entropies[k] <= min_entropy or not is_filtered(k)
             ]
         else:
             qualified_codes = list(original_concept_codes)
@@ -1202,8 +1215,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             qualified_codes = [
                 k
                 for k in qualified_codes
-                if not is_clinical_event(k, data_args.is_data_in_meds)
-                   or patient_counts.get(k, 0) >= min_patient_count
+                if not is_filtered(k) or patient_counts.get(k, 0) >= min_patient_count
             ]
             LOG.info(
                 "min_patient_count=%s removed %s of the %s tokens that were left",
@@ -1292,9 +1304,15 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                 original_concept_codes, data_args, ontology, measurement_concept_ids
             )
             if min_patient_count > 0:
-                # A token that was removed from the vocabulary must not be a task either
+                # A token that was removed from the vocabulary must not be a task either, and a token
+                # that stayed only because it is a gender or race (the exemption above) is not a
+                # clinical event to predict
                 kept = set(qualified_codes)
-                allowed_motor_codes = [c for c in allowed_motor_codes if c in kept]
+                allowed_motor_codes = [
+                    c
+                    for c in allowed_motor_codes
+                    if c in kept and c not in demographic_tokens
+                ]
             motor_tte_statistics = compute_motor_tte_statistics(
                 dataset, data_args, allowed_motor_codes, ontology
             )
