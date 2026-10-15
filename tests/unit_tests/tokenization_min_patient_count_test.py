@@ -1,5 +1,6 @@
 import dataclasses
 import os
+import pickle
 import unittest
 from collections import Counter
 
@@ -77,6 +78,7 @@ class PatientCountsTest(unittest.TestCase):
         ontology = Ontology.__new__(Ontology)
         ontology.parents_map = parents
         ontology.all_parents_map = {}
+        ontology.dataset_concept_ids = set()
         ontology.concept_domain_map = {}
         ontology.concept_vocabulary_map = {}
         return ontology
@@ -121,11 +123,126 @@ class PatientCountsTest(unittest.TestCase):
 
         ontology = self.ontology({"100": {"900"}, "900": {"950"}, "300": {"900", "500"}})
         found = get_ancestors_by_code(ontology)
-        self.assertEqual(found["100"], ("900", "950"))
-        self.assertEqual(found["300"], ("500", "900", "950"))
-        self.assertEqual(found["900"], ("950",))
+        self.assertEqual(found["100"], ["900", "950"])
+        self.assertEqual(found["300"], ["500", "900", "950"])
+        self.assertEqual(found["900"], ["950"])
         self.assertNotIn("950", found)
-        self.assertEqual(get_ancestors_by_code(None), {})
+        self.assertEqual(len(get_ancestors_by_code(None)), 0)
+
+
+class TokenizationPerformanceEquivalenceTest(unittest.TestCase):
+    def test_concept_filter_accepts_a_set(self):
+        records = {"concept_ids": [["100", "200", "D1"]]}
+        self.assertEqual(
+            CehrGptTokenizer.batch_concat_concepts(
+                records, "concept_ids", {"100", "D1"}
+            ),
+            {"concept_ids": ["100 D1"]},
+        )
+        self.assertEqual(
+            CehrGptTokenizer.batch_concat_concepts(
+                records, "concept_ids", set()
+            ),
+            {"concept_ids": ["100 200 D1"]},
+        )
+
+
+class AncestorLookupOptimizationTest(unittest.TestCase):
+    def test_only_observed_concepts_are_added_to_the_worker_lookup(self):
+        from cehrgpt.tokenization.tokenization_statistics import get_ancestors_by_code
+
+        ontology = PatientCountsTest.ontology(
+            {"100": {"900"}, "200": {"900"}, "900": {"950"}}
+        )
+        ontology.dataset_concept_ids = {"100", "200"}
+        found = get_ancestors_by_code(ontology)
+        self.assertEqual(len(found), 2)
+        self.assertEqual(found["100"], ["900", "950"])
+        self.assertEqual(found["200"], ["900", "950"])
+        restored = pickle.loads(pickle.dumps(found))
+        self.assertEqual(restored["100"], ["900", "950"])
+        self.assertEqual(restored.get("D1", ()), ())
+
+
+class OntologyPruningTest(unittest.TestCase):
+    @staticmethod
+    def ontology():
+        from cehrgpt.omop.ontology import Ontology
+
+        ontology = Ontology.__new__(Ontology)
+        ontology.parents_map = {
+            "100": {"900", "901"},
+            "200": {"901"},
+            "900": {"950"},
+            "777": {"778"},
+        }
+        ontology.all_parents_map = {}
+        ontology.dataset_concept_ids = set()
+        ontology.concept_vocabulary_map = {
+            "100": "SNOMED",
+            "200": "SNOMED",
+            "900": "SNOMED",
+            "901": "LOINC",
+            "950": "SNOMED",
+            "777": "SNOMED",
+            "778": "SNOMED",
+        }
+        ontology.concept_domain_map = {
+            concept_id: "Condition"
+            for concept_id in ontology.concept_vocabulary_map
+        }
+        return ontology
+
+    def test_pruning_keeps_observed_concepts_and_allowed_ancestors(self):
+        ontology = self.ontology()
+        dataset = Dataset.from_list(
+            [
+                {"concept_ids": ["100", "D1", "not-numeric"]},
+                {"concept_ids": ["200"]},
+            ]
+        )
+
+        ontology.prune_to_dataset(
+            dataset,
+            remove_ontologies={"LOINC"},
+            num_proc=1,
+            batch_size=1,
+        )
+
+        self.assertEqual(set(ontology.parents_map), {"100", "200", "900"})
+        self.assertEqual(ontology.parents_map["100"], {"900"})
+        self.assertEqual(ontology.parents_map["200"], set())
+        self.assertEqual(ontology.parents_map["900"], {"950"})
+        self.assertEqual(
+            dict(ontology.concept_vocabulary_map),
+            {"100": "SNOMED", "200": "SNOMED", "900": "SNOMED", "950": "SNOMED"},
+        )
+        self.assertTrue(
+            all(
+                isinstance(vocabulary, str)
+                for vocabulary in ontology.concept_vocabulary_map.values()
+            )
+        )
+        self.assertEqual(
+            set(ontology.concept_domain_map), {"100", "200", "900", "950"}
+        )
+        self.assertEqual(ontology.get_all_parents("100"), {"100", "900", "950"})
+        self.assertEqual(ontology.dataset_concept_ids, {"100", "200"})
+
+    def test_an_observed_concept_is_kept_even_from_an_excluded_vocabulary(self):
+        ontology = self.ontology()
+        dataset = Dataset.from_list([{"concept_ids": ["901"]}])
+
+        ontology.prune_to_dataset(
+            dataset,
+            remove_ontologies={"LOINC"},
+            num_proc=1,
+            batch_size=1,
+        )
+
+        self.assertEqual(ontology.dataset_concept_ids, {"901"})
+        self.assertEqual(ontology.concept_vocabulary_map["901"], "LOINC")
+        self.assertEqual(ontology.concept_domain_map["901"], "Condition")
 
 
 class TokenizerFilterTest(unittest.TestCase):

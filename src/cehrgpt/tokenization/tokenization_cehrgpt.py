@@ -6,7 +6,7 @@ import re
 import pickle
 from functools import partial
 from itertools import islice
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 import transformers
@@ -1392,10 +1392,15 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             min_frequency=data_args.min_frequency,
             show_progress=True,
         )
+        # This collection is queried for every token in every patient sequence. Keeping it as a
+        # list makes tokenization O(number of tokens * vocabulary size).
+        qualified_code_set = (
+            set(qualified_codes) if qualified_codes is not None else None
+        )
         batch_concat_concepts_partial_func = partial(
             cls.batch_concat_concepts,
             feature_name=feature_name,
-            qualified_codes=qualified_codes,
+            qualified_codes=qualified_code_set,
         )
         if data_args.streaming:
             concatenated_features = dataset.map(
@@ -1438,7 +1443,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             cls,
             records: Dict[str, List],
             feature_name: str,
-            qualified_codes: Optional[List[str]] = None,
+            qualified_codes: Optional[Set[str]] = None,
     ) -> Dict[str, List]:
         def filter_token(t: str) -> bool:
             """
