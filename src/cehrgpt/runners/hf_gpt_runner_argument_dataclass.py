@@ -336,9 +336,14 @@ class CehrGPTArguments:
         default=False,
         metadata={"help": "A flag to indicate whether we want to use entropy filter."},
     )
-    min_prevalence: Optional[float] = dataclasses.field(
-        default=1 / 1000,
-        metadata={"help": "The min_prevalence to keep the concepts in the tokenizer"},
+    min_patient_count: Optional[int] = dataclasses.field(
+        default=0,
+        metadata={
+            "help": "Keep a clinical concept in the tokenizer only if at least this many patients "
+            "of the tokenizer training data have it. With an ontology (motor_use_ontology) the "
+            "descendants count towards their ancestors, once per patient. 0 keeps every concept. "
+            "Time, visit and demographic tokens are always kept"
+        },
     )
     class_weights: Optional[List[int]] = dataclasses.field(
         default=None,

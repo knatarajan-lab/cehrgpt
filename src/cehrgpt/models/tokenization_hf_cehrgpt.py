@@ -342,6 +342,9 @@ def agg_statistics(stats1, stats2):
     if stats1.get("concept_code_stats"):
         for concept_id, weight in stats2["concept_code_stats"].items():
             stats1["concept_code_stats"][concept_id] += weight
+    if stats1.get("concept_patient_counts"):
+        for concept_id, count in stats2["concept_patient_counts"].items():
+            stats1["concept_patient_counts"][concept_id] += count
     if stats1.get("gender_list"):
         stats1.get("gender_list").update(stats2.get("gender_list"))
     if stats1.get("race_list"):
@@ -349,7 +352,31 @@ def agg_statistics(stats1, stats2):
     return stats1
 
 
-def map_statistics(batch: Dict[str, Any], total_size, size=10_000) -> Dict[str, Any]:
+def get_ancestors_by_code(ontology: Optional[Ontology]) -> Dict[str, Tuple[str, ...]]:
+    """
+    For every concept of the ontology that has parents, all its ancestors (not the concept itself).
+
+    Used to count a patient once for every ancestor of the concepts the patient has. It is a plain
+    dict of tuples so that it can be sent to the worker processes of a dataset map.
+    """
+    if ontology is None:
+        return {}
+    ancestors: Dict[str, Tuple[str, ...]] = {}
+    for concept_id in list(ontology.parents_map.keys()):
+        found = tuple(
+            sorted(a for a in ontology.get_all_parents(concept_id) if a != concept_id)
+        )
+        if found:
+            ancestors[concept_id] = found
+    return ancestors
+
+
+def map_statistics(
+    batch: Dict[str, Any],
+    total_size,
+    size=10_000,
+    ancestors_by_code: Optional[Dict[str, Tuple[str, ...]]] = None,
+) -> Dict[str, Any]:
     if "units" in batch:
         batch_value_units = batch["units"]
     else:
@@ -374,6 +401,9 @@ def map_statistics(batch: Dict[str, Any], total_size, size=10_000) -> Dict[str, 
     numeric_stats_by_lab = collections.defaultdict(partial(ReservoirSampler, size=size))
     categorical_stats_by_lab = collections.defaultdict(int)
     concept_code_stats = collections.defaultdict(int)
+    # The number of patients (rows) that have a token, or a descendant of it when an ontology is
+    # given, however often they have it
+    concept_patient_counts = collections.defaultdict(int)
     gender_list = set()
     race_list = set()
     for (
@@ -417,11 +447,21 @@ def map_statistics(batch: Dict[str, Any], total_size, size=10_000) -> Dict[str, 
 
         for code in unique_codes:
             concept_code_stats[code] += 1 / total_size
+        # A patient counts once for a concept when the patient has the concept or any descendant of
+        # it. The ancestors are collected in a set first: adding up the counts of the children would
+        # count a patient with two children twice.
+        covered = set(unique_codes)
+        if ancestors_by_code:
+            for code in unique_codes:
+                covered.update(ancestors_by_code.get(code, ()))
+        for code in covered:
+            concept_patient_counts[code] += 1
 
     return {
         "numeric_stats_by_lab": numeric_stats_by_lab,
         "categorical_stats_by_lab": categorical_stats_by_lab,
         "concept_code_stats": concept_code_stats,
+        "concept_patient_counts": concept_patient_counts,
         "gender_list": gender_list,
         "race_list": race_list,
     }
@@ -433,7 +473,12 @@ def compute_statistics(
     ontology: Optional[Ontology] = None,
 ) -> Dict[str, Any]:
     total = get_dataset_len(dataset)
-    map_statistics_partial = partial(map_statistics, total_size=total, size=SAMPLE_SIZE)
+    map_statistics_partial = partial(
+        map_statistics,
+        total_size=total,
+        size=SAMPLE_SIZE,
+        ancestors_by_code=get_ancestors_by_code(ontology),
+    )
     if data_args.streaming:
         first_example = next(iter(dataset))
         parts = dataset.map(
@@ -520,6 +565,10 @@ def compute_statistics(
         "categorical_lab_stats": categorical_lab_stats,
         "original_concept_codes": list(current["concept_code_stats"].keys()),
         "all_concept_code_stats": all_concept_code_stats,
+        # How many patients have each concept, or a descendant of it when an ontology is given. A
+        # patient is counted once however many descendants they have, unlike the prevalence in
+        # all_concept_code_stats, which adds the descendants' prevalences up
+        "concept_patient_counts": dict(current["concept_patient_counts"]),
         "all_concept_code_entropies": all_concept_code_entropies,
         "gender_list": current["gender_list"],
         "race_list": current["race_list"],
@@ -1238,7 +1287,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         pretrained_concept_embedding_model: PretrainedEmbeddings = None,
         num_motor_tasks: Optional[int] = None,
         apply_entropy_filter: bool = False,
-        min_prevalence: float = 1 / 1000,
+        min_patient_count: int = 0,
+        ontology: Optional[Ontology] = None,
     ):
         if not isinstance(cehrgpt_tokenizer, CehrGptTokenizer):
             raise ValueError(
@@ -1253,7 +1303,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             data_args=data_args,
             num_motor_tasks=num_motor_tasks,
             apply_entropy_filter=apply_entropy_filter,
-            min_prevalence=min_prevalence,
+            min_patient_count=min_patient_count,
+            ontology=ontology,
         )
 
         new_tokens = set(new_tokenizer.get_vocab().keys()) - set(
@@ -1431,15 +1482,31 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         pretrained_concept_embedding_model: PretrainedEmbeddings = None,
         num_motor_tasks: Optional[int] = None,
         apply_entropy_filter: bool = False,
-        min_prevalence: float = 1 / 1000,
         ontology: Optional[Ontology] = None,
+        min_patient_count: int = 0,
     ):
         """
         Train a huggingface word level tokenizer.
 
         To use their tokenizer, we need to concatenate all the concepts
         together and treat it as a sequence.
+
+        Args:
+            min_patient_count: a clinical token must be had by at least this many patients of the
+                dataset. With an ontology a patient counts for a token when they have the token or
+                any of its descendants, once however many; without one, only the token itself
+                counts. 0 keeps every token. Tokens that are not clinical events (time, visit,
+                demographic tokens) are never removed.
+            apply_entropy_filter: also keep only the clinical tokens whose entropy is at least that
+                of a token that occurs in min_patient_count of the patients (as a share of the
+                dataset). It applies on top of min_patient_count.
         """
+        if min_patient_count is None:
+            min_patient_count = 0
+        if min_patient_count < 0:
+            raise ValueError(
+                f"min_patient_count cannot be negative, got {min_patient_count}"
+            )
 
         if isinstance(dataset, DatasetDict):
             dataset = dataset["train"]
@@ -1455,10 +1522,13 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         ]
 
         if apply_entropy_filter:
-            min_prevalence = max(1e-8, min_prevalence)
+            # The cut-off is the entropy of a token that occurs in min_patient_count of the patients
+            threshold_share = max(
+                1e-8, min_patient_count / cehrgpt_data_statistics["total"]
+            )
             min_entropy = (
-                np.log(1 - min_prevalence) * (1 - min_prevalence)
-                + np.log(min_prevalence) * min_prevalence
+                np.log(1 - threshold_share) * (1 - threshold_share)
+                + np.log(threshold_share) * threshold_share
             )
             qualified_codes = [
                 k
@@ -1467,12 +1537,23 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                 or not is_clinical_event(k, data_args.is_data_in_meds)
             ]
         else:
+            qualified_codes = list(original_concept_codes)
+
+        if min_patient_count > 0:
+            patient_counts = cehrgpt_data_statistics["concept_patient_counts"]
+            before = len(qualified_codes)
             qualified_codes = [
                 k
-                for k in original_concept_codes
-                if min_prevalence <= all_concept_code_stats[k]
-                or not is_clinical_event(k, data_args.is_data_in_meds)
+                for k in qualified_codes
+                if not is_clinical_event(k, data_args.is_data_in_meds)
+                or patient_counts.get(k, 0) >= min_patient_count
             ]
+            LOG.info(
+                "min_patient_count=%s removed %s of the %s tokens that were left",
+                min_patient_count,
+                before - len(qualified_codes),
+                before,
+            )
 
         # Create the tokenizer now
         LOG.info("Training the tokenizer for concepts")
@@ -1549,6 +1630,10 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             allowed_motor_codes = get_allowed_motor_codes(
                 original_concept_codes, ontology
             )
+            if min_patient_count > 0:
+                # A token that was removed from the vocabulary must not be a task either
+                kept = set(qualified_codes)
+                allowed_motor_codes = [c for c in allowed_motor_codes if c in kept]
             motor_tte_statistics = compute_motor_tte_statistics(
                 dataset, data_args, allowed_motor_codes, ontology
             )
