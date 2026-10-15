@@ -439,6 +439,21 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
             "is_numeric_types",
         ]
 
+    def _valid_concept_ids(self) -> frozenset:
+        """
+        The tokens of the vocabulary, built once per process.
+
+        get_vocab() of a Hugging Face tokenizer builds a new dict of the whole vocabulary on every
+        call (6 ms at 50,000 tokens). Calling it for every token of every patient made a single
+        patient with 3,000 tokens take 20 seconds, and the first batch of a dataset.map never ends.
+        Built on first use, so it is not part of what is pickled to the workers.
+        """
+        valid = self.__dict__.get("_valid_concept_ids_cache")
+        if valid is None:
+            valid = frozenset(self._concept_tokenizer.get_vocab())
+            self._valid_concept_ids_cache = valid
+        return valid
+
     def filter_out_invalid_tokens(self, record: Dict[str, Any]) -> Dict[str, Any]:
         column_names = []
         seq_length = len(record["concept_ids"])
@@ -458,10 +473,11 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
                 continue
             if isinstance(v, (list, np.ndarray)) and len(v) == seq_length:
                 column_names.append(k)
+        valid_concept_ids = self._valid_concept_ids()
         valid_indices = [
             idx
             for idx, concept_id in enumerate(record["concept_ids"])
-            if concept_id in self._concept_tokenizer.get_vocab()
+            if concept_id in valid_concept_ids
         ]
         if len(valid_indices) != len(record["concept_ids"]):
             for column in column_names:
