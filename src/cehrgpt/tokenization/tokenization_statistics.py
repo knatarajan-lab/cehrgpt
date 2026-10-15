@@ -236,6 +236,9 @@ def agg_statistics(stats1, stats2):
     if stats1.get("concept_code_stats"):
         for concept_id, weight in stats2["concept_code_stats"].items():
             stats1["concept_code_stats"][concept_id] += weight
+    if stats1.get("concept_patient_counts"):
+        for concept_id, count in stats2["concept_patient_counts"].items():
+            stats1["concept_patient_counts"][concept_id] += count
     if stats1.get("gender_list"):
         stats1.get("gender_list").update(stats2.get("gender_list"))
     if stats1.get("race_list"):
@@ -243,7 +246,29 @@ def agg_statistics(stats1, stats2):
     return stats1
 
 
-def map_statistics(batch: Dict[str, Any], total_size, size=10_000) -> Dict[str, Any]:
+def get_ancestors_by_code(ontology: Optional[Ontology]) -> Dict[str, Tuple[str, ...]]:
+    """
+    For every concept of the ontology that has parents, all its ancestors (not the concept itself).
+
+    Used to count a patient once for every ancestor of the concepts the patient has. It is a plain
+    dict of tuples so that it can be sent to the worker processes of a dataset map.
+    """
+    if ontology is None:
+        return {}
+    ancestors: Dict[str, Tuple[str, ...]] = {}
+    for concept_id in list(ontology.parents_map.keys()):
+        found = tuple(sorted(a for a in ontology.get_all_parents(concept_id) if a != concept_id))
+        if found:
+            ancestors[concept_id] = found
+    return ancestors
+
+
+def map_statistics(
+    batch: Dict[str, Any],
+    total_size,
+    size=10_000,
+    ancestors_by_code: Optional[Dict[str, Tuple[str, ...]]] = None,
+) -> Dict[str, Any]:
     if "units" in batch:
         batch_value_units = batch["units"]
     else:
@@ -268,6 +293,9 @@ def map_statistics(batch: Dict[str, Any], total_size, size=10_000) -> Dict[str, 
     numeric_stats_by_lab = collections.defaultdict(partial(ReservoirSampler, size=size))
     categorical_stats_by_lab = collections.defaultdict(int)
     concept_code_stats = collections.defaultdict(int)
+    # The number of patients (rows) that have a token, or a descendant of it when an ontology is
+    # given, however often they have it
+    concept_patient_counts = collections.defaultdict(int)
     gender_list = set()
     race_list = set()
     for (
@@ -311,11 +339,21 @@ def map_statistics(batch: Dict[str, Any], total_size, size=10_000) -> Dict[str, 
 
         for code in unique_codes:
             concept_code_stats[code] += 1 / total_size
+        # A patient counts once for a concept when the patient has the concept or any descendant of
+        # it. The ancestors are collected in a set first: adding up the counts of the children would
+        # count a patient with two children twice.
+        covered = set(unique_codes)
+        if ancestors_by_code:
+            for code in unique_codes:
+                covered.update(ancestors_by_code.get(code, ()))
+        for code in covered:
+            concept_patient_counts[code] += 1
 
     return {
         "numeric_stats_by_lab": numeric_stats_by_lab,
         "categorical_stats_by_lab": categorical_stats_by_lab,
         "concept_code_stats": concept_code_stats,
+        "concept_patient_counts": concept_patient_counts,
         "gender_list": gender_list,
         "race_list": race_list,
     }
@@ -327,7 +365,12 @@ def compute_statistics(
         ontology: Optional[Ontology] = None,
 ) -> Dict[str, Any]:
     total = get_dataset_len(dataset)
-    map_statistics_partial = partial(map_statistics, total_size=total, size=SAMPLE_SIZE)
+    map_statistics_partial = partial(
+        map_statistics,
+        total_size=total,
+        size=SAMPLE_SIZE,
+        ancestors_by_code=get_ancestors_by_code(ontology),
+    )
     if data_args.streaming:
         first_example = next(iter(dataset))
         parts = dataset.map(
@@ -414,6 +457,10 @@ def compute_statistics(
         "categorical_lab_stats": categorical_lab_stats,
         "original_concept_codes": list(current["concept_code_stats"].keys()),
         "all_concept_code_stats": all_concept_code_stats,
+        # How many patients have each concept, or a descendant of it when an ontology is given. A
+        # patient is counted once however many descendants they have, unlike the prevalence in
+        # all_concept_code_stats, which adds the descendants' prevalences up
+        "concept_patient_counts": dict(current["concept_patient_counts"]),
         "all_concept_code_entropies": all_concept_code_entropies,
         "gender_list": current["gender_list"],
         "race_list": current["race_list"],

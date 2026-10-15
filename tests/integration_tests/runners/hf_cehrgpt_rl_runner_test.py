@@ -84,9 +84,8 @@ class HfCehrGptRLRunnerIntegrationTest(unittest.TestCase):
             "--include_motor_time_to_event", "true",
             "--linear_prob_n_layer", "2",
             "--motor_sampling_probability", "0.5",
-            # Low threshold so sample data produces at least some motor codes
+            # No minimum patient count (the default) so sample data produces at least some motor codes
             "--apply_entropy_filter",
-            "--min_prevalence", "0.001",
             "--apply_rotary", "true",
             "--exclude_position_ids", "true",
             "--activation_function", "silu",
