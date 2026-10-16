@@ -325,8 +325,14 @@ class CehrGptDataCollator:
         if self.include_motor_time_to_event:
 
             motor_row_indices = [example["motor_row_indices"] for example in examples]
-            row_index_pads = [0] + [max(indices, default=-1) + 1 for indices in motor_row_indices][:-1]
-            row_index_pads = np.cumsum(row_index_pads)
+            # The rows of a patient are its prediction points, the True entries of the indicators. A row with
+            # no pair (no task happens after it) has no entry in motor_row_indices, so the rows cannot be
+            # counted from the largest row index.
+            row_counts = [
+                int(np.asarray(example["motor_tte_task_indicators"]).sum())
+                for example in examples
+            ]
+            row_index_pads = np.cumsum([0] + row_counts[:-1])
             for i, row_index_pad in enumerate(row_index_pads):
                 motor_row_indices[i] = np.asarray(motor_row_indices[i]) + row_index_pad
 
@@ -556,6 +562,7 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
         current_motor_col_indices = []
         current_motor_values = []
         current_motor_tte_task_indicators = []
+        current_num_motor_rows = 0
 
         # Demographics
         current_person_ids = []
@@ -619,16 +626,17 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 )
 
             if self.include_motor_time_to_event:
-                current_max_motor_row_index = len(np.unique(current_motor_row_indices))
                 motor_row_indices = (
                     example["motor_row_indices"].tolist()
                     if isinstance(example["motor_row_indices"], torch.Tensor)
                     else list(example["motor_row_indices"])
                 )
+                # The rows before this patient are all its predecessors' prediction points, also the ones with
+                # no pair, which np.unique(current_motor_row_indices) would miss
                 current_motor_row_indices.extend(
                     list(
                         map(
-                            lambda offset: offset + current_max_motor_row_index,
+                            lambda offset: offset + current_num_motor_rows,
                             motor_row_indices,
                         )
                     )
@@ -651,16 +659,13 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                     )
                     + [0]
                 )
-                current_motor_tte_task_indicators.extend(
-                    (
-                        example["motor_tte_task_indicators"].tolist()
-                        if isinstance(
-                            example["motor_tte_task_indicators"], torch.Tensor
-                        )
-                        else list(example["motor_tte_task_indicators"])
-                    )
-                    + [False]
+                example_indicators = (
+                    example["motor_tte_task_indicators"].tolist()
+                    if isinstance(example["motor_tte_task_indicators"], torch.Tensor)
+                    else list(example["motor_tte_task_indicators"])
                 )
+                current_motor_tte_task_indicators.extend(example_indicators + [False])
+                current_num_motor_rows += int(np.sum(example_indicators))
 
             if "person_id" in example:
                 current_person_ids.append(example["person_id"])
