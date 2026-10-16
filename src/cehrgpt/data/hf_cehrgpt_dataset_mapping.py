@@ -6,7 +6,6 @@ from typing import Any, Dict, Generator, List, Optional, Union
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
 from cehrbert.data_generators.hf_data_generator import UNKNOWN_VALUE
 from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import (
     ED_VISIT_TYPE_CODES,
@@ -71,83 +70,30 @@ def convert_date_to_posix_time(index_date: Union[datetime.date, int, float]) -> 
     return index_date
 
 
-def _restore_integer_type(values: List[Any], input_type: Optional[pa.DataType]) -> Any:
-    """
-    Return the values as NumPy arrays of the input's integer type, e.g. int32.
-
-    Python ints would otherwise be written as int64. Anything that is not an integer column or does
-    not fit the input type is returned as is.
-    """
-    if input_type is None:
-        return values
-    is_list = pa.types.is_list(input_type)
-    value_type = input_type.value_type if is_list else input_type
-    if not pa.types.is_integer(value_type):
-        return values
-    dtype = value_type.to_pandas_dtype()
-    try:
-        if is_list:
-            return [None if v is None else np.asarray(v, dtype=dtype) for v in values]
-        if any(v is None for v in values):
-            return values
-        return np.asarray(values, dtype=dtype)
-    except (TypeError, ValueError, OverflowError):
-        return values
-
-
 class DatasetMappingDecorator(DatasetMapping):
-    # Output columns copied from an input column under another name, {output: input}, so that they
-    # keep the input's integer type.
-    output_column_sources: Dict[str, str] = {}
 
     def batch_transform(
         self, records: Union[LazyBatch, Dict[str, Any]]
-    ) -> Dict[str, List[Any]]:
+    ) -> List[Dict[str, Any]]:
         """
-        Transform a batch row by row without going through pandas.
-
-        The cehrbert implementation converts the Arrow table with ``to_pandas()``, which runs on
-        PyArrow's thread pool. In forked ``datasets.map`` workers that conversion can block forever
-        on a lock inherited from the parent, so the first batch never completes. Reading the batch
-        with ``to_pydict()`` avoids the thread pool.
-
-        ``index_date`` is dropped from the batch when it contains nulls. Columns that pass through
-        unchanged keep the integer type of the input, as they did on the pandas path.
+        Drop index_date if it contains None.
 
         :param records:
         :return:
         """
-        input_types = {}
         if isinstance(records, LazyBatch):
             table = records.pa_table
+
             if "index_date" in table.column_names:
-                if table.column("index_date").null_count > 0:
+                index_col = table.column("index_date")
+                if index_col.null_count > 0:
                     table = table.drop(["index_date"])
-            input_types = {field.name: field.type for field in table.schema}
-            columns = table.to_pydict()
+            records = LazyBatch(pa_table=table, formatter=records.formatter)
         else:
-            columns = dict(records)
-            if "index_date" in columns and pd.isna(columns["index_date"][0]):
-                del columns["index_date"]
-        if not columns:
-            return {}
-
-        batch_size = len(next(iter(columns.values())))
-        transformed_records = []
-        for row_index in range(batch_size):
-            record = {name: values[row_index] for name, values in columns.items()}
-            transformed = self.transform(record)
-            if isinstance(transformed, Series):
-                transformed = transformed.to_dict()
-            transformed_records.append(transformed)
-
-        output_names = list(dict.fromkeys(name for r in transformed_records for name in r))
-        output = {}
-        for name in output_names:
-            values = [r.get(name) for r in transformed_records]
-            source = self.output_column_sources.get(name, name)
-            output[name] = _restore_integer_type(values, input_types.get(source))
-        return output
+            if "index_date" in records:
+                if pd.isna(records["index_date"][0]):
+                    del records["index_date"]
+        return super().batch_transform(records=records)
 
     def transform(self, record: Dict[str, Any]) -> Union[Dict[str, Any], Series]:
         raise NotImplemented("Must be implemented")
@@ -468,8 +414,6 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
 
 
 class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
-    output_column_sources = {"value_indicators": "concept_value_masks"}
-
     def __init__(
         self,
         concept_tokenizer: CehrGptTokenizer,
