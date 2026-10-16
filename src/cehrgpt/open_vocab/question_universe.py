@@ -168,15 +168,24 @@ def ingredient_categories(concept: pl.DataFrame) -> Tuple[Tuple[int, str], ...]:
     return tuple(zip(found["concept_id"].to_list(), found["concept_name"].to_list()))
 
 
-def check_categories(concept: pl.DataFrame, categories: Sequence[Tuple[int, str]]) -> None:
-    """Every category must exist in this vocabulary version under the name given here."""
+def check_categories(concept: pl.DataFrame, categories: Sequence[Tuple[int, str]], strict_names: bool = False) -> None:
+    """
+    Every category must exist in this vocabulary version.
+
+    The concept id is what identifies a category. A name that differs from the one given here is a rename between
+    vocabulary versions ("Traumatic AND/OR non-traumatic injury" became "Traumatic or non-traumatic injury"), which
+    is reported but not an error, unless strict_names is set.
+    """
     names = dict(zip(concept["concept_id"].to_list(), concept["concept_name"].to_list()))
-    for concept_id, name in categories:
-        if names.get(concept_id) != name:
-            raise ValueError(
-                f"Category {concept_id} is {names.get(concept_id)!r} in the concept table, "
-                f"expected {name!r}; the vocabulary version may differ"
-            )
+    missing = [(concept_id, name) for concept_id, name in categories if concept_id not in names]
+    if missing:
+        raise ValueError(f"Categories that are not in the concept table: {missing}; the vocabulary version may differ")
+    renamed = [(concept_id, name, names[concept_id]) for concept_id, name in categories if names[concept_id] != name]
+    if renamed and strict_names:
+        concept_id, name, found = renamed[0]
+        raise ValueError(f"Category {concept_id} is {found!r} in the concept table, expected {name!r}")
+    for concept_id, name, found in renamed:
+        LOG.warning("Category %s is named %r in this vocabulary, %r in the category list; the id is used", concept_id, found, name)
 
 
 def build_universe(
@@ -187,6 +196,7 @@ def build_universe(
     categories: Optional[Sequence[Tuple[int, str]]] = None,
     vocabularies: Optional[Sequence[str]] = None,
     ancestor_classes: Optional[Sequence[str]] = None,
+    strict_names: bool = False,
 ) -> pl.DataFrame:
     """
     The questions of one domain: one row per concept.
@@ -203,7 +213,7 @@ def build_universe(
     vocabularies = tuple(vocabularies if vocabularies is not None else VOCABULARIES.get(domain, (SNOMED,)))
     if ancestor_classes is None:
         ancestor_classes = ANCESTOR_CLASSES.get(domain)
-    check_categories(concept, categories)
+    check_categories(concept, categories, strict_names)
     category_ids = [c for c, _ in categories]
 
     token_ids = set(token_ids)
@@ -274,6 +284,7 @@ def build_pool_universe(
     vocabularies: Optional[Sequence[str]] = None,
     ancestor_classes: Optional[Sequence[str]] = None,
     max_depth: Optional[int] = None,
+    strict_names: bool = False,
 ) -> pl.DataFrame:
     """
     The questions of one domain without a tokenizer: every valid concept of the domain that is a category or below
@@ -292,7 +303,7 @@ def build_pool_universe(
     vocabularies = tuple(vocabularies if vocabularies is not None else VOCABULARIES.get(domain, (SNOMED,)))
     if ancestor_classes is None:
         ancestor_classes = ANCESTOR_CLASSES.get(domain)
-    check_categories(concept, categories)
+    check_categories(concept, categories, strict_names)
     category_ids = [c for c, _ in categories]
 
     valid = concept.filter(pl.col("domain_id") == domain) if domain != "Drug" else concept
@@ -365,6 +376,10 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, pl.DataFrame]:
         "--max_depth", type=int, default=None,
         help="Keep the concepts at most this many levels below their category (default: all)",
     )
+    parser.add_argument(
+        "--strict_category_names", action="store_true",
+        help="Fail when a category is named differently in this vocabulary version (default: warn, the id is used)",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
 
@@ -380,7 +395,9 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, pl.DataFrame]:
     os.makedirs(args.output_dir, exist_ok=True)
     result = {}
     for domain in args.domains:
-        universe = build_pool_universe(concept, ancestor, domain, max_depth=args.max_depth)
+        universe = build_pool_universe(
+            concept, ancestor, domain, max_depth=args.max_depth, strict_names=args.strict_category_names
+        )
         result[domain] = universe
         universe.write_parquet(os.path.join(args.output_dir, f"{domain.lower()}_universe.parquet"))
         universe.with_columns(pl.col("categories").list.eval(pl.element().cast(pl.String)).list.join(";")).write_csv(

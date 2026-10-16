@@ -140,12 +140,15 @@ class BuildUniverseTest(unittest.TestCase):
         # 901 is a Procedure, so asking for conditions with it as a token gives nothing for it
         self.assertEqual(self.universe([901], domain="Condition"), {})
 
-    def test_a_category_that_does_not_match_the_vocabulary_fails(self):
+    def test_a_category_that_is_not_in_the_vocabulary_fails_and_a_renamed_one_is_used_by_its_id(self):
         concept, ancestor = tables()
         with self.assertRaisesRegex(ValueError, "vocabulary version"):
-            qu.build_universe(concept, ancestor, [140], "Condition", ((120, "Cardiac disease"),))
-        with self.assertRaisesRegex(ValueError, "vocabulary version"):
             qu.build_universe(concept, ancestor, [140], "Condition", ((999999, "Heart disease"),))
+        with self.assertLogs(qu.LOG, level="WARNING"):
+            renamed = qu.build_universe(concept, ancestor, [140], "Condition", ((120, "Cardiac disease"),))
+        self.assertIn(120, renamed["concept_id"].to_list())
+        with self.assertRaisesRegex(ValueError, "expected"):
+            qu.build_universe(concept, ancestor, [140], "Condition", ((120, "Cardiac disease"),), strict_names=True)
 
 
 VISIT_TEST_CATEGORIES = ((500, "Inpatient Visit"), (520, "Outpatient Visit"))
@@ -308,3 +311,23 @@ class HardcodedCategoriesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CheckCategoriesTest(unittest.TestCase):
+    CONCEPT = pl.DataFrame({"concept_id": [1, 2], "concept_name": ["Injury or poisoning", "Fracture"]})
+
+    def test_matching_names_pass(self):
+        qu.check_categories(self.CONCEPT, [(1, "Injury or poisoning"), (2, "Fracture")], strict_names=True)
+
+    def test_a_renamed_category_is_reported_and_its_id_is_used(self):
+        with self.assertLogs(qu.LOG, level="WARNING") as logs:
+            qu.check_categories(self.CONCEPT, [(1, "Injury AND/OR poisoning")])
+        self.assertIn("Injury AND/OR poisoning", logs.output[0])
+
+    def test_strict_names_fail_on_a_rename(self):
+        with self.assertRaisesRegex(ValueError, "expected"):
+            qu.check_categories(self.CONCEPT, [(1, "Injury AND/OR poisoning")], strict_names=True)
+
+    def test_a_category_that_is_not_in_the_table_always_fails(self):
+        with self.assertRaisesRegex(ValueError, "not in the concept table"):
+            qu.check_categories(self.CONCEPT, [(99, "Gone")])
