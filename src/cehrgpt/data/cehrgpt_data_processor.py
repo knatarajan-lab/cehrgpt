@@ -74,6 +74,7 @@ class CehrGptDataProcessor(DatasetMapping):
         self.include_motor_time_to_event = include_motor_time_to_event
         self.motor_sampling_probability = motor_sampling_probability
         self.motor_code_cache: Dict[str, List[str]] = {}
+        self.motor_token_ids_cache: Dict[str, np.ndarray] = {}
         self.is_data_in_meds = is_data_in_meds
         # Pre-compute vocab-wide token type mappings
         self._precompute_vocab_mappings()
@@ -429,7 +430,12 @@ class CehrGptDataProcessor(DatasetMapping):
         """Highly optimized vectorized version using pre-computed token type arrays."""
         concept_ids = record["concept_ids"]
         # Convert concept_ids to indices for vectorized operations
-        concept_indices = np.array([self.vocab_to_idx[cid] for cid in concept_ids])
+        n_concepts = len(concept_ids)
+        concept_indices = np.fromiter(
+            map(self.vocab_to_idx.__getitem__, concept_ids),
+            dtype=np.int64,
+            count=n_concepts,
+        )
         # Vectorized token type detection
         is_att_tokens = self.is_att_token_array[concept_indices]
         is_clinical_events = self.is_clinical_event_array[concept_indices]
@@ -437,17 +443,11 @@ class CehrGptDataProcessor(DatasetMapping):
 
         # Find valid time tokens (att tokens with positive intervals)
         valid_time_tokens = is_att_tokens & (time_intervals > 0)
-        n_concepts = len(concept_ids)
 
         # We need to make sure event_times is monotonic
-        event_times = np.zeros(n_concepts, dtype=float)
-        previous_time_stamp = record["epoch_times"][0]
-        for i, time_stamp in enumerate(record["epoch_times"]):
-            if time_stamp < previous_time_stamp:
-                time_stamp = previous_time_stamp
-            else:
-                previous_time_stamp = time_stamp
-            event_times[i] = time_stamp
+        event_times = np.maximum.accumulate(
+            np.asarray(record["epoch_times"], dtype=float)
+        )
 
         # Convert epoch times to days
         event_times = event_times / (3600 * 24)
@@ -479,85 +479,68 @@ class CehrGptDataProcessor(DatasetMapping):
                 "motor_tte_task_indicators": [False] * n_concepts,
             }
 
-        # Pre-compute all motor codes for clinical events to avoid repeated lookups
+        # The tasks (motor token ids) each clinical event counts for, from the cache of its concept
         clinical_positions = np.where(is_clinical_events)[0]
-        motor_codes_cache = {}  # position -> list of (motor_code, motor_token_id)
-
+        task_arrays = []
+        task_positions = []
         for pos in clinical_positions:
-            concept_id = concept_ids[pos]
-            if concept_id in self.motor_code_cache:
-                motor_codes = self.motor_code_cache[concept_id]
-            else:
-                motor_codes = self.tokenizer.get_motor_parents(concept_id)
-                self.motor_code_cache[concept_id] = motor_codes
+            task_ids = self._get_motor_token_ids(concept_ids[pos])
+            if len(task_ids):
+                task_arrays.append(task_ids)
+                task_positions.append(np.full(len(task_ids), pos, dtype=np.int64))
 
-            if motor_codes:
-                motor_codes_cache[pos] = [
-                    (motor_code, self.tokenizer.get_motor_token_id(motor_code))
-                    for motor_code in motor_codes
-                ]
-
-        # Process sections in REVERSE order but build results in FORWARD order
-        section_boundaries = np.concatenate([prediction_indices, [n_concepts]])
-
-        # Pre-allocate arrays with exact size needed
         motor_censor_times = event_times[-1] - event_times
         motor_tte_task_indicators = np.zeros(n_concepts, dtype=bool)
+        motor_tte_task_indicators[prediction_indices] = True
 
-        # Store sparse matrix data grouped by row for efficient construction
-        sparse_data_by_row = {}  # row_idx -> [(col_idx, value), ...]
+        # Row i is the prediction point prediction_indices[i]. The events after it belong to the section
+        # (prediction_indices[sec], prediction_indices[sec + 1]] they fall in, and are counted for the
+        # rows up to that section only if they happen after the prediction point that opens the section.
+        # A task is then listed for row r with the time of its first such event in a section >= r. Event
+        # e of a task covers the rows after the section of the previous event of the task up to its own
+        # section, so the rows of all the events are produced at once, without a loop over rows.
+        row_times = event_times[prediction_indices]
+        if task_arrays:
+            event_tasks = np.concatenate(task_arrays)
+            event_positions = np.concatenate(task_positions)
+            sections = np.searchsorted(prediction_indices, event_positions, side="left") - 1
+            event_event_times = event_times[event_positions]
+            included = (sections >= 0) & (
+                event_event_times > row_times[np.maximum(sections, 0)]
+            )
+            event_tasks = event_tasks[included]
+            sections = sections[included]
+            event_event_times = event_event_times[included]
+        else:
+            event_tasks = np.zeros(0, dtype=np.int64)
+            sections = np.zeros(0, dtype=np.int64)
+            event_event_times = np.zeros(0, dtype=float)
 
-        # Global motor event state that accumulates as we go backwards
-        global_motor_events = {}  # motor_code -> earliest_future_time
-
-        # Process in reverse order but assign to forward row indices
-        for i in range(len(prediction_indices) - 1, -1, -1):
-            start_index = prediction_indices[i]
-            end_index = section_boundaries[i + 1]
-            current_event_time = event_times[start_index]
-
-            # Add new motor events from this section to global state
-            section_start = start_index + 1
-            section_end = end_index + 1 if end_index < n_concepts else n_concepts
-
-            # Process clinical events in this section (in reverse order within section)
-            section_clinical_positions = clinical_positions[
-                (clinical_positions >= section_start)
-                & (clinical_positions < section_end)
-            ]
-
-            for pos in reversed(section_clinical_positions):
-                if pos in motor_codes_cache:
-                    concept_time = event_times[pos]
-                    if concept_time > current_event_time:
-                        for motor_code, motor_token_id in motor_codes_cache[pos]:
-                            global_motor_events[motor_code] = (
-                                concept_time,
-                                motor_token_id,
-                            )
-
-            # Store sparse matrix data for current prediction position
-            # Even if global_motor_events is empty, we still need to record this position
-            # because it indicates all motor tasks are censored at this time point
-            sparse_data_by_row[i] = [
-                (motor_token_id, motor_time - current_event_time)
-                for motor_code, (
-                    motor_time,
-                    motor_token_id,
-                ) in global_motor_events.items()
-            ]
-            motor_tte_task_indicators[start_index] = True
-
-        # Build final sparse matrix lists in forward order (no reversals needed)
-        motor_row_indices = []
-        motor_col_indices = []
-        motor_values = []
-
-        for row_idx in sorted(sparse_data_by_row.keys()):
-            for col_idx, value in sparse_data_by_row[row_idx]:
-                motor_row_indices.append(row_idx)
-                motor_col_indices.append(col_idx)
-                motor_values.append(value)
+        if len(event_tasks):
+            # Events are in position order; a stable sort by task keeps that order inside a task
+            order = np.argsort(event_tasks, kind="stable")
+            event_tasks = event_tasks[order]
+            sections = sections[order]
+            event_event_times = event_event_times[order]
+            same_task = np.zeros(len(event_tasks), dtype=bool)
+            same_task[1:] = event_tasks[1:] == event_tasks[:-1]
+            previous = np.full(len(event_tasks), -1, dtype=np.int64)
+            previous[1:] = np.where(same_task[1:], sections[:-1], -1)
+            counts = sections - previous  # rows previous + 1 .. sections, none if the section repeats
+            counts = np.maximum(counts, 0)
+            total = int(counts.sum())
+            owner = np.repeat(np.arange(len(event_tasks)), counts)
+            first_of_owner = np.cumsum(counts) - counts
+            rows = previous[owner] + 1 + (np.arange(total) - first_of_owner[owner])
+            cols = event_tasks[owner]
+            values = event_event_times[owner] - row_times[rows]
+            # Ordered by row, then task
+            final_order = np.lexsort((cols, rows))
+            motor_row_indices = rows[final_order].tolist()
+            motor_col_indices = cols[final_order].tolist()
+            motor_values = values[final_order].tolist()
+        else:
+            motor_row_indices, motor_col_indices, motor_values = [], [], []
 
         if len(motor_row_indices) == 0:
             LOG.debug(
@@ -574,3 +557,18 @@ class CehrGptDataProcessor(DatasetMapping):
             "motor_values": motor_values,
             "motor_tte_task_indicators": motor_tte_task_indicators.tolist(),
         }
+
+    def _get_motor_token_ids(self, concept_id: str) -> np.ndarray:
+        """The motor token ids of the tasks a concept counts for, cached per concept."""
+        token_ids = self.motor_token_ids_cache.get(concept_id)
+        if token_ids is None:
+            motor_codes = self.motor_code_cache.get(concept_id)
+            if motor_codes is None:
+                motor_codes = self.tokenizer.get_motor_parents(concept_id)
+                self.motor_code_cache[concept_id] = motor_codes
+            token_ids = np.asarray(
+                [self.tokenizer.get_motor_token_id(code) for code in motor_codes],
+                dtype=np.int64,
+            )
+            self.motor_token_ids_cache[concept_id] = token_ids
+        return token_ids
