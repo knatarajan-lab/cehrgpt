@@ -22,11 +22,13 @@ def main():
     p.add_argument("--tokenizers", nargs="+", required=True)
     p.add_argument("--condition_root", default="Disease")
     p.add_argument("--procedure_root", default="Procedure")
+    p.add_argument("--condition_root_code", default=None, help="SNOMED concept_code of the condition root (64572001 is Disease); used instead of the name")
+    p.add_argument("--procedure_root_code", default=None, help="SNOMED concept_code of the procedure root; used instead of the name")
     p.add_argument("--max_depth", type=int, default=6)
     p.add_argument("--examples", nargs="*", default=[], help="Names (substrings) of concepts whose ancestor chain is printed, e.g. 'Coronary artery bypass'")
     a = p.parse_args()
     concept = scan(a.vocab_path, "concept").select(
-        pl.col("concept_id").cast(pl.Int64), "concept_name", "domain_id", "vocabulary_id", "concept_class_id"
+        pl.col("concept_id").cast(pl.Int64), "concept_name", "domain_id", "vocabulary_id", "concept_class_id", "concept_code"
     ).collect()
     anc = scan(a.vocab_path, "concept_ancestor").select(
         pl.col("ancestor_concept_id").cast(pl.Int64), pl.col("descendant_concept_id").cast(pl.Int64),
@@ -37,8 +39,14 @@ def main():
         mine = concept.filter(pl.col("concept_id").is_in(tokens))
         print(f"\n===== {path}: {len(tokens)} numeric tokens, {len(mine)} in the concept table")
         print(mine.group_by("domain_id", "vocabulary_id", "concept_class_id").len().sort("len", descending=True).head(25))
-        for domain, root_name, vocab in (("Condition", a.condition_root, "SNOMED"), ("Procedure", a.procedure_root, "SNOMED")):
-            roots = concept.filter((pl.col("concept_name") == root_name) & (pl.col("vocabulary_id") == vocab)).sort("concept_id")
+        for domain, root_name, vocab, root_code in (
+            ("Condition", a.condition_root, "SNOMED", a.condition_root_code),
+            ("Procedure", a.procedure_root, "SNOMED", a.procedure_root_code),
+        ):
+            if root_code:
+                roots = concept.filter((pl.col("concept_code").cast(pl.String) == root_code) & (pl.col("vocabulary_id") == vocab)).sort("concept_id")
+            else:
+                roots = concept.filter((pl.col("concept_name") == root_name) & (pl.col("vocabulary_id") == vocab)).sort("concept_id")
             if roots.is_empty():
                 print(f"\n-- {domain}: no {vocab} concept named {root_name!r}"); continue
             root = roots["concept_id"][0]
