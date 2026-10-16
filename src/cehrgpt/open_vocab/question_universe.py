@@ -9,6 +9,10 @@ concept below no category is still a question, but only itself. Only SNOMED ance
 concept_ancestor also lists MedDRA and other vocabularies above a SNOMED concept, and the CPT4,
 ICD10PCS and ICD9Proc procedures have SNOMED ancestors.
 
+Drugs (RxNorm, RxNorm Extension) are mapped to their ingredient: the questions are the drug concepts
+of the tokenizer and the ingredients above them, and nothing in between (clinical drug components and
+forms, which mostly cover the same patients as one child) and nothing above (no ATC classes).
+
     python -m cehrgpt.open_vocab.question_universe --vocab_path OHDSI_DIR \
         --tokenizers TOKENIZER_DIR [TOKENIZER_DIR ...] --output_dir OUT
 
@@ -28,6 +32,12 @@ import polars as pl
 LOG = logging.getLogger(__name__)
 
 SNOMED = "SNOMED"
+RXNORM = ("RxNorm", "RxNorm Extension")
+INGREDIENT = "Ingredient"
+
+# The vocabularies whose ancestors are questions, and for the drugs the only class an ancestor may have
+VOCABULARIES: Dict[str, Tuple[str, ...]] = {"Condition": (SNOMED,), "Procedure": (SNOMED,), "Drug": RXNORM}
+ANCESTOR_CLASSES: Dict[str, Optional[Tuple[str, ...]]] = {"Condition": None, "Procedure": None, "Drug": (INGREDIENT,)}
 
 # Conditions below Disease: the kind of disease
 DISEASE_CATEGORIES = (
@@ -113,10 +123,20 @@ PROCEDURE_CATEGORIES = (
     (4313889, 'Endoscopy'),
 )
 
-CATEGORIES: Dict[str, Tuple[Tuple[int, str], ...]] = {
+CATEGORIES: Dict[str, Optional[Tuple[Tuple[int, str], ...]]] = {
     "Condition": DISEASE_CATEGORIES + BODY_SYSTEM_CATEGORIES + FINDING_CATEGORIES,
     "Procedure": PROCEDURE_CATEGORIES,
+    # every RxNorm ingredient is a category, see ingredient_categories
+    "Drug": None,
 }
+
+
+def ingredient_categories(concept: pl.DataFrame) -> Tuple[Tuple[int, str], ...]:
+    """Every RxNorm and RxNorm Extension ingredient: the categories of the drugs."""
+    found = concept.filter(
+        (pl.col("concept_class_id") == INGREDIENT) & pl.col("vocabulary_id").is_in(list(RXNORM))
+    ).sort("concept_id")
+    return tuple(zip(found["concept_id"].to_list(), found["concept_name"].to_list()))
 
 
 def check_categories(concept: pl.DataFrame, categories: Sequence[Tuple[int, str]]) -> None:
@@ -136,6 +156,8 @@ def build_universe(
     token_ids: Iterable[int],
     domain: str,
     categories: Optional[Sequence[Tuple[int, str]]] = None,
+    vocabularies: Optional[Sequence[str]] = None,
+    ancestor_classes: Optional[Sequence[str]] = None,
 ) -> pl.DataFrame:
     """
     The questions of one domain: one row per concept.
@@ -146,14 +168,19 @@ def build_universe(
     token outside SNOMED),
     num_tokens (tokens at or below the concept, itself included).
     """
-    categories = tuple(categories if categories is not None else CATEGORIES[domain])
+    if categories is None:
+        categories = CATEGORIES[domain] if CATEGORIES[domain] is not None else ingredient_categories(concept)
+    categories = tuple(categories)
+    vocabularies = tuple(vocabularies if vocabularies is not None else VOCABULARIES.get(domain, (SNOMED,)))
+    if ancestor_classes is None:
+        ancestor_classes = ANCESTOR_CLASSES.get(domain)
     check_categories(concept, categories)
     category_ids = [c for c, _ in categories]
 
     token_ids = set(token_ids)
     tokens = concept.filter((pl.col("domain_id") == domain) & pl.col("concept_id").is_in(list(token_ids)))
     token_list = tokens["concept_id"].to_list()
-    snomed = concept.filter(pl.col("vocabulary_id") == SNOMED)["concept_id"].to_list()
+    snomed = concept.filter(pl.col("vocabulary_id").is_in(list(vocabularies)))["concept_id"].to_list()
 
     # node -> the categories at or above it, with the distance; a category is at distance 0
     below = ancestor.filter(
@@ -174,6 +201,10 @@ def build_universe(
     members = pl.concat([pairs, own]).unique()
     # an ancestor is a question only if it is a category or below one; a token always is
     in_a_category = set(below["node"].to_list())
+    if ancestor_classes is not None:
+        # only ancestors of these classes are questions (the ingredient of a drug, not its forms)
+        allowed = concept.filter(pl.col("concept_class_id").is_in(list(ancestor_classes)))["concept_id"].to_list()
+        in_a_category &= set(allowed)
     members = members.filter(pl.col("node").is_in(list(in_a_category)) | (pl.col("node") == pl.col("token")))
 
     sizes = members.group_by("node").agg(pl.col("token").n_unique().alias("num_tokens"))
@@ -230,7 +261,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, pl.DataFrame]:
     logging.basicConfig(level=logging.INFO)
 
     concept = _scan(args.vocab_path, "concept").select(
-        pl.col("concept_id").cast(pl.Int64), "concept_name", "domain_id", "vocabulary_id"
+        pl.col("concept_id").cast(pl.Int64), "concept_name", "domain_id", "vocabulary_id", "concept_class_id"
     ).collect()
     ancestor = _scan(args.vocab_path, "concept_ancestor").select(
         pl.col("ancestor_concept_id").cast(pl.Int64), pl.col("descendant_concept_id").cast(pl.Int64),

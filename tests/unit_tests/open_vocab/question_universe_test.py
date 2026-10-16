@@ -28,10 +28,22 @@ NAMES = {
     170: ("Orphan group", "SNOMED", "Condition"),
     180: ("Orphan disease", "SNOMED", "Condition"),
     901: ("Coronary angiography", "CPT4", "Procedure"),
+    # drugs: ATC class > ingredient > clinical drug form > clinical drug (token)
+    300: ("Antidiabetic drugs", "ATC", "Drug"),
+    310: ("Metformin", "RxNorm", "Drug"),
+    320: ("Metformin Oral Tablet", "RxNorm", "Drug"),
+    330: ("Metformin 500 MG Oral Tablet", "RxNorm", "Drug"),
+    340: ("Aspirin", "RxNorm Extension", "Drug"),
+    350: ("Aspirin 81 MG Oral Tablet", "RxNorm Extension", "Drug"),
+    360: ("Metformin / Aspirin Pack", "RxNorm", "Drug"),
+    370: ("Unmapped vaccine", "CVX", "Drug"),
 }
+CLASSES = {310: "Ingredient", 340: "Ingredient", 320: "Clinical Drug Form", 330: "Clinical Drug",
+           350: "Clinical Drug", 360: "Clinical Pack", 300: "ATC 4th"}
 # parent -> children
 EDGES = {100: [110, 170], 110: [120, 160], 120: [130, 150], 130: [140], 160: [150], 170: [180], 130: [140]}
-CPT_PARENT = {901: [130]}
+CPT_PARENT = {901: [130], 320: [310], 330: [320], 350: [340], 360: [330, 350]}
+EDGES[300] = [310]
 
 
 def tables():
@@ -41,6 +53,7 @@ def tables():
             "concept_name": [v[0] for v in NAMES.values()],
             "vocabulary_id": [v[1] for v in NAMES.values()],
             "domain_id": [v[2] for v in NAMES.values()],
+            "concept_class_id": [CLASSES.get(c, "Clinical Finding") for c in NAMES],
         }
     )
     parents = {}
@@ -127,9 +140,40 @@ class BuildUniverseTest(unittest.TestCase):
             qu.build_universe(concept, ancestor, [140], "Condition", ((999999, "Heart disease"),))
 
 
+class DrugUniverseTest(unittest.TestCase):
+    def universe(self, tokens):
+        concept, ancestor = tables()
+        result = qu.build_universe(concept, ancestor, tokens, "Drug")
+        return {row["concept_id"]: row for row in result.iter_rows(named=True)}
+
+    def test_a_drug_is_mapped_to_its_ingredient_only(self):
+        universe = self.universe([330])
+        # the drug and its ingredient: not the form in between, not the ATC class above
+        self.assertEqual(set(universe), {330, 310})
+        self.assertFalse(universe[310]["is_token"])
+        self.assertEqual(universe[310]["num_tokens"], 1)
+
+    def test_a_pack_has_all_of_its_ingredients(self):
+        universe = self.universe([360])
+        self.assertEqual(set(universe), {360, 310, 340})
+        self.assertEqual(universe[360]["categories"], [310, 340])
+
+    def test_rxnorm_extension_ingredients_count_and_other_vocabularies_do_not(self):
+        universe = self.universe([350, 370])
+        self.assertIn(340, universe)
+        self.assertEqual(universe[370]["categories"], [])  # a vaccine of another vocabulary: itself only
+
+    def test_an_ingredient_that_is_a_token_is_a_question_once(self):
+        universe = self.universe([310, 330])
+        self.assertTrue(universe[310]["is_token"])
+        self.assertEqual(universe[310]["num_tokens"], 2)
+
+
 class HardcodedCategoriesTest(unittest.TestCase):
-    def test_the_lists_have_no_duplicate_ids_and_cover_both_domains(self):
+    def test_the_lists_have_no_duplicate_ids_and_cover_the_domains(self):
         for domain, categories in qu.CATEGORIES.items():
+            if categories is None:  # the drugs: the ingredients of the concept table
+                continue
             ids = [concept_id for concept_id, _ in categories]
             self.assertEqual(len(ids), len(set(ids)), f"duplicate ids in the {domain} categories")
             self.assertTrue(categories)
@@ -138,7 +182,7 @@ class HardcodedCategoriesTest(unittest.TestCase):
         self.assertNotIn("Surgical procedure", names)  # too generic, left out on purpose
 
     def test_hubs_are_not_categories(self):
-        names = {name for categories in qu.CATEGORIES.values() for _, name in categories}
+        names = {name for categories in qu.CATEGORIES.values() if categories for _, name in categories}
         for hub in ("Disorder by body site", "Disorder of body system", "Procedure by method", "Procedure on body system"):
             self.assertNotIn(hub, names)
 
