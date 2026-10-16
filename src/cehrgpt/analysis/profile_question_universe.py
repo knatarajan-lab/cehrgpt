@@ -23,6 +23,7 @@ def main():
     p.add_argument("--condition_root", default="Disease")
     p.add_argument("--procedure_root", default="Procedure")
     p.add_argument("--max_depth", type=int, default=6)
+    p.add_argument("--examples", nargs="*", default=[], help="Names (substrings) of concepts whose ancestor chain is printed, e.g. 'Coronary artery bypass'")
     a = p.parse_args()
     concept = scan(a.vocab_path, "concept").select(
         pl.col("concept_id").cast(pl.Int64), "concept_name", "domain_id", "vocabulary_id", "concept_class_id"
@@ -56,6 +57,20 @@ def main():
                 top = size.sort("n", descending=True).head(1).join(concept, left_on="ancestor_concept_id", right_on="concept_id")
                 n = size["n"].to_numpy()
                 print(f" {d:>5}  {len(nodes):>6}  {covered:>14}  {n.min():>6}/{int(np.median(n))}/{n.max()}   {top['concept_name'][0][:40]} ({top['n'][0]})")
+        for example in a.examples:
+            found = mine.filter(pl.col("concept_name").str.to_lowercase().str.contains(example.lower(), literal=True)).head(3)
+            if found.is_empty():
+                print(f"\n-- example {example!r}: no token of this tokenizer has this name"); continue
+            for cid, cname in zip(found["concept_id"], found["concept_name"]):
+                print(f"\n-- ancestors of {cname!r} ({cid}); tokens = tokens of this tokenizer at or below the ancestor")
+                chain = anc.filter(pl.col("descendant_concept_id") == cid).join(
+                    concept.select(pl.col("concept_id").alias("ancestor_concept_id"), "concept_name", "vocabulary_id"), on="ancestor_concept_id")
+                below_count = (anc.filter(pl.col("ancestor_concept_id").is_in(chain["ancestor_concept_id"].to_list())
+                                          & pl.col("descendant_concept_id").is_in(tokens))
+                               .group_by("ancestor_concept_id").agg(pl.col("descendant_concept_id").n_unique().alias("tokens")))
+                chain = chain.join(below_count, on="ancestor_concept_id", how="left").sort("min_levels_of_separation")
+                for row in chain.iter_rows(named=True):
+                    print(f"  {row['min_levels_of_separation']:>3} up  {row['concept_name'][:60]:<60} {row['vocabulary_id']:<14} tokens={row['tokens']}")
         drugs = mine.filter(pl.col("domain_id") == "Drug")
         ing = anc.join(concept.filter(pl.col("concept_class_id") == "Ingredient").select(pl.col("concept_id").alias("ancestor_concept_id")), on="ancestor_concept_id")
         has = ing.filter(pl.col("descendant_concept_id").is_in(drugs["concept_id"].to_list()))["descendant_concept_id"].n_unique()
