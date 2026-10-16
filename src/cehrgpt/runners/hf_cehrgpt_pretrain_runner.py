@@ -49,7 +49,11 @@ from cehrgpt.runners.gpt_runner_util import (
 )
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.runners.sample_packing_trainer import CehrGptTrainer, SamplePackingTrainer
-from cehrgpt.open_vocab.assets import OpenVocabAssets
+from cehrgpt.open_vocab.assets import (
+    OpenVocabAssets,
+    read_concept_counts,
+    vocabulary_concept_ids,
+)
 from cehrgpt.tools.gpu_profile import GpuProfileCallback
 from cehrgpt.tools.instability_probe import InstabilityProbe
 
@@ -157,7 +161,10 @@ def load_and_create_tokenizer(
 
 
 def setup_open_vocab(
-    model: CEHRGPT2LMHeadModel, cehrgpt_args: CehrGPTArguments
+    model: CEHRGPT2LMHeadModel,
+    cehrgpt_args: CehrGPTArguments,
+    tokenizer: CehrGptTokenizer,
+    tokenizer_dir: str,
 ) -> Optional[OpenVocabAssets]:
     """
     Add the patient timeline QA head to the model if include_open_vocab is set, and return its assets.
@@ -168,17 +175,32 @@ def setup_open_vocab(
     """
     if not cehrgpt_args.include_open_vocab:
         return None
-    if not (cehrgpt_args.open_vocab_hierarchy_path and cehrgpt_args.open_vocab_embeddings_dir):
+    if not (
+        cehrgpt_args.open_vocab_universe_dir
+        and cehrgpt_args.open_vocab_embeddings_dir
+        and cehrgpt_args.vocab_dir
+    ):
         raise ValueError(
-            "include_open_vocab needs open_vocab_hierarchy_path and open_vocab_embeddings_dir"
+            "include_open_vocab needs open_vocab_universe_dir, open_vocab_embeddings_dir and vocab_dir (the OHDSI folder)"
         )
     if not getattr(model.config, "include_motor_time_to_event", False):
         raise ValueError(
             "include_open_vocab needs a model with the MOTOR head: the questions are asked at its "
             "prediction points. Set include_motor_time_to_event."
         )
-    assets = OpenVocabAssets.load(
-        cehrgpt_args.open_vocab_hierarchy_path, cehrgpt_args.open_vocab_embeddings_dir
+    # The universe and the embeddings do not depend on a tokenizer; only here, where the run has one, are the
+    # questions cut to the concepts of its vocabulary
+    assets = OpenVocabAssets.build(
+        universe_dir=cehrgpt_args.open_vocab_universe_dir,
+        vocab_path=cehrgpt_args.vocab_dir,
+        embeddings_dir=cehrgpt_args.open_vocab_embeddings_dir,
+        token_ids=vocabulary_concept_ids(tokenizer.get_vocab()),
+        concept_counts=(
+            read_concept_counts([tokenizer_dir])
+            if cehrgpt_args.open_vocab_min_patient_count > 0
+            else None
+        ),
+        min_patient_count=cehrgpt_args.open_vocab_min_patient_count,
     )
     config = model.config
     config.open_vocab_loss_weight = cehrgpt_args.open_vocab_loss_weight
@@ -695,7 +717,16 @@ def main():
         cehrgpt_tokenizer.save_pretrained(tokenizer_save_path)
 
     model = load_and_create_model(model_args, cehrgpt_args, cehrgpt_tokenizer)
-    open_vocab_assets = setup_open_vocab(model, cehrgpt_args)
+    open_vocab_assets = setup_open_vocab(
+        model,
+        cehrgpt_args,
+        cehrgpt_tokenizer,
+        os.path.expanduser(
+            training_args.output_dir
+            if cehrgpt_args.expand_tokenizer
+            else model_args.tokenizer_name_or_path
+        ),
+    )
 
     # Try to update motor tte vocab size if the new configuration is different from the existing one
     if cehrgpt_args.include_motor_time_to_event:

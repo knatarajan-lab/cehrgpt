@@ -1,30 +1,32 @@
 """
-The questions the open vocabulary head is trained on: the concepts of the tokenizer and their
-ancestors in the OHDSI hierarchy, up to a fixed list of top level categories.
+The questions the open vocabulary head is trained on, built from the OHDSI hierarchy alone.
 
-A question is a concept of the tokenizer, or an ancestor of one that is a top level category or
-below one. The categories are listed in this file; nothing above them is a question, which keeps
-out groups that are too generic to ask about ("Disorder by body site", "Procedure by method"). A
-concept below no category is still a question, but only itself. Only SNOMED ancestors are used:
-concept_ancestor also lists MedDRA and other vocabularies above a SNOMED concept, and the CPT4,
-ICD10PCS and ICD9Proc procedures have SNOMED ancestors.
+    python -m cehrgpt.open_vocab.question_universe --vocab_path OHDSI_DIR --output_dir OUT
 
-Visits are a domain of their own: the visit types (inpatient, outpatient, emergency room, ...) are the
-categories, and the places of service and specialties below them (Inpatient Hospital, Ambulatory
-Surgical Center, Radiology Clinic/Center, ...) are questions that roll up to the type through the
-hierarchy, so an inpatient hospital stay is also an inpatient visit. These concepts live in the Visit,
-CMS Place of Service, NUCC and Medicare Specialty vocabularies.
+This is the first step and it needs no tokenizer, so it can run before one is built. A question is a valid
+concept of a domain that is a top level category or below one; the categories are listed in this file, and
+nothing above them is a question, which keeps out groups that are too generic to ask about ("Disorder by body
+site", "Procedure by method"). A concept below no category is not a question, except for the visits, which are
+all questions. Conditions and procedures use the SNOMED hierarchy only: concept_ancestor also lists MedDRA and
+other vocabularies above a SNOMED concept. The CPT4, ICD10PCS and ICD9Proc procedures are not questions
+themselves, but they roll up to their SNOMED ancestors.
 
-Drugs (RxNorm, RxNorm Extension) are mapped to their ingredient: the questions are the drug concepts
-of the tokenizer and the ingredients above them, and nothing in between (clinical drug components and
-forms, which mostly cover the same patients as one child) and nothing above (no ATC classes).
+Drugs (RxNorm, RxNorm Extension) are mapped to their ingredient: the questions are the ingredients, and nothing
+in between (clinical drug components and forms, which mostly cover the same patients as one child) and nothing
+above (no ATC classes). The visits are the visit types, with the places of service and the specialties below them
+(CMS Place of Service, NUCC, Medicare Specialty), so an inpatient hospital stay is also an inpatient visit.
 
-    python -m cehrgpt.open_vocab.question_universe --vocab_path OHDSI_DIR \
-        --tokenizers TOKENIZER_DIR [TOKENIZER_DIR ...] --output_dir OUT
+The universe is large because nothing prunes it here (every ingredient, every concept below a category). The
+embeddings of its questions (question_embeddings) are computed once and serve any tokenizer, and
+python -m cehrgpt.open_vocab.assets keeps the questions that have a token at or below them in the vocabulary of
+the tokenizer, and optionally a minimum number of patients in the data it was trained on.
 
-The lists are a first draft taken from the groups at depth 1 to 3 below Disease, Clinical finding
-and Procedure that cover enough tokens of the tokenizers. The id and the name of every category are
-checked against the concept table, so an id of another vocabulary version fails loudly.
+The lists are a first draft taken from the groups at depth 1 to 3 below Disease, Clinical finding and Procedure
+that cover enough tokens of the tokenizers. The id and the name of every category are checked against the concept
+table, so an id of another vocabulary version fails loudly.
+
+build_universe, which cuts the universe to the concepts of given tokenizers, is kept for the library; the command
+line does not use it.
 """
 
 import argparse
@@ -264,6 +266,82 @@ def build_universe(
     return universe
 
 
+def build_pool_universe(
+    concept: pl.DataFrame,
+    ancestor: pl.DataFrame,
+    domain: str,
+    categories: Optional[Sequence[Tuple[int, str]]] = None,
+    vocabularies: Optional[Sequence[str]] = None,
+    ancestor_classes: Optional[Sequence[str]] = None,
+    max_depth: Optional[int] = None,
+) -> pl.DataFrame:
+    """
+    The questions of one domain without a tokenizer: every valid concept of the domain that is a category or below
+    one, and nothing else.
+
+    For the drugs every ingredient is a category and a question, the products below them are not. For the visits
+    every valid concept of the visit vocabularies is a question, also those below no type of visit (a skilled nursing
+    facility); for the other domains a concept below no category is not.
+
+    Same columns as build_universe, with is_token False and num_tokens 0 since no tokenizer is involved. max_depth
+    keeps the concepts at most that many levels below their closest category (None: all).
+    """
+    if categories is None:
+        categories = CATEGORIES[domain] if CATEGORIES[domain] is not None else ingredient_categories(concept)
+    categories = tuple(categories)
+    vocabularies = tuple(vocabularies if vocabularies is not None else VOCABULARIES.get(domain, (SNOMED,)))
+    if ancestor_classes is None:
+        ancestor_classes = ANCESTOR_CLASSES.get(domain)
+    check_categories(concept, categories)
+    category_ids = [c for c, _ in categories]
+
+    valid = concept.filter(pl.col("domain_id") == domain) if domain != "Drug" else concept
+    valid = valid.filter(pl.col("vocabulary_id").is_in(list(vocabularies)))
+    if "invalid_reason" in concept.columns:
+        valid = valid.filter(pl.col("invalid_reason").is_null())
+    if ancestor_classes is not None:
+        valid = valid.filter(pl.col("concept_class_id").is_in(list(ancestor_classes)))
+    node_ids = valid["concept_id"].to_list()
+
+    below = ancestor.filter(
+        pl.col("ancestor_concept_id").is_in(category_ids) & pl.col("descendant_concept_id").is_in(node_ids)
+    ).select(
+        pl.col("ancestor_concept_id").alias("category"),
+        pl.col("descendant_concept_id").alias("concept_id"),
+        pl.col("min_levels_of_separation").alias("distance"),
+    )
+    per_node = below.group_by("concept_id").agg(
+        pl.col("category").sort().alias("categories"), pl.col("distance").min().alias("depth")
+    )
+    if domain == "Visit":
+        per_node = valid.select("concept_id").join(per_node, on="concept_id", how="left")
+    else:
+        # the category itself is a question: it is at distance 0 from itself in concept_ancestor, and is
+        # added here in case a vocabulary version does not list it
+        categories_found = valid.filter(pl.col("concept_id").is_in(category_ids)).select("concept_id")
+        per_node = per_node.join(categories_found, on="concept_id", how="full", coalesce=True)
+        per_node = per_node.with_columns(
+            pl.when(pl.col("concept_id").is_in(category_ids) & pl.col("depth").is_null())
+            .then(0)
+            .otherwise(pl.col("depth"))
+            .alias("depth")
+        )
+    universe = (
+        per_node.with_columns(
+            pl.col("categories").fill_null([]).cast(pl.List(pl.Int64)),
+            pl.col("depth").cast(pl.Int64),
+            pl.lit(False).alias("is_token"),
+            pl.lit(0, dtype=pl.UInt32).alias("num_tokens"),
+        )
+        .join(concept.select("concept_id", "concept_name", "vocabulary_id"), on="concept_id", how="left")
+        .select("concept_id", "concept_name", "vocabulary_id", "is_token", "categories", "depth", "num_tokens")
+        .sort("concept_id")
+    )
+    if max_depth is not None:
+        universe = universe.filter(pl.col("depth").is_null() | (pl.col("depth") <= max_depth))
+    return universe
+
+
 def _scan(vocab_path: str, name: str) -> pl.LazyFrame:
     return pl.scan_parquet(glob.glob(os.path.join(vocab_path, name, "*.parquet")))
 
@@ -281,33 +359,35 @@ def read_token_ids(tokenizer_dirs: Sequence[str]) -> Set[int]:
 def main(argv: Optional[Sequence[str]] = None) -> Dict[str, pl.DataFrame]:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--vocab_path", required=True, help="OHDSI folder with concept/ and concept_ancestor/ (parquet)")
-    parser.add_argument("--tokenizers", nargs="+", required=True, help="Tokenizer folders; their concepts are united")
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--domains", nargs="+", default=list(CATEGORIES), choices=list(CATEGORIES))
+    parser.add_argument(
+        "--max_depth", type=int, default=None,
+        help="Keep the concepts at most this many levels below their category (default: all)",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
 
+    concept_columns = ["concept_name", "domain_id", "vocabulary_id", "concept_class_id", "invalid_reason"]
+    available = _scan(args.vocab_path, "concept").collect_schema().names()
     concept = _scan(args.vocab_path, "concept").select(
-        pl.col("concept_id").cast(pl.Int64), "concept_name", "domain_id", "vocabulary_id", "concept_class_id"
+        pl.col("concept_id").cast(pl.Int64), *[c for c in concept_columns if c in available]
     ).collect()
     ancestor = _scan(args.vocab_path, "concept_ancestor").select(
         pl.col("ancestor_concept_id").cast(pl.Int64), pl.col("descendant_concept_id").cast(pl.Int64),
         pl.col("min_levels_of_separation").cast(pl.Int64),
     ).collect()
-    token_ids = read_token_ids(args.tokenizers)
     os.makedirs(args.output_dir, exist_ok=True)
     result = {}
     for domain in args.domains:
-        universe = build_universe(concept, ancestor, token_ids, domain)
+        universe = build_pool_universe(concept, ancestor, domain, max_depth=args.max_depth)
         result[domain] = universe
         universe.write_parquet(os.path.join(args.output_dir, f"{domain.lower()}_universe.parquet"))
         universe.with_columns(pl.col("categories").list.eval(pl.element().cast(pl.String)).list.join(";")).write_csv(
             os.path.join(args.output_dir, f"{domain.lower()}_universe.csv")
         )
-        uncovered = universe.filter(pl.col("is_token") & (pl.col("categories").list.len() == 0))
         LOG.info(
-            "%s: %s questions, %s tokens, %s ancestors only; %s tokens are below no category",
-            domain, len(universe), universe["is_token"].sum(), (~universe["is_token"]).sum(), len(uncovered),
+            "%s: %s questions, %s below no category", domain, len(universe), (universe["categories"].list.len() == 0).sum()
         )
     return result
 

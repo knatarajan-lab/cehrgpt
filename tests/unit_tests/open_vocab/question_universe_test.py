@@ -195,6 +195,70 @@ class VisitUniverseTest(unittest.TestCase):
         self.assertIsNone(qu.ANCESTOR_CLASSES["Visit"])
 
 
+class PoolUniverseTest(unittest.TestCase):
+    """The universe without a tokenizer: the hierarchy alone."""
+
+    def pool(self, domain="Condition", **kwargs):
+        concept, ancestor = tables()
+        result = qu.build_pool_universe(concept, ancestor, domain, **kwargs)
+        return {row["concept_id"]: row for row in result.iter_rows(named=True)}
+
+    def test_every_concept_that_is_a_category_or_below_one_is_a_question(self):
+        universe = self.pool(categories=CATEGORIES)
+        self.assertEqual(set(universe), {120, 130, 140, 150, 160})
+        # nothing above the categories, and the orphans that are below none
+        for excluded in (100, 110, 170, 180):
+            self.assertNotIn(excluded, universe)
+
+    def test_categories_and_depths(self):
+        universe = self.pool(categories=CATEGORIES)
+        self.assertEqual(universe[150]["categories"], [120, 160])
+        self.assertEqual({k: v["depth"] for k, v in universe.items()}, {120: 0, 160: 0, 130: 1, 150: 1, 140: 2})
+
+    def test_no_tokenizer_is_involved(self):
+        universe = self.pool(categories=CATEGORIES)
+        self.assertTrue(all(not row["is_token"] and row["num_tokens"] == 0 for row in universe.values()))
+
+    def test_max_depth_cuts_the_deep_concepts(self):
+        self.assertEqual(set(self.pool(categories=CATEGORIES, max_depth=1)), {120, 160, 130, 150})
+        self.assertEqual(set(self.pool(categories=CATEGORIES, max_depth=0)), {120, 160})
+
+    def test_only_the_vocabularies_and_the_domain_of_the_questions(self):
+        # 901 is a CPT4 procedure: not a question of the SNOMED conditions
+        self.assertNotIn(901, self.pool(categories=CATEGORIES))
+        self.assertEqual(self.pool("Procedure", categories=CATEGORIES), {})
+
+    def test_invalid_concepts_are_not_questions(self):
+        concept, ancestor = tables()
+        concept = concept.with_columns(
+            pl.when(pl.col("concept_id") == 140).then(pl.lit("D")).otherwise(None).cast(pl.String).alias("invalid_reason")
+        )
+        result = qu.build_pool_universe(concept, ancestor, "Condition", CATEGORIES)
+        self.assertNotIn(140, result["concept_id"].to_list())
+        self.assertIn(130, result["concept_id"].to_list())
+
+    def test_the_drugs_are_the_ingredients_and_nothing_else(self):
+        universe = self.pool("Drug")
+        self.assertEqual(set(universe), {310, 340})  # not the forms, the drugs or the packs below them
+        self.assertEqual(universe[340]["categories"], [340])
+        self.assertEqual(universe[310]["depth"], 0)
+
+    def test_every_visit_concept_is_a_question_also_below_no_type(self):
+        universe = self.pool("Visit", categories=VISIT_TEST_CATEGORIES)
+        self.assertEqual(set(universe), {500, 510, 520, 530, 540, 550})
+        self.assertEqual(universe[510]["categories"], [500])
+        self.assertEqual(universe[540]["depth"], 2)
+        self.assertEqual(universe[550]["categories"], [])
+        self.assertIsNone(universe[550]["depth"])
+
+    def test_the_same_columns_as_the_universe_with_tokens(self):
+        concept, ancestor = tables()
+        with_tokens = qu.build_universe(concept, ancestor, [140], "Condition", CATEGORIES)
+        pool = qu.build_pool_universe(concept, ancestor, "Condition", CATEGORIES)
+        self.assertEqual(pool.columns, with_tokens.columns)
+        self.assertEqual(dict(pool.schema), dict(with_tokens.schema))
+
+
 class DrugUniverseTest(unittest.TestCase):
     def universe(self, tokens):
         concept, ancestor = tables()

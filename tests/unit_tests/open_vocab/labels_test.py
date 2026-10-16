@@ -236,18 +236,12 @@ class HierarchyArraysTest(unittest.TestCase):
         self.assertEqual(sorted(questions[owner == 0].tolist()), [INPATIENT, HOSPITAL])
         self.assertEqual(sorted(questions[owner == 1].tolist()), sorted([HEART, CORONARY, ANGINA]))
 
-    def test_save_and_load_round_trip(self):
-        import os
-        import tempfile
 
+class HierarchySizeTest(unittest.TestCase):
+    def test_len_counts_the_concepts_and_question_ids_the_questions(self):
         h = hierarchy()
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "hierarchy.parquet")
-            h.save(path)
-            loaded = QuestionHierarchy.load(path)
-        self.assertEqual(len(loaded), len(h))
-        for concept in (HOSPITAL, RADIOLOGY, HOME, ANGINA):
-            self.assertEqual(loaded.questions_of(concept), h.questions_of(concept))
+        self.assertEqual(len(h), len([c for c in (HOSPITAL, RADIOLOGY, HOME, ANGINA)]))
+        self.assertEqual(sorted(h.question_ids().tolist()), sorted({HEART, CORONARY, ANGINA, INPATIENT, HOSPITAL, OUTPATIENT, CLINIC, RADIOLOGY, HOME}))
 
 
 class BatchLabelsTest(unittest.TestCase):

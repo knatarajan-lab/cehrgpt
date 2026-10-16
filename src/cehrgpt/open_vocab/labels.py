@@ -115,6 +115,13 @@ class QuestionHierarchy:
         concept_id = to_concept_id(concept_id)
         return concept_id is not None and concept_id in self._questions
 
+    def __len__(self) -> int:
+        return len(self._questions)
+
+    def question_ids(self) -> np.ndarray:
+        """The questions that at least one concept counts for, sorted."""
+        return np.unique(self._question_ids)
+
     def vocab_numbers(self, vocab: Mapping[str, int]) -> np.ndarray:
         """
         For every id of a tokenizer vocabulary the concept number of its token (-1 if it is no concept
@@ -124,23 +131,6 @@ class QuestionHierarchy:
         numbers = np.full(max(vocab.values()) + 1, -1, dtype=np.int64)
         numbers[np.fromiter((vocab[t] for t in tokens), dtype=np.int64, count=len(tokens))] = self.concept_numbers(tokens)
         return numbers
-
-    def save(self, path: str) -> None:
-        """Write the roll-up as a parquet file of (concept_id, question_id) pairs."""
-        concepts = [c for c, qs in self._questions.items() for _ in qs]
-        questions = [q for qs in self._questions.values() for q in qs]
-        pl.DataFrame({"concept_id": concepts, "question_id": questions}, schema={"concept_id": pl.Int64, "question_id": pl.Int64}).write_parquet(path)
-
-    @classmethod
-    def load(cls, path: str) -> "QuestionHierarchy":
-        pairs = pl.read_parquet(path)
-        questions: Dict[int, set] = {}
-        for concept, question in pairs.iter_rows():
-            questions.setdefault(concept, set()).add(question)
-        return cls(questions)
-
-    def __len__(self) -> int:
-        return len(self._questions)
 
 
 @dataclass

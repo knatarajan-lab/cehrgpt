@@ -9,7 +9,6 @@ import torch
 from transformers import TrainingArguments
 
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
-from cehrgpt.open_vocab.labels import QuestionHierarchy
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import setup_open_vocab
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.runners.sample_packing_trainer import CehrGptTrainer
@@ -76,43 +75,75 @@ class OpenVocabStartStepTest(unittest.TestCase):
 
 
 def write_assets(folder):
-    hierarchy_path = os.path.join(folder, "hierarchy.parquet")
-    QuestionHierarchy({i: [i] for i in range(100, 100 + QUESTION_ROWS)}).save(hierarchy_path)
+    """An OHDSI folder, a universe and embeddings of QUESTION_ROWS conditions; none of it involves a tokenizer."""
+    ids = list(range(100, 100 + QUESTION_ROWS))
+    ohdsi = os.path.join(folder, "ohdsi")
+    concept = pl.DataFrame({
+        "concept_id": ids, "concept_name": [f"q{i}" for i in ids], "domain_id": ["Condition"] * len(ids),
+        "vocabulary_id": ["SNOMED"] * len(ids), "concept_class_id": ["Clinical Finding"] * len(ids),
+    })
+    ancestor = pl.DataFrame({
+        "ancestor_concept_id": ids, "descendant_concept_id": ids, "min_levels_of_separation": [0] * len(ids),
+    })
+    for name, frame in (("concept", concept), ("concept_ancestor", ancestor)):
+        os.makedirs(os.path.join(ohdsi, name))
+        frame.write_parquet(os.path.join(ohdsi, name, "part-0.parquet"))
+    universe_dir = os.path.join(folder, "universes")
+    os.makedirs(universe_dir)
+    pl.DataFrame({"concept_id": ids}).write_parquet(os.path.join(universe_dir, "condition_universe.parquet"))
     embeddings_dir = os.path.join(folder, "embeddings")
     os.makedirs(embeddings_dir)
     rng = np.random.default_rng(0)
     np.save(os.path.join(embeddings_dir, "embeddings.npy"), rng.normal(size=(QUESTION_ROWS, QUESTION_DIM)).astype(np.float32))
-    pl.DataFrame({"row": list(range(QUESTION_ROWS)), "concept_id": list(range(100, 100 + QUESTION_ROWS)),
-                  "text": [f"q{i}" for i in range(QUESTION_ROWS)]}).write_parquet(os.path.join(embeddings_dir, "question_texts.parquet"))
+    pl.DataFrame({"row": list(range(QUESTION_ROWS)), "concept_id": ids,
+                  "text": [f"q{i}" for i in ids]}).write_parquet(os.path.join(embeddings_dir, "question_texts.parquet"))
     with open(os.path.join(embeddings_dir, "question_embedder.json"), "w") as f:
         json.dump({"model": "test", "template": "{text}"}, f)
-    return hierarchy_path, embeddings_dir
+    return universe_dir, ohdsi, embeddings_dir
+
+
+class StubTokenizer:
+    """What setup_open_vocab reads of a tokenizer: its vocabulary."""
+
+    def __init__(self, concept_ids):
+        self.vocab = {"[PAD]": 0, **{str(c): i + 1 for i, c in enumerate(concept_ids)}}
+
+    def get_vocab(self):
+        return self.vocab
 
 
 class SetupOpenVocabTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.hierarchy_path, self.embeddings_dir = write_assets(self.tmp.name)
+        self.universe_dir, self.ohdsi, self.embeddings_dir = write_assets(self.tmp.name)
+        self.ids = list(range(100, 100 + QUESTION_ROWS))
+        self.tokenizer = StubTokenizer(self.ids)
+        self.tokenizer_dir = os.path.join(self.tmp.name, "tokenizer")
+        os.makedirs(self.tokenizer_dir)
 
     def args(self, **kwargs):
-        return CehrGPTArguments(
-            include_open_vocab=True, open_vocab_hierarchy_path=self.hierarchy_path,
-            open_vocab_embeddings_dir=self.embeddings_dir, open_vocab_loss_weight=0.25,
-            open_vocab_residual_dim=16, **kwargs,
+        defaults = dict(
+            include_open_vocab=True, open_vocab_universe_dir=self.universe_dir, vocab_dir=self.ohdsi,
+            open_vocab_embeddings_dir=self.embeddings_dir, open_vocab_loss_weight=0.25, open_vocab_residual_dim=16,
         )
+        defaults.update(kwargs)
+        return CehrGPTArguments(**defaults)
+
+    def setup(self, model, args=None, tokenizer=None):
+        return setup_open_vocab(model, args or self.args(), tokenizer or self.tokenizer, self.tokenizer_dir)
 
     def motor_only(self):
         return tiny_model(include_open_vocab=False, open_vocab_num_question_rows=None, open_vocab_question_dim=None)
 
     def test_nothing_happens_when_it_is_off(self):
         model = self.motor_only()
-        self.assertIsNone(setup_open_vocab(model, CehrGPTArguments()))
+        self.assertIsNone(self.setup(model, CehrGPTArguments()))
         self.assertIsNone(model.open_vocab_head)
 
     def test_the_head_is_added_to_a_trained_motor_model(self):
         model = self.motor_only()
-        assets = setup_open_vocab(model, self.args())
+        assets = self.setup(model)
         self.assertEqual(assets.num_rows, QUESTION_ROWS)
         self.assertIsNotNone(model.open_vocab_head)
         self.assertEqual(model.config.include_open_vocab, True)
@@ -126,28 +157,48 @@ class SetupOpenVocabTest(unittest.TestCase):
         loaded = CEHRGPT2LMHeadModel.from_pretrained(self.tmp.name + "/model")
         self.assertTrue(torch.equal(loaded.question_embeddings, model.question_embeddings))
 
+    def test_only_the_questions_of_the_vocabulary_get_embeddings(self):
+        # the vocabulary has half of the concepts: the model holds the embeddings of those questions only
+        half = StubTokenizer(self.ids[: QUESTION_ROWS // 2])
+        model = self.motor_only()
+        assets = self.setup(model, tokenizer=half)
+        self.assertEqual(assets.num_rows, QUESTION_ROWS // 2)
+        self.assertEqual(model.config.open_vocab_num_question_rows, QUESTION_ROWS // 2)
+        self.assertEqual(tuple(model.question_embeddings.shape), (QUESTION_ROWS // 2, QUESTION_DIM))
+        self.assertEqual(assets.question_concept_ids.tolist(), self.ids[: QUESTION_ROWS // 2])
+
+    def test_the_minimum_patient_count_reads_the_statistics_of_the_tokenizer(self):
+        # 1000 patients; the first five concepts have 500, the next five 10, the others 1
+        shares = {str(c): (0.5 if i < 5 else 0.01 if i < 10 else 0.001) for i, c in enumerate(self.ids)}
+        with open(os.path.join(self.tokenizer_dir, "cehrgpt_concept_stats.json"), "w") as f:
+            json.dump(shares, f)
+        assets = self.setup(self.motor_only(), self.args(open_vocab_min_patient_count=100))
+        self.assertEqual(assets.question_concept_ids.tolist(), self.ids[:5])
+
     def test_a_model_that_has_the_head_only_gets_the_embeddings_again(self):
         model = tiny_model()
         head = model.open_vocab_head
         model.question_embeddings.zero_()
-        setup_open_vocab(model, self.args())
+        self.setup(model)
         self.assertIs(model.open_vocab_head, head)
         self.assertGreater(model.question_embeddings.abs().sum().item(), 0)
 
     def test_the_paths_and_the_motor_head_are_required(self):
         with self.assertRaises(ValueError):
-            setup_open_vocab(self.motor_only(), CehrGPTArguments(include_open_vocab=True))
+            self.setup(self.motor_only(), CehrGPTArguments(include_open_vocab=True))
+        with self.assertRaises(ValueError):
+            self.setup(self.motor_only(), self.args(vocab_dir=None))
         no_motor = tiny_model(include_open_vocab=False, include_motor_time_to_event=False,
                               open_vocab_num_question_rows=None, open_vocab_question_dim=None)
         with self.assertRaises(ValueError):
-            setup_open_vocab(no_motor, self.args())
+            self.setup(no_motor)
 
     def test_wrong_sized_embeddings_are_rejected(self):
         model = tiny_model()
         model.config.open_vocab_num_question_rows = QUESTION_ROWS + 3
         model.question_embeddings = torch.zeros(QUESTION_ROWS + 3, QUESTION_DIM)
         with self.assertRaises(ValueError):
-            setup_open_vocab(model, self.args())
+            self.setup(model)
 
 
 if __name__ == "__main__":

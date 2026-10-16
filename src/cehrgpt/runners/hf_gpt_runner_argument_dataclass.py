@@ -334,9 +334,9 @@ class CehrGPTArguments:
         metadata={
             "help": "Train the patient timeline QA head (open vocabulary head): it answers when any "
             "question about the future of a patient happens, at the prediction points of the MOTOR "
-            "labels, so include_motor_time_to_event is required. Needs open_vocab_hierarchy_path and "
-            "open_vocab_embeddings_dir. Combine with continue_pretrain to add the head to a model whose "
-            "MOTOR and CEHR-GPT training is done, see open_vocab_start_step."
+            "labels, so include_motor_time_to_event is required. Needs open_vocab_universe_dir, "
+            "open_vocab_embeddings_dir and vocab_dir (the OHDSI folder). Combine with continue_pretrain to add "
+            "the head to a model whose MOTOR and CEHR-GPT training is done, see open_vocab_start_step."
         },
     )
     open_vocab_start_step: int = dataclasses.field(
@@ -348,11 +348,20 @@ class CehrGPTArguments:
             "of the run, also when it resumes from a checkpoint."
         },
     )
-    open_vocab_hierarchy_path: Optional[str] = dataclasses.field(
+    open_vocab_universe_dir: Optional[str] = dataclasses.field(
         default=None,
         metadata={
-            "help": "Parquet file with the concept to question roll-up, written by "
-            "python -m cehrgpt.open_vocab.assets."
+            "help": "Folder with the <domain>_universe.parquet files of the questions, written by "
+            "python -m cehrgpt.open_vocab.question_universe from the OHDSI vocabulary alone. The questions are cut "
+            "to those with a concept of the tokenizer's vocabulary at or below them when the run starts."
+        },
+    )
+    open_vocab_min_patient_count: int = dataclasses.field(
+        default=0,
+        metadata={
+            "help": "Keep only the questions that at least this many patients of the data the tokenizer was "
+            "trained on have (or have a concept below it), from the tokenizer's concept statistics. 0 keeps "
+            "every question with a concept of the vocabulary below it."
         },
     )
     open_vocab_embeddings_dir: Optional[str] = dataclasses.field(
