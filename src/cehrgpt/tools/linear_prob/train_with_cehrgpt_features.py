@@ -1,8 +1,10 @@
 import argparse
+import hashlib
 import json
+import os
 import pickle
 from pathlib import Path
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -42,6 +44,50 @@ def prepare_dataset(
     }
 
 
+DEFAULT_WANDB_PROJECT = "cehrgpt-linear-probing"
+
+
+def init_wandb(args, output_dir: Path, config: Dict[str, Any]) -> Optional[Any]:
+    """
+    Start the wandb run of this linear probing result, or return None unless --report_to wandb.
+
+    The run is identified by the output directory, so running the same cohort again resumes and
+    updates its run instead of creating a new one. By default the run is named <cohort>/<model>
+    and grouped by <model>, which is the layout run_linear_prob.sh writes (<output>/<cohort>/<model>).
+    """
+    if args.report_to != "wandb":
+        return None
+    try:
+        import wandb
+    except ImportError as e:
+        raise ImportError(
+            "--report_to wandb needs the wandb package, install it with `pip install wandb`"
+        ) from e
+    resolved = output_dir.resolve()
+    return wandb.init(
+        project=args.wandb_project
+        or os.environ.get("WANDB_PROJECT")
+        or DEFAULT_WANDB_PROJECT,
+        group=args.wandb_group or resolved.name,
+        name=args.wandb_run_name or f"{resolved.parent.name}/{resolved.name}",
+        id=hashlib.sha1(str(resolved).encode()).hexdigest()[:16],
+        resume="allow",
+        dir=str(resolved),
+        config=config,
+    )
+
+
+def report_to_wandb(
+    args, output_dir: Path, metrics: Dict[str, float], config: Dict[str, Any]
+) -> None:
+    run = init_wandb(args, output_dir, config)
+    if run is None:
+        return
+    run.log(metrics)
+    run.summary.update(metrics)
+    run.finish()
+
+
 def main(args):
     features_data_dir = Path(args.features_data_dir)
     output_dir = Path(args.output_dir)
@@ -51,6 +97,14 @@ def main(args):
     logistic_test_result_file = logistic_dir / "metrics.json"
     if logistic_test_result_file.exists():
         print("The models have been trained, and skip ...")
+        # Report the existing results too, so that turning wandb on for a finished cohort fills it in
+        with open(logistic_test_result_file) as f:
+            report_to_wandb(
+                args,
+                output_dir,
+                json.load(f),
+                {"features_data_dir": str(features_data_dir)},
+            )
         exit(0)
 
     feature_train = pd.read_parquet(
@@ -150,6 +204,19 @@ def main(args):
         with open(logistic_test_result_file, "w") as f:
             json.dump(metrics, f, indent=4)
 
+        report_to_wandb(
+            args,
+            output_dir,
+            metrics,
+            {
+                "features_data_dir": str(features_data_dir),
+                "num_train_samples": len(feature_train),
+                "num_test_samples": len(feature_test),
+                "num_features": int(test_dataset["features"].shape[-1]),
+                "test_positive_rate": float(np.mean(test_dataset["boolean_value"])),
+            },
+        )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -162,5 +229,23 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--output_dir", required=True, help="Directory to save the output results"
+    )
+    parser.add_argument(
+        "--report_to",
+        choices=["none", "wandb"],
+        default="none",
+        help="Log the ROC-AUC and PR-AUC to wandb (default: none)",
+    )
+    parser.add_argument(
+        "--wandb_project",
+        help=f"wandb project (default: $WANDB_PROJECT, else {DEFAULT_WANDB_PROJECT})",
+    )
+    parser.add_argument(
+        "--wandb_group",
+        help="wandb run group (default: the name of the output directory, i.e. the model)",
+    )
+    parser.add_argument(
+        "--wandb_run_name",
+        help="wandb run name (default: <parent directory>/<output directory>, i.e. <cohort>/<model>)",
     )
     main(parser.parse_args())

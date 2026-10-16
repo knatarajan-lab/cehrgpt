@@ -20,6 +20,10 @@ usage() {
     echo "  --model_name=NAME              Name for the model output directory (default: cehrgpt_model)"
     echo "  --max_tokens_per_batch=NUM     Maximum tokens per batch (default: 16384)"
     echo "  --torch_type=TYPE              Torch data type (default: float32)"
+    echo "  --report_to=none|wandb         Log the ROC-AUC and PR-AUC of every cohort to wandb, one run per"
+    echo "                                 cohort named <cohort>/<model_name> and grouped by model_name"
+    echo "                                 (default: none)"
+    echo "  --wandb_project=NAME           wandb project (default: \$WANDB_PROJECT, else cehrgpt-linear-probing)"
     echo "  --disable_sample_packing       Disable sample packing (enabled by default)"
     echo "  --disable_combine_global_local Disable combining global and local features (enabled by default)"
     echo "  --add_random_token             Enable adding random token (disabled by default)"
@@ -50,6 +54,7 @@ usage() {
 
 # Default values
 MODEL_NAME="cehrgpt_model"
+REPORT_TO="none"
 MAX_TOKENS_PER_BATCH="16384"
 TORCH_TYPE="bfloat16"
 DISABLE_SAMPLE_PACKING="false"
@@ -104,6 +109,12 @@ for arg in "$@"; do
             ;;
         --torch_type=*)
             TORCH_TYPE="${arg#*=}"
+            ;;
+        --report_to=*)
+            REPORT_TO="${arg#*=}"
+            ;;
+        --wandb_project=*)
+            export WANDB_PROJECT="${arg#*=}"
             ;;
         --disable_sample_packing)
             DISABLE_SAMPLE_PACKING="true"
@@ -220,6 +231,16 @@ if ! [ "$MAX_TOKENS_PER_BATCH" -eq "$MAX_TOKENS_PER_BATCH" ] 2>/dev/null; then
     exit 1
 fi
 
+# Validate report_to
+case "$REPORT_TO" in
+    none|wandb)
+        ;;
+    *)
+        echo "Error: Invalid report_to. Supported values: none, wandb"
+        usage
+        ;;
+esac
+
 # Validate torch_type (common PyTorch data types)
 case "$TORCH_TYPE" in
     float16|float32|float64|bfloat16|int8|int16|int32|int64)
@@ -269,6 +290,7 @@ log "  --output_dir=$OUTPUT_DIR"
 log "  --model_name=$MODEL_NAME"
 log "  --max_tokens_per_batch=$MAX_TOKENS_PER_BATCH"
 log "  --torch_type=$TORCH_TYPE"
+log "  --report_to=$REPORT_TO"
 log "  --disable_sample_packing=$DISABLE_SAMPLE_PACKING"
 log "  --disable_combine_global_local=$DISABLE_COMBINE_GLOBAL_LOCAL"
 log "  --add_random_token=$ADD_RANDOM_TOKEN"
@@ -439,11 +461,12 @@ while read -r cohort_name; do
 
     # Step 2: Model training
     log "Starting model training for $cohort_name..."
-    log "Command: python -u -m cehrgpt.tools.linear_prob.train_with_cehrgpt_features --features_data_dir $output_dir --output_dir $output_dir"
+    log "Command: python -u -m cehrgpt.tools.linear_prob.train_with_cehrgpt_features --features_data_dir $output_dir --output_dir $output_dir --report_to $REPORT_TO"
 
     python -u -m cehrgpt.tools.linear_prob.train_with_cehrgpt_features \
         --features_data_dir "$output_dir" \
         --output_dir "$output_dir" \
+        --report_to "$REPORT_TO" \
         >> "$cohort_log" 2>&1
 
     model_training_status=$?
