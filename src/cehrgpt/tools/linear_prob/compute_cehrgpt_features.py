@@ -9,6 +9,8 @@ from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.dataset as pa_dataset
 import torch
 import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
@@ -71,6 +73,27 @@ def _create_feature_dataset(data_args, training_args, cehrgpt_args, tokenizer, c
         data_args=data_args,
         cache_file_collector=cache_file_collector,
     )
+
+
+def _is_meds_cohort(data_args) -> bool:
+    """
+    Whether the cohort is in the MEDS layout (subject_id, prediction_time, boolean_value).
+
+    The flag is_data_in_meds says so, but a cohort that has a subject_id column and no person_id
+    column is read as MEDS regardless of the flag, as data_utils.extract_cohort_sequences does.
+    """
+    if data_args.is_data_in_meds:
+        return True
+    for folder in (data_args.data_folder, data_args.test_data_folder):
+        if not folder:
+            continue
+        try:
+            names = set(pa_dataset.dataset(os.path.expanduser(folder)).schema.names)
+        except (OSError, pa.ArrowInvalid):
+            continue
+        if "subject_id" in names and "person_id" not in names:
+            return True
+    return False
 
 
 def main():
@@ -271,7 +294,7 @@ def main():
         batch_sampler=test_batch_sampler,
     )
 
-    if data_args.is_data_in_meds:
+    if _is_meds_cohort(data_args):
         demographics_dict = dict()
     else:
         # Loading demographics
