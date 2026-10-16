@@ -72,9 +72,12 @@ HEAD_PREFIX = "motor_tte."
 # ---------------------------------------------------------------------------------------
 # Loading the head
 # ---------------------------------------------------------------------------------------
-def load_head_state(model_path: str) -> Dict[str, torch.Tensor]:
+def load_head_state(
+    model_path: str, prefix: str = HEAD_PREFIX, what: str = "MOTOR head"
+) -> Dict[str, torch.Tensor]:
     """
-    The weights of the MOTOR head from a checkpoint folder, without loading the whole model.
+    The weights of a head (default: the MOTOR head) from a checkpoint folder, without loading the whole model.
+    The keys are returned without the prefix.
 
     Handles safetensors and pytorch_model.bin checkpoints, single file or sharded.
     """
@@ -89,7 +92,7 @@ def load_head_state(model_path: str) -> Dict[str, torch.Tensor]:
         if os.path.exists(index_path):
             with open(index_path) as f:
                 weight_map = json.load(f)["weight_map"]
-            files = sorted({v for k, v in weight_map.items() if k.startswith(HEAD_PREFIX)})
+            files = sorted({v for k, v in weight_map.items() if k.startswith(prefix)})
             candidates += [(os.path.join(model_path, name), kind) for name in files]
     if not candidates:
         for name, kind in (("model.safetensors", "safetensors"), ("pytorch_model.bin", "bin")):
@@ -103,17 +106,17 @@ def load_head_state(model_path: str) -> Dict[str, torch.Tensor]:
 
             with safe_open(path, framework="pt") as f:
                 for key in f.keys():
-                    if key.startswith(HEAD_PREFIX):
-                        state[key[len(HEAD_PREFIX):]] = f.get_tensor(key)
+                    if key.startswith(prefix):
+                        state[key[len(prefix):]] = f.get_tensor(key)
         else:
             weights = torch.load(path, map_location="cpu", weights_only=True)
             state.update(
-                {k[len(HEAD_PREFIX):]: v for k, v in weights.items() if k.startswith(HEAD_PREFIX)}
+                {k[len(prefix):]: v for k, v in weights.items() if k.startswith(prefix)}
             )
     if not state:
         raise ValueError(
-            f"No MOTOR head weights (keys starting with {HEAD_PREFIX!r}) were found in {model_path}. "
-            "Was the model pretrained with include_motor_time_to_event?"
+            f"No {what} weights (keys starting with {prefix!r}) were found in {model_path}. "
+            "Was the model trained with the head?"
         )
     return state
 

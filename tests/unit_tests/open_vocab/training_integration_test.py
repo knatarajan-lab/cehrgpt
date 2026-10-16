@@ -9,6 +9,7 @@ import torch
 from transformers import TrainingArguments
 
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
+from cehrgpt.open_vocab.question_encoder import EmbedderMismatchError
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import setup_open_vocab
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.runners.sample_packing_trainer import CehrGptTrainer
@@ -156,6 +157,25 @@ class SetupOpenVocabTest(unittest.TestCase):
         model.save_pretrained(self.tmp.name + "/model")
         loaded = CEHRGPT2LMHeadModel.from_pretrained(self.tmp.name + "/model")
         self.assertTrue(torch.equal(loaded.question_embeddings, model.question_embeddings))
+
+    def test_the_embedder_is_kept_with_the_model(self):
+        model = self.motor_only()
+        self.setup(model)
+        record = model.config.open_vocab_embedder
+        self.assertEqual(record["template"], "{text}")
+        self.assertEqual(len(record["probes"]), min(8, QUESTION_ROWS))
+        model.save_pretrained(self.tmp.name + "/model")
+        loaded = CEHRGPT2LMHeadModel.from_pretrained(self.tmp.name + "/model")
+        self.assertEqual(loaded.config.open_vocab_embedder, record)
+
+    def test_other_embeddings_cannot_replace_those_of_a_trained_head(self):
+        model = self.motor_only()
+        self.setup(model)
+        # the same questions embedded with another template
+        with open(os.path.join(self.embeddings_dir, "question_embedder.json"), "w") as f:
+            json.dump({"model": "test", "template": "Condition: {text}"}, f)
+        with self.assertRaisesRegex(EmbedderMismatchError, "template"):
+            self.setup(model)
 
     def test_only_the_questions_of_the_vocabulary_get_embeddings(self):
         # the vocabulary has half of the concepts: the model holds the embeddings of those questions only

@@ -35,6 +35,8 @@ class OpenVocabAssets:
     hierarchy: QuestionHierarchy
     question_concept_ids: np.ndarray  # the concept id of every row of the embedding matrix
     embeddings: np.ndarray  # (rows, dimension)
+    # the encoder, template and probes of the embeddings (QuestionEmbeddings.embedder), kept by the model
+    embedder: Optional[Dict] = None
 
     def __post_init__(self):
         self.question_concept_ids = np.asarray(self.question_concept_ids, dtype=np.int64)
@@ -88,7 +90,7 @@ class OpenVocabAssets:
                 "were the embeddings built from the universes in universe_dir?"
             )
         LOG.info("%s of the %s question embeddings have concepts of the vocabulary below them and are used", int(keep.sum()), len(keep))
-        return cls(hierarchy, concept_ids[keep], embeddings.embeddings[keep])
+        return cls(hierarchy, concept_ids[keep], embeddings.embeddings[keep], embeddings.embedder())
 
 
 def vocabulary_concept_ids(vocab: Iterable[str]) -> Set[int]:

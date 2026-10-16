@@ -33,6 +33,7 @@ from cehrgpt.analysis.concept_name_embeddings import (
 LOG = logging.getLogger(__name__)
 
 DEFAULT_TEMPLATE = "{text}"
+PROBE_COUNT = 8
 # embed_with_cache keeps its own description in embedder.json; this one is the encoder and the template
 DESCRIPTION_FILE = "question_embedder.json"
 
@@ -66,6 +67,22 @@ class QuestionEmbeddings:
             pl.read_parquet(os.path.join(folder, "question_texts.parquet")),
             description,
         )
+
+    def embedder(self, num_probes: int = PROBE_COUNT) -> Dict:
+        """
+        What a model needs to know to embed a new question the same way: the description of the encoder and
+        the template, and a few probes, the text that was embedded with its vector. An encoder that does not
+        reproduce the probes is not the one that made these embeddings, whatever it is called.
+        """
+        template = self.description.get("template", DEFAULT_TEMPLATE)
+        ordered = self.texts.sort("row")
+        picked = np.unique(np.linspace(0, len(ordered) - 1, min(num_probes, len(ordered))).astype(np.int64))
+        names = ordered["text"].to_list()
+        probes = [
+            {"text": template.format(text=names[i]), "vector": [float(x) for x in self.embeddings[i]]}
+            for i in picked
+        ]
+        return {**self.description, "template": template, "dim": self.dim, "probes": probes}
 
     def __len__(self) -> int:
         return len(self._row)
@@ -110,6 +127,7 @@ def main(argv: Optional[Sequence[str]] = None) -> QuestionEmbeddings:
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--template", default=DEFAULT_TEMPLATE, help="Applied to each name, with {text}")
+    parser.add_argument("--revision", default=None, help="Commit of the model on the Hub; recorded and enforced")
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--device", default=None)
     parser.add_argument("--fp16", action="store_true")
@@ -118,7 +136,9 @@ def main(argv: Optional[Sequence[str]] = None) -> QuestionEmbeddings:
     logging.basicConfig(level=logging.INFO)
 
     universe = pl.concat([pl.read_parquet(path).select("concept_id", "concept_name") for path in args.universe_files])
-    encoder = HuggingFaceEncoder(args.model, batch_size=args.batch_size, device=args.device, fp16=args.fp16)
+    encoder = HuggingFaceEncoder(
+        args.model, batch_size=args.batch_size, device=args.device, fp16=args.fp16, revision=args.revision
+    )
     result = embed_questions(universe, encoder, args.output_dir, args.template, args.overwrite)
     LOG.info("%s questions, dimension %s", len(result), result.dim)
     return result

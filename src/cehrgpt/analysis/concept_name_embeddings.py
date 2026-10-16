@@ -151,6 +151,7 @@ class HuggingFaceEncoder:
         max_length: int = 128,
         device: Optional[str] = None,
         fp16: bool = False,
+        revision: Optional[str] = None,
     ):
         import torch
         from transformers import AutoModel, AutoTokenizer
@@ -159,8 +160,8 @@ class HuggingFaceEncoder:
         self.batch_size = batch_size
         self.max_length = max_length
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModel.from_pretrained(model_name).eval().to(self.device)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, revision=revision)
+        self.model = AutoModel.from_pretrained(model_name, revision=revision).eval().to(self.device)
         if fp16 and self.device.startswith("cuda"):
             self.model = self.model.half()
 
@@ -169,6 +170,9 @@ class HuggingFaceEncoder:
 
         return {
             "model_name": self.model_name,
+            # the commit of the model on the Hub (None for a local folder), so a model that changed under the
+            # same name is noticed
+            "revision": getattr(self.model.config, "_commit_hash", None),
             "pooling": "masked mean over tokens",
             "normalize": "l2",
             "max_length": self.max_length,

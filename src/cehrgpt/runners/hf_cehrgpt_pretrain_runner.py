@@ -54,6 +54,7 @@ from cehrgpt.open_vocab.assets import (
     read_concept_counts,
     vocabulary_concept_ids,
 )
+from cehrgpt.open_vocab.question_encoder import require_same_embedder
 from cehrgpt.tools.gpu_profile import GpuProfileCallback
 from cehrgpt.tools.instability_probe import InstabilityProbe
 
@@ -206,6 +207,8 @@ def setup_open_vocab(
     config.open_vocab_loss_weight = cehrgpt_args.open_vocab_loss_weight
     if model.open_vocab_head is None:
         config.include_open_vocab = True
+        # kept with the model: a question is only embedded at inference by this encoder
+        config.open_vocab_embedder = assets.embedder
         config.open_vocab_num_question_rows = assets.num_rows
         config.open_vocab_question_dim = assets.dim
         config.open_vocab_residual_dim = cehrgpt_args.open_vocab_residual_dim
@@ -218,6 +221,11 @@ def setup_open_vocab(
             cehrgpt_args.open_vocab_start_step,
         )
     else:
+        # the head has learnt the embeddings of the encoder it was started with: not another one
+        if config.open_vocab_embedder is None:
+            LOG.warning("The model's QA head has no record of its embedder; the one of %s is recorded", cehrgpt_args.open_vocab_embeddings_dir)
+            config.open_vocab_embedder = assets.embedder
+        require_same_embedder(config.open_vocab_embedder, assets.embedder, "the question embeddings of open_vocab_embeddings_dir")
         model.set_question_embeddings(assets.embeddings)
     return assets
 

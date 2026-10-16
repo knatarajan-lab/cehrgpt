@@ -177,6 +177,7 @@ class CEHRGPTConfig(PretrainedConfig):
         open_vocab_question_dim=None,
         open_vocab_loss_weight=1.0,
         open_vocab_residual_dim=256,
+        open_vocab_embedder: Optional[Dict] = None,
         linear_prob_token_id=None,
         token_to_time_token_mapping: Dict[int, List] = None,
         use_pretrained_embeddings=False,
@@ -335,6 +336,9 @@ class CEHRGPTConfig(PretrainedConfig):
         self.open_vocab_question_dim = open_vocab_question_dim
         self.open_vocab_loss_weight = open_vocab_loss_weight
         self.open_vocab_residual_dim = open_vocab_residual_dim
+        # the encoder, template and probes of the question embeddings (QuestionEmbeddings.embedder): at inference a
+        # new question is embedded with the same encoder or refused, see open_vocab.question_encoder
+        self.open_vocab_embedder = open_vocab_embedder
         self.ve_token_id = ve_token_id
         self.vs_token_id = vs_token_id
         self.att_token_ids = att_token_ids if att_token_ids is not None else []
