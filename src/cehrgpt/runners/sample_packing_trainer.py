@@ -20,6 +20,7 @@ _CEHRGPT_SUB_LOSSES = [
     "time_to_visit_loss",
     "token_value_loss",
     "motor_tte_loss",
+    "open_vocab_loss",
     "age_at_vs_loss",
     "year_at_vs_loss",
 ]
@@ -31,6 +32,10 @@ class CehrGptTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         self.aux_loss_start_step = kwargs.pop("aux_loss_start_step", 0)
         self.aux_loss_warmup_steps = kwargs.pop("aux_loss_warmup_steps", 0)
+        # The step the patient timeline QA loss starts at: MOTOR and CEHR-GPT train first
+        self.open_vocab_start_step = kwargs.pop("open_vocab_start_step", 0)
+        if self.open_vocab_start_step > 0:
+            LOG.info("open_vocab_start_step: %s", self.open_vocab_start_step)
         if self.aux_loss_start_step > 0:
             LOG.info("aux_loss_start_step: %s (overrides warmup)", self.aux_loss_start_step)
         elif self.aux_loss_warmup_steps > 0:
@@ -52,7 +57,15 @@ class CehrGptTrainer(Trainer):
             return min(1.0, self.state.global_step / self.aux_loss_warmup_steps)
         return 1.0
 
+    def _open_vocab_active(self) -> bool:
+        return self.state.global_step >= self.open_vocab_start_step
+
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        # self.model is the model itself also when `model` is wrapped for distributed training
+        if getattr(self.model, "open_vocab_head", None) is not None:
+            self.model.open_vocab_active = self._open_vocab_active()
+            # what the forward pass used; the step counter has moved on when the log is written
+            self._last_open_vocab_active = self.model.open_vocab_active
         outputs = model(**inputs)
         loss = outputs.loss
 
@@ -111,6 +124,8 @@ class CehrGptTrainer(Trainer):
                 logs[name] = round(total / count, 6)
             self._sub_loss_sums = {}
             self._sub_loss_counts = {}
+        if getattr(self, "_last_open_vocab_active", None) is not None:
+            logs["open_vocab_active"] = float(self._last_open_vocab_active)
         # Log the current aux weight so progress is visible in training logs.
         if self.aux_loss_start_step > 0 or self.aux_loss_warmup_steps > 0:
             logs["aux_loss_weight"] = round(self._aux_weight(), 4)

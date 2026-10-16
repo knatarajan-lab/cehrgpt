@@ -172,6 +172,11 @@ class CEHRGPTConfig(PretrainedConfig):
         motor_num_time_pieces=16,
         motor_time_bins: Optional[List[float]] = None,
         motor_task_prevalence_rates: Optional[List[float]] = None,
+        include_open_vocab=False,
+        open_vocab_num_question_rows=None,
+        open_vocab_question_dim=None,
+        open_vocab_loss_weight=1.0,
+        open_vocab_residual_dim=256,
         linear_prob_token_id=None,
         token_to_time_token_mapping: Dict[int, List] = None,
         use_pretrained_embeddings=False,
@@ -313,6 +318,23 @@ class CEHRGPTConfig(PretrainedConfig):
             raise RuntimeError(
                 "motor_time_bins must be provided when include_motor_time_to_event is True"
             )
+        # The patient timeline QA head answers questions at the prediction points of the MOTOR head
+        self.include_open_vocab = bool(include_open_vocab)
+        if self.include_open_vocab:
+            if not self.include_motor_time_to_event:
+                raise RuntimeError(
+                    "include_open_vocab needs include_motor_time_to_event: the questions are asked at the "
+                    "prediction points of the MOTOR head and read its global features"
+                )
+            if not open_vocab_num_question_rows or not open_vocab_question_dim:
+                raise RuntimeError(
+                    "open_vocab_num_question_rows and open_vocab_question_dim must be provided when "
+                    "include_open_vocab is True"
+                )
+        self.open_vocab_num_question_rows = open_vocab_num_question_rows
+        self.open_vocab_question_dim = open_vocab_question_dim
+        self.open_vocab_loss_weight = open_vocab_loss_weight
+        self.open_vocab_residual_dim = open_vocab_residual_dim
         self.ve_token_id = ve_token_id
         self.vs_token_id = vs_token_id
         self.att_token_ids = att_token_ids if att_token_ids is not None else []
