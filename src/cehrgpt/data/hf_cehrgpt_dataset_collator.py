@@ -570,18 +570,17 @@ class SamplePackingCehrGptDataCollator(CehrGptDataCollator):
                 )
 
             if self.include_motor_time_to_event:
-                # The rows before this patient are all its predecessors' prediction points, also the ones with
-                # no pair, which np.unique(current_motor_row_indices) would miss
-                current_max_motor_row_index = current_num_motor_rows
                 motor_row_indices = (
                     example["motor_row_indices"].tolist()
                     if isinstance(example["motor_row_indices"], torch.Tensor)
                     else list(example["motor_row_indices"])
                 )
+                # The rows before this patient are all its predecessors' prediction points, also the ones with
+                # no pair, which np.unique(current_motor_row_indices) would miss
                 current_motor_row_indices.extend(
                     list(
                         map(
-                            lambda offset: offset + current_max_motor_row_index,
+                            lambda offset: offset + current_num_motor_rows,
                             motor_row_indices,
                         )
                     )
