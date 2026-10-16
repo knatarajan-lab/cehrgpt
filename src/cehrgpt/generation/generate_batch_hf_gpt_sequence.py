@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import torch
 from cehrbert.runners.runner_util import load_parquet_as_dataset
+from tqdm import tqdm
 from transformers import GenerationConfig
 from transformers.utils import logging
 
@@ -218,7 +219,15 @@ def main(args):
     num_of_batches = args.num_of_patients // args.batch_size + 1
     sequence_to_flush = []
     current_person_id = 1
+    num_of_files = 0
     prompt_size = 2 if args.meds_format else START_TOKEN_SIZE
+    progress = tqdm(
+        total=args.num_of_patients,
+        desc="Generating patients",
+        unit="patient",
+        dynamic_ncols=True,
+        disable=getattr(args, "disable_progress_bar", False),
+    )
     for i in range(num_of_batches):
         LOG.info(f"{datetime.datetime.now()}: Batch {i} started")
 
@@ -292,6 +301,11 @@ def main(args):
             sequence_to_flush.append(output)
             current_person_id += 1
 
+        # The last batch can generate more patients than requested, so the bar stops at the total
+        progress.update(
+            min(len(batch_sequences["sequences"]), progress.total - progress.n)
+        )
+
         if len(sequence_to_flush) >= args.buffer_size:
             LOG.info(f"{datetime.datetime.now()}: Flushing to the Disk at Batch {i}")
             pd.DataFrame(
@@ -307,6 +321,13 @@ def main(args):
                 ],
             ).to_parquet(os.path.join(output_folder_name, f"{uuid.uuid4()}.parquet"))
             sequence_to_flush.clear()
+            num_of_files += 1
+
+        progress.set_postfix(
+            batch=f"{i + 1}/{num_of_batches}",
+            buffered=len(sequence_to_flush),
+            files=num_of_files,
+        )
 
     if len(sequence_to_flush) > 0:
         LOG.info(f"{datetime.datetime.now()}: Flushing to the Disk at Final Batch")
@@ -322,6 +343,11 @@ def main(args):
                 "units",
             ],
         ).to_parquet(os.path.join(output_folder_name, f"{uuid.uuid4()}-last.parquet"))
+        num_of_files += 1
+    progress.set_postfix(
+        batch=f"{num_of_batches}/{num_of_batches}", buffered=0, files=num_of_files
+    )
+    progress.close()
 
 
 def create_arg_parser():
@@ -352,6 +378,12 @@ def create_arg_parser():
         "--meds_format",
         dest="meds_format",
         action="store_true",
+    )
+    base_arg_parser.add_argument(
+        "--disable_progress_bar",
+        dest="disable_progress_bar",
+        action="store_true",
+        help="Do not show the progress bar, e.g. when the output goes to a log file",
     )
     return base_arg_parser
 
