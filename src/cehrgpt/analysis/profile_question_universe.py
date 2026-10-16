@@ -8,7 +8,7 @@ and tokens there are at every depth below the root (the Disease / Procedure conc
 import argparse, os, glob
 import numpy as np
 import polars as pl
-from cehrgpt.tokenization.tokenization_cehrgpt import CehrGptTokenizer
+from tokenizers import Tokenizer
 
 
 def scan(vocab_path, name):
@@ -35,7 +35,10 @@ def main():
         pl.col("min_levels_of_separation").cast(pl.Int64),
     ).collect()
     for path in a.tokenizers:
-        tokens = [int(t) for t in CehrGptTokenizer.from_pretrained(path).get_vocab() if t.isdigit()]
+        # only the concept vocabulary is needed, so read it from the tokenizer file directly; this also
+        # works on folders that lack the other files of a full CEHR-GPT tokenizer
+        vocab_file = os.path.join(path, "cehrgpt_tokenizer.json")
+        tokens = [int(t) for t in Tokenizer.from_file(vocab_file).get_vocab() if t.isdigit()]
         mine = concept.filter(pl.col("concept_id").is_in(tokens))
         print(f"\n===== {path}: {len(tokens)} numeric tokens, {len(mine)} in the concept table")
         print(mine.group_by("domain_id", "vocabulary_id", "concept_class_id").len().sort("len", descending=True).head(25))
