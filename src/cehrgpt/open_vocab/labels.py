@@ -39,6 +39,46 @@ class QuestionHierarchy:
 
     def __init__(self, questions_by_concept: Mapping[int, Sequence[int]]):
         self._questions = {int(c): tuple(sorted({int(q) for q in qs})) for c, qs in questions_by_concept.items()}
+        # The same roll-up as arrays, for build_question_labels: concept number -> the slice
+        # question_ids[offsets[n]:offsets[n + 1]]. A token is looked up as an int or as a string.
+        concepts = list(self._questions)
+        self._number = {}
+        for n, concept in enumerate(concepts):
+            self._number[concept] = n
+            self._number[str(concept)] = n
+        lengths = np.fromiter((len(self._questions[c]) for c in concepts), dtype=np.int64, count=len(concepts))
+        self._offsets = np.concatenate([[0], np.cumsum(lengths)]).astype(np.int64)
+        flat = [q for c in concepts for q in self._questions[c]]
+        self._question_ids = np.asarray(flat, dtype=np.int64)
+
+    def concept_numbers(self, tokens: Sequence) -> np.ndarray:
+        """
+        The number of each token in the hierarchy (the row of the lookup arrays), -1 for a token that
+        is not a concept of it: time tokens, [VS], ETHOS/COMET tokens, unknown concepts.
+        """
+        get = self._number.get
+        numbers = np.fromiter((get(t, -1) for t in tokens), dtype=np.int64, count=len(tokens))
+        # a bool or a float must not match the int key it happens to equal, and "0510" is concept 510
+        for i in np.nonzero(numbers >= 0)[0]:
+            if isinstance(tokens[i], (bool, float)):
+                numbers[i] = -1
+        for i in np.nonzero(numbers < 0)[0]:
+            concept = to_concept_id(tokens[i])
+            if concept is not None:
+                numbers[i] = self._number.get(concept, -1)
+        return numbers
+
+    def expand(self, numbers: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        For concept numbers (all >= 0), the pairs (index into numbers, question id): one pair for each
+        question each concept counts for.
+        """
+        starts = self._offsets[numbers]
+        counts = self._offsets[numbers + 1] - starts
+        owner = np.repeat(np.arange(len(numbers)), counts)
+        first = np.cumsum(counts) - counts
+        flat = starts[owner] + (np.arange(int(counts.sum())) - first[owner])
+        return owner, self._question_ids[flat]
 
     @classmethod
     def from_universes(cls, universes: Mapping[str, pl.DataFrame], ancestor: pl.DataFrame) -> "QuestionHierarchy":
@@ -130,33 +170,58 @@ def build_question_labels(
     """
     prediction_days = np.asarray(prediction_days, dtype=np.float64)
     rows = len(prediction_days)
-    slot = {int(q): i for i, q in enumerate(question_ids)}  # the questions are concept ids
+    asked = np.asarray(question_ids, dtype=np.int64)  # the questions are concept ids
+    if len(np.unique(asked)) != len(asked):
+        raise ValueError("question_ids has to be unique, a question is asked once")
     censor_times = np.maximum(float(end_day) - prediction_days, 0.0)
 
-    days_by_slot: Dict[int, List[float]] = {}
-    for concept_id, day in zip(event_concept_ids, event_days):
-        for question in hierarchy.questions_of(concept_id):
-            if question in slot:
-                days_by_slot.setdefault(slot[question], []).append(float(day))
+    def empty() -> QuestionLabels:
+        return QuestionLabels(
+            np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.float64), censor_times
+        )
 
-    rows_out, slots_out, times_out = [], [], []
-    for question_slot, days in days_by_slot.items():
-        days = np.unique(days)  # sorted
-        first_after = np.searchsorted(days, prediction_days, side="right")
-        happens = first_after < len(days)
-        if not happens.any():
-            continue
-        rows_out.append(np.nonzero(happens)[0])
-        slots_out.append(np.full(int(happens.sum()), question_slot))
-        times_out.append(days[first_after[happens]] - prediction_days[happens])
+    numbers = hierarchy.concept_numbers(event_concept_ids)
+    known = numbers >= 0
+    if rows == 0 or len(asked) == 0 or not known.any():
+        return empty()
+    days = np.asarray(event_days, dtype=np.float64)[known]
+    # every event counts for each question above it: one entry per (event, question)
+    owner, questions = hierarchy.expand(numbers[known])
+    # keep the questions that are asked, with their slot
+    by_id = np.argsort(asked, kind="stable")
+    sorted_ids = asked[by_id]
+    where = np.minimum(np.searchsorted(sorted_ids, questions), len(asked) - 1)
+    is_asked = sorted_ids[where] == questions
+    if not is_asked.any():
+        return empty()
+    slots = by_id[where[is_asked]]
+    event_days_q = days[owner[is_asked]]
 
-    if rows_out:
-        event_rows = np.concatenate(rows_out).astype(np.int64)
-        event_questions = np.concatenate(slots_out).astype(np.int64)
-        event_times = np.concatenate(times_out).astype(np.float64)
-        order = np.lexsort((event_questions, event_rows))
-        event_rows, event_questions, event_times = event_rows[order], event_questions[order], event_times[order]
-    else:
-        event_rows = event_questions = np.zeros(0, dtype=np.int64)
-        event_times = np.zeros(0, dtype=np.float64)
-    return QuestionLabels(event_rows, event_questions, event_times, censor_times)
+    # Per question the days of its events in increasing order. The first event strictly after a row at
+    # time t is the first one with day > t, so an event at day d answers the rows with
+    # previous_day <= t < d, previous_day being the day of the previous event of the same question.
+    order = np.lexsort((event_days_q, slots))
+    slots, event_days_q = slots[order], event_days_q[order]
+    same_question = np.zeros(len(slots), dtype=bool)
+    same_question[1:] = slots[1:] == slots[:-1]
+    previous_day = np.full(len(slots), -np.inf)
+    previous_day[1:] = np.where(same_question[1:], event_days_q[:-1], -np.inf)
+
+    # the rows in time order, so that the rows of an event are a contiguous range of them
+    row_order = np.argsort(prediction_days, kind="stable")
+    sorted_times = prediction_days[row_order]
+    low = np.searchsorted(sorted_times, previous_day, side="left")  # first row with t >= previous_day
+    high = np.searchsorted(sorted_times, event_days_q, side="left")  # rows below this have t < day
+    counts = np.maximum(high - low, 0)
+    total = int(counts.sum())
+    if total == 0:
+        return empty()
+    owner = np.repeat(np.arange(len(slots)), counts)
+    first_of_owner = np.cumsum(counts) - counts
+    sorted_rows = low[owner] + (np.arange(total) - first_of_owner[owner])
+    event_rows = row_order[sorted_rows].astype(np.int64)
+    event_questions = slots[owner].astype(np.int64)
+    event_times = event_days_q[owner] - prediction_days[event_rows]
+
+    final = np.lexsort((event_questions, event_rows))
+    return QuestionLabels(event_rows[final], event_questions[final], event_times[final], censor_times)

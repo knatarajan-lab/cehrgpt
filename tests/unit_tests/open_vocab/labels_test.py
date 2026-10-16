@@ -150,6 +150,56 @@ class BuildQuestionLabelsTest(unittest.TestCase):
                              sorted(zip(rows, slots, np.round(times, 6))))
             np.testing.assert_allclose(got.censor_times, censor)
 
+    def test_matches_the_naive_computation_with_repeated_days_and_unsorted_points(self):
+        rng = np.random.default_rng(1)
+        pool = [RADIOLOGY, HOSPITAL, HOME, ANGINA, 12345, CLINIC, CORONARY, "[VS]", "D5", "Visit/IP", str(ANGINA)]
+        compared = 0
+        for _ in range(300):
+            n = int(rng.integers(0, 25))
+            concepts = [pool[i] for i in rng.integers(0, len(pool), n)]
+            days = rng.integers(0, 12, n).astype(float).tolist()  # many events share a day
+            points = rng.integers(-2, 14, int(rng.integers(0, 8))).astype(float).tolist()  # unsorted, repeated
+            questions = [self.questions[i] for i in rng.permutation(len(self.questions))[: int(rng.integers(1, 8))]]
+            got = build_question_labels(self.h, concepts, days, points, 15.0, questions)
+            rows, slots, times, censor = naive(self.h, concepts, days, points, 15.0, questions)
+            self.assertEqual(sorted(zip(got.event_rows.tolist(), got.event_questions.tolist(), got.event_times.tolist())),
+                             sorted(zip(rows, slots, times)))
+            np.testing.assert_allclose(got.censor_times, censor)
+            compared += len(rows)
+        self.assertGreater(compared, 500)
+
+    def test_the_labels_are_ordered_by_row_then_slot(self):
+        labels = self.labels([40.0, 5.0, 20.0])
+        keys = list(zip(labels.event_rows.tolist(), labels.event_questions.tolist()))
+        self.assertEqual(keys, sorted(keys))
+        # the rows are the positions of the prediction points as they were given, not sorted
+        self.assertEqual(self.table(labels)[(1, HOSPITAL)], 5.0)  # the point at day 5 is row 1
+
+    def test_empty_inputs(self):
+        for kwargs in (
+            dict(concepts=[], days=[], points=[5.0]),
+            dict(concepts=[HOSPITAL], days=[10.0], points=[]),
+            dict(concepts=["[VS]", "D3"], days=[1.0, 2.0], points=[0.0]),
+            dict(concepts=[HOSPITAL], days=[10.0], points=[11.0]),  # nothing after the point
+        ):
+            labels = build_question_labels(self.h, kwargs["concepts"], kwargs["days"], kwargs["points"], 20.0, self.questions)
+            self.assertEqual(len(labels.event_rows), 0, kwargs)
+            self.assertEqual(labels.num_rows, len(kwargs["points"]))
+        asked_nothing = build_question_labels(self.h, self.concepts, self.days, [5.0], 60.0, [])
+        self.assertEqual(len(asked_nothing.event_rows), 0)
+        not_in_hierarchy = build_question_labels(self.h, self.concepts, self.days, [5.0], 60.0, [999999])
+        self.assertEqual(len(not_in_hierarchy.event_rows), 0)
+
+    def test_a_question_asked_twice_is_an_error(self):
+        with self.assertRaises(ValueError):
+            build_question_labels(self.h, self.concepts, self.days, [5.0], 60.0, [HOSPITAL, HOSPITAL])
+
+    def test_bools_and_floats_are_not_concept_ids(self):
+        h = QuestionHierarchy({1: [1], 5: [5]})
+        labels = build_question_labels(h, [True, 5.0, 1, "5"], [10.0, 11.0, 12.0, 13.0], [0.0], 20.0, [1, 5])
+        # only the int 1 (day 12) and the string "5" (day 13) count
+        self.assertEqual(sorted(zip(labels.event_questions.tolist(), labels.event_times.tolist())), [(0, 12.0), (1, 13.0)])
+
     def test_concatenate_shifts_the_rows(self):
         a, b = self.labels([5.0, 20.0]), self.labels([30.0])
         both = QuestionLabels.concatenate([a, b])
