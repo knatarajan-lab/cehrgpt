@@ -3,9 +3,11 @@ import pickle
 import tempfile
 import unittest
 
+from datasets.fingerprint import Hasher
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 
+from cehrgpt.data.hf_cehrgpt_dataset_mapping import HFCehrGptTokenizationMapping
 from cehrgpt.models.special_tokens import (
     END_TOKEN,
     OUT_OF_VOCABULARY_TOKEN,
@@ -13,6 +15,10 @@ from cehrgpt.models.special_tokens import (
     START_TOKEN,
 )
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.tokenization.tokenization_constants import (
+    LAB_STATS_FILE_NAME,
+    NUMERIC_VALUE_BINS_FILE_NAME,
+)
 
 LAB_STATS = ["_numeric_lab_stats", "_categorical_lab_stats", "_numeric_event_statistics"]
 MOTOR = ["_motor_task_info", "_motor_time_to_event_codes", "_motor_code_to_id_mapping"]
@@ -137,6 +143,58 @@ class TestLazyTokenizerLoading(unittest.TestCase):
             reloaded = CehrGptTokenizer.from_pretrained(other)
             self.assertEqual(reloaded.normalize("3000963", "g/dL", 1.5), "BIN:1")
             self.assertEqual(reloaded._motor_time_to_event_codes, ["B", "A"])
+
+    def test_dataset_mapping_keeps_only_compact_tokenization_resources(self):
+        tokenizer = make_tokenizer()
+        mapping = HFCehrGptTokenizationMapping(tokenizer)
+
+        self.assertEqual(
+            mapping._concept_tokenizer.encode(["year:2020", "3000963"]),
+            tokenizer.encode(["year:2020", "3000963"]),
+        )
+        self.assertEqual(
+            mapping._concept_tokenizer.encode_value(["BIN:0", "BIN:1"]),
+            tokenizer.encode_value(["BIN:0", "BIN:1"]),
+        )
+        self.assertIs(
+            mapping._concept_tokenizer._att_tokenizer, tokenizer._att_tokenizer
+        )
+        self.assertEqual(
+            mapping._concept_tokenizer.normalize("3000963", "g/dL", 0.5),
+            tokenizer.normalize("3000963", "g/dL", 0.5),
+        )
+        self.assertEqual(
+            mapping._concept_tokenizer.normalize("3000963", "g/dL", 1),
+            tokenizer.normalize("3000963", "g/dL", 1),
+        )
+        for name in LAB_STATS + MOTOR + ["_ontology", "_concept_name_mapping"]:
+            self.assertNotIn(name, mapping._concept_tokenizer.__dict__)
+        self.assertIn("_added_tokens_decoder", mapping._concept_tokenizer.__dict__)
+        self.assertLess(len(pickle.dumps(mapping)), 50_000)
+        self.assertEqual(
+            Hasher.hash(mapping.batch_transform),
+            Hasher.hash(mapping.batch_transform),
+        )
+        second_mapping = HFCehrGptTokenizationMapping(tokenizer)
+        self.assertEqual(
+            mapping.cache_fingerprint("dataset"),
+            second_mapping.cache_fingerprint("dataset"),
+        )
+
+    def test_dataset_mapping_does_not_load_full_lab_statistics(self):
+        tokenizer = self.load()
+        self.assertTrue(os.path.exists(os.path.join(self.tmp.name, LAB_STATS_FILE_NAME)))
+        self.assertTrue(
+            os.path.exists(os.path.join(self.tmp.name, NUMERIC_VALUE_BINS_FILE_NAME))
+        )
+
+        mapping = HFCehrGptTokenizationMapping(tokenizer)
+
+        for name in LAB_STATS:
+            self.assertNotIn(name, tokenizer.__dict__)
+        self.assertEqual(
+            mapping._concept_tokenizer.normalize("3000963", "g/dL", 0.5), "BIN:0"
+        )
 
 
 if __name__ == "__main__":

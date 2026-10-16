@@ -21,6 +21,7 @@ from cehrgpt.tokenization.tokenization_constants import (  # noqa: F401
     MOTOR_TIME_TO_EVENT_TASK_INFO_FILE_NAME,
     NA,
     NONE_BIN,
+    NUMERIC_VALUE_BINS_FILE_NAME,
     NUM_OF_BINS,
     ONTOLOGY_FILE_NAME,
     SAMPLE_SIZE,

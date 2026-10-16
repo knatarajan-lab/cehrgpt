@@ -1,6 +1,7 @@
 import datetime
+import hashlib
+import pickle
 from collections import defaultdict
-from copy import deepcopy
 from typing import Any, Dict, Generator, List, Optional, Union
 
 import numpy as np
@@ -37,6 +38,7 @@ from cehrgpt.gpt_utils import (
     is_att_token,
     multiple_of_10,
 )
+from cehrgpt.tokenization.special_tokens import OUT_OF_VOCABULARY_TOKEN
 from cehrgpt.models.tokenization_hf_cehrgpt import (
     NONE_BIN,
     UNKNOWN_BIN,
@@ -416,22 +418,68 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         self,
         concept_tokenizer: CehrGptTokenizer,
     ):
-        self._concept_tokenizer = deepcopy(concept_tokenizer)
-        self._concept_tokenizer._ontology = None
-        self._concept_tokenizer._motor_task_info = {}
-        self._concept_tokenizer._motor_time_to_event_codes = []
-        self._concept_tokenizer._motor_code_to_id_mapping = {}
-        self._lab_token_ids = self._concept_tokenizer.lab_token_ids
-        # Reading lab_token_ids loaded the lab statistics, which can be hundreds of MB. Drop
-        # them again so the pickled mapping stays small; the workers read them back from
-        # disk if they need to bin a numeric value.
-        self._concept_tokenizer.release_lazy_data()
+        self._concept_tokenizer = concept_tokenizer.create_lightweight_tokenizer()
+        concept_tokenizer.release_lazy_data()
+        tokenizer_payload = pickle.dumps(
+            self._concept_tokenizer, protocol=pickle.HIGHEST_PROTOCOL
+        )
+        self._tokenization_fingerprint = hashlib.sha256(
+            b"cehrgpt-tokenization-v2:" + tokenizer_payload
+        ).hexdigest()
+
+    def cache_fingerprint(self, dataset_fingerprint: str) -> str:
+        """Return a stable cache key without hashing the tokenizer object graph."""
+        return hashlib.sha256(
+            f"{dataset_fingerprint}:{type(self).__qualname__}:"
+            f"{self._tokenization_fingerprint}".encode()
+        ).hexdigest()[:16]
 
     def remove_columns(self):
         return [
             "concept_value_masks",
             "is_numeric_types",
         ]
+
+    def _valid_concept_ids(self) -> Dict[str, int]:
+        """
+        The vocabulary of the tokenizer, {token: id}, built once per process.
+
+        get_vocab() of a Hugging Face tokenizer builds a new dict of the whole vocabulary on every
+        call (6 ms at 50,000 tokens). Calling it for every token of every patient made a single
+        patient with 3,000 tokens take 20 seconds, and the first batch of a dataset.map never ends.
+        Built on first use, so it is not part of what is pickled to the workers.
+        """
+        valid = self.__dict__.get("_valid_concept_ids_cache")
+        if valid is None:
+            valid = dict(self._concept_tokenizer.get_vocab())
+            self._valid_concept_ids_cache = valid
+        return valid
+
+    def _value_ids(self) -> Dict[str, int]:
+        value_ids = self.__dict__.get("_value_ids_cache")
+        if value_ids is None:
+            value_ids = dict(self._concept_tokenizer.get_value_vocab())
+            self._value_ids_cache = value_ids
+        return value_ids
+
+    def encode_concepts(self, concept_ids: List[str]) -> List[int]:
+        """
+        Look the tokens up in the vocabulary directly.
+
+        The tokenizer is a word level model, so this returns the ids of tokenizer.encode(), about 70
+        times faster, which was the largest single cost of tokenizing a patient. Tokens outside the
+        vocabulary map to [OOV], as they do in the tokenizer. The one difference is a token that
+        contains whitespace: the tokenizer splits it into several ids, which no longer line up with
+        the other columns; here it is one [OOV].
+        """
+        vocabulary = self._valid_concept_ids()
+        oov = vocabulary[OUT_OF_VOCABULARY_TOKEN]
+        return [vocabulary.get(token, oov) for token in concept_ids]
+
+    def encode_values(self, values: List[str]) -> List[int]:
+        value_ids = self._value_ids()
+        oov = value_ids[OUT_OF_VOCABULARY_TOKEN]
+        return [value_ids.get(value, oov) for value in values]
 
     def filter_out_invalid_tokens(self, record: Dict[str, Any]) -> Dict[str, Any]:
         column_names = []
@@ -452,7 +500,7 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
                 continue
             if isinstance(v, (list, np.ndarray)) and len(v) == seq_length:
                 column_names.append(k)
-        valid_concept_ids = self._concept_tokenizer.get_vocab().keys()
+        valid_concept_ids = self._valid_concept_ids()
         valid_indices = [
             idx
             for idx, concept_id in enumerate(record["concept_ids"])
@@ -475,10 +523,9 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         # Remove the tokens from patient sequences that do not exist in the tokenizer
         record = self.filter_out_invalid_tokens(record)
         # If any concept has a value associated with it, we normalize the value
-        record["input_ids"] = self._concept_tokenizer.encode(record["concept_ids"])
+        record["input_ids"] = self.encode_concepts(record["concept_ids"])
         assert len(record["input_ids"]) == len(record["concept_ids"]), (
-            "The number of tokens must equal to the number of concepts\n"
-            f"decoded concept_ids: {self._concept_tokenizer.decode(record['input_ids'], skip_special_tokens=False)}"
+            "The number of tokens must equal to the number of concepts"
         )
         record["value_indicators"] = record["concept_value_masks"]
         if "number_as_values" not in record or "concept_as_values" not in record:
@@ -515,19 +562,18 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
                 if concept_value_mask == 1:
                     value = UNKNOWN_BIN
                     if is_numeric_type == 1:
-                        if concept_id in self._concept_tokenizer.numeric_concept_ids:
-                            value = self._concept_tokenizer.normalize(
-                                concept_id, unit, number_as_value
-                            )
+                        value = self._concept_tokenizer.normalize(
+                            concept_id, unit, number_as_value
+                        )
                     elif isinstance(concept_as_value, str):
                         value = concept_as_value
                     values.append(value)
                 else:
                     values.append(NONE_BIN)
             assert len(values) == len(record["input_ids"])
-            record["values"] = self._concept_tokenizer.encode_value(values)
+            record["values"] = self.encode_values(values)
         else:
-            record["values"] = self._concept_tokenizer.encode_value(
+            record["values"] = self.encode_values(
                 [NONE_BIN for _ in range(len(record["concept_value_masks"]))]
             )
         # Delete these features because they contain null values and pyarrow cannot concatenate multiple records

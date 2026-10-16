@@ -356,9 +356,22 @@ class CehrGPTArguments:
         default=False,
         metadata={"help": "A flag to indicate whether we want to use entropy filter."},
     )
-    min_prevalence: Optional[float] = dataclasses.field(
-        default=1 / 1000,
-        metadata={"help": "The min_prevalence to keep the concepts in the tokenizer"},
+    keep_unused_parquet_columns: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "Load every column of the parquet patient sequences. By default the per-token "
+            "columns that tokenization and pretraining never read (orders, record_ranks, priorities, "
+            "...) are left out, which roughly halves the datasets cache and the tokenization map."
+        },
+    )
+    min_patient_count: Optional[int] = dataclasses.field(
+        default=0,
+        metadata={
+            "help": "Keep a clinical concept in the tokenizer only if at least this many patients "
+            "of the tokenizer training data have it. With an ontology (motor_use_ontology) the "
+            "descendants count towards their ancestors, once per patient. 0 keeps every concept. "
+            "Time and visit markers and the demographic tokens (year, age, gender, race) are always kept"
+        },
     )
     class_weights: Optional[List[int]] = dataclasses.field(
         default=None,

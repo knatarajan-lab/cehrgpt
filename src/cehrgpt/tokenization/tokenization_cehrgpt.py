@@ -4,9 +4,10 @@ import json
 import os
 import re
 import pickle
+import warnings
 from functools import partial
 from itertools import islice
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 import transformers
@@ -51,6 +52,7 @@ from cehrgpt.tokenization.tokenization_constants import (
     LEGACY_LAB_STATS_FILE_NAME,
     MOTOR_TIME_TO_EVENT_TASK_INFO_FILE_NAME,
     NONE_BIN,
+    NUMERIC_VALUE_BINS_FILE_NAME,
     NUM_OF_BINS,
     ONTOLOGY_FILE_NAME,
     TIME_TOKENIZER_FILE_NAME,
@@ -105,6 +107,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     _numeric_event_statistics = _LazyAttribute("lab_stats")
     _numeric_concept_ids = _LazyAttribute("lab_stats")
     _categorical_concept_ids = _LazyAttribute("lab_stats")
+    _numeric_normalization_bins = _LazyAttribute("normalization_bins")
     _motor_task_info = _LazyAttribute("motor_task_info")
     _motor_time_to_event_codes = _LazyAttribute("motor_task_info")
     _motor_code_to_id_mapping = _LazyAttribute("motor_task_info")
@@ -151,6 +154,10 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             )
             self._categorical_concept_ids = list(
                 {t[0] for t in self._categorical_lab_stats.keys()}
+            )
+        if "normalization_bins" not in self._lazy_files:
+            self._numeric_normalization_bins = self._create_numeric_normalization_bins(
+                numeric_lab_stats or []
             )
         self._concept_name_mapping = concept_name_mapping
         self._oov_token_id = self._tokenizer.token_to_id(OUT_OF_VOCABULARY_TOKEN)
@@ -237,6 +244,24 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                     code: i for i, code in enumerate(sorted(codes))
                 },
             }
+        elif group == "normalization_bins":
+            if kind == "legacy":
+                values = {
+                    "_numeric_normalization_bins": self._create_numeric_normalization_bins(
+                        load_json_file(path)
+                    )
+                }
+            else:
+                with open(path, "rb") as file:
+                    data = pickle.load(file)
+                if kind == "pickle":
+                    values = {"_numeric_normalization_bins": data}
+                else:
+                    values = {
+                        "_numeric_normalization_bins": self._create_numeric_normalization_bins(
+                            data["numeric_lab_stats"]
+                        )
+                    }
         elif group == "ontology":
             with open(path, "rb") as file:
                 values = {"_ontology": pickle.load(file)}
@@ -255,6 +280,34 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             if self.__dict__.get(name) is value:
                 del self.__dict__[name]
         self._lazy_loaded = {}
+
+    def create_lightweight_tokenizer(self) -> "CehrGptTokenizer":
+        """Return a copy containing only the state needed for dataset tokenization."""
+        numeric_normalization_bins = self.numeric_normalization_bins
+        tokenizer = copy.copy(self)
+        for name in (
+            "_token_to_sub_time_token_mapping",
+            "_concept_code_stats",
+            "_numeric_lab_stats",
+            "_categorical_lab_stats",
+            "_numeric_event_statistics",
+            "_numeric_concept_ids",
+            "_categorical_concept_ids",
+            "_concept_name_mapping",
+            "_pretrained_concept_embedding_model",
+            "_pretrained_concept_ids",
+            "_motor_task_info",
+            "_motor_time_to_event_codes",
+            "_motor_code_to_id_mapping",
+            "_gender_map",
+            "_race_map",
+            "_ontology",
+        ):
+            tokenizer.__dict__.pop(name, None)
+        tokenizer._numeric_normalization_bins = numeric_normalization_bins
+        tokenizer._lazy_files = {}
+        tokenizer._lazy_loaded = {}
+        return tokenizer
 
     def __getstate__(self):
         # Lazily loaded data is re-read from disk by the unpickled copy
@@ -481,6 +534,25 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     @property
     def numeric_concept_ids(self):
         return self._numeric_concept_ids
+
+    @staticmethod
+    def _create_numeric_normalization_bins(numeric_lab_stats):
+        return {
+            (lab_stat["concept_id"], lab_stat["unit"]): tuple(
+                (
+                    value_bin["start_val"],
+                    value_bin["end_val"],
+                    create_value_bin(value_bin["bin_index"]),
+                )
+                for value_bin in lab_stat["bins"]
+            )
+            for lab_stat in numeric_lab_stats
+            if lab_stat["bins"]
+        }
+
+    @property
+    def numeric_normalization_bins(self):
+        return self._numeric_normalization_bins
 
     @property
     def categorical_concept_ids(self):
@@ -722,6 +794,11 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             pickle.dump(lab_stats, f)
 
         with open(
+                os.path.join(save_directory, NUMERIC_VALUE_BINS_FILE_NAME), "wb"
+        ) as f:
+            pickle.dump(self._numeric_normalization_bins, f)
+
+        with open(
                 os.path.join(save_directory, DEMOGRAPHICS_STATS_FILE_NAME), "wb"
         ) as f:
             pickle.dump(
@@ -832,6 +909,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             if not legacy_lab_stats_file:
                 return None
             lazy_files["lab_stats"] = ("legacy", legacy_lab_stats_file)
+            normalization_fallback = ("legacy", legacy_lab_stats_file)
         else:
             lab_stats_file = transformers.utils.hub.cached_file(
                 pretrained_model_name_or_path, LAB_STATS_FILE_NAME, **kwargs
@@ -839,6 +917,20 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             if not lab_stats_file:
                 return None
             lazy_files["lab_stats"] = ("pickle", lab_stats_file)
+            normalization_fallback = ("lab_stats", lab_stats_file)
+        try:
+            numeric_value_bins_file = transformers.utils.hub.cached_file(
+                pretrained_model_name_or_path,
+                NUMERIC_VALUE_BINS_FILE_NAME,
+                **kwargs,
+            )
+        except EnvironmentError:
+            numeric_value_bins_file = None
+        lazy_files["normalization_bins"] = (
+            ("pickle", numeric_value_bins_file)
+            if numeric_value_bins_file
+            else normalization_fallback
+        )
         try:
             # Load the demographics stats json file
             demographics_stats_file = transformers.utils.hub.cached_file(
@@ -948,7 +1040,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             pretrained_concept_embedding_model: PretrainedEmbeddings = None,
             num_motor_tasks: Optional[int] = None,
             apply_entropy_filter: bool = False,
-            min_prevalence: float = 1 / 1000,
+            min_patient_count: int = 0,
+            ontology: Optional[Ontology] = None,
     ):
         if not isinstance(cehrgpt_tokenizer, CehrGptTokenizer):
             raise ValueError(
@@ -963,7 +1056,8 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             data_args=data_args,
             num_motor_tasks=num_motor_tasks,
             apply_entropy_filter=apply_entropy_filter,
-            min_prevalence=min_prevalence,
+            min_patient_count=min_patient_count,
+            ontology=ontology,
         )
 
         new_tokens = set(new_tokenizer.get_vocab().keys()) - set(
@@ -1141,15 +1235,30 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             pretrained_concept_embedding_model: PretrainedEmbeddings = None,
             num_motor_tasks: Optional[int] = None,
             apply_entropy_filter: bool = False,
-            min_prevalence: float = 1 / 1000,
             ontology: Optional[Ontology] = None,
+            min_patient_count: int = 0,
     ):
         """
         Train a huggingface word level tokenizer.
 
         To use their tokenizer, we need to concatenate all the concepts
         together and treat it as a sequence.
+
+        Args:
+            min_patient_count: a clinical token must be had by at least this many patients of the
+                dataset. With an ontology a patient counts for a token when they have the token or
+                any of its descendants, once however many; without one, only the token itself
+                counts. 0 keeps every token. Tokens that are not clinical events (time and visit
+                markers, year and age) and the gender and race tokens of the demographic prompt are
+                never removed.
+            apply_entropy_filter: also keep only the clinical tokens whose entropy is at least that
+                of a token that occurs in min_patient_count of the patients (as a share of the
+                dataset). It applies on top of min_patient_count.
         """
+        if min_patient_count is None:
+            min_patient_count = 0
+        if min_patient_count < 0:
+            raise ValueError(f"min_patient_count cannot be negative, got {min_patient_count}")
 
         if isinstance(dataset, DatasetDict):
             dataset = dataset["train"]
@@ -1164,31 +1273,53 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             "all_concept_code_entropies"
         ]
 
+        # Only the real clinical events are filtered. The gender and race tokens are numeric concept
+        # ids as well, but they are the fixed demographic prompt of every patient: a rare race removed
+        # from the vocabulary would be dropped from the sequence and leave the prompt a token short.
+        demographic_tokens = set(cehrgpt_data_statistics["gender_list"]) | set(
+            cehrgpt_data_statistics["race_list"]
+        )
+
+        def is_filtered(token: str) -> bool:
+            return (
+                is_clinical_event(token, data_args.is_data_in_meds)
+                and token not in demographic_tokens
+            )
+
         if apply_entropy_filter:
-            min_prevalence = max(1e-8, min_prevalence)
+            # The cut-off is the entropy of a token that occurs in min_patient_count of the patients
+            threshold_share = max(1e-8, min_patient_count / cehrgpt_data_statistics["total"])
             min_entropy = (
-                    np.log(1 - min_prevalence) * (1 - min_prevalence)
-                    + np.log(min_prevalence) * min_prevalence
+                    np.log(1 - threshold_share) * (1 - threshold_share)
+                    + np.log(threshold_share) * threshold_share
             )
             qualified_codes = [
                 k
                 for k in original_concept_codes
-                if all_concept_code_entropies[k] <= min_entropy
-                   or not is_clinical_event(k, data_args.is_data_in_meds)
+                if all_concept_code_entropies[k] <= min_entropy or not is_filtered(k)
             ]
         else:
+            qualified_codes = list(original_concept_codes)
+
+        if min_patient_count > 0:
+            patient_counts = cehrgpt_data_statistics["concept_patient_counts"]
+            before = len(qualified_codes)
             qualified_codes = [
                 k
-                for k in original_concept_codes
-                if min_prevalence <= all_concept_code_stats[k]
-                   or not is_clinical_event(k, data_args.is_data_in_meds)
+                for k in qualified_codes
+                if not is_filtered(k) or patient_counts.get(k, 0) >= min_patient_count
             ]
+            LOG.info(
+                "min_patient_count=%s removed %s of the %s tokens that were left",
+                min_patient_count,
+                before - len(qualified_codes),
+                before,
+            )
 
         # Create the tokenizer now
         LOG.info("Training the tokenizer for concepts")
-        concept_tokenizer = cls.train_concept_tokenizer(
-            dataset,
-            feature_name="concept_ids",
+        concept_tokenizer = cls.train_concept_tokenizer_from_counts(
+            cehrgpt_data_statistics["concept_token_counts"],
             special_tokens=[
                 PAD_TOKEN,
                 OUT_OF_VOCABULARY_TOKEN,
@@ -1200,15 +1331,9 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             data_args=data_args,
             qualified_codes=qualified_codes,
         )
-        concept_value_column = "concept_as_values"
-        for row in dataset:
-            if concept_value_column not in row:
-                concept_value_column = "concept_values"
-            break
         LOG.info("Training the tokenizer for values")
-        value_tokenizer = cls.train_concept_tokenizer(
-            dataset,
-            feature_name=concept_value_column,
+        value_tokenizer = cls.train_concept_tokenizer_from_counts(
+            cehrgpt_data_statistics["value_token_counts"],
             special_tokens=[OUT_OF_VOCABULARY_TOKEN, PAD_TOKEN],
             unk_token=OUT_OF_VOCABULARY_TOKEN,
             data_args=data_args,
@@ -1263,6 +1388,16 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             allowed_motor_codes = get_allowed_motor_codes(
                 original_concept_codes, data_args, ontology, measurement_concept_ids
             )
+            if min_patient_count > 0:
+                # A token that was removed from the vocabulary must not be a task either, and a token
+                # that stayed only because it is a gender or race (the exemption above) is not a
+                # clinical event to predict
+                kept = set(qualified_codes)
+                allowed_motor_codes = [
+                    c
+                    for c in allowed_motor_codes
+                    if c in kept and c not in demographic_tokens
+                ]
             motor_tte_statistics = compute_motor_tte_statistics(
                 dataset, data_args, allowed_motor_codes, ontology
             )
@@ -1323,6 +1458,53 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         )
 
     @classmethod
+    def train_concept_tokenizer_from_counts(
+            cls,
+            token_counts: Dict[str, int],
+            special_tokens: List[str],
+            unk_token: str,
+            data_args: DataTrainingArguments,
+            qualified_codes: Optional[Sequence[str]] = None,
+    ) -> Tokenizer:
+        """Construct a WordLevel tokenizer from counts gathered during statistics.
+
+        ``WordLevelTrainer`` assigns special tokens first, then orders observed tokens by
+        decreasing frequency and lexicographically for ties. Reproducing that ordering avoids
+        two full ``dataset.map`` passes while preserving the token ids produced by the trainer.
+        """
+        special_tokens = list(dict.fromkeys(special_tokens))
+        special_token_set = set(special_tokens)
+        qualified_code_set = set(qualified_codes) if qualified_codes else None
+        word_counts = collections.defaultdict(int)
+        for value, count in token_counts.items():
+            # The existing map filters complete values before joining them. Split only after this
+            # check to retain that behavior if a value itself contains whitespace.
+            if qualified_code_set is not None and value not in qualified_code_set:
+                continue
+            for token in value.split():
+                word_counts[token] += count
+        candidates = [
+            (token, count)
+            for token, count in word_counts.items()
+            if token not in special_token_set
+            and count >= data_args.min_frequency
+        ]
+        candidates.sort(key=lambda item: (-item[1], item[0]))
+        available_slots = max(0, data_args.vocab_size - len(special_tokens))
+        candidates = candidates[:available_slots]
+
+        vocab = {token: token_id for token_id, token in enumerate(special_tokens)}
+        vocab.update(
+            (token, len(special_tokens) + token_id)
+            for token_id, (token, _) in enumerate(candidates)
+        )
+        tokenizer = Tokenizer(WordLevel(unk_token=unk_token, vocab=vocab))
+        tokenizer.pre_tokenizer = WhitespaceSplit()
+        # Mark the already indexed tokens as special so decoding keeps the trainer's behavior.
+        tokenizer.add_special_tokens(special_tokens)
+        return tokenizer
+
+    @classmethod
     def train_concept_tokenizer(
             cls,
             dataset,
@@ -1332,6 +1514,13 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             data_args,
             qualified_codes: Optional[List[str]] = None,
     ):
+        """Deprecated: use :meth:`train_concept_tokenizer_from_counts` instead."""
+        warnings.warn(
+            "train_concept_tokenizer is deprecated; use "
+            "train_concept_tokenizer_from_counts instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         # Use the Fast Tokenizer from the Huggingface tokenizers Rust implementation.
         # https://github.com/huggingface/tokenizers
         concept_tokenizer = Tokenizer(WordLevel(unk_token=unk_token, vocab=dict()))
@@ -1342,10 +1531,15 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             min_frequency=data_args.min_frequency,
             show_progress=True,
         )
+        # This collection is queried for every token in every patient sequence. Keeping it as a
+        # list makes tokenization O(number of tokens * vocabulary size).
+        qualified_code_set = (
+            set(qualified_codes) if qualified_codes is not None else None
+        )
         batch_concat_concepts_partial_func = partial(
             cls.batch_concat_concepts,
             feature_name=feature_name,
-            qualified_codes=qualified_codes,
+            qualified_codes=qualified_code_set,
         )
         if data_args.streaming:
             concatenated_features = dataset.map(
@@ -1378,7 +1572,12 @@ class CehrGptTokenizer(PreTrainedTokenizer):
         return concept_tokenizer
 
     def normalize(self, concept_id: str, unit: str, concept_value: float) -> str:
-        return self._numeric_event_statistics.normalize(concept_id, unit, concept_value)
+        if isinstance(concept_value, float):
+            bins = self._numeric_normalization_bins.get((concept_id, unit), ())
+            for start, end, value_bin in bins:
+                if start <= concept_value <= end:
+                    return value_bin
+        return UNKNOWN_BIN
 
     def denormalize(self, concept_id: str, value_bin: str) -> Tuple[float, str]:
         return self._numeric_event_statistics.denormalize(concept_id, value_bin)
@@ -1388,7 +1587,7 @@ class CehrGptTokenizer(PreTrainedTokenizer):
             cls,
             records: Dict[str, List],
             feature_name: str,
-            qualified_codes: Optional[List[str]] = None,
+            qualified_codes: Optional[Set[str]] = None,
     ) -> Dict[str, List]:
         def filter_token(t: str) -> bool:
             """

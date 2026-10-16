@@ -1,3 +1,4 @@
+import pickle
 import unittest
 
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
@@ -5,6 +6,7 @@ from datasets import Dataset
 
 from cehrgpt.omop.ontology import Ontology
 from cehrgpt.tokenization.tokenization_statistics import (
+    _AncestorIndex,
     compute_motor_tte_statistics,
     get_motor_code_ancestors,
     map_motor_tte_statistics,
@@ -55,6 +57,13 @@ class AncestorsTest(unittest.TestCase):
 
     def test_a_code_missing_from_the_ontology_still_covers_itself(self):
         self.assertEqual(get_motor_code_ancestors(["z"], ontology({"a": {"b"}})), {"z": ("z",)})
+
+    def test_compact_worker_index_round_trips(self):
+        mapping = {"a": ("a", "P"), "b": ("b", "P")}
+        restored = pickle.loads(pickle.dumps(_AncestorIndex(mapping)))
+        self.assertEqual(restored.codes, {"a", "b"})
+        self.assertEqual(restored.all_codes, ("P", "a", "b"))
+        self.assertEqual(restored["a"], ["a", "P"])
 
 
 class CountingTest(unittest.TestCase):
@@ -115,6 +124,12 @@ class CountingTest(unittest.TestCase):
         tokens = ["[VS]", "a", "[VE]", "D0", "[VS]", "a", "[VE]"]
         patient = {"concept_ids": tokens, "epoch_times": [0.0] * 3 + [DAY] + [2.0 * DAY] * 3}
         self.assertEqual(sum(counts(run(["a"], patients=(patient,)), "a")), 0)
+
+    def test_sequence_order_breaks_ties_at_the_same_timestamp(self):
+        before = {"concept_ids": ["D1", "a"], "epoch_times": [DAY, DAY]}
+        after = {"concept_ids": ["a", "D1"], "epoch_times": [DAY, DAY]}
+        self.assertEqual(counts(run(["a"], patients=(before,)), "a"), (1, 0))
+        self.assertEqual(counts(run(["a"], patients=(after,)), "a"), (0, 1))
 
     def test_the_global_event_times_stay_at_the_level_of_the_codes_that_occur(self):
         # 2 events of a and 1 of b: the same three times with or without ancestors

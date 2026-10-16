@@ -29,6 +29,7 @@ class Ontology:
         self.parents_map: Dict[str, Set[str]] = collections.defaultdict(set)
         self.concept_vocabulary_map: Dict[str, str] = collections.defaultdict(str)
         self.concept_domain_map: Dict[str, str] = collections.defaultdict(str)
+        self.dataset_concept_ids: Set[str] = set()
 
         # Load from the athena path ...
         concept = pl.scan_parquet(os.path.join(vocab_path, "concept/*parquet"))
@@ -100,18 +101,21 @@ class Ontology:
     def prune_to_dataset(
         self,
         dataset: Dataset,
-        remove_ontologies: Set[str] = set(),
+        remove_ontologies: Optional[Set[str]] = None,
         num_proc: int = 4,
         batch_size: int = 1024,
     ) -> None:
-        mapped_dataset = dataset.map(
+        remove_ontologies = remove_ontologies or set()
+        concept_dataset = dataset.select_columns(["concept_ids"])
+        mapped_dataset = concept_dataset.map(
             _get_all_codes_map,
             batched=True,
             batch_size=batch_size,
-            remove_columns=dataset.column_names,
+            remove_columns=concept_dataset.column_names,
             num_proc=num_proc,
         )
         valid_concept_ids = set(mapped_dataset["unique_concept_ids"])
+        self.dataset_concept_ids = valid_concept_ids
         all_parents = set()
         for concept_id in valid_concept_ids:
             all_parents |= self.get_all_parents(concept_id)
@@ -122,16 +126,42 @@ class Ontology:
                 (ontology not in remove_ontologies) and (c in all_parents)
             )
 
-        concept_ids = set(self.parents_map.keys())
-        for concept_id in concept_ids:
-            m: Any
-            if is_valid(concept_id):
-                for m in (self.parents_map, self.concept_vocabulary_map):
-                    m[concept_id] = {a for a in m[concept_id] if is_valid(a)}
-            else:
-                for m in (self.parents_map, self.concept_vocabulary_map):
-                    if concept_id in m:
-                        del m[concept_id]
+        retained_concept_ids = valid_concept_ids | {
+            concept_id for concept_id in all_parents if is_valid(concept_id)
+        }
+
+        # Prune each map according to its value type. The previous implementation treated
+        # vocabulary-name strings as collections of concept IDs and replaced them with sets of
+        # characters. Besides corrupting the metadata, that made subsequent is_valid calls depend
+        # on the unordered iteration order of parents_map.
+        self.parents_map = collections.defaultdict(
+            set,
+            {
+                concept_id: {
+                    parent
+                    for parent in parents
+                    if parent in retained_concept_ids
+                }
+                for concept_id, parents in self.parents_map.items()
+                if concept_id in retained_concept_ids
+            },
+        )
+        self.concept_vocabulary_map = collections.defaultdict(
+            str,
+            {
+                concept_id: vocabulary
+                for concept_id, vocabulary in self.concept_vocabulary_map.items()
+                if concept_id in retained_concept_ids
+            },
+        )
+        self.concept_domain_map = collections.defaultdict(
+            str,
+            {
+                concept_id: domain
+                for concept_id, domain in self.concept_domain_map.items()
+                if concept_id in retained_concept_ids
+            },
+        )
 
         self.all_parents_map = {}
 

@@ -21,7 +21,6 @@ from cehrbert.runners.runner_util import (
     generate_prepared_ds_path,
     get_last_hf_checkpoint,
     get_meds_extension_path,
-    load_parquet_as_dataset,
 )
 from datasets import Dataset, DatasetDict, IterableDatasetDict, load_from_disk
 from transformers import EarlyStoppingCallback, Trainer, set_seed
@@ -29,6 +28,10 @@ from transformers.trainer_utils import is_main_process
 from transformers.utils import logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset
+from cehrgpt.data.parquet_loading import (
+    UNUSED_PRETRAINING_COLUMNS,
+    load_parquet_as_dataset,
+)
 from cehrgpt.data.hf_cehrgpt_dataset_collator import (
     CehrGptDataCollator,
     SamplePackingCehrGptDataCollator,
@@ -116,6 +119,7 @@ def load_and_create_tokenizer(
                 ontology.prune_to_dataset(
                     train_val_dataset,
                     num_proc=data_args.preprocessing_num_workers,
+                    batch_size=data_args.preprocessing_batch_size,
                     remove_ontologies={"SPL", "HemOnc", "LOINC"},
                 )
 
@@ -134,12 +138,17 @@ def load_and_create_tokenizer(
                 else None
             ),
             apply_entropy_filter=cehrgpt_args.apply_entropy_filter,
-            min_prevalence=cehrgpt_args.min_prevalence,
             ontology=ontology,
+            min_patient_count=cehrgpt_args.min_patient_count,
         )
         LOG.info("Finished training the tokenizer ...")
         tokenizer.save_pretrained(tokenizer_abspath)
         LOG.info("Saved the tokenizer to %s", tokenizer_abspath)
+        # The freshly trained tokenizer still owns the full lab statistics, MOTOR
+        # metadata, and ontology in memory. Reloading the saved tokenizer converts
+        # those large fields to lazy file references before the tokenizer is copied
+        # into multiprocessing dataset mappings.
+        tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_abspath)
     else:
         LOG.info("The tokenizer exists and will be loaded from %s", tokenizer_abspath)
         tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_abspath)
@@ -315,10 +324,14 @@ def _load_parquet_dataset(
     training_args,
 ) -> DatasetDict:
     """Load and split the raw parquet dataset into train/validation/(optional) test splits."""
+    exclude_columns = (
+        None if cehrgpt_args.keep_unused_parquet_columns else UNUSED_PRETRAINING_COLUMNS
+    )
     dataset = load_parquet_as_dataset(
         os.path.expanduser(data_args.data_folder),
         split="train",
         streaming=data_args.streaming,
+        exclude_columns=exclude_columns,
     )
 
     # Streaming: split by count
@@ -349,6 +362,7 @@ def _load_parquet_dataset(
             test_dataset = load_parquet_as_dataset(
                 os.path.expanduser(data_args.test_data_folder),
                 split="train",
+                exclude_columns=exclude_columns,
             )
             dataset = datasets.concatenate_datasets([dataset, test_dataset])
 
@@ -375,7 +389,9 @@ def _load_parquet_dataset(
         splits = {"train": split["train"], "validation": split["test"]}
         if data_args.test_data_folder:
             test_set = load_parquet_as_dataset(
-                os.path.expanduser(data_args.test_data_folder), split="train"
+                os.path.expanduser(data_args.test_data_folder),
+                split="train",
+                exclude_columns=exclude_columns,
             )
             if len(test_set) > 0:
                 splits["test"] = test_set
@@ -543,7 +559,7 @@ def main():
                             cehrgpt_args.pretrained_embedding_path
                         ),
                         apply_entropy_filter=cehrgpt_args.apply_entropy_filter,
-                        min_prevalence=cehrgpt_args.min_prevalence,
+                        min_patient_count=cehrgpt_args.min_patient_count,
                     )
                     cehrgpt_tokenizer.save_pretrained(
                         os.path.expanduser(training_args.output_dir)
