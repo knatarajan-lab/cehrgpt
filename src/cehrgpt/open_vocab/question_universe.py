@@ -9,6 +9,12 @@ concept below no category is still a question, but only itself. Only SNOMED ance
 concept_ancestor also lists MedDRA and other vocabularies above a SNOMED concept, and the CPT4,
 ICD10PCS and ICD9Proc procedures have SNOMED ancestors.
 
+Visits are a domain of their own: the visit types (inpatient, outpatient, emergency room, ...) are the
+categories, and the places of service and specialties below them (Inpatient Hospital, Ambulatory
+Surgical Center, Radiology Clinic/Center, ...) are questions that roll up to the type through the
+hierarchy, so an inpatient hospital stay is also an inpatient visit. These concepts live in the Visit,
+CMS Place of Service, NUCC and Medicare Specialty vocabularies.
+
 Drugs (RxNorm, RxNorm Extension) are mapped to their ingredient: the questions are the drug concepts
 of the tokenizer and the ingredients above them, and nothing in between (clinical drug components and
 forms, which mostly cover the same patients as one child) and nothing above (no ATC classes).
@@ -36,8 +42,19 @@ RXNORM = ("RxNorm", "RxNorm Extension")
 INGREDIENT = "Ingredient"
 
 # The vocabularies whose ancestors are questions, and for the drugs the only class an ancestor may have
-VOCABULARIES: Dict[str, Tuple[str, ...]] = {"Condition": (SNOMED,), "Procedure": (SNOMED,), "Drug": RXNORM}
-ANCESTOR_CLASSES: Dict[str, Optional[Tuple[str, ...]]] = {"Condition": None, "Procedure": None, "Drug": (INGREDIENT,)}
+VISIT_VOCABULARIES = ("Visit", "CMS Place of Service", "NUCC", "Medicare Specialty")
+VOCABULARIES: Dict[str, Tuple[str, ...]] = {
+    "Condition": (SNOMED,),
+    "Procedure": (SNOMED,),
+    "Drug": RXNORM,
+    "Visit": VISIT_VOCABULARIES,
+}
+ANCESTOR_CLASSES: Dict[str, Optional[Tuple[str, ...]]] = {
+    "Condition": None,
+    "Procedure": None,
+    "Drug": (INGREDIENT,),
+    "Visit": None,
+}
 
 # Conditions below Disease: the kind of disease
 DISEASE_CATEGORIES = (
@@ -123,11 +140,21 @@ PROCEDURE_CATEGORIES = (
     (4313889, 'Endoscopy'),
 )
 
+# Visits: the type of visit. The places of service and the specialties below them are questions too
+VISIT_CATEGORIES = (
+    (9201, 'Inpatient Visit'),
+    (9202, 'Outpatient Visit'),
+    (9203, 'Emergency Room Visit'),
+    (262, 'Emergency Room and Inpatient Visit'),
+    (581476, 'Home Visit'),
+)
+
 CATEGORIES: Dict[str, Optional[Tuple[Tuple[int, str], ...]]] = {
     "Condition": DISEASE_CATEGORIES + BODY_SYSTEM_CATEGORIES + FINDING_CATEGORIES,
     "Procedure": PROCEDURE_CATEGORIES,
     # every RxNorm ingredient is a category, see ingredient_categories
     "Drug": None,
+    "Visit": VISIT_CATEGORIES,
 }
 
 

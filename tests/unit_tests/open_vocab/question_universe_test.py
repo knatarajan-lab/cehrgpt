@@ -37,6 +37,13 @@ NAMES = {
     350: ("Aspirin 81 MG Oral Tablet", "RxNorm Extension", "Drug"),
     360: ("Metformin / Aspirin Pack", "RxNorm", "Drug"),
     370: ("Unmapped vaccine", "CVX", "Drug"),
+    # visits: a visit type (category) > place of service / clinic, which are in other vocabularies
+    500: ("Inpatient Visit", "Visit", "Visit"),
+    510: ("Inpatient Hospital", "CMS Place of Service", "Visit"),
+    520: ("Outpatient Visit", "Visit", "Visit"),
+    530: ("Clinic/Center", "NUCC", "Visit"),
+    540: ("Radiology Clinic/Center", "NUCC", "Visit"),
+    550: ("Home", "CMS Place of Service", "Visit"),
 }
 CLASSES = {310: "Ingredient", 340: "Ingredient", 320: "Clinical Drug Form", 330: "Clinical Drug",
            350: "Clinical Drug", 360: "Clinical Pack", 300: "ATC 4th"}
@@ -44,6 +51,7 @@ CLASSES = {310: "Ingredient", 340: "Ingredient", 320: "Clinical Drug Form", 330:
 EDGES = {100: [110, 170], 110: [120, 160], 120: [130, 150], 130: [140], 160: [150], 170: [180], 130: [140]}
 CPT_PARENT = {901: [130], 320: [310], 330: [320], 350: [340], 360: [330, 350]}
 EDGES[300] = [310]
+EDGES.update({500: [510], 520: [530], 530: [540]})
 
 
 def tables():
@@ -138,6 +146,53 @@ class BuildUniverseTest(unittest.TestCase):
             qu.build_universe(concept, ancestor, [140], "Condition", ((120, "Cardiac disease"),))
         with self.assertRaisesRegex(ValueError, "vocabulary version"):
             qu.build_universe(concept, ancestor, [140], "Condition", ((999999, "Heart disease"),))
+
+
+VISIT_TEST_CATEGORIES = ((500, "Inpatient Visit"), (520, "Outpatient Visit"))
+
+
+class VisitUniverseTest(unittest.TestCase):
+    def universe(self, tokens):
+        concept, ancestor = tables()
+        # the vocabularies are the defaults of the Visit domain
+        result = qu.build_universe(concept, ancestor, tokens, "Visit", VISIT_TEST_CATEGORIES)
+        return {row["concept_id"]: row for row in result.iter_rows(named=True)}
+
+    def test_a_place_of_service_rolls_up_to_its_visit_type_across_vocabularies(self):
+        universe = self.universe([510])
+        # Inpatient Hospital (CMS Place of Service) is below Inpatient Visit (Visit)
+        self.assertEqual(set(universe), {510, 500})
+        self.assertEqual(universe[510]["categories"], [500])
+        self.assertEqual(universe[500]["num_tokens"], 1)
+        self.assertFalse(universe[500]["is_token"])
+
+    def test_the_levels_between_a_token_and_its_visit_type_are_questions(self):
+        universe = self.universe([540])
+        # Radiology Clinic/Center > Clinic/Center (not a token) > Outpatient Visit
+        self.assertEqual(set(universe), {540, 530, 520})
+        self.assertEqual({k: universe[k]["depth"] for k in universe}, {540: 2, 530: 1, 520: 0})
+        self.assertEqual(universe[520]["num_tokens"], 1)
+
+    def test_a_visit_below_no_type_is_a_question_on_its_own(self):
+        universe = self.universe([550])
+        self.assertEqual(set(universe), {550})
+        self.assertEqual(universe[550]["categories"], [])
+
+    def test_the_tokens_under_a_type_are_counted(self):
+        universe = self.universe([510, 540, 550])
+        self.assertEqual(universe[500]["num_tokens"], 1)
+        self.assertEqual(universe[520]["num_tokens"], 1)
+        self.assertEqual(set(universe), {500, 510, 520, 530, 540, 550})
+
+    def test_other_domains_ignore_the_visit_tokens(self):
+        concept, ancestor = tables()
+        result = qu.build_universe(concept, ancestor, [510, 540], "Condition", CATEGORIES)
+        self.assertEqual(len(result), 0)
+
+    def test_the_visit_categories_are_configured_for_the_domain(self):
+        self.assertEqual(qu.CATEGORIES["Visit"], qu.VISIT_CATEGORIES)
+        self.assertIn("CMS Place of Service", qu.VOCABULARIES["Visit"])
+        self.assertIsNone(qu.ANCESTOR_CLASSES["Visit"])
 
 
 class DrugUniverseTest(unittest.TestCase):

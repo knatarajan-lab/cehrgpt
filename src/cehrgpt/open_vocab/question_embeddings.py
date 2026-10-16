@@ -8,6 +8,7 @@ template, pooling and normalisation.
 
     python -m cehrgpt.open_vocab.question_embeddings \
         --universe_files OUT/condition_universe.parquet OUT/procedure_universe.parquet OUT/drug_universe.parquet \
+        OUT/visit_universe.parquet \
         --output_dir EMBEDDINGS
 
 Writes embeddings.npy (questions x dimension, float32), question_texts.parquet (row, concept_id,
