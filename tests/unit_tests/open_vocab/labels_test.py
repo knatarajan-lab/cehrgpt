@@ -6,7 +6,7 @@ import torch
 
 from cehrgpt.open_vocab import question_universe as qu
 from cehrgpt.open_vocab.head import open_vocab_nll_loss
-from cehrgpt.open_vocab.labels import QuestionHierarchy, QuestionLabels, build_question_labels
+from cehrgpt.open_vocab.labels import QuestionHierarchy, QuestionLabels, build_question_labels, to_concept_id
 
 from .question_universe_test import CATEGORIES, VISIT_TEST_CATEGORIES, tables
 
@@ -47,6 +47,22 @@ class QuestionHierarchyTest(unittest.TestCase):
 
     def test_conditions_roll_up_their_chain(self):
         self.assertEqual(hierarchy().questions_of(ANGINA), (HEART, CORONARY, ANGINA))
+
+    def test_concept_ids_can_be_ints_or_digit_strings(self):
+        h = hierarchy()
+        self.assertEqual(h.questions_of("510"), h.questions_of(510))
+        self.assertEqual(h.questions_of(np.int64(510)), h.questions_of(510))
+        self.assertIn("510", h)
+
+    def test_tokens_that_are_not_concept_ids_count_for_nothing(self):
+        h = hierarchy()
+        for token in ("[VS]", "[VE]", "D3", "year:2020", "age:40", "Visit/IP", "CMS_Place_of_Service/51", "", "5.1", "-5", None, 5.5, True):
+            self.assertEqual(h.questions_of(token), (), repr(token))
+            self.assertNotIn(token, h)
+
+    def test_to_concept_id(self):
+        self.assertEqual([to_concept_id(x) for x in (9202, "9202", np.int32(7), "x", "9202a", None, 1.5, False)],
+                         [9202, 9202, 7, None, None, None, None, None])
 
     def test_unknown_concepts_count_for_nothing(self):
         h = hierarchy()
@@ -104,6 +120,15 @@ class BuildQuestionLabelsTest(unittest.TestCase):
     def test_other_domains_roll_up_in_the_same_call(self):
         got = self.table(self.labels([0.0]))
         self.assertEqual(got[(0, HEART)], 25.0)
+
+    def test_a_sequence_of_string_tokens_gives_the_same_labels_as_concept_ids(self):
+        tokens = ["year:2020", "age:40", "Gender/F", "Race/5", "[VS]", str(RADIOLOGY), "D5", str(HOSPITAL),
+                  "Visit/IP", str(RADIOLOGY), "[VE]", "12345", str(ANGINA)]
+        days = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 10.0, 10.0, 40.0, 40.0, 41.0, 25.0]
+        mixed = build_question_labels(self.h, tokens, days, [5.0, 20.0], 60.0, self.questions)
+        clean = build_question_labels(self.h, self.concepts, self.days, [5.0, 20.0], 60.0, self.questions)
+        for name in ("event_rows", "event_questions", "event_times", "censor_times"):
+            np.testing.assert_array_equal(getattr(mixed, name), getattr(clean, name), name)
 
     def test_ignored_events_and_unasked_questions(self):
         # only the asked question is listed, in slot 0, and 12345 (not in the hierarchy) adds nothing

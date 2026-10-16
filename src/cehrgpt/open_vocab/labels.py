@@ -9,6 +9,10 @@ is also Metformin. QuestionHierarchy holds that roll-up, built from the universe
 question_universe and the concept_ancestor table, and build_question_labels turns the events of one
 patient into the arguments of open_vocab_nll_loss.
 
+Only OMOP concept ids are used. The tokens of a sequence are strings, so a concept id is an int or a
+string of digits ("9202"); anything else (time tokens, [VS], ETHOS/COMET tokens such as "Visit/IP",
+"year:2020") is not a concept and is ignored.
+
 A question that does not happen after a prediction point is censored at the end of the record, so it
 is simply left out of the events; open_vocab_nll_loss treats a question that is not listed for a row as
 censored. Only the first occurrence of a question matters.
@@ -19,6 +23,15 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import polars as pl
+
+
+def to_concept_id(token) -> Optional[int]:
+    """The concept id of a token: an int, or a string of digits; None for any other token."""
+    if isinstance(token, (int, np.integer)) and not isinstance(token, bool):
+        return int(token)
+    if isinstance(token, str) and token.isascii() and token.isdigit():
+        return int(token)
+    return None
 
 
 class QuestionHierarchy:
@@ -50,12 +63,17 @@ class QuestionHierarchy:
                 questions.setdefault(token, set()).add(token)
         return cls(questions)
 
-    def questions_of(self, concept_id: int) -> Tuple[int, ...]:
-        """The questions the concept counts for; empty for a concept that is no token of the universe."""
-        return self._questions.get(int(concept_id), ())
+    def questions_of(self, concept_id) -> Tuple[int, ...]:
+        """
+        The questions the concept counts for; empty for a concept that is no token of the universe and
+        for a token that is not a concept id at all.
+        """
+        concept_id = to_concept_id(concept_id)
+        return self._questions.get(concept_id, ()) if concept_id is not None else ()
 
-    def __contains__(self, concept_id: int) -> bool:
-        return int(concept_id) in self._questions
+    def __contains__(self, concept_id) -> bool:
+        concept_id = to_concept_id(concept_id)
+        return concept_id is not None and concept_id in self._questions
 
     def __len__(self) -> int:
         return len(self._questions)
@@ -99,9 +117,10 @@ def build_question_labels(
 
     Args:
         hierarchy: the roll-up from the concepts of the events to the questions
-        event_concept_ids: the concept id of every event of the record, visit records included (the
-            visit concept of a visit is an event at the start of the visit); anything that is not in
-            the hierarchy (time tokens, [VS], unknown concepts) is ignored
+        event_concept_ids: the concept id of every event of the record (ints or digit strings), visit
+            records included (the visit concept of a visit is an event at the start of the visit);
+            anything that is not in the hierarchy (time tokens, [VS], ETHOS/COMET tokens, unknown
+            concepts) is ignored
         event_days: the day of every event, on any common scale (e.g. days since 1970)
         prediction_days: the day of each prediction point; each is a row
         end_day: the day the record ends, where the questions that did not happen are censored
@@ -111,14 +130,12 @@ def build_question_labels(
     """
     prediction_days = np.asarray(prediction_days, dtype=np.float64)
     rows = len(prediction_days)
-    slot = {int(q): i for i, q in enumerate(question_ids)}
+    slot = {int(q): i for i, q in enumerate(question_ids)}  # the questions are concept ids
     censor_times = np.maximum(float(end_day) - prediction_days, 0.0)
 
     days_by_slot: Dict[int, List[float]] = {}
     for concept_id, day in zip(event_concept_ids, event_days):
-        if int(concept_id) not in hierarchy:
-            continue
-        for question in hierarchy.questions_of(int(concept_id)):
+        for question in hierarchy.questions_of(concept_id):
             if question in slot:
                 days_by_slot.setdefault(slot[question], []).append(float(day))
 
