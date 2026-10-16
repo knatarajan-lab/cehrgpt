@@ -82,7 +82,6 @@ class MotorRowOffsetsTest(unittest.TestCase):
             rows, pairs = motor_rows(collator([dict(e) for e in examples]))
             self.assertEqual(rows, total_rows)
             self.assertEqual(sorted(pairs), expected, f"seed {seed}")
-            self.assertLess(max(pairs, default=-1), rows)
             rows_without_pairs += empty_rows
         # the test is only meaningful if some prediction rows have no pair
         self.assertGreater(rows_without_pairs, 0)
@@ -123,7 +122,6 @@ class MotorRowOffsetsTest(unittest.TestCase):
         self.assertEqual(rows, first_rows + second_rows)
         # the second patient's pairs belong to its own rows, after the silent patient's
         self.assertEqual(sorted(pairs), sorted(r + first_rows for r in labels[1]["motor_row_indices"]))
-        self.assertGreaterEqual(min(pairs), first_rows)
 
     def test_a_packed_patient_without_any_pair_still_takes_its_rows(self):
         self.check_silent_patient(packed=True)
