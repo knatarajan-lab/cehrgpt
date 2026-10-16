@@ -115,6 +115,30 @@ class QuestionHierarchy:
         concept_id = to_concept_id(concept_id)
         return concept_id is not None and concept_id in self._questions
 
+    def vocab_numbers(self, vocab: Mapping[str, int]) -> np.ndarray:
+        """
+        For every id of a tokenizer vocabulary the concept number of its token (-1 if it is no concept
+        of the hierarchy), so that the input ids of a batch map to concept numbers in one indexing.
+        """
+        tokens = list(vocab)
+        numbers = np.full(max(vocab.values()) + 1, -1, dtype=np.int64)
+        numbers[np.fromiter((vocab[t] for t in tokens), dtype=np.int64, count=len(tokens))] = self.concept_numbers(tokens)
+        return numbers
+
+    def save(self, path: str) -> None:
+        """Write the roll-up as a parquet file of (concept_id, question_id) pairs."""
+        concepts = [c for c, qs in self._questions.items() for _ in qs]
+        questions = [q for qs in self._questions.values() for q in qs]
+        pl.DataFrame({"concept_id": concepts, "question_id": questions}, schema={"concept_id": pl.Int64, "question_id": pl.Int64}).write_parquet(path)
+
+    @classmethod
+    def load(cls, path: str) -> "QuestionHierarchy":
+        pairs = pl.read_parquet(path)
+        questions: Dict[int, set] = {}
+        for concept, question in pairs.iter_rows():
+            questions.setdefault(concept, set()).add(question)
+        return cls(questions)
+
     def __len__(self) -> int:
         return len(self._questions)
 
@@ -169,22 +193,39 @@ def build_question_labels(
     A question happens after a prediction point if one of its events is strictly later than the point.
     """
     prediction_days = np.asarray(prediction_days, dtype=np.float64)
+    censor_times = np.maximum(float(end_day) - prediction_days, 0.0)
+    numbers = hierarchy.concept_numbers(event_concept_ids)
+    event_rows, event_questions, event_times = first_events_after(
+        hierarchy, numbers, np.asarray(event_days, dtype=np.float64), prediction_days, question_ids
+    )
+    return QuestionLabels(event_rows, event_questions, event_times, censor_times)
+
+
+def first_events_after(
+    hierarchy: QuestionHierarchy,
+    numbers: np.ndarray,
+    event_days: np.ndarray,
+    prediction_days: np.ndarray,
+    question_ids: Sequence[int],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    The core of build_question_labels, for events given as concept numbers of the hierarchy
+    (QuestionHierarchy.concept_numbers, -1 for an event that is no concept).
+
+    Returns event_rows, event_questions (the slot in question_ids) and event_times, ordered by row and slot.
+    """
     rows = len(prediction_days)
     asked = np.asarray(question_ids, dtype=np.int64)  # the questions are concept ids
     if len(np.unique(asked)) != len(asked):
         raise ValueError("question_ids has to be unique, a question is asked once")
-    censor_times = np.maximum(float(end_day) - prediction_days, 0.0)
 
-    def empty() -> QuestionLabels:
-        return QuestionLabels(
-            np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.float64), censor_times
-        )
+    def empty():
+        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.float64)
 
-    numbers = hierarchy.concept_numbers(event_concept_ids)
     known = numbers >= 0
     if rows == 0 or len(asked) == 0 or not known.any():
         return empty()
-    days = np.asarray(event_days, dtype=np.float64)[known]
+    days = event_days[known]
     # every event counts for each question above it: one entry per (event, question)
     owner, questions = hierarchy.expand(numbers[known])
     # keep the questions that are asked, with their slot
@@ -224,4 +265,100 @@ def build_question_labels(
     event_times = event_days_q[owner] - prediction_days[event_rows]
 
     final = np.lexsort((event_questions, event_rows))
-    return QuestionLabels(event_rows[final], event_questions[final], event_times[final], censor_times)
+    return event_rows[final], event_questions[final], event_times[final]
+
+
+@dataclass
+class BatchQuestionLabels:
+    """The questions asked of a batch and when they happen, rows counted over the whole batch."""
+
+    question_rows: np.ndarray  # (K,) rows of the question embedding matrix, the slot is the position here
+    event_rows: np.ndarray
+    event_questions: np.ndarray  # slot in question_rows
+    event_times: np.ndarray
+
+
+def sample_questions(
+    candidate_rows: np.ndarray,
+    num_rows_total: int,
+    num_questions: int,
+    positive_fraction: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """
+    The rows of the question embeddings asked of one batch.
+
+    A share of the questions (positive_fraction) is drawn from the candidates, the questions that
+    happen to some patient of the batch, and the rest uniformly from all questions, so the model sees both
+    what happens and what does not. The result has no duplicates and at most num_questions entries.
+    """
+    num_questions = min(num_questions, num_rows_total)
+    positives = min(int(round(num_questions * positive_fraction)), len(candidate_rows))
+    chosen = rng.choice(candidate_rows, size=positives, replace=False) if positives else np.zeros(0, dtype=np.int64)
+    missing = num_questions - len(chosen)
+    if missing > 0:
+        extra = rng.choice(num_rows_total, size=min(num_rows_total, missing + len(chosen)), replace=False)
+        extra = extra[~np.isin(extra, chosen)][:missing]
+        chosen = np.concatenate([chosen, extra])
+    return chosen.astype(np.int64)
+
+
+def build_batch_question_labels(
+    hierarchy: QuestionHierarchy,
+    question_concept_ids: np.ndarray,
+    segments: Sequence[Tuple[np.ndarray, np.ndarray, np.ndarray]],
+    num_questions: int,
+    positive_fraction: float = 0.5,
+    rng: Optional[np.random.Generator] = None,
+) -> BatchQuestionLabels:
+    """
+    The labels of a batch of patients, one question set for all of them.
+
+    Args:
+        question_concept_ids: the concept id of every row of the question embedding matrix
+        segments: one per patient, (concept numbers of the events, day of the events, positions of the
+            prediction points among the events); the prediction points are the rows of the batch in
+            the order of the segments, then of the positions
+        num_questions: how many questions to ask, see sample_questions
+    """
+    rng = rng if rng is not None else np.random.default_rng()
+    question_concept_ids = np.asarray(question_concept_ids, dtype=np.int64)
+    by_id = np.argsort(question_concept_ids, kind="stable")
+    sorted_ids = question_concept_ids[by_id]
+
+    prepared = []
+    candidates = []
+    for numbers, days, positions in segments:
+        positions = np.asarray(positions, dtype=np.int64)
+        days = np.maximum.accumulate(np.asarray(days, dtype=np.float64)) if len(days) else np.asarray(days, dtype=np.float64)
+        prepared.append((np.asarray(numbers, dtype=np.int64), days, positions))
+        known = np.asarray(numbers) >= 0
+        if len(positions) == 0 or not known.any():
+            continue
+        owner, questions = hierarchy.expand(np.asarray(numbers, dtype=np.int64)[known])
+        # a question can be asked about a patient if it happens after the first prediction point
+        after = days[known][owner] > days[positions].min()
+        candidates.append(questions[after])
+    if candidates:
+        candidate_ids = np.unique(np.concatenate(candidates))
+        where = np.minimum(np.searchsorted(sorted_ids, candidate_ids), len(sorted_ids) - 1)
+        candidate_rows = by_id[where[sorted_ids[where] == candidate_ids]]
+    else:
+        candidate_rows = np.zeros(0, dtype=np.int64)
+    question_rows = sample_questions(candidate_rows, len(question_concept_ids), num_questions, positive_fraction, rng)
+    asked = question_concept_ids[question_rows]
+
+    all_rows, all_questions, all_times = [], [], []
+    offset = 0
+    for numbers, days, positions in prepared:
+        if len(positions):
+            rows, slots, times = first_events_after(hierarchy, numbers, days, days[positions], asked)
+            all_rows.append(rows + offset)
+            all_questions.append(slots)
+            all_times.append(times)
+        offset += len(positions)
+    if all_rows:
+        return BatchQuestionLabels(
+            question_rows, np.concatenate(all_rows), np.concatenate(all_questions), np.concatenate(all_times)
+        )
+    return BatchQuestionLabels(question_rows, np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.float64))

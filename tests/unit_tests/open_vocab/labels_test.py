@@ -6,7 +6,14 @@ import torch
 
 from cehrgpt.open_vocab import question_universe as qu
 from cehrgpt.open_vocab.head import open_vocab_nll_loss
-from cehrgpt.open_vocab.labels import QuestionHierarchy, QuestionLabels, build_question_labels, to_concept_id
+from cehrgpt.open_vocab.labels import (
+    QuestionHierarchy,
+    QuestionLabels,
+    build_batch_question_labels,
+    build_question_labels,
+    sample_questions,
+    to_concept_id,
+)
 
 from .question_universe_test import CATEGORIES, VISIT_TEST_CATEGORIES, tables
 
@@ -216,6 +223,119 @@ class BuildQuestionLabelsTest(unittest.TestCase):
             torch.as_tensor(labels.event_times), torch.as_tensor(labels.censor_times), bins,
         )
         self.assertTrue(torch.isfinite(loss))
+
+
+class HierarchyArraysTest(unittest.TestCase):
+    def test_vocab_numbers_map_ids_of_the_vocabulary(self):
+        h = hierarchy()
+        vocab = {"[PAD]": 0, "[VS]": 1, str(HOSPITAL): 2, "Visit/IP": 3, str(ANGINA): 4, "99999": 5}
+        numbers = h.vocab_numbers(vocab)
+        self.assertEqual(len(numbers), 6)
+        self.assertEqual((numbers >= 0).tolist(), [False, False, True, False, True, False])
+        owner, questions = h.expand(numbers[[2, 4]])
+        self.assertEqual(sorted(questions[owner == 0].tolist()), [INPATIENT, HOSPITAL])
+        self.assertEqual(sorted(questions[owner == 1].tolist()), sorted([HEART, CORONARY, ANGINA]))
+
+    def test_save_and_load_round_trip(self):
+        import os
+        import tempfile
+
+        h = hierarchy()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "hierarchy.parquet")
+            h.save(path)
+            loaded = QuestionHierarchy.load(path)
+        self.assertEqual(len(loaded), len(h))
+        for concept in (HOSPITAL, RADIOLOGY, HOME, ANGINA):
+            self.assertEqual(loaded.questions_of(concept), h.questions_of(concept))
+
+
+class BatchLabelsTest(unittest.TestCase):
+    def setUp(self):
+        self.h = hierarchy()
+        # the embedding rows, in some order: row i is the question concept id QUESTIONS[i]
+        self.questions = np.array([HOME, INPATIENT, ANGINA, OUTPATIENT, HOSPITAL, HEART, CLINIC, RADIOLOGY, CORONARY, 77777])
+        self.numbers = lambda concepts: self.h.concept_numbers(concepts)
+
+    def segment(self, concepts, days, positions):
+        return self.numbers(concepts), np.asarray(days, dtype=float), np.asarray(positions)
+
+    def test_sample_questions_mixes_positives_and_the_rest(self):
+        rng = np.random.default_rng(0)
+        rows = sample_questions(np.array([3, 4, 5]), 100, 10, 0.5, rng)
+        self.assertEqual(len(rows), 10)
+        self.assertEqual(len(set(rows.tolist())), 10)
+        self.assertEqual(len(set(rows.tolist()) & {3, 4, 5}), 3 if set([3, 4, 5]) <= set(rows.tolist()) else len(set(rows.tolist()) & {3, 4, 5}))
+        # with more positives than the share, only the share is positive-drawn
+        rows = sample_questions(np.arange(50), 100, 10, 0.4, rng)
+        self.assertEqual(len(rows), 10)
+
+    def test_sample_questions_cannot_ask_more_than_there_are(self):
+        rows = sample_questions(np.array([0, 1]), 4, 10, 0.5, np.random.default_rng(1))
+        self.assertEqual(sorted(rows.tolist()), [0, 1, 2, 3])
+        self.assertEqual(len(sample_questions(np.zeros(0, dtype=np.int64), 5, 3, 0.5, np.random.default_rng(1))), 3)
+
+    def test_one_question_set_for_the_batch_and_rows_counted_over_it(self):
+        # patient A: a stay at day 10, prediction points at positions 0 and 1 (days 0 and 5)
+        # patient B: a radiology visit at day 30, one prediction point at position 0 (day 20)
+        a = self.segment([ANGINA, HOSPITAL, 12345], [0.0, 10.0, 11.0], [0, 1])
+        a = (a[0], np.array([0.0, 5.0, 10.0]) if False else a[1], a[2])
+        a = self.segment([ANGINA, ANGINA, HOSPITAL], [0.0, 5.0, 10.0], [0, 1])
+        b = self.segment([ANGINA, RADIOLOGY], [20.0, 30.0], [0])
+        labels = build_batch_question_labels(self.h, self.questions, [a, b], num_questions=10, positive_fraction=0.5, rng=np.random.default_rng(0))
+        asked = self.questions[labels.question_rows]
+        table = {(int(r), int(asked[q])): float(t) for r, q, t in zip(labels.event_rows, labels.event_questions, labels.event_times)}
+        # patient A rows 0 and 1: the stay at day 10 is 10 and 5 days away
+        self.assertEqual(table[(0, HOSPITAL)], 10.0)
+        self.assertEqual(table[(1, HOSPITAL)], 5.0)
+        self.assertEqual(table[(0, INPATIENT)], 10.0)
+        # patient B is row 2 of the batch; the radiology visit is 10 days away, the stay of A does not count
+        self.assertEqual(table[(2, RADIOLOGY)], 10.0)
+        self.assertEqual(table[(2, OUTPATIENT)], 10.0)
+        self.assertNotIn((2, HOSPITAL), table)
+        # and A's rows know nothing of B's visit
+        self.assertNotIn((0, RADIOLOGY), table)
+        self.assertNotIn((1, RADIOLOGY), table)
+
+    def test_the_questions_that_happen_are_asked_first(self):
+        a = self.segment([ANGINA, HOSPITAL], [0.0, 10.0], [0])
+        labels = build_batch_question_labels(self.h, self.questions, [a], num_questions=3, positive_fraction=1.0, rng=np.random.default_rng(0))
+        asked = set(self.questions[labels.question_rows].tolist())
+        # the positives of this patient after the point (the stay and the visit type above it) are always
+        # asked; with only two of them the third question is drawn from all the questions
+        self.assertTrue({INPATIENT, HOSPITAL} <= asked)
+        self.assertEqual(len(asked), 3)
+        self.assertEqual(len(labels.event_rows), 2)
+
+    def test_a_batch_without_prediction_points_has_no_events(self):
+        a = self.segment([ANGINA, HOSPITAL], [0.0, 10.0], [])
+        labels = build_batch_question_labels(self.h, self.questions, [a], num_questions=4, rng=np.random.default_rng(0))
+        self.assertEqual(len(labels.event_rows), 0)
+        self.assertEqual(len(labels.question_rows), 4)
+
+    def test_the_events_are_ordered_and_match_the_single_patient_builder(self):
+        rng = np.random.default_rng(3)
+        pool = [HOSPITAL, RADIOLOGY, ANGINA, HOME, 12345]
+        segments, singles = [], []
+        offset = 0
+        for _ in range(4):
+            n = int(rng.integers(3, 12))
+            concepts = [pool[i] for i in rng.integers(0, len(pool), n)]
+            days = np.sort(rng.integers(0, 30, n)).astype(float)
+            positions = np.sort(rng.choice(n, int(rng.integers(1, min(n, 4) + 1)), replace=False))
+            segments.append(self.segment(concepts, days, positions))
+            singles.append((concepts, days, positions))
+        labels = build_batch_question_labels(self.h, self.questions, segments, num_questions=10, positive_fraction=0.5, rng=np.random.default_rng(5))
+        asked = self.questions[labels.question_rows].tolist()
+        got = sorted(zip(labels.event_rows.tolist(), labels.event_questions.tolist(), labels.event_times.tolist()))
+        want, offset = [], 0
+        for concepts, days, positions in singles:
+            single = build_question_labels(self.h, concepts, days, days[positions], days[-1], asked)
+            want += list(zip((single.event_rows + offset).tolist(), single.event_questions.tolist(), single.event_times.tolist()))
+            offset += len(positions)
+        self.assertEqual(got, sorted(want))
+        keys = list(zip(labels.event_rows.tolist(), labels.event_questions.tolist()))
+        self.assertEqual(len(keys), len(set(keys)))
 
 
 if __name__ == "__main__":

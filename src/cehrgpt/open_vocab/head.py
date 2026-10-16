@@ -20,7 +20,7 @@ embeddings, so training starts from the MOTOR predictions and learns the rest.
 """
 
 import math
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple, Union
 
 import torch
 from torch import nn
@@ -63,10 +63,30 @@ class OpenVocabularyHead(nn.Module):
         self.bias_residual = _zero_residual(question_dim, residual_dim, 1)
         # one offset per time piece, shared by all questions
         self.piece_bias = nn.Parameter(torch.zeros(num_time_pieces))
-        nn.init.zeros_(self.question_weight.weight)
-        nn.init.zeros_(self.question_weight.bias)
-        nn.init.zeros_(self.question_bias.weight)
-        nn.init.constant_(self.question_bias.bias, bias_init)
+        self.bias_init = bias_init
+        self.initialize()
+
+    @torch.no_grad()
+    def initialize(self, std: float = 0.02):
+        """
+        Set the starting state: zero question weights and residuals, the low initial hazard, a small random
+        projection of the features. Plain tensor operations on purpose: transformers turns the functions of
+        torch.nn.init into no-ops while it builds a model for from_pretrained, which would leave a layer
+        that is new in the checkpoint uninitialised.
+        """
+        self.final_layer.weight.normal_(0.0, std)
+        self.final_layer.bias.zero_()
+        self.norm.weight.fill_(1.0)
+        self.question_weight.weight.zero_()
+        self.question_weight.bias.zero_()
+        self.question_bias.weight.zero_()
+        self.question_bias.bias.fill_(self.bias_init)
+        for residual in (self.weight_residual, self.bias_residual):
+            residual[0].weight.normal_(0.0, std)
+            residual[0].bias.zero_()
+            residual[-1].weight.zero_()
+            residual[-1].bias.zero_()
+        self.piece_bias.zero_()
 
     def question_parameters(self, question_embeddings: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """The weight (questions, hidden) and the bias (questions,) of each question."""
@@ -133,10 +153,7 @@ class OpenVocabularyHead(nn.Module):
 
 
 def _zero_residual(in_dim: int, hidden: int, out_dim: int) -> nn.Sequential:
-    layers = nn.Sequential(nn.Linear(in_dim, hidden), nn.GELU(), nn.Linear(hidden, out_dim))
-    nn.init.zeros_(layers[-1].weight)
-    nn.init.zeros_(layers[-1].bias)
-    return layers
+    return nn.Sequential(nn.Linear(in_dim, hidden), nn.GELU(), nn.Linear(hidden, out_dim))
 
 
 def _ridge(x: torch.Tensor, y: torch.Tensor, ridge: float) -> torch.Tensor:
@@ -153,7 +170,7 @@ def open_vocab_nll_loss(
     event_questions: torch.Tensor,
     event_times: torch.Tensor,
     censor_times: torch.Tensor,
-    time_bins: Sequence[float],
+    time_bins: Union[Sequence[float], torch.Tensor],
     chunk_rows: Optional[int] = None,
 ) -> torch.Tensor:
     """
@@ -171,7 +188,10 @@ def open_vocab_nll_loss(
     The loss is averaged over the rows and the questions.
     """
     rows, pieces, questions = hazards.shape
-    bins = torch.as_tensor(list(time_bins), dtype=hazards.dtype, device=hazards.device)
+    if isinstance(time_bins, torch.Tensor):
+        bins = time_bins.to(dtype=hazards.dtype, device=hazards.device)
+    else:
+        bins = torch.as_tensor(list(time_bins), dtype=hazards.dtype, device=hazards.device)
     if bins.shape[0] != pieces + 1:
         raise ValueError(f"{bins.shape[0]} time bin edges for {pieces} pieces")
     starts, ends = bins[:-1], bins[1:]
