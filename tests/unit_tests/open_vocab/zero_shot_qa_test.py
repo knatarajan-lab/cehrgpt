@@ -23,8 +23,8 @@ ROWS = 7
 def arguments(model_path, features, output, **kwargs):
     defaults = dict(
         model_path=model_path, features_folder=features, output_dir=output, questions=["asthma", "gout"],
-        questions_file=None, concepts=None, embeddings_dir=None, windows=["30", "365"], gap_days=0.0,
-        gap_days_column=None, label_column="boolean_value", evaluate=False, outcome_window=None,
+        questions_file=None, concepts=None, embeddings_dir=None, window="365", gap_days=0.0,
+        gap_days_column=None, label_column="boolean_value", evaluate=False,
         probe_similarity=0.999, fp16=False, batch_size=4,
         device="cpu",
     )
@@ -58,12 +58,12 @@ class ZeroShotQATest(unittest.TestCase):
     def run_tool(self, encoder=None, **kwargs):
         return tool.run(arguments(self.model_path, self.features, self.output, **kwargs), encoder or FakeEncoder())
 
-    def test_it_writes_a_probability_per_patient_window_and_question(self):
+    def test_it_writes_a_probability_per_patient_and_question_for_the_first_year(self):
         metrics = self.run_tool()
         table = pq.read_table(os.path.join(self.output, "predictions.parquet")).to_pandas()
-        self.assertEqual(len(table), self.n * 2 * 2)
+        self.assertEqual(len(table), self.n * 2)
         self.assertEqual(set(table["question"]), {"asthma", "gout"})
-        self.assertEqual(set(table["window_days"]), {"0-30", "0-365"})
+        self.assertEqual(metrics["window_days"], "0-365")
         self.assertTrue(table["probability"].between(0, 1).all())
         self.assertEqual(metrics["num_patients"], self.n)
         self.assertEqual(metrics["question_embedder"]["model_name"], "fake")
@@ -85,10 +85,15 @@ class ZeroShotQATest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not questions"):
             self.run_tool(questions=None, concepts=["5"], embeddings_dir=self.embeddings_dir)
 
-    def test_evaluate_scores_the_outcome_window(self):
-        metrics = self.run_tool(evaluate=True, outcome_window="365")
-        outcome = metrics["outcome"]
-        self.assertEqual(outcome["window_days"], "0-365")
+    def test_a_shorter_window_is_less_likely_than_the_year(self):
+        self.run_tool(window="30")
+        month = pq.read_table(os.path.join(self.output, "predictions.parquet")).to_pandas()
+        self.run_tool()
+        year = pq.read_table(os.path.join(self.output, "predictions.parquet")).to_pandas()
+        self.assertTrue((month["probability"].to_numpy() <= year["probability"].to_numpy() + 1e-7).all())
+
+    def test_evaluate_scores_each_question(self):
+        outcome = self.run_tool(evaluate=True)["outcome"]
         self.assertEqual(set(outcome["per_question"]), {"asthma", "gout"})
         self.assertEqual(outcome["per_question"]["asthma"]["n"], self.n)
         self.assertNotIn("any_of_the_questions", outcome)

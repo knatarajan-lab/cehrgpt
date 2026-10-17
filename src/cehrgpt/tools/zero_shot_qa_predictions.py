@@ -6,7 +6,7 @@ Where zero_shot_motor_predictions can only ask about the MOTOR tasks, this head 
 embedding of its name, so a concept that was never a MOTOR task, or a text, can be asked about. Like that tool it
 does not run the transformer: it reads the features that compute_cehrgpt_features writes (the global and the local
 state, its default; do not use --disable_combine_global_local), loads only the weights of the head from the
-checkpoint, and turns the hazards into probabilities of the windows (see zero_shot_motor_predictions for the
+checkpoint, and turns the hazards into the probability of the window (see zero_shot_motor_predictions for the
 formula, and for the gap between the last event and the prediction time).
 
 The questions are embedded by the encoder the model's question embeddings were made with. The model records it
@@ -16,13 +16,13 @@ probes of the model, see cehrgpt.open_vocab.question_encoder. There is no option
 Questions: --questions "text" ..., --questions_file (one per line), or --concepts ids with --embeddings_dir, the
 folder of question_embeddings, which holds the name of each concept id (question_texts.parquet).
 
-With --evaluate and a label column in the features, the probability of each question in --outcome_window is
+With --evaluate and a label column in the features, the probability of each question in the window is
 compared with the label: AUROC, AUPRC, Brier score. The questions are scored one by one; they are not combined.
 
 Example:
     python -m cehrgpt.tools.zero_shot_qa_predictions --model_path MODEL \
         --features_folder FEATURES/test_features --output_dir OUT \
-        --questions "Type 2 diabetes mellitus" "Heart failure" --windows 30 90 365
+        --questions "Type 2 diabetes mellitus" "Heart failure"
 """
 
 import argparse
@@ -79,11 +79,7 @@ def run(args: argparse.Namespace, encoder=None) -> Dict[str, object]:
     encoder = QuestionEncoder(config_embedder, encoder, device=args.device, fp16=args.fp16, probe_similarity=args.probe_similarity)
     questions = read_questions(args)
     question_vectors = encoder.embed(questions)
-    windows = [parse_window(w) for w in args.windows]
-    outcome_window = parse_window(args.outcome_window) if args.outcome_window else windows[0]
-    if args.evaluate and outcome_window not in windows:
-        windows.append(outcome_window)
-    outcome_at = windows.index(outcome_window)
+    window = parse_window(args.window)
 
     os.makedirs(args.output_dir, exist_ok=True)
     extra = [args.label_column] + ([args.gap_days_column] if args.gap_days_column else [])
@@ -91,26 +87,24 @@ def run(args: argparse.Namespace, encoder=None) -> Dict[str, object]:
     scored: List[np.ndarray] = []
     labels_seen: List[np.ndarray] = []
     total = 0
-    n_windows, n_questions = len(windows), len(questions)
+    n_questions = len(questions)
     question_names = np.array(questions, dtype=object)
-    window_names = np.array([window_name(w) for w in windows], dtype=object)
     for batch in iter_feature_batches(args.features_folder, args.batch_size, extra):
         gap = torch.from_numpy(np.array(batch[args.gap_days_column], dtype=np.float32)) if args.gap_days_column else None
         if gap is None and args.gap_days:
             gap = torch.full((batch["features"].shape[0],), float(args.gap_days))
-        probabilities = predictor.probabilities(torch.from_numpy(batch["features"]), question_vectors, windows, gap).cpu().numpy()
+        probabilities = predictor.probabilities(torch.from_numpy(batch["features"]), question_vectors, [window], gap)[:, 0].cpu().numpy()
         rows = probabilities.shape[0]
         labels = batch.get(args.label_column)
-        # long format, patient major: one row per (patient, window, question)
+        # long format, patient major: one row per (patient, question)
         columns = {
-            "subject_id": pa.array(np.repeat(batch["subject_id"], n_windows * n_questions).astype(np.int64)),
-            "prediction_time_posix": pa.array(np.repeat(batch["prediction_time_posix"], n_windows * n_questions).astype(np.float64)),
-            "question": pa.array(np.tile(question_names, rows * n_windows).tolist(), pa.string()),
-            "window_days": pa.array(np.tile(np.repeat(window_names, n_questions), rows).tolist(), pa.string()),
+            "subject_id": pa.array(np.repeat(batch["subject_id"], n_questions).astype(np.int64)),
+            "prediction_time_posix": pa.array(np.repeat(batch["prediction_time_posix"], n_questions).astype(np.float64)),
+            "question": pa.array(np.tile(question_names, rows).tolist(), pa.string()),
             "probability": pa.array(probabilities.reshape(-1).astype(np.float32)),
         }
         if labels is not None:
-            columns["label"] = pa.array(np.repeat(labels.astype(np.int8), n_windows * n_questions))
+            columns["label"] = pa.array(np.repeat(labels.astype(np.int8), n_questions))
         table = pa.table(columns)
         if writer is None:
             writer = pq.ParquetWriter(os.path.join(args.output_dir, "predictions.parquet"), table.schema)
@@ -119,14 +113,14 @@ def run(args: argparse.Namespace, encoder=None) -> Dict[str, object]:
         if args.evaluate:
             if labels is None:
                 raise ValueError(f"--evaluate needs the label column {args.label_column!r} in the features")
-            scored.append(probabilities[:, outcome_at, :])
+            scored.append(probabilities)
             labels_seen.append(labels)
     if writer is not None:
         writer.close()
     metrics: Dict[str, object] = {
         "num_patients": total,
         "questions": questions,
-        "windows": [window_name(w) for w in windows],
+        "window_days": window_name(window),
         "model_path": args.model_path,
         "question_embedder": {
             "fingerprint": encoder.fingerprint,
@@ -137,7 +131,6 @@ def run(args: argparse.Namespace, encoder=None) -> Dict[str, object]:
         probabilities_of_outcome = np.concatenate(scored)
         labels_of_outcome = np.concatenate(labels_seen)
         metrics["outcome"] = {
-            "window_days": window_name(outcome_window),
             "per_question": {
                 q: evaluate_predictions(labels_of_outcome, probabilities_of_outcome[:, i])
                 for i, q in enumerate(questions)
@@ -158,12 +151,11 @@ def create_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--questions_file", default=None, help="A file with one question per line")
     parser.add_argument("--concepts", nargs="+", default=None, help="Concept ids of questions of the embeddings; needs --embeddings_dir")
     parser.add_argument("--embeddings_dir", default=None, help="The folder of question_embeddings, for the names of --concepts")
-    parser.add_argument("--windows", nargs="+", default=["30", "90", "365"], help='Days after the prediction time: "90" is 0-90, "30-90" is days 30 to 90')
+    parser.add_argument("--window", default="365", help='Days after the prediction time: "365" (default) is the first year, "30-90" is days 30 to 90')
     parser.add_argument("--gap_days", type=float, default=0.0, help="Days between the last event and the prediction time, for every patient")
     parser.add_argument("--gap_days_column", default=None, help="A column with the gap per patient (overrides --gap_days)")
     parser.add_argument("--label_column", default="boolean_value", help="A column with the observed outcome, written next to the predictions")
-    parser.add_argument("--evaluate", action="store_true", help="Compare the probability of each question in --outcome_window with the label column")
-    parser.add_argument("--outcome_window", default=None, help="The window to evaluate (default: the first of --windows)")
+    parser.add_argument("--evaluate", action="store_true", help="Compare the probability of each question with the label column")
     parser.add_argument("--probe_similarity", type=float, default=0.999, help="The lowest cosine similarity between a probe and its stored vector for the encoder to be accepted")
     parser.add_argument("--fp16", action="store_true", help="Run the question encoder in half precision on a GPU (still has to reproduce the probes)")
     parser.add_argument("--batch_size", type=int, default=4096)
