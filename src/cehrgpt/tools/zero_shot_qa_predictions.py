@@ -16,8 +16,8 @@ probes of the model, see cehrgpt.open_vocab.question_encoder. There is no option
 Questions: --questions "text" ..., --questions_file (one per line), or --concepts ids with --embeddings_dir, the
 folder of question_embeddings, which holds the name of each concept id (question_texts.parquet).
 
-With --evaluate and a label column in the features, the probability of each question (and of any of them)
-in --outcome_window is compared with the label: AUROC, AUPRC, Brier score.
+With --evaluate and a label column in the features, the probability of each question in --outcome_window is
+compared with the label: AUROC, AUPRC, Brier score. The questions are scored one by one; they are not combined.
 
 Example:
     python -m cehrgpt.tools.zero_shot_qa_predictions --model_path MODEL \
@@ -39,7 +39,6 @@ import torch
 from cehrgpt.open_vocab.predictor import OpenVocabPredictor
 from cehrgpt.open_vocab.question_encoder import QuestionEncoder
 from cehrgpt.tools.zero_shot_motor_predictions import (
-    combine_probabilities,
     evaluate_predictions,
     iter_feature_batches,
     parse_window,
@@ -137,11 +136,8 @@ def run(args: argparse.Namespace, encoder=None) -> Dict[str, object]:
     if args.evaluate:
         probabilities_of_outcome = np.concatenate(scored)
         labels_of_outcome = np.concatenate(labels_seen)
-        combined = combine_probabilities(probabilities_of_outcome, args.combine, args.num_trials, args.seed)
         metrics["outcome"] = {
             "window_days": window_name(outcome_window),
-            "combine": args.combine if n_questions > 1 else "single question",
-            "any_of_the_questions": evaluate_predictions(labels_of_outcome, combined),
             "per_question": {
                 q: evaluate_predictions(labels_of_outcome, probabilities_of_outcome[:, i])
                 for i, q in enumerate(questions)
@@ -166,11 +162,8 @@ def create_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gap_days", type=float, default=0.0, help="Days between the last event and the prediction time, for every patient")
     parser.add_argument("--gap_days_column", default=None, help="A column with the gap per patient (overrides --gap_days)")
     parser.add_argument("--label_column", default="boolean_value", help="A column with the observed outcome, written next to the predictions")
-    parser.add_argument("--evaluate", action="store_true", help="Compare the probability of the questions (any of them) in --outcome_window with the label column")
+    parser.add_argument("--evaluate", action="store_true", help="Compare the probability of each question in --outcome_window with the label column")
     parser.add_argument("--outcome_window", default=None, help="The window to evaluate (default: the first of --windows)")
-    parser.add_argument("--combine", choices=["independent_or", "max", "sampled"], default="independent_or", help="How several questions become the probability of any of them")
-    parser.add_argument("--num_trials", type=int, default=100)
-    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--probe_similarity", type=float, default=0.999, help="The lowest cosine similarity between a probe and its stored vector for the encoder to be accepted")
     parser.add_argument("--fp16", action="store_true", help="Run the question encoder in half precision on a GPU (still has to reproduce the probes)")
     parser.add_argument("--batch_size", type=int, default=4096)

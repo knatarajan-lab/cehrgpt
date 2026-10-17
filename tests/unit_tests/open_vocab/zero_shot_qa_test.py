@@ -25,7 +25,7 @@ def arguments(model_path, features, output, **kwargs):
         model_path=model_path, features_folder=features, output_dir=output, questions=["asthma", "gout"],
         questions_file=None, concepts=None, embeddings_dir=None, windows=["30", "365"], gap_days=0.0,
         gap_days_column=None, label_column="boolean_value", evaluate=False, outcome_window=None,
-        combine="independent_or", num_trials=10, seed=0, probe_similarity=0.999, fp16=False, batch_size=4,
+        probe_similarity=0.999, fp16=False, batch_size=4,
         device="cpu",
     )
     defaults.update(kwargs)
@@ -89,8 +89,9 @@ class ZeroShotQATest(unittest.TestCase):
         metrics = self.run_tool(evaluate=True, outcome_window="365")
         outcome = metrics["outcome"]
         self.assertEqual(outcome["window_days"], "0-365")
-        self.assertEqual(outcome["any_of_the_questions"]["n"], self.n)
         self.assertEqual(set(outcome["per_question"]), {"asthma", "gout"})
+        self.assertEqual(outcome["per_question"]["asthma"]["n"], self.n)
+        self.assertNotIn("any_of_the_questions", outcome)
 
     def test_another_encoder_is_refused(self):
         for other in (FakeEncoder(name="other"), FakeEncoder(salt="changed")):
