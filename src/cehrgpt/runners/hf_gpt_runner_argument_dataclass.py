@@ -329,6 +329,67 @@ class CehrGPTArguments:
         default=None,
         metadata={"help": "The directory where the concept data is stored."},
     )
+    include_open_vocab: bool = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "Train the patient timeline QA head (open vocabulary head): it answers when any "
+            "question about the future of a patient happens, at the prediction points of the MOTOR "
+            "labels, so include_motor_time_to_event is required. Needs open_vocab_universe_dir, "
+            "open_vocab_embeddings_dir and vocab_dir (the OHDSI folder). Combine with continue_pretrain to add "
+            "the head to a model whose MOTOR and CEHR-GPT training is done, see open_vocab_start_step."
+        },
+    )
+    open_vocab_start_step: int = dataclasses.field(
+        default=0,
+        metadata={
+            "help": "The number of optimizer steps CEHR-GPT and MOTOR train alone before the patient timeline "
+            "QA loss is added: the head is skipped (and costs no compute) while the global step is below it "
+            "and trained from then on. 0 trains it from the first step. The step counts from the beginning "
+            "of the run, also when it resumes from a checkpoint."
+        },
+    )
+    open_vocab_universe_dir: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "Folder with the <domain>_universe.parquet files of the questions, written by "
+            "python -m cehrgpt.open_vocab.question_universe from the OHDSI vocabulary alone. The questions are cut "
+            "to those with a concept of the tokenizer's vocabulary at or below them when the run starts."
+        },
+    )
+    open_vocab_min_patient_count: int = dataclasses.field(
+        default=0,
+        metadata={
+            "help": "Keep only the questions that at least this many patients of the data the tokenizer was "
+            "trained on have (or have a concept below it), from the tokenizer's concept statistics. 0 keeps "
+            "every question with a concept of the vocabulary below it."
+        },
+    )
+    open_vocab_embeddings_dir: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "Folder with the embeddings of the question names, written by "
+            "python -m cehrgpt.open_vocab.question_embeddings."
+        },
+    )
+    open_vocab_num_questions: int = dataclasses.field(
+        default=512,
+        metadata={"help": "The number of questions asked of each batch."},
+    )
+    open_vocab_positive_fraction: float = dataclasses.field(
+        default=0.5,
+        metadata={
+            "help": "The share of the questions of a batch drawn from those that happen to some patient of "
+            "the batch; the rest is drawn from all the questions."
+        },
+    )
+    open_vocab_loss_weight: float = dataclasses.field(
+        default=1.0,
+        metadata={"help": "The weight of the patient timeline QA loss in the total loss."},
+    )
+    open_vocab_residual_dim: int = dataclasses.field(
+        default=256,
+        metadata={"help": "The width of the hidden layer that refines the linear map of a question."},
+    )
     gpu_ids: Optional[str] = dataclasses.field(
         default=None,
         metadata={

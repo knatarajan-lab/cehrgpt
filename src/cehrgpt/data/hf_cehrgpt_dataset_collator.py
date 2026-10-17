@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -7,6 +7,8 @@ from transformers.utils import logging
 
 from cehrgpt.data.cehrgpt_data_processor import CehrGptDataProcessor
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.open_vocab.assets import OpenVocabAssets
+from cehrgpt.open_vocab.labels import build_batch_question_labels
 
 LOG = logging.get_logger("transformers")
 
@@ -28,6 +30,9 @@ class CehrGptDataCollator:
         add_linear_prob_token: bool = False,
         include_age_at_vs_prediction: bool = False,
         include_year_at_vs_prediction: bool = False,
+        open_vocab_assets: Optional[OpenVocabAssets] = None,
+        open_vocab_num_questions: int = 512,
+        open_vocab_positive_fraction: float = 0.5,
     ):
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -81,6 +86,15 @@ class CehrGptDataCollator:
         self.pretraining = pretraining
         self.include_demographics = include_demographics
         self.include_motor_time_to_event = include_motor_time_to_event
+        # The patient timeline QA labels: one set of questions per batch, asked at the prediction points
+        # of the MOTOR labels
+        self.open_vocab_assets = open_vocab_assets if pretraining else None
+        self.open_vocab_num_questions = open_vocab_num_questions
+        self.open_vocab_positive_fraction = open_vocab_positive_fraction
+        if self.open_vocab_assets is not None:
+            if not include_motor_time_to_event:
+                raise ValueError("open_vocab_assets needs include_motor_time_to_event")
+            self._open_vocab_numbers = self.open_vocab_assets.hierarchy.vocab_numbers(tokenizer.get_vocab())
         if self.use_sub_time_tokenization:
             token_to_time_token_mapping = tokenizer.token_to_time_token_mapping
             if not token_to_time_token_mapping:
@@ -109,6 +123,45 @@ class CehrGptDataCollator:
             include_demographics=include_demographics,
             add_linear_prob_token=add_linear_prob_token,
         )
+
+    def _open_vocab_labels(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """
+        The labels of the patient timeline QA head for a batch: the questions asked and the first time
+        each happens after every prediction point of the MOTOR labels.
+
+        The patients are the runs of the attention mask (a packed sequence has several, separated by a
+        zero), and the rows are the True entries of motor_tte_task_indicators in row-major order, which is
+        the order in which the model reads the hidden states at the prediction points.
+        """
+        input_ids = batch["input_ids"].numpy()
+        attention = batch["attention_mask"].numpy() > 0
+        days = batch["epoch_times"].numpy().astype(np.float64) / 86400.0
+        indicators = batch["motor_tte_task_indicators"].numpy().astype(bool)
+        segments = []
+        for b in range(input_ids.shape[0]):
+            edges = np.diff(np.concatenate([[0], attention[b].astype(np.int8), [0]]))
+            for start, end in zip(np.nonzero(edges == 1)[0], np.nonzero(edges == -1)[0]):
+                segments.append(
+                    (
+                        self._open_vocab_numbers[input_ids[b, start:end]],
+                        days[b, start:end],
+                        np.nonzero(indicators[b, start:end])[0],
+                    )
+                )
+        assets = self.open_vocab_assets
+        labels = build_batch_question_labels(
+            assets.hierarchy,
+            assets.question_concept_ids,
+            segments,
+            self.open_vocab_num_questions,
+            self.open_vocab_positive_fraction,
+        )
+        return {
+            "open_vocab_question_rows": torch.from_numpy(labels.question_rows),
+            "open_vocab_event_rows": torch.from_numpy(labels.event_rows),
+            "open_vocab_event_questions": torch.from_numpy(labels.event_questions),
+            "open_vocab_event_times": torch.from_numpy(labels.event_times).to(torch.float32),
+        }
 
     def _try_reverse_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         if not self.pretraining:
@@ -479,6 +532,9 @@ class CehrGptDataCollator:
                 .to(torch.float32)
                 .reshape(bz, -1)
             )
+
+        if self.open_vocab_assets is not None and "motor_tte_task_indicators" in batch:
+            batch.update(self._open_vocab_labels(batch))
 
         return batch
 
