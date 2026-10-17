@@ -9,31 +9,21 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.distributed as dist
-from cehrbert.data_generators.hf_data_generator.meds_utils import (
-    CacheFileCollector,
-    create_dataset_from_meds_reader,
-)
-from cehrbert.runners.hf_runner_argument_dataclass import (
-    DataTrainingArguments,
-    ModelArguments,
-)
-from cehrbert.runners.runner_util import (
-    generate_prepared_ds_path,
-    get_last_hf_checkpoint,
-    get_meds_extension_path,
-    load_parquet_as_dataset,
-)
 from datasets import Dataset, DatasetDict, IterableDatasetDict, load_from_disk
+from meds_to_cehr.arguments import DataTrainingArguments
+from meds_to_cehr.cache_util import CacheFileCollector
+from meds_to_cehr.mapping.cehrgpt import MedToCehrGPTDatasetMapping
+from meds_to_cehr.mapping.cehrgpt_datasets import create_cehrgpt_pretraining_dataset
+from meds_to_cehr.meds.conversion_detection import resolve_meds_conversion_type
+from meds_to_cehr.meds.meds_utils import create_dataset_from_meds_reader
 from transformers import EarlyStoppingCallback, Trainer, set_seed
 from transformers.trainer_utils import is_main_process
 from transformers.utils import logging
 
-from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import (
     CehrGptDataCollator,
     SamplePackingCehrGptDataCollator,
 )
-from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
@@ -45,6 +35,13 @@ from cehrgpt.runners.gpt_runner_util import (
     resolve_attn_implementation,
 )
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
+from cehrgpt.runners.hf_runner_argument_dataclass import ModelArguments
+from cehrgpt.runners.runner_util import (
+    generate_prepared_ds_path,
+    get_last_hf_checkpoint,
+    get_meds_extension_path,
+    load_parquet_as_dataset,
+)
 from cehrgpt.runners.sample_packing_trainer import SamplePackingTrainer
 from cehrgpt.tools.instability_probe import InstabilityProbe
 
@@ -356,6 +353,7 @@ def main():
                             )
                 except FileNotFoundError as e:
                     LOG.warning(e)
+                    resolve_meds_conversion_type(data_args)
                     dataset = create_dataset_from_meds_reader(
                         data_args=data_args,
                         dataset_mappings=[

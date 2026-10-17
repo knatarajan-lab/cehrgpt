@@ -5,25 +5,21 @@ from typing import Dict, List, Optional, Union, Tuple
 import numpy as np
 import polars as pl
 import torch
-from cehrbert.data_generators.hf_data_generator.cache_util import CacheFileCollector
-from cehrbert.data_generators.hf_data_generator.meds_utils import (
-    create_dataset_from_meds_reader,
-)
-from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
-from cehrbert.runners.runner_util import (
-    get_meds_extension_path,
-    load_parquet_as_dataset,
-)
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_from_disk
 from meds import held_out_split, subject_id_field, train_split, tuning_split
-from transformers import TrainingArguments
-from transformers.utils import logging
-
-from cehrgpt.data.hf_cehrgpt_dataset_mapping import (
+from meds_to_cehr.arguments import DataTrainingArguments
+from meds_to_cehr.cache_util import CacheFileCollector
+from meds_to_cehr.mapping.cehrgpt import (
     ExtractTokenizedSequenceDataMapping,
     MedToCehrGPTDatasetMapping,
 )
+from meds_to_cehr.meds.conversion_detection import resolve_meds_conversion_type
+from meds_to_cehr.meds.meds_utils import create_dataset_from_meds_reader
+from transformers import TrainingArguments
+from transformers.utils import logging
+
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
+from cehrgpt.runners.runner_util import get_meds_extension_path, load_parquet_as_dataset
 
 LOG = logging.get_logger("transformers")
 
@@ -75,6 +71,7 @@ def prepare_finetune_dataset(
                     )
         except Exception as e:
             LOG.warning(e)
+            resolve_meds_conversion_type(data_args)
             dataset = create_dataset_from_meds_reader(
                 data_args=data_args,
                 dataset_mappings=[

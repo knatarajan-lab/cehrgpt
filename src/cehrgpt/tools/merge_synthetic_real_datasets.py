@@ -5,12 +5,12 @@ import shutil
 from enum import Enum
 from typing import List
 
-from cehrbert_data.utils.logging_utils import add_console_logging
-from cehrbert_data.utils.spark_utils import validate_table_names
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
-add_console_logging()
+from cehrgpt.omop.spark_utils import validate_table_names
+
+logging.getLogger().setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 COHORT_FOLDER_NAME = "cohorts"

@@ -45,16 +45,14 @@ from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
-from cehrbert.runners.hf_runner_argument_dataclass import (
-    DataTrainingArguments,
-    ModelArguments,
-)
-from cehrbert.runners.runner_util import generate_prepared_ds_path
 from datasets import DatasetDict, load_from_disk
+from meds_to_cehr.arguments import DataTrainingArguments
 from transformers import HfArgumentParser, TrainingArguments
 
 from cehrgpt.data.sample_packing_sampler import SamplePackingBatchSampler
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
+from cehrgpt.runners.hf_runner_argument_dataclass import ModelArguments
+from cehrgpt.runners.runner_util import generate_prepared_ds_path
 
 
 def parse_config(yaml_file: str):

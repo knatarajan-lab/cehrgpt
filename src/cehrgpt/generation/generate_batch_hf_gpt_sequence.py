@@ -7,7 +7,6 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 import torch
-from cehrbert.runners.runner_util import load_parquet_as_dataset
 from tqdm import tqdm
 from transformers import GenerationConfig
 from transformers.utils import logging
@@ -26,6 +25,7 @@ from cehrgpt.runners.gpt_runner_util import (
     read_backbone,
     resolve_attn_implementation,
 )
+from cehrgpt.runners.runner_util import load_parquet_as_dataset
 
 LOG = logging.get_logger("transformers")
 

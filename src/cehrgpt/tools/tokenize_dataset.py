@@ -18,13 +18,13 @@ import argparse
 import os
 from pathlib import Path
 
-from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
-from cehrbert.runners.runner_util import load_parquet_as_dataset
 from datasets import DatasetDict
+from meds_to_cehr.arguments import DataTrainingArguments
+from meds_to_cehr.mapping.cehrgpt_datasets import create_cehrgpt_pretraining_dataset
 from transformers.utils import logging
 
-from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.runners.runner_util import load_parquet_as_dataset
 
 LOG = logging.get_logger("transformers")
 
