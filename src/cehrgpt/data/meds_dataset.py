@@ -2,33 +2,35 @@
 """
 Read a MEDS dataset (a meds_reader database) as patients with visits, by the visit rules of the dataset.
 
-cehrbert chooses the rules of the conversion by the name of a class that is in its code. These functions are the same as
-the ones of cehrbert with the rules (cehrgpt.data.meds_visit_rules) in the place of that name, so they can come from the
-metadata of the dataset or from a yaml file. Datasets without rules are read with the packaged rules of the conversion that the arguments name.
+CEHR-GPT uses one generic visit builder whose matching rules come from cehrgpt.data.meds_visit_rules, so they can be
+declared in the metadata of the dataset or in a YAML file. Datasets without rules are read with the packaged rules of
+the conversion that the arguments name for backwards compatibility.
 """
 
 import collections
 import functools
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Literal, Optional, Tuple
 
 import meds_reader
 import numpy as np
 import pandas as pd
-from cehrbert.data_generators.hf_data_generator import UNKNOWN_VALUE
+from cehrbert.data_generators.hf_data_generator import DEFAULT_INPATIENT_CONCEPT_ID, UNKNOWN_VALUE
 from cehrbert.data_generators.hf_data_generator.cache_util import CacheFileCollector
 from cehrbert.data_generators.hf_data_generator.hf_dataset import apply_cehrbert_dataset_mapping
 from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import DatasetMapping
 from cehrbert.data_generators.hf_data_generator.meds_utils import get_subject_split
 from cehrbert.data_generators.hf_data_generator.patient_block import (
-    mimic_meds_generate_demographics_and_patient_blocks,
-    omop_meds_generate_demographics_and_patient_blocks,
+    PatientBlock,
+    PatientDemographics,
+    merge_patient_blocks,
 )
 from cehrbert.med_extension.schema_extension import CehrBertPatient, Visit
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import Dataset, DatasetDict, Features, Sequence, Value
+from meds.schema import birth_code
 from transformers.utils import logging
 
 from cehrgpt.data.meds_visit_rules import (
@@ -46,11 +48,15 @@ def determine_visit_boundary_method(
     patient: meds_reader.Subject, conversion: YamlDrivenConversion
 ) -> Literal["visit_id", "admission_window"]:
     """Infer how this patient's events define visits, without a dataset-specific conversion class or YAML switch."""
-    if any(getattr(event, "visit_id", None) for event in patient.events):
+    return _determine_visit_boundary_method(patient.events, conversion)
+
+
+def _determine_visit_boundary_method(events, conversion) -> Literal["visit_id", "admission_window"]:
+    if any(getattr(event, "visit_id", None) for event in events):
         return "visit_id"
 
     visit_patterns = conversion.get_other_visit_matching_rules()
-    if any(any(re.match(pattern, event.code) for pattern in visit_patterns) for event in patient.events):
+    if any(any(re.match(pattern, event.code) for pattern in visit_patterns) for event in events):
         return "visit_id"
 
     return "admission_window"
@@ -62,18 +68,147 @@ def generate_demographics_and_patient_blocks_from_rules(
     prediction_time: datetime = None,
     observation_window: int = None,
 ):
-    """Automatically determine visit boundaries and return the resulting patient blocks."""
-    common = dict(
-        patient=patient,
-        conversion=conversion,
-        prediction_time=prediction_time,
-        observation_window=observation_window,
+    """Build visit boundaries directly from a patient's events and the YAML matching rules."""
+    birth_datetime = None
+    race = None
+    gender = None
+    ethnicity = None
+    clinical_events = []
+    observation_start = (
+        prediction_time - timedelta(days=observation_window) if prediction_time and observation_window else None
     )
-    if determine_visit_boundary_method(patient, conversion) == "admission_window":
-        return mimic_meds_generate_demographics_and_patient_blocks(
-            **common, default_visit_id=conversion.default_visit_id
+
+    for event in patient.events:
+        event_code = event.code.upper()
+        if event_code.startswith(birth_code):
+            birth_datetime = event.time
+        elif event_code.startswith("RACE"):
+            race = event.code
+        elif event_code.startswith("GENDER"):
+            gender = event.code
+        elif event_code.startswith("ETHNICITY"):
+            ethnicity = event.code
+        elif event.time is not None:
+            if prediction_time is not None and event.time > prediction_time:
+                break
+            if observation_start is None or event.time >= observation_start:
+                clinical_events.append(event)
+
+    demographics = PatientDemographics(
+        birth_datetime=birth_datetime,
+        race=race,
+        gender=gender,
+        ethnicity=ethnicity,
+    )
+    boundary_method = _determine_visit_boundary_method(clinical_events, conversion)
+    if boundary_method == "visit_id":
+        patient_blocks = _build_visit_id_patient_blocks(patient, clinical_events, conversion)
+    else:
+        patient_blocks = _build_admission_window_patient_blocks(
+            clinical_events,
+            conversion,
+            conversion.default_visit_id,
+            prediction_time,
         )
-    return omop_meds_generate_demographics_and_patient_blocks(**common)
+    return demographics, patient_blocks
+
+
+def _build_visit_id_patient_blocks(patient, events, conversion):
+    """Build blocks from explicit visit ids and place unlinked/out-of-bound events by their own timestamps."""
+    events_by_visit = collections.defaultdict(list)
+    unlinked_events_by_date = collections.defaultdict(list)
+    for event in events:
+        visit_id = getattr(event, "visit_id", None)
+        if visit_id:
+            events_by_visit[visit_id].append(event)
+        else:
+            unlinked_events_by_date[event.time.date()].append(event)
+
+    blocks_by_visit = {}
+    for visit_id, visit_events in events_by_visit.items():
+        block = PatientBlock(visit_events, visit_id, conversion)
+        events_inside_boundary = []
+        for event in block.events:
+            before_start = (block.block_start_time - event.time).days > 1
+            after_end = block.block_end_time and (event.time - block.block_end_time).days > 1
+            if before_start or after_end:
+                unlinked_events_by_date[event.time.date()].append(event)
+            else:
+                events_inside_boundary.append(event)
+        block.events = events_inside_boundary
+        blocks_by_visit[visit_id] = block
+
+    for event_date in list(unlinked_events_by_date):
+        for block in blocks_by_visit.values():
+            if block.get_visit_start_datetime().date() <= event_date <= block.get_visit_end_datetime().date():
+                block.events.extend(unlinked_events_by_date.pop(event_date))
+                block.events.sort(key=lambda event: (event.time, event.code))
+                break
+
+    next_visit_id = max(blocks_by_visit, default=0) + 1
+    for orphan_events in unlinked_events_by_date.values():
+        blocks_by_visit[next_visit_id] = PatientBlock(orphan_events, next_visit_id, conversion)
+        next_visit_id += 1
+
+    blocks = list(blocks_by_visit.values())
+    if unlinked_events_by_date:
+        blocks.sort(key=lambda block: block.block_start_time)
+    return merge_patient_blocks(patient, blocks)
+
+
+def _build_admission_window_patient_blocks(events, conversion, default_visit_id, prediction_time):
+    """Build daily blocks, then join the blocks bounded by admission and discharge events."""
+    events_by_date = collections.defaultdict(list)
+    for event in events:
+        events_by_date[event.time.date()].append(event)
+
+    patient_blocks = []
+    for offset, daily_events in enumerate(events_by_date.values()):
+        patient_blocks.append(PatientBlock(daily_events, default_visit_id + offset, conversion))
+
+    admission_discharge_pairs = []
+    active_ed_index = None
+    active_admission_index = None
+    for index, block in enumerate(patient_blocks):
+        if block.has_ed_admission and active_admission_index is None:
+            active_ed_index = index
+        if block.has_admission:
+            if active_ed_index is not None:
+                hours_since_ed = (block.min_time - patient_blocks[active_ed_index].max_time).total_seconds() / 3600
+                if hours_since_ed <= 24 or active_ed_index == index:
+                    active_admission_index = active_ed_index
+                    active_ed_index = None
+            else:
+                active_admission_index = index
+
+        if block.has_discharge:
+            if active_admission_index is not None:
+                admission_discharge_pairs.append((active_admission_index, index))
+            active_admission_index = None
+            active_ed_index = None
+        elif index == len(patient_blocks) - 1 and active_admission_index is not None and prediction_time is not None:
+            admission_discharge_pairs.append((active_admission_index, index))
+
+    for admission_index, discharge_index in admission_discharge_pairs:
+        visit_id = patient_blocks[admission_index].visit_id
+        for index in range(admission_index, discharge_index + 1):
+            patient_blocks[index].visit_id = visit_id
+            patient_blocks[index].visit_type = DEFAULT_INPATIENT_CONCEPT_ID
+
+        next_index = discharge_index + 1
+        if next_index < len(patient_blocks):
+            next_block = patient_blocks[next_index]
+            discharge_block = patient_blocks[discharge_index]
+            hours_after_discharge = (next_block.min_time - discharge_block.max_time).total_seconds() / 3600
+            if hours_after_discharge < 0:
+                raise ValueError(
+                    f"next block starts at {next_block.min_time}, before discharge at {discharge_block.max_time}"
+                )
+            if hours_after_discharge <= 12:
+                next_block.visit_id = visit_id
+                next_block.visit_type = DEFAULT_INPATIENT_CONCEPT_ID
+
+    return patient_blocks
 
 
 def convert_one_patient_with_rules(
