@@ -256,6 +256,13 @@ class VisitRulesTest(unittest.TestCase):
         with self.assertRaisesRegex(VisitRulesError, "code, pattern and labels"):
             VisitRules.from_dict(self.valid(text_events=[dict(code="BP")]))
 
+    def test_a_stay_without_a_discharge_ends_after_a_week_by_default_and_the_limit_is_a_positive_number(self):
+        self.assertEqual(VisitRules.from_dict({}).max_stay_gap_days, 7.0)
+        self.assertEqual(VisitRules.from_dict(dict(max_stay_gap_days=2)).max_stay_gap_days, 2.0)
+        for bad in (0, -1, "week", True, None):
+            with self.assertRaisesRegex(VisitRulesError, "max_stay_gap_days"):
+                VisitRules.from_dict(dict(max_stay_gap_days=bad))
+
     def test_the_default_rules_only_declare_event_matching_rules(self):
         with open(DEFAULT_RULES) as f:
             rules = VisitRules.from_dict(yaml.safe_load(f))
@@ -609,6 +616,120 @@ class VisitsFromRulesTest(unittest.TestCase):
                 dataset = create_meds_dataset(args)
             self.assertGreater(dataset["train"].num_rows, 0)
             self.assertEqual(set(dataset["train"][0]["visits"]["visit_type"]), visit_types)
+
+# MIMIC-IV style stays whose discharge is missing from the record
+NO_DISCHARGE_EVENTS = [
+    event("MEDS_BIRTH", 0),
+    event("Gender/F", 0),
+    event("Race/White", 0),
+    event("HOSPITAL_ADMISSION//EW EMER.", 10),
+    event("LAB//1", 11),
+    event("LAB//2", 12),
+    event("LAB//3", 100),
+    event("LAB//4", 200),
+    event("LAB//5", 300),
+]
+DISCHARGE_AFTER_A_LONG_GAP_EVENTS = [
+    event("MEDS_BIRTH", 0),
+    event("Gender/F", 0),
+    event("Race/White", 0),
+    event("HOSPITAL_ADMISSION//EW EMER.", 10),
+    event("LAB//1", 11),
+    event("HOSPITAL_DISCHARGE//HOME", 25),
+]
+TWO_ADMISSIONS_EVENTS = [
+    event("MEDS_BIRTH", 0),
+    event("Gender/F", 0),
+    event("Race/White", 0),
+    event("HOSPITAL_ADMISSION//EW EMER.", 10),
+    event("LAB//1", 11),
+    event("HOSPITAL_ADMISSION//ELECTIVE//PHYSICIAN REFERRAL", 40),
+    event("LAB//2", 41),
+    event("HOSPITAL_DISCHARGE//HOME", 43),
+]
+LONE_ADMISSION_EVENTS = [
+    event("MEDS_BIRTH", 0),
+    event("Gender/F", 0),
+    event("Race/White", 0),
+    event("HOSPITAL_ADMISSION//EW EMER.", 10),
+    event("LAB//1", 200),
+]
+
+
+@unittest.skipIf(converter() is None, "meds_reader_convert is not installed")
+class StaysWithoutADischargeTest(unittest.TestCase):
+    """A hospitalization whose discharge is not in the record must end, and not last until the cutoff."""
+
+    START = dt.datetime(2020, 1, 1)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp()
+        cls.no_discharge = build_database(cls.root, "no_discharge", NO_DISCHARGE_EVENTS)
+        cls.late_discharge = build_database(cls.root, "late_discharge", DISCHARGE_AFTER_A_LONG_GAP_EVENTS)
+        cls.two_admissions = build_database(cls.root, "two_admissions", TWO_ADMISSIONS_EVENTS)
+        cls.lone_admission = build_database(cls.root, "lone_admission", LONE_ADMISSION_EVENTS)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def visits(self, database, cutoff_day=None, **rules):
+        path = None
+        if rules:
+            path = os.path.join(self.root, "rules_%s.yaml" % "_".join(f"{k}{v}" for k, v in rules.items()))
+            with open(path, "w") as f:
+                yaml.safe_dump(rules, f)
+        conversion = YamlDrivenConversion(resolve_visit_rules(path), default_visit_id=1)
+        cutoff = None if cutoff_day is None else self.START + dt.timedelta(days=cutoff_day)
+        with meds_reader.SubjectDatabase(database) as db:
+            visits = convert_one_patient_with_rules(db[1], conversion, prediction_time=cutoff)["visits"]
+
+        def day(value):
+            return None if value is None else (value - self.START).days
+
+        return [(v["visit_type"], day(v["visit_start_datetime"]), day(v["visit_end_datetime"])) for v in visits]
+
+    def test_the_stay_ends_where_its_events_stop_and_the_later_events_are_not_part_of_it(self):
+        self.assertEqual(
+            self.visits(self.no_discharge),
+            [("Visit/IP", 10, 12), ("Visit/OP", 100, 100), ("Visit/OP", 200, 200), ("Visit/OP", 300, 300)],
+        )
+
+    def test_a_cutoff_months_after_the_last_event_of_the_stay_does_not_leave_it_open(self):
+        self.assertEqual(
+            self.visits(self.no_discharge, cutoff_day=250),
+            [("Visit/IP", 10, 12), ("Visit/OP", 100, 100), ("Visit/OP", 200, 200)],
+        )
+
+    def test_a_cutoff_right_after_the_last_event_of_the_stay_leaves_it_open(self):
+        self.assertEqual(self.visits(self.no_discharge, cutoff_day=13), [("Visit/IP", 10, None)])
+        # a week later is still within the limit, a day more is not
+        self.assertEqual(self.visits(self.no_discharge, cutoff_day=19), [("Visit/IP", 10, None)])
+        self.assertEqual(self.visits(self.no_discharge, cutoff_day=20), [("Visit/IP", 10, 12)])
+
+    def test_a_discharge_ends_a_stay_however_long_it_took(self):
+        # 14 days without an event inside the stay: the discharge still closes it
+        self.assertEqual(
+            self.visits(self.late_discharge),
+            [("Visit/IP", 10, 25)],
+        )
+
+    def test_a_stay_without_a_discharge_ends_before_the_next_admission(self):
+        self.assertEqual(
+            self.visits(self.two_admissions),
+            [("Visit/IP", 10, 11), ("Visit/IP", 40, 43)],
+        )
+
+    def test_an_admission_with_nothing_after_it_is_an_inpatient_visit_of_its_own(self):
+        self.assertEqual(self.visits(self.lone_admission), [("Visit/IP", 10, 10), ("Visit/OP", 200, 200)])
+
+    def test_the_limit_is_a_rule_of_the_user(self):
+        # longer: the stay reaches the events of day 100 (88 days later) only with a limit of that size
+        self.assertEqual(self.visits(self.no_discharge, max_stay_gap_days=100)[0], ("Visit/IP", 10, 300))
+        # shorter: even the next day is too far
+        self.assertEqual(self.visits(self.no_discharge, max_stay_gap_days=0.5)[:2], [("Visit/IP", 10, 10), ("Visit/OP", 11, 11)])
+
 
 @unittest.skipIf(converter() is None, "meds_reader_convert is not installed")
 class PrepareFinetuneDatasetTest(unittest.TestCase):

@@ -58,7 +58,14 @@ For the events that are placed by the rules, daily blocks are joined using these
 - an ED event can start a stay when an admission follows within 24 hours;
 - a discharge closes the stay;
 - a block beginning within 12 hours after discharge remains part of that stay; and
-- an admission still active at prediction time produces an open visit with `visit_end_datetime: null`.
+- a stay that never gets a discharge ends at its last event after `max_stay_gap_days` (rule, default 7) without an
+  event, so it cannot last until the next admission or the cutoff; and
+- an admission still active at prediction time produces an open visit with `visit_end_datetime: null`, if the cutoff is
+  within `max_stay_gap_days` of its last event.
+
+On real MIMIC-IV (950 patients, with cutoffs), this changes 19 patients: stub visits typed by a raw
+`HOSPITAL_ADMISSION//` code (an admission with no discharge before the next one) go from 27 to 3, and the longest
+inpatient stay is unchanged at 11.9 days.
 
 ### Inpatient and ED timing
 
@@ -117,4 +124,4 @@ PYTHONPATH=src python -m pytest tests/unit_tests/data/meds_visit_rules_test.py -
 git diff --check
 ```
 
-Current result: `30 passed` for the focused MEDS rules and timeline suite.
+Current result: `38 passed` for the focused MEDS rules and timeline suite.

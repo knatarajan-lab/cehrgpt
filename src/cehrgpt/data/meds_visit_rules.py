@@ -25,6 +25,10 @@ For ``visit_id`` data, the time of an event is always the ground truth. An event
 more than a day before its start or after its end (a problem list entry from years ago, a drug that is recorded long
 after the visit) is taken out of that visit and put where its own time is.
 
+``max_stay_gap_days`` (default 7): a stay with an admission but no discharge event ends at its last event once this many
+days pass without any, instead of lasting until the next admission or the end of the record. Stays that have a discharge
+event are not affected, however long they are.
+
 Visits are built from the visit ids that the events carry and, for the events that have none, from the admission and
 discharge events and the time between them (see ``meds_dataset._build_patient_blocks``).
 """
@@ -45,7 +49,8 @@ LOG = logging.get_logger("transformers")
 
 DEFAULT_RULES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visit_rules", "defaults.yaml")
 PATTERN_LISTS = ("visit_events", "ed_admission_events", "admission_events", "discharge_events")
-KEYS = PATTERN_LISTS + ("text_events",)
+KEYS = PATTERN_LISTS + ("text_events", "max_stay_gap_days")
+DEFAULT_MAX_STAY_GAP_DAYS = 7.0
 
 
 class VisitRulesError(ValueError):
@@ -66,6 +71,8 @@ class VisitRules:
     admission_events: List[str] = dataclasses.field(default_factory=list)
     discharge_events: List[str] = dataclasses.field(default_factory=list)
     text_events: List[TextEventRule] = dataclasses.field(default_factory=list)
+    # a stay that has no discharge event ends after this many days without an event
+    max_stay_gap_days: float = DEFAULT_MAX_STAY_GAP_DAYS
     # where the rules came from, for the log and for error messages
     source: str = ""
 
@@ -99,7 +106,10 @@ class VisitRules:
                     f"{len(entry['labels'])} labels"
                 )
             text_events.append(TextEventRule(entry["code"], entry["pattern"], list(entry["labels"])))
-        return cls(text_events=text_events, source=source, **lists)
+        gap = values.get("max_stay_gap_days", DEFAULT_MAX_STAY_GAP_DAYS)
+        if isinstance(gap, bool) or not isinstance(gap, (int, float)) or gap <= 0:
+            raise VisitRulesError(f"max_stay_gap_days ({source}) must be a number of days above 0, got {gap!r}")
+        return cls(text_events=text_events, max_stay_gap_days=float(gap), source=source, **lists)
 
     def to_dict(self) -> Dict[str, Any]:
         result: Dict[str, Any] = {}
@@ -107,6 +117,7 @@ class VisitRules:
             result[key] = list(getattr(self, key))
         if self.text_events:
             result["text_events"] = [dataclasses.asdict(rule) for rule in self.text_events]
+        result["max_stay_gap_days"] = self.max_stay_gap_days
         return result
 
 

@@ -84,3 +84,8 @@ text_events:
   labels:
   - LAB//50827//UNK//1 # MIMIC-IV MEDS derived concept
   - LAB//50827//UNK//2 # MIMIC-IV MEDS derived concept
+
+# A stay that has an admission but no discharge event ends at its last event after this many days without any event
+# (in real MIMIC-IV stays, 99.9% of the gaps between event days are under 3.1 days). Days; a stay with a discharge
+# event is not affected, however long it is.
+max_stay_gap_days: 7

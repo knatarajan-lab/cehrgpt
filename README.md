@@ -179,8 +179,10 @@ visit_events:
   - Visit/
 ```
 
-If any event has a `visit_id`, those IDs define the boundaries. Otherwise, a matching `visit_events` event defines an
-explicit visit. When neither is present, admission and discharge events define the visit windows.
+Events with a `visit_id` make one visit per id. The events that have none join the visit whose dates contain them, and
+the ones that are left are joined into stays by the admission, ED and discharge patterns. A stay that never gets a
+discharge event ends where its events stop, after `max_stay_gap_days` (default 7) without any, instead of lasting until
+the next admission or the end of the record; set `max_stay_gap_days` in your rules file to change it.
 
 The shared CEHR-GPT timeline mapping starts every detected visit with `[VS]` and ends every completed visit with `[VE]`.
 A visit that is still active at a prediction cutoff remains open without `[VE]`. The mapping inserts `D...` tokens

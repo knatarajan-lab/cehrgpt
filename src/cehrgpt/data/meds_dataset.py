@@ -92,8 +92,10 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
     2. Events without a visit id (and the ones taken out) join the block whose dates contain their date.
     3. Rules. The events that are still alone are put in one block per day, and the blocks are joined into stays by the
        ED, admission and discharge patterns: an ED block followed by an admission within 24 hours begins a stay, a
-       discharge closes it, and a block that starts within 12 hours after a discharge stays with it. A stay that is
-       still open at the prediction time stays open. A day without such events is a visit of its own.
+       discharge closes it, and a block that starts within 12 hours after a discharge stays with it. A stay that
+       never gets a discharge (before the next admission, or before the record ends) ends where its events stop:
+       after ``max_stay_gap_days`` without one. It stays open only if the prediction time is that close to its last
+       event. A day without such events is a visit of its own.
 
     A dataset with visit ids is built by 1 and 2. A dataset without any, such as MIMIC-IV, is built by 3. A dataset
     with some of both gets both. The blocks of a visit that contain each other are merged when there are visit ids.
@@ -141,6 +143,18 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
     ]
     admission_discharge_pairs = []
     incomplete_pairs = set()
+    max_gap_hours = conversion.rules.max_stay_gap_days * 24
+
+    def hours_between(earlier, later):
+        return (daily_blocks[later].min_time - daily_blocks[earlier].max_time).total_seconds() / 3600
+
+    def end_of_events(start, last):
+        """The last block, up to last, that follows the start without a gap of more than max_stay_gap_days."""
+        end = start
+        while end < last and hours_between(end, end + 1) <= max_gap_hours:
+            end += 1
+        return end
+
     active_ed_index = None
     active_admission_index = None
     for index, block in enumerate(daily_blocks):
@@ -148,11 +162,15 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
             active_ed_index = index
         if block.has_admission:
             if active_ed_index is not None:
-                hours_since_ed = (block.min_time - daily_blocks[active_ed_index].max_time).total_seconds() / 3600
-                if hours_since_ed <= 24 or active_ed_index == index:
+                if hours_between(active_ed_index, index) <= 24 or active_ed_index == index:
                     active_admission_index = active_ed_index
                     active_ed_index = None
             else:
+                if active_admission_index is not None:
+                    # the stay before had no discharge: it ends where its events stop
+                    admission_discharge_pairs.append(
+                        (active_admission_index, end_of_events(active_admission_index, index - 1))
+                    )
                 active_admission_index = index
 
         if block.has_discharge:
@@ -160,9 +178,18 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
                 admission_discharge_pairs.append((active_admission_index, index))
             active_admission_index = None
             active_ed_index = None
-        elif index == len(daily_blocks) - 1 and active_admission_index is not None and prediction_time is not None:
-            pair = (active_admission_index, index)
-            admission_discharge_pairs.append(pair)
+
+    if active_admission_index is not None:
+        # no discharge until the end of the record
+        last_index = len(daily_blocks) - 1
+        pair = (active_admission_index, end_of_events(active_admission_index, last_index))
+        admission_discharge_pairs.append(pair)
+        hours_to_prediction = (
+            (prediction_time - daily_blocks[last_index].max_time).total_seconds() / 3600
+            if prediction_time is not None
+            else None
+        )
+        if pair[1] == last_index and hours_to_prediction is not None and hours_to_prediction <= max_gap_hours:
             incomplete_pairs.add(pair)
 
     for admission_index, discharge_index in admission_discharge_pairs:

@@ -41,9 +41,14 @@ Visit-ID data (OMOP) is built by 1 and 2, data without visit ids (MIMIC-IV) by 3
 both. Contained visits are merged when there are visit ids.
 
 In 3, events are first grouped into daily blocks. ED activity can begin a stay when followed by
-an admission within 24 hours. A discharge closes the stay. An event block starting within 12 hours after discharge is
-kept with that stay. If a prediction cutoff occurs during an active admission, the final visit remains open by setting
-`visit_end_datetime` to `None`.
+an admission within 24 hours. A discharge closes the stay, however long it took. An event block starting within 12 hours
+after discharge is kept with that stay.
+
+A stay that never gets a discharge (before the next admission, or before the record ends) must not last forever. It ends
+at its last event once `max_stay_gap_days` (a rule, default 7) pass without an event; the default comes from real
+MIMIC-IV stays, where 99.9% of the gaps between event days are under 3.1 days. If a prediction cutoff occurs during an
+active admission, the final visit remains open by setting `visit_end_datetime` to `None`, but only when the cutoff is
+within `max_stay_gap_days` of its last event; a cutoff months later finds a closed stay.
 
 ## CEHR-GPT token semantics
 
@@ -94,7 +99,7 @@ Run the focused suite after changing this feature:
 PYTHONPATH=src python -m pytest tests/unit_tests/data/meds_visit_rules_test.py -q
 ```
 
-The current expected result is 30 passing tests. Also run `git diff --check` and the broader project tests when the
+The current expected result is 38 passing tests. Also run `git diff --check` and the broader project tests when the
 environment has all optional dependencies.
 
 Tests should continue to cover:
