@@ -40,9 +40,11 @@ have none. There is no per-patient choice between two methods.
 Visit-ID data (OMOP) is built by 1 and 2, data without visit ids (MIMIC-IV) by 3, and a patient with some of both gets
 both. Contained visits are merged when there are visit ids.
 
-In 3, events are first grouped into daily blocks. ED activity can begin a stay when followed by
-an admission within 24 hours. A discharge closes the stay, however long it took. An event block starting within 12 hours
-after discharge is kept with that stay.
+In 3, events are first grouped into daily blocks; a day is cut where a discharge is followed by an ED or admission event
+(at the same time, the discharge comes first), so back-to-back stays are two. ED activity begins a stay when followed by
+an admission within 24 hours; an ED visit further before an admission stays a visit of its own and the stay starts at the
+admission. A discharge closes the stay, however long it took. An event block starting within 12 hours after discharge is
+kept with that stay, unless it starts a stay itself (ED or admission).
 
 A stay that never gets a discharge (before the next admission, or before the record ends) must not last forever. It ends
 at its last event once `max_stay_gap_days` (a rule, default 7) pass without an event; the default comes from real
@@ -99,7 +101,7 @@ Run the focused suite after changing this feature:
 PYTHONPATH=src python -m pytest tests/unit_tests/data/meds_visit_rules_test.py -q
 ```
 
-The current expected result is 38 passing tests. Also run `git diff --check` and the broader project tests when the
+The current expected result is 40 passing tests. Also run `git diff --check` and the broader project tests when the
 environment has all optional dependencies.
 
 Tests should continue to cover:

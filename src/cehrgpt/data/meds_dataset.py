@@ -9,6 +9,7 @@ and MIMIC defaults, and a YAML file of the user for a dataset that codes its vis
 import collections
 import functools
 import os
+import re
 from datetime import datetime, timedelta
 from typing import List, Optional, Tuple
 
@@ -83,6 +84,38 @@ def generate_demographics_and_patient_blocks_from_rules(
     return demographics, patient_blocks
 
 
+def _split_days_at_discharges(days_of_events, conversion):
+    """
+    Cut a day where a stay ends and another begins, so that the discharge is not in the block of the next stay.
+
+    A block is one day, but a patient can be discharged and be back (or be moved from observation to an inpatient stay,
+    with the discharge and the admission at the same time) within that day. The events from the ED or admission event
+    on, and those after the discharge, go in a block of their own.
+    """
+    discharge = [re.compile(rule) for rule in conversion.get_discharge_matching_rules()]
+    starts = [
+        re.compile(rule)
+        for rule in conversion.get_ed_admission_matching_rules() + conversion.get_admission_matching_rules()
+    ]
+
+    def is_discharge(event):
+        return any(rule.match(event.code) for rule in discharge)
+
+    def is_start(event):
+        return any(rule.match(event.code) for rule in starts) and not is_discharge(event)
+
+    for events in days_of_events:
+        # at the same time the discharge comes first: it is the end of the stay that the admission follows
+        events = sorted(events, key=lambda event: (event.time, not is_discharge(event), event.code))
+        part = []
+        for event in events:
+            if part and any(is_discharge(e) for e in part) and is_start(event):
+                yield part
+                part = []
+            part.append(event)
+        yield part
+
+
 def _build_patient_blocks(patient, events, conversion, prediction_time):
     """
     Build the visits of a patient: the visit ids that the events carry, then the rules for the events that have none.
@@ -139,7 +172,7 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
     next_visit_id = max([*blocks_by_visit, conversion.default_visit_id - 1]) + 1
     daily_blocks = [
         PatientBlock(daily_events, next_visit_id + offset, conversion)
-        for offset, daily_events in enumerate(unlinked_by_date.values())
+        for offset, daily_events in enumerate(_split_days_at_discharges(unlinked_by_date.values(), conversion))
     ]
     admission_discharge_pairs = []
     incomplete_pairs = set()
@@ -161,17 +194,20 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
         if block.has_ed_admission and active_admission_index is None:
             active_ed_index = index
         if block.has_admission:
-            if active_ed_index is not None:
-                if hours_between(active_ed_index, index) <= 24 or active_ed_index == index:
-                    active_admission_index = active_ed_index
-                    active_ed_index = None
+            if active_ed_index is not None and (
+                active_ed_index == index or hours_between(active_ed_index, index) <= 24
+            ):
+                # the ED visit leads to this admission and the stay starts with it
+                active_admission_index = active_ed_index
             else:
+                # an ED visit more than 24 hours before stays a visit of its own; the stay starts at the admission
                 if active_admission_index is not None:
                     # the stay before had no discharge: it ends where its events stop
                     admission_discharge_pairs.append(
                         (active_admission_index, end_of_events(active_admission_index, index - 1))
                     )
                 active_admission_index = index
+            active_ed_index = None
 
         if block.has_discharge:
             if active_admission_index is not None:
@@ -208,7 +244,8 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
                 raise ValueError(
                     f"next block starts at {next_block.min_time}, before discharge at {discharge_block.max_time}"
                 )
-            if hours_after_discharge <= 12:
+            # a block that starts a stay of its own (an ED visit or an admission) is not the tail of this one
+            if hours_after_discharge <= 12 and not next_block.has_ed_or_hospital_admission:
                 next_block.visit_id = visit_id
                 next_block.visit_type = DEFAULT_INPATIENT_CONCEPT_ID
 

@@ -654,6 +654,26 @@ LONE_ADMISSION_EVENTS = [
     event("HOSPITAL_ADMISSION//EW EMER.", 10),
     event("LAB//1", 200),
 ]
+ED_THEN_A_LATER_ADMISSION_EVENTS = [
+    event("MEDS_BIRTH", 0),
+    event("Gender/F", 0),
+    event("Race/White", 0),
+    event("TRANSFER_TO//ED//Emergency Department", 10),
+    event("LAB//ED", 10),
+    event("HOSPITAL_ADMISSION//ELECTIVE//PHYSICIAN REFERRAL", 14),
+    event("LAB//1", 15),
+    event("HOSPITAL_DISCHARGE//HOME", 17),
+]
+BACK_TO_BACK_STAYS_EVENTS = [
+    event("MEDS_BIRTH", 0),
+    event("Gender/F", 0),
+    event("Race/White", 0),
+    event("HOSPITAL_ADMISSION//EU OBSERVATION//EMERGENCY ROOM", 10),
+    event("HOSPITAL_DISCHARGE//UNK", 11),
+    event("HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM", 11),
+    event("LAB//1", 13),
+    event("HOSPITAL_DISCHARGE//HOME", 15),
+]
 
 
 @unittest.skipIf(converter() is None, "meds_reader_convert is not installed")
@@ -669,6 +689,8 @@ class StaysWithoutADischargeTest(unittest.TestCase):
         cls.late_discharge = build_database(cls.root, "late_discharge", DISCHARGE_AFTER_A_LONG_GAP_EVENTS)
         cls.two_admissions = build_database(cls.root, "two_admissions", TWO_ADMISSIONS_EVENTS)
         cls.lone_admission = build_database(cls.root, "lone_admission", LONE_ADMISSION_EVENTS)
+        cls.back_to_back = build_database(cls.root, "back_to_back", BACK_TO_BACK_STAYS_EVENTS)
+        cls.ed_then_admission = build_database(cls.root, "ed_then_admission", ED_THEN_A_LATER_ADMISSION_EVENTS)
 
     @classmethod
     def tearDownClass(cls):
@@ -689,6 +711,16 @@ class StaysWithoutADischargeTest(unittest.TestCase):
             return None if value is None else (value - self.START).days
 
         return [(v["visit_type"], day(v["visit_start_datetime"]), day(v["visit_end_datetime"])) for v in visits]
+
+    def test_a_discharge_and_the_next_admission_on_the_same_day_are_two_stays(self):
+        self.assertEqual(self.visits(self.back_to_back), [("Visit/IP", 10, 11), ("Visit/IP", 11, 15)])
+
+    def test_an_ed_visit_days_before_an_admission_does_not_swallow_the_stay(self):
+        # the ED is more than 24 hours before the admission, so it is a visit of its own and the stay still happens
+        self.assertEqual(
+            self.visits(self.ed_then_admission),
+            [("TRANSFER_TO//ED//Emergency Department", 10, 10), ("Visit/IP", 14, 17)],
+        )
 
     def test_the_stay_ends_where_its_events_stop_and_the_later_events_are_not_part_of_it(self):
         self.assertEqual(
