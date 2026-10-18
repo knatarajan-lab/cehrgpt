@@ -1,0 +1,68 @@
+# Visit rules of MIMIC-IV as MEDS (MEDS_transforms, MIMIC-IV 2.2), whose events have no visit ids:
+# the visits are built from the admissions, the discharges and the ED events in time.
+#
+# These are the rules of MedsToBertMimic4, to the letter, so that the visits are the same as before.
+# Checked on the 364,627 subjects of that dataset:
+#   HOSPITAL_ADMISSION//<type>//<location> and HOSPITAL_DISCHARGE//<disposition>   one pair per hospital stay
+#   TRANSFER_TO//ED//Emergency Department                                          the ED events that are matched
+#   ED_REGISTRATION has no "//" after it in this dataset, so the pattern ED_REGISTRATION// below never matches it.
+#   TRANSFER_TO//ED covers nearly all of the ED stays (it changes 1 visit in 5,925 on a sample of 400 subjects);
+#   write ED_REGISTRATION without the slashes to match it too.
+# The ICU stays (ICU_ADMISSION//, ICU_DISCHARGE//) are inside a hospital stay and are not visits of their own.
+#
+# Declare it in <meds_reader database>/metadata/visit_rules.yaml, or pass --meds_visit_rules_file mimic4.
+strategy: admission_window
+visit_events: []
+ed_admission_events:
+- ED_REGISTRATION//
+- TRANSFER_TO//ED
+admission_events:
+- HOSPITAL_ADMISSION//
+discharge_events:
+- HOSPITAL_DISCHARGE//
+# Measurements that MIMIC-IV keeps as text ("134/82", "127.5"): one numeric event per group of the pattern
+text_events:
+- code: Blood Pressure
+  pattern: (\d+)/(\d+)
+  labels:
+  - Systolic Blood Pressure
+  - Diastolic Blood Pressure
+- code: Blood Pressure Lying
+  pattern: (\d+)/(\d+)
+  labels:
+  - Systolic Blood Pressure Lying
+  - Diastolic Blood Pressure Lying
+- code: Blood Pressure Sitting
+  pattern: (\d+)/(\d+)
+  labels:
+  - Systolic Blood Pressure Sitting
+  - Diastolic Blood Pressure Sitting
+- code: Blood Pressure Standing (1 min)
+  pattern: (\d+)/(\d+)
+  labels:
+  - Systolic Blood Pressure Standing (1 min)
+  - Diastolic Blood Pressure Standing (1 min)
+- code: Blood Pressure Standing (3 mins)
+  pattern: (\d+)/(\d+)
+  labels:
+  - Systolic Blood Pressure Standing (3 mins)
+  - Diastolic Blood Pressure Standing (3 mins)
+- code: Weight (Lbs)
+  pattern: (\d+)
+  labels:
+  - Weight (Lbs)
+- code: Height (Inches)
+  pattern: (\d+)
+  labels:
+  - Height (Inches)
+- code: BMI (kg/m2)
+  pattern: (\d+)
+  labels:
+  - BMI (kg/m2)
+- code: LAB//50827//UNK
+  pattern: (\d+)/(\d+)
+  labels:
+  - LAB//50827//UNK//1
+  - LAB//50827//UNK//2
+# disconnect_problem_list_events does not apply to this strategy: the events are put into visits by their time
+disconnect_problem_list_events: true

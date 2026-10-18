@@ -5,7 +5,11 @@ a discharge. They depend on how the dataset was made and they change, so they ar
   * the dataset declares them in ``<meds_reader database>/metadata/visit_rules.yaml`` (the file comes from the
     ``metadata`` folder of the MEDS dataset, which meds_reader_convert copies);
   * a yaml file given with ``--meds_visit_rules_file`` overrides them: the keys that it has replace the ones of the
-    dataset, the others stay.
+    dataset, the others stay. ``omop`` and ``mimic4`` stand for the two files that come with cehrgpt (visit_rules/).
+
+The two files are the rules of the two kinds of datasets that cehrgpt is used on: MEDS made from OMOP (``omop``) and
+MEDS made from MIMIC-IV with MEDS_transforms (``mimic4``). A dataset that declares nothing is read with the one that
+matches ``--meds_to_cehrbert_conversion_type``.
 
     strategy: visit_id            # how the events are put into visits, see STRATEGIES
     visit_events: ["Visit/"]      # the event that is the visit: its code is the visit type, its time the start
@@ -16,9 +20,15 @@ a discharge. They depend on how the dataset was made and they change, so they ar
       - code: "Blood Pressure"
         pattern: '(\\d+)/(\\d+)'
         labels: ["Systolic Blood Pressure", "Diastolic Blood Pressure"]
+    disconnect_problem_list_events: true   # default true, see below
 
 The codes are regular expressions that are matched from the start of the code of an event (re.match), so a code is
 written as it is, and ``"Visit/"`` matches every code that starts with it.
+
+``disconnect_problem_list_events`` (default true, strategy ``visit_id`` only): the time of an event is the ground truth. An
+event that has the id of a visit but happened more than a day before its start or after its end (a problem list entry
+from years ago, a drug that is recorded long after the visit) is taken out of that visit and put where its own time is.
+Set it to false to keep every event in the visit of its id.
 
 The strategies are the two ways of cehrbert to find the visits; the rules above are the same for both:
   * ``visit_id``: the events carry the id of their visit (a ``visit_id`` property), as in a dataset made from OMOP.
@@ -45,11 +55,14 @@ from transformers.utils import logging
 LOG = logging.get_logger("transformers")
 
 METADATA_FILE = os.path.join("metadata", "visit_rules.yaml")
+PACKAGED_RULES_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visit_rules")
+# the rules that come with cehrgpt, by name; the conversion of cehrbert that each one takes the place of
+PACKAGED_RULES = {"omop": "MedsToCehrbertOMOP", "mimic4": "MedsToBertMimic4"}
 STRATEGY_VISIT_ID = "visit_id"
 STRATEGY_ADMISSION_WINDOW = "admission_window"
 STRATEGIES = (STRATEGY_VISIT_ID, STRATEGY_ADMISSION_WINDOW)
 PATTERN_LISTS = ("visit_events", "ed_admission_events", "admission_events", "discharge_events")
-KEYS = ("strategy",) + PATTERN_LISTS + ("text_events",)
+KEYS = ("strategy",) + PATTERN_LISTS + ("text_events", "disconnect_problem_list_events")
 
 
 class VisitRulesError(ValueError):
@@ -71,6 +84,7 @@ class VisitRules:
     admission_events: List[str] = dataclasses.field(default_factory=list)
     discharge_events: List[str] = dataclasses.field(default_factory=list)
     text_events: List[TextEventRule] = dataclasses.field(default_factory=list)
+    disconnect_problem_list_events: bool = True
     # where the rules came from, for the log and for error messages
     source: str = ""
 
@@ -107,7 +121,12 @@ class VisitRules:
                     f"{len(entry['labels'])} labels"
                 )
             text_events.append(TextEventRule(entry["code"], entry["pattern"], list(entry["labels"])))
-        return cls(strategy=strategy, text_events=text_events, source=source, **lists)
+        disconnect = values.get("disconnect_problem_list_events", True)
+        if not isinstance(disconnect, bool):
+            raise VisitRulesError(f"disconnect_problem_list_events ({source}) must be true or false, got {disconnect!r}")
+        return cls(
+            strategy=strategy, text_events=text_events, disconnect_problem_list_events=disconnect, source=source, **lists
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         result: Dict[str, Any] = {"strategy": self.strategy}
@@ -115,11 +134,37 @@ class VisitRules:
             result[key] = list(getattr(self, key))
         if self.text_events:
             result["text_events"] = [dataclasses.asdict(rule) for rule in self.text_events]
+        result["disconnect_problem_list_events"] = self.disconnect_problem_list_events
         return result
 
 
+def packaged_rules_path(name: str) -> str:
+    """The path of the rules file that comes with cehrgpt under this name ("omop" or "mimic4")."""
+    if name not in PACKAGED_RULES:
+        raise VisitRulesError(f"There are no packaged visit rules called {name!r}; they are {sorted(PACKAGED_RULES)}")
+    return os.path.join(PACKAGED_RULES_FOLDER, f"{name}.yaml")
+
+
+def packaged_rules_for_conversion(conversion_type: str) -> VisitRules:
+    """
+    The packaged rules that take the place of a conversion of cehrbert that is named by its class
+    (meds_to_cehrbert_conversion_type), for a dataset that does not declare rules.
+    """
+    for name, conversion in PACKAGED_RULES.items():
+        if conversion == conversion_type:
+            path = packaged_rules_path(name)
+            return VisitRules.from_dict(load_rules_file(path), source=path)
+    raise VisitRulesError(
+        f"The dataset declares no visit rules and {conversion_type!r} is not a conversion with packaged rules "
+        f"({sorted(PACKAGED_RULES.values())}). Declare the rules of the dataset in {METADATA_FILE} or pass "
+        "--meds_visit_rules_file."
+    )
+
+
 def load_rules_file(path: str) -> Dict[str, Any]:
-    """The keys of a visit rules file (yaml, which includes json)."""
+    """The keys of a visit rules file (yaml, which includes json), or of a packaged one by its name."""
+    if path in PACKAGED_RULES:
+        path = packaged_rules_path(path)
     path = os.path.expanduser(path)
     with open(path) as f:
         values = yaml.safe_load(f)
@@ -143,7 +188,7 @@ def resolve_visit_rules(data_folder: str, rules_file: Optional[str] = None) -> O
     if declared is not None:
         sources.append(metadata_path)
     if override is not None:
-        sources.append(os.path.expanduser(rules_file))
+        sources.append(packaged_rules_path(rules_file) if rules_file in PACKAGED_RULES else os.path.expanduser(rules_file))
     rules = VisitRules.from_dict({**(declared or {}), **(override or {})}, source=" + ".join(sources))
     LOG.info("Visit rules from %s: %s", rules.source, rules.to_dict())
     return rules
@@ -191,7 +236,8 @@ class AdmissionWindowConversion(_ConfiguredRules, MedsToBertMimic4):
 
 
 def build_conversion(rules: VisitRules, default_visit_id: int = 1, **kwargs) -> MedsToCehrBertConversion:
-    """The cehrbert conversion that follows the rules."""
+    """The cehrbert conversion that follows the rules (the setting of the rules wins over a keyword argument)."""
+    kwargs["disconnect_problem_list_events"] = rules.disconnect_problem_list_events
     if rules.strategy == STRATEGY_VISIT_ID:
         return VisitIdConversion(rules, **kwargs)
     return AdmissionWindowConversion(rules, default_visit_id=default_visit_id, **kwargs)
@@ -210,5 +256,6 @@ def rules_of_conversion(conversion: MedsToCehrBertConversion) -> VisitRules:
             TextEventRule(rule.code, rule.parsing_pattern.pattern, list(rule.mapped_event_labels))
             for rule in conversion._text_event_numeric_event_map.values()
         ],
+        disconnect_problem_list_events=getattr(conversion, "disconnect_problem_list_events", True),
         source=type(conversion).__name__,
     )

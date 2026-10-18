@@ -242,7 +242,7 @@ class CehrGPTArguments:
             "help": "A yaml file with the rules that make the visits of a MEDS dataset (which events are a visit, "
             "an admission, an ED admission and a discharge). The dataset declares its rules in "
             "metadata/visit_rules.yaml; the keys of this file replace the ones of the dataset. "
-            "See cehrgpt.data.meds_visit_rules."
+            "omop and mimic4 stand for the files that come with cehrgpt. See cehrgpt.data.meds_visit_rules."
         },
     )
     meds_repartition: Optional[bool] = dataclasses.field(

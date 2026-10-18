@@ -158,18 +158,27 @@ Transform MIMIC files to MEDS format following the [MEDS_transforms](https://git
 
 How the events of a MEDS dataset make visits (which events are a visit, an admission, an ED admission and a discharge)
 depends on how the dataset was made, so the dataset declares it. Put a `visit_rules.yaml` in the `metadata` folder of
-the MEDS dataset before converting it. Start from an example in `sample_configs/meds_visit_rules/`: `mimic4.yaml` for
-MIMIC-IV and `omop.yaml` for a dataset made from OMOP, whose events carry a `visit_id`.
+the MEDS dataset before converting it. The rules of the two common sources come with CEHR-GPT in
+`src/cehrgpt/data/visit_rules/`: `mimic4.yaml` for MIMIC-IV made with MEDS_transforms and `omop.yaml` for a dataset made
+from OMOP, whose events carry a `visit_id`. They are the rules of `MedsToBertMimic4` and `MedsToCehrbertOMOP`, written
+as data.
 
 ```bash
-cp sample_configs/meds_visit_rules/mimic4.yaml $MEDS_DIR/metadata/visit_rules.yaml
+cp src/cehrgpt/data/visit_rules/mimic4.yaml $MEDS_DIR/metadata/visit_rules.yaml
 meds_reader_convert $MEDS_DIR $MEDS_READER_DIR --num_threads 10
 ```
 
 `--meds_visit_rules_file my_rules.yaml` replaces the keys that the file has and keeps the other rules of the dataset,
-which is the way to try a change without touching the dataset. The format is described in
-`src/cehrgpt/data/meds_visit_rules.py`. A dataset without rules is still read by the conversion that
-`--meds_to_cehrbert_conversion_type` names (default `MedsToCehrbertOMOP`), with a warning.
+which is the way to try a change without touching the dataset; `--meds_visit_rules_file mimic4` or `omop` stands for the
+packaged file. The format is described in `src/cehrgpt/data/meds_visit_rules.py`. A dataset that declares nothing is read
+with the packaged rules of the conversion that `--meds_to_cehrbert_conversion_type` names (default `MedsToCehrbertOMOP`),
+with a warning.
+
+The rules also say how to place an event that has the id of a visit (OMOP style): with `disconnect_problem_list_events`
+(true by default) the time of an event is the ground truth, and an event more than a day before the start or after
+the end of its visit (a problem list entry from years ago, a drug recorded long after) is put where its own time is.
+Set it to `false` in the rules to keep every event in the visit of its id. The argument of the same name no longer has
+an effect, the rules do.
 
 ### Step 3: Pre-train with MEDS Data
 

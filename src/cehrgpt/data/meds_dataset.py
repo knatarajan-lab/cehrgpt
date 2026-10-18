@@ -4,7 +4,7 @@ Read a MEDS dataset (a meds_reader database) as patients with visits, by the vis
 
 cehrbert chooses the rules of the conversion by the name of a class that is in its code. These functions are the same as
 the ones of cehrbert with the rules (cehrgpt.data.meds_visit_rules) in the place of that name, so they can come from the
-metadata of the dataset or from a yaml file. Datasets without rules are still read the way cehrbert does it.
+metadata of the dataset or from a yaml file. Datasets without rules are read with the packaged rules of the conversion that the arguments name.
 """
 
 import functools
@@ -19,7 +19,6 @@ from cehrbert.data_generators.hf_data_generator.hf_dataset import apply_cehrbert
 from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import DatasetMapping
 from cehrbert.data_generators.hf_data_generator.meds_utils import (
     convert_one_patient,
-    create_dataset_from_meds_reader,
     get_subject_split,
 )
 from cehrbert.med_extension.schema_extension import CehrBertPatient
@@ -27,7 +26,12 @@ from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import Dataset, DatasetDict, Features, Sequence, Value
 from transformers.utils import logging
 
-from cehrgpt.data.meds_visit_rules import VisitRules, build_conversion, resolve_visit_rules
+from cehrgpt.data.meds_visit_rules import (
+    VisitRules,
+    build_conversion,
+    packaged_rules_for_conversion,
+    resolve_visit_rules,
+)
 
 LOG = logging.get_logger("transformers")
 
@@ -38,13 +42,11 @@ def _meds_to_cehrbert_generator_with_rules(
     default_visit_id: int,
     rules: VisitRules,
     meds_exclude_tables: Optional[List[str]] = None,
-    disconnect_problem_list_events: bool = False,
 ) -> CehrBertPatient:
     conversion = build_conversion(
         rules,
         default_visit_id=default_visit_id,
         meds_exclude_tables=meds_exclude_tables,
-        disconnect_problem_list_events=disconnect_problem_list_events,
     )
     with meds_reader.SubjectDatabase(path_to_db) as patient_database:
         for shard in shards:
@@ -128,7 +130,6 @@ def _create_cehrbert_data_from_meds_with_rules(
         default_visit_id=default_visit_id,
         rules=rules,
         meds_exclude_tables=data_args.meds_exclude_tables,
-        disconnect_problem_list_events=data_args.disconnect_problem_list_events,
     )
     dataset = Dataset.from_generator(
         batch_func,
@@ -172,7 +173,7 @@ def create_dataset_from_meds_reader_with_rules(
     LOG.info("The include_auxiliary_token: %s", data_args.include_auxiliary_token)
     LOG.info("The include_demographic_prompt: %s", data_args.include_demographic_prompt)
     LOG.info("The meds_exclude_tables: %s", "\n".join(data_args.meds_exclude_tables))
-    LOG.info("The disconnect_problem_list_events: %s", data_args.disconnect_problem_list_events)
+    LOG.info("The disconnect_problem_list_events: %s", rules.disconnect_problem_list_events)
 
     train_dataset = _create_cehrbert_data_from_meds_with_rules(
         data_args=data_args,
@@ -212,24 +213,19 @@ def create_meds_dataset(
     The train, validation and test patients of the MEDS dataset in data_args.data_folder, with the mappings applied.
 
     The visits are made by the rules that the dataset declares in its metadata, with the keys of rules_file on top. A
-    dataset that has none and no rules_file is read by the conversion of cehrbert that data_args names
-    (meds_to_cehrbert_conversion_type), which has its rules in code: this still works, but the rules are better written down.
+    dataset that has none and no rules_file is read with the packaged rules of the conversion that data_args names
+    (meds_to_cehrbert_conversion_type: omop or mimic4), with a warning.
     """
     rules = resolve_visit_rules(data_args.data_folder, rules_file)
     if rules is None:
+        rules = packaged_rules_for_conversion(data_args.meds_to_cehrbert_conversion_type)
         LOG.warning(
-            "No visit rules for %s: neither %s in the metadata of the dataset nor a rules file. Falling back to the "
-            "rules in the code of cehrbert (%s), which may not describe this dataset. Declare the rules of the dataset "
-            "in its metadata or pass --meds_visit_rules_file.",
+            "The dataset in %s declares no visit rules (%s) and none was given with --meds_visit_rules_file: using the "
+            "packaged rules %s for %s. Declare the rules of the dataset in its metadata.",
             data_args.data_folder,
             os.path.join("metadata", "visit_rules.yaml"),
+            rules.source,
             data_args.meds_to_cehrbert_conversion_type,
-        )
-        return create_dataset_from_meds_reader(
-            data_args=data_args,
-            default_visit_id=default_visit_id,
-            dataset_mappings=dataset_mappings,
-            cache_file_collector=cache_file_collector,
         )
     return create_dataset_from_meds_reader_with_rules(
         data_args=data_args,
