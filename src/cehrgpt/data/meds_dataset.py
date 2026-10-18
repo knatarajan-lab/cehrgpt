@@ -236,10 +236,10 @@ def convert_one_patient_with_rules(
 
     visits = []
     for blocks in blocks_by_visit.values():
-        has_discharge_facility = any(block.has_ed_or_hospital_admission for block in blocks)
+        is_inpatient_or_ed = any(block.has_ed_or_hospital_admission for block in blocks)
         is_incomplete = any(getattr(block, "is_incomplete", False) for block in blocks)
         discharge_facility = (
-            next(filter(None, (block.discharged_to for block in blocks)), None) if has_discharge_facility else None
+            next(filter(None, (block.discharged_to for block in blocks)), None) if is_inpatient_or_ed else None
         )
         events = []
         for block in blocks:
@@ -253,6 +253,7 @@ def convert_one_patient_with_rules(
                 ),
                 discharge_facility=discharge_facility or UNKNOWN_VALUE,
                 events=events,
+                is_inpatient_or_ed=is_inpatient_or_ed,
             )
         )
 
@@ -349,6 +350,7 @@ def _create_cehrbert_data_from_meds_with_rules(
                     "visit_start_datetime": Value(dtype="timestamp[us]"),
                     "visit_end_datetime": Value(dtype="timestamp[us]"),
                     "discharge_facility": Value(dtype="string"),
+                    "is_inpatient_or_ed": Value(dtype="bool"),
                     "events": Sequence(
                         feature={
                             "time": Value(dtype="timestamp[us]"),

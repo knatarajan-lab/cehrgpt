@@ -370,6 +370,7 @@ class VisitRulesTest(unittest.TestCase):
         )
         converted = convert_one_patient_with_rules(patient, conversion, prediction_time=prediction_time)
         self.assertIsNone(converted["visits"][0]["visit_end_datetime"])
+        self.assertTrue(converted["visits"][0]["is_inpatient_or_ed"])
 
         args = data_args("unused", att_function_type="day", inpatient_att_function_type="day")
         concepts = MedToCehrGPTDatasetMapping(args, include_inpatient_hour_token=True).transform(converted)[
@@ -378,6 +379,57 @@ class VisitRulesTest(unittest.TestCase):
         self.assertEqual(concepts.count("[VS]"), 1)
         self.assertNotIn("[VE]", concepts)
         self.assertIn("i-D1", concepts)
+
+    def test_yaml_defined_ed_visits_use_inpatient_days_and_optional_hours(self):
+        args = data_args("unused", att_function_type="day", inpatient_att_function_type="day")
+        record = {
+            "patient_id": 1,
+            "birth_datetime": dt.datetime(1990, 1, 1),
+            "gender": "Gender/F",
+            "race": "Race/White",
+            "visits": [
+                {
+                    "visit_type": "CUSTOM_ED//ARRIVAL",
+                    "visit_start_datetime": dt.datetime(2020, 1, 1, 2),
+                    "visit_end_datetime": dt.datetime(2020, 1, 2, 8),
+                    "discharge_facility": "HOME",
+                    "is_inpatient_or_ed": True,
+                    "events": [{"code": "LAB//ED", "time": dt.datetime(2020, 1, 2, 6)}],
+                }
+            ],
+        }
+
+        with_hours = MedToCehrGPTDatasetMapping(args, include_inpatient_hour_token=True).transform(record)["concept_ids"]
+        without_hours = MedToCehrGPTDatasetMapping(args, include_inpatient_hour_token=False).transform(record)[
+            "concept_ids"
+        ]
+        self.assertIn("i-D1", with_hours)
+        self.assertIn("i-D1", without_hours)
+        self.assertIn("i-H2", with_hours)
+        self.assertIn("i-H6", with_hours)
+        self.assertFalse(any(token.startswith("i-H") for token in without_hours))
+
+    def test_columnar_visits_keep_the_yaml_derived_inpatient_or_ed_flag(self):
+        converted = MedToCehrGPTDatasetMapping.convert_visit_columnar_to_python(
+            {
+                "visit_start_datetime": [dt.datetime(2020, 1, 1)],
+                "visit_end_datetime": [dt.datetime(2020, 1, 2)],
+                "visit_type": ["CUSTOM_ED//ARRIVAL"],
+                "discharge_facility": ["HOME"],
+                "is_inpatient_or_ed": [True],
+                "events": [
+                    {
+                        "time": [],
+                        "code": [],
+                        "text_value": [],
+                        "numeric_value": [],
+                        "unit": [],
+                        "properties": [],
+                    }
+                ],
+            }
+        )
+        self.assertTrue(converted[0].is_inpatient_or_ed)
 
 
 class ResolveVisitRulesTest(unittest.TestCase):

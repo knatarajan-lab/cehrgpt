@@ -108,6 +108,16 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
         self._include_demographic_prompt = data_args.include_demographic_prompt
         self._include_inpatient_hour_token = include_inpatient_hour_token
 
+    @staticmethod
+    def convert_visit_columnar_to_python(visits: Dict[str, List[Any]]) -> List[VisitObject]:
+        """Keep the YAML-derived inpatient/ED classification when converting a columnar dataset row."""
+        python_visits = DatasetMapping.convert_visit_columnar_to_python(visits)
+        classifications = visits.get("is_inpatient_or_ed")
+        if classifications is not None:
+            for visit, is_inpatient_or_ed in zip(python_visits, classifications):
+                visit.is_inpatient_or_ed = is_inpatient_or_ed
+        return python_visits
+
     """
     This mapping function converts the MED (https://github.com/Medical-Event-Data-Standard/meds/tree/main) extension
     to the CehrGPT format. We make several assumptions
@@ -214,11 +224,14 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
 
             # We assume the first measurement to be the visit type of the current visit
             visit_type = get_value(visit, "visit_type")
-            is_er_or_inpatient = (
-                visit_type in INPATIENT_VISIT_TYPES
-                or visit_type in INPATIENT_VISIT_TYPE_CODES
-                or visit_type in ED_VISIT_TYPE_CODES
-            )
+            is_er_or_inpatient = get_value(visit, "is_inpatient_or_ed")
+            if is_er_or_inpatient is None:
+                # Backwards compatibility for records produced before the generic MEDS builder added an explicit flag.
+                is_er_or_inpatient = (
+                    visit_type in INPATIENT_VISIT_TYPES
+                    or visit_type in INPATIENT_VISIT_TYPE_CODES
+                    or visit_type in ED_VISIT_TYPE_CODES
+                )
 
             # Add artificial time tokens to the patient timeline if timedelta exists
             if datetime_cursor is not None:
