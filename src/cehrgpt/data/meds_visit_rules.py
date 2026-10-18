@@ -11,7 +11,7 @@ The two files are the rules of the two kinds of datasets that cehrgpt is used on
 MEDS made from MIMIC-IV with MEDS_transforms (``mimic4``). A dataset that declares nothing is read with the one that
 matches ``--meds_to_cehrbert_conversion_type``.
 
-    strategy: visit_id            # how the events are put into visits, see STRATEGIES
+    conversion: MedsToCehrbertOMOP # CEHR-BERT conversion algorithm
     visit_events: ["Visit/"]      # the event that is the visit: its code is the visit type, its time the start
     ed_admission_events: ["Visit/ER"]
     admission_events: ["Visit/IP", "Visit/ERIP"]
@@ -28,10 +28,9 @@ For ``visit_id`` data, the time of an event is always the ground truth. An event
 more than a day before its start or after its end (a problem list entry from years ago, a drug that is recorded long
 after the visit) is taken out of that visit and put where its own time is.
 
-The strategies are the two ways of cehrbert to find the visits; the rules above are the same for both:
-  * ``visit_id``: the events carry the id of their visit (a ``visit_id`` property), as in a dataset made from OMOP.
-  * ``admission_window``: there are no visit ids; the visits are built from the admission and discharge events and the
-    time between them, as in MIMIC-IV.
+The conversion is one of the two CEHR-BERT algorithms:
+  * ``MedsToCehrbertOMOP``: events carry the id of their visit (a ``visit_id`` property), as in OMOP.
+  * ``MedsToBertMimic4``: visits are built from admission and discharge events and the time between them, as in MIMIC-IV.
 """
 
 import dataclasses
@@ -56,11 +55,11 @@ METADATA_FILE = os.path.join("metadata", "visit_rules.yaml")
 PACKAGED_RULES_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visit_rules")
 # the rules that come with cehrgpt, by name; the conversion of cehrbert that each one takes the place of
 PACKAGED_RULES = {"omop": "MedsToCehrbertOMOP", "mimic4": "MedsToBertMimic4"}
-STRATEGY_VISIT_ID = "visit_id"
-STRATEGY_ADMISSION_WINDOW = "admission_window"
-STRATEGIES = (STRATEGY_VISIT_ID, STRATEGY_ADMISSION_WINDOW)
+CONVERSION_OMOP = MedsToCehrbertOMOP.__name__
+CONVERSION_MIMIC4 = MedsToBertMimic4.__name__
+CONVERSIONS = (CONVERSION_OMOP, CONVERSION_MIMIC4)
 PATTERN_LISTS = ("visit_events", "ed_admission_events", "admission_events", "discharge_events")
-KEYS = ("strategy",) + PATTERN_LISTS + ("text_events",)
+KEYS = ("conversion",) + PATTERN_LISTS + ("text_events",)
 
 
 class VisitRulesError(ValueError):
@@ -76,7 +75,7 @@ class TextEventRule:
 
 @dataclasses.dataclass(frozen=True)
 class VisitRules:
-    strategy: str
+    conversion: str
     visit_events: List[str] = dataclasses.field(default_factory=list)
     ed_admission_events: List[str] = dataclasses.field(default_factory=list)
     admission_events: List[str] = dataclasses.field(default_factory=list)
@@ -90,9 +89,11 @@ class VisitRules:
         unknown = sorted(set(values) - set(KEYS))
         if unknown:
             raise VisitRulesError(f"Unknown keys in the visit rules ({source}): {unknown}; the keys are {list(KEYS)}")
-        strategy = values.get("strategy")
-        if strategy not in STRATEGIES:
-            raise VisitRulesError(f"The visit rules ({source}) need a strategy, one of {list(STRATEGIES)}; got {strategy!r}")
+        conversion = values.get("conversion")
+        if conversion not in CONVERSIONS:
+            raise VisitRulesError(
+                f"The visit rules ({source}) need a conversion, one of {list(CONVERSIONS)}; got {conversion!r}"
+            )
         lists = {}
         for key in PATTERN_LISTS:
             patterns = values.get(key) or []
@@ -118,10 +119,10 @@ class VisitRules:
                     f"{len(entry['labels'])} labels"
                 )
             text_events.append(TextEventRule(entry["code"], entry["pattern"], list(entry["labels"])))
-        return cls(strategy=strategy, text_events=text_events, source=source, **lists)
+        return cls(conversion=conversion, text_events=text_events, source=source, **lists)
 
     def to_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {"strategy": self.strategy}
+        result: Dict[str, Any] = {"conversion": self.conversion}
         for key in PATTERN_LISTS:
             result[key] = list(getattr(self, key))
         if self.text_events:
@@ -229,16 +230,16 @@ class AdmissionWindowConversion(_ConfiguredRules, MedsToBertMimic4):
 def build_conversion(rules: VisitRules, default_visit_id: int = 1, **kwargs) -> MedsToCehrBertConversion:
     """The cehrbert conversion that follows the rules, with event time as ground truth."""
     kwargs["disconnect_problem_list_events"] = True
-    if rules.strategy == STRATEGY_VISIT_ID:
+    if rules.conversion == CONVERSION_OMOP:
         return VisitIdConversion(rules, **kwargs)
     return AdmissionWindowConversion(rules, default_visit_id=default_visit_id, **kwargs)
 
 
 def rules_of_conversion(conversion: MedsToCehrBertConversion) -> VisitRules:
     """The rules that a conversion of cehrbert has in its code, e.g. to write them out as a rules file."""
-    strategy = STRATEGY_ADMISSION_WINDOW if isinstance(conversion, MedsToBertMimic4) else STRATEGY_VISIT_ID
+    conversion_type = CONVERSION_MIMIC4 if isinstance(conversion, MedsToBertMimic4) else CONVERSION_OMOP
     return VisitRules(
-        strategy=strategy,
+        conversion=conversion_type,
         visit_events=list(conversion.get_other_visit_matching_rules()),
         ed_admission_events=list(conversion.get_ed_admission_matching_rules()),
         admission_events=list(conversion.get_admission_matching_rules()),

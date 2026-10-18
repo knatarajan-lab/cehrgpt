@@ -134,7 +134,7 @@ CUSTOM_EVENTS = [
     event("LOINC/1", 20, "measurement", 2),
 ]
 CUSTOM_RULES = dict(
-    strategy="visit_id",
+    conversion=OMOP,
     visit_events=["ENC//"],
     admission_events=["ENC//INPATIENT"],
     discharge_events=["DISCH//"],
@@ -199,13 +199,13 @@ def describe(visits):
 
 class VisitRulesTest(unittest.TestCase):
     def valid(self, **changes):
-        values = dict(strategy="visit_id", visit_events=["Visit/"], discharge_events=["X/1"])
+        values = dict(conversion=OMOP, visit_events=["Visit/"], discharge_events=["X/1"])
         values.update(changes)
         return values
 
     def test_valid_rules(self):
         rules = VisitRules.from_dict(self.valid(text_events=[dict(code="BP", pattern=r"(\d+)/(\d+)", labels=["S", "D"])]))
-        self.assertEqual(rules.strategy, "visit_id")
+        self.assertEqual(rules.conversion, OMOP)
         self.assertEqual(rules.visit_events, ["Visit/"])
         self.assertEqual(rules.text_events[0].labels, ["S", "D"])
         self.assertEqual(VisitRules.from_dict(rules.to_dict()).to_dict(), rules.to_dict())
@@ -220,11 +220,11 @@ class VisitRulesTest(unittest.TestCase):
         )
         self.assertTrue(conversion.disconnect_problem_list_events)
 
-    def test_a_strategy_is_needed(self):
-        with self.assertRaisesRegex(VisitRulesError, "strategy"):
+    def test_a_conversion_is_needed(self):
+        with self.assertRaisesRegex(VisitRulesError, "conversion"):
             VisitRules.from_dict(dict(visit_events=["Visit/"]))
-        with self.assertRaisesRegex(VisitRulesError, "strategy"):
-            VisitRules.from_dict(self.valid(strategy="by_magic"))
+        with self.assertRaisesRegex(VisitRulesError, "conversion"):
+            VisitRules.from_dict(self.valid(conversion="by_magic"))
 
     def test_a_typo_in_a_key_is_an_error_and_not_a_missing_rule(self):
         with self.assertRaisesRegex(VisitRulesError, "discharge_event"):
@@ -271,17 +271,18 @@ class VisitRulesTest(unittest.TestCase):
             self.assertTrue(matches(omop.discharge_events, code), code)
 
     def test_a_packaged_name_stands_for_its_file(self):
-        self.assertEqual(packaged_rules_for_conversion("MedsToBertMimic4").strategy, "admission_window")
-        self.assertEqual(packaged_rules_for_conversion("MedsToCehrbertOMOP").strategy, "visit_id")
+        self.assertEqual(packaged_rules_for_conversion(MIMIC).conversion, MIMIC)
+        self.assertEqual(packaged_rules_for_conversion(OMOP).conversion, OMOP)
         with self.assertRaisesRegex(VisitRulesError, "no packaged visit rules"):
             packaged_rules_path("eicu")
         with self.assertRaisesRegex(VisitRulesError, "packaged rules"):
             packaged_rules_for_conversion("SomeConversionOfMine")
 
-    def test_the_strategies_are_the_two_algorithms_of_cehrbert(self):
+    def test_yaml_selects_the_two_cehrbert_conversion_classes(self):
         self.assertIsInstance(build_conversion(VisitRules.from_dict(self.valid())), MedsToCehrbertOMOP)
         self.assertIsInstance(
-            build_conversion(VisitRules.from_dict(self.valid(strategy="admission_window"))), MedsToBertMimic4
+            build_conversion(VisitRules.from_dict(self.valid(conversion=MIMIC))),
+            MedsToBertMimic4,
         )
 
 
@@ -316,11 +317,11 @@ class ResolveVisitRulesTest(unittest.TestCase):
         rules = resolve_visit_rules(self.folder(CUSTOM_RULES), path)
         self.assertEqual(rules.discharge_events, ["OTHER//"])
         self.assertEqual(rules.visit_events, ["ENC//"])
-        self.assertEqual(rules.strategy, "visit_id")
+        self.assertEqual(rules.conversion, OMOP)
 
-    def test_a_file_can_stand_alone_if_it_has_a_strategy(self):
+    def test_a_file_can_stand_alone_if_it_has_a_conversion(self):
         self.assertEqual(resolve_visit_rules(self.folder(), self.override(CUSTOM_RULES)).visit_events, ["ENC//"])
-        with self.assertRaisesRegex(VisitRulesError, "strategy"):
+        with self.assertRaisesRegex(VisitRulesError, "conversion"):
             resolve_visit_rules(self.folder(), self.override(dict(discharge_events=["OTHER//"])))
 
     def test_json_is_accepted_too(self):

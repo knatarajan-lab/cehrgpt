@@ -16,7 +16,7 @@
 # its own time is.
 #
 # Declare it in <meds_reader database>/metadata/visit_rules.yaml, or pass --meds_visit_rules_file omop.
-strategy: visit_id
+conversion: MedsToCehrbertOMOP
 visit_events:
 - Visit/
 ed_admission_events:

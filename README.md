@@ -174,6 +174,14 @@ packaged file. The format is described in `src/cehrgpt/data/meds_visit_rules.py`
 with the packaged rules of the conversion that `--meds_to_cehrbert_conversion_type` names (default `MedsToCehrbertOMOP`),
 with a warning.
 
+The YAML selects the CEHR-BERT conversion class explicitly:
+
+```yaml
+conversion: MedsToCehrbertOMOP  # or MedsToBertMimic4
+visit_events:
+  - Visit/
+```
+
 For an event that has the id of a visit (OMOP style), the event time is always the ground truth. An event more than a day
 before the start or after the end of its visit (a problem list entry from years ago, a drug recorded long after) is put
 where its own time is.
