@@ -19,6 +19,7 @@ from meds import held_out_split, subject_id_field, train_split, tuning_split
 from transformers import TrainingArguments
 from transformers.utils import logging
 
+from cehrgpt.data.meds_conversion import resolve_meds_conversion_type
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import (
     ExtractTokenizedSequenceDataMapping,
     MedToCehrGPTDatasetMapping,
@@ -75,6 +76,7 @@ def prepare_finetune_dataset(
                     )
         except Exception as e:
             LOG.warning(e)
+            resolve_meds_conversion_type(data_args)
             dataset = create_dataset_from_meds_reader(
                 data_args=data_args,
                 dataset_mappings=[

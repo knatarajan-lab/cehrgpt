@@ -34,6 +34,7 @@ from cehrgpt.data.hf_cehrgpt_dataset_collator import (
     SamplePackingCehrGptDataCollator,
 )
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
+from cehrgpt.data.meds_conversion import resolve_meds_conversion_type
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
@@ -356,6 +357,7 @@ def main():
                             )
                 except FileNotFoundError as e:
                     LOG.warning(e)
+                    resolve_meds_conversion_type(data_args)
                     dataset = create_dataset_from_meds_reader(
                         data_args=data_args,
                         dataset_mappings=[
