@@ -15,8 +15,9 @@
 # after its end (a problem list entry from years ago, a drug recorded long after) is taken out of the visit and put where
 # its own time is.
 #
+# The strategy and all event matching rules below drive one generic YAML converter.
 # Declare it in <meds_reader database>/metadata/visit_rules.yaml, or pass --meds_visit_rules_file omop.
-conversion: MedsToCehrbertOMOP
+strategy: visit_id
 visit_events:
 - Visit/
 ed_admission_events:

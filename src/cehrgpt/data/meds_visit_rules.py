@@ -11,7 +11,7 @@ The two files are the rules of the two kinds of datasets that cehrgpt is used on
 MEDS made from MIMIC-IV with MEDS_transforms (``mimic4``). A dataset that declares nothing is read with the one that
 matches ``--meds_to_cehrbert_conversion_type``.
 
-    conversion: MedsToCehrbertOMOP # CEHR-BERT conversion algorithm
+    strategy: visit_id            # how events are assigned to visits
     visit_events: ["Visit/"]      # the event that is the visit: its code is the visit type, its time the start
     ed_admission_events: ["Visit/ER"]
     admission_events: ["Visit/IP", "Visit/ERIP"]
@@ -28,9 +28,9 @@ For ``visit_id`` data, the time of an event is always the ground truth. An event
 more than a day before its start or after its end (a problem list entry from years ago, a drug that is recorded long
 after the visit) is taken out of that visit and put where its own time is.
 
-The conversion is one of the two CEHR-BERT algorithms:
-  * ``MedsToCehrbertOMOP``: events carry the id of their visit (a ``visit_id`` property), as in OMOP.
-  * ``MedsToBertMimic4``: visits are built from admission and discharge events and the time between them, as in MIMIC-IV.
+The visit assignment strategy is data too:
+  * ``visit_id``: events carry the id of their visit (a ``visit_id`` property), as in OMOP.
+  * ``admission_window``: visits are built from admission and discharge events and the time between them, as in MIMIC-IV.
 """
 
 import dataclasses
@@ -39,10 +39,6 @@ import re
 from typing import Any, Dict, List, Optional
 
 import yaml
-from cehrbert.data_generators.hf_data_generator.meds_to_cehrbert_conversion_rules import (
-    MedsToBertMimic4,
-    MedsToCehrbertOMOP,
-)
 from cehrbert.data_generators.hf_data_generator.meds_to_cehrbert_conversion_rules.meds_to_cehrbert_base import (
     EventConversionRule,
     MedsToCehrBertConversion,
@@ -53,13 +49,14 @@ LOG = logging.get_logger("transformers")
 
 METADATA_FILE = os.path.join("metadata", "visit_rules.yaml")
 PACKAGED_RULES_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visit_rules")
-# the rules that come with cehrgpt, by name; the conversion of cehrbert that each one takes the place of
+# The old conversion names remain only as a backwards-compatible way to choose a packaged YAML file when a dataset
+# does not declare rules. They are not instantiated by this module.
 PACKAGED_RULES = {"omop": "MedsToCehrbertOMOP", "mimic4": "MedsToBertMimic4"}
-CONVERSION_OMOP = MedsToCehrbertOMOP.__name__
-CONVERSION_MIMIC4 = MedsToBertMimic4.__name__
-CONVERSIONS = (CONVERSION_OMOP, CONVERSION_MIMIC4)
+STRATEGY_VISIT_ID = "visit_id"
+STRATEGY_ADMISSION_WINDOW = "admission_window"
+STRATEGIES = (STRATEGY_VISIT_ID, STRATEGY_ADMISSION_WINDOW)
 PATTERN_LISTS = ("visit_events", "ed_admission_events", "admission_events", "discharge_events")
-KEYS = ("conversion",) + PATTERN_LISTS + ("text_events",)
+KEYS = ("strategy",) + PATTERN_LISTS + ("text_events",)
 
 
 class VisitRulesError(ValueError):
@@ -75,7 +72,7 @@ class TextEventRule:
 
 @dataclasses.dataclass(frozen=True)
 class VisitRules:
-    conversion: str
+    strategy: str
     visit_events: List[str] = dataclasses.field(default_factory=list)
     ed_admission_events: List[str] = dataclasses.field(default_factory=list)
     admission_events: List[str] = dataclasses.field(default_factory=list)
@@ -89,10 +86,10 @@ class VisitRules:
         unknown = sorted(set(values) - set(KEYS))
         if unknown:
             raise VisitRulesError(f"Unknown keys in the visit rules ({source}): {unknown}; the keys are {list(KEYS)}")
-        conversion = values.get("conversion")
-        if conversion not in CONVERSIONS:
+        strategy = values.get("strategy")
+        if strategy not in STRATEGIES:
             raise VisitRulesError(
-                f"The visit rules ({source}) need a conversion, one of {list(CONVERSIONS)}; got {conversion!r}"
+                f"The visit rules ({source}) need a strategy, one of {list(STRATEGIES)}; got {strategy!r}"
             )
         lists = {}
         for key in PATTERN_LISTS:
@@ -119,10 +116,10 @@ class VisitRules:
                     f"{len(entry['labels'])} labels"
                 )
             text_events.append(TextEventRule(entry["code"], entry["pattern"], list(entry["labels"])))
-        return cls(conversion=conversion, text_events=text_events, source=source, **lists)
+        return cls(strategy=strategy, text_events=text_events, source=source, **lists)
 
     def to_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {"conversion": self.conversion}
+        result: Dict[str, Any] = {"strategy": self.strategy}
         for key in PATTERN_LISTS:
             result[key] = list(getattr(self, key))
         if self.text_events:
@@ -186,67 +183,41 @@ def resolve_visit_rules(data_folder: str, rules_file: Optional[str] = None) -> O
     return rules
 
 
-class _ConfiguredRules:
-    """The rule hooks of a cehrbert conversion, from VisitRules instead of from code."""
+class YamlDrivenConversion(MedsToCehrBertConversion):
+    """One generic CEHR-BERT conversion whose complete behavior is supplied by YAML rules."""
 
-    def _configure(self, rules: VisitRules):
-        self._visit_rules = rules
+    def __init__(self, rules: VisitRules, default_visit_id: int = 1, **kwargs):
+        self.rules = rules
+        self.strategy = rules.strategy
+        self.default_visit_id = default_visit_id
+        # Event time is always the ground truth for visit_id data.
+        self.disconnect_problem_list_events = True
+        super().__init__(**kwargs)
 
     def _create_visit_matching_rules(self) -> List[str]:
-        return list(self._visit_rules.visit_events)
+        return list(self.rules.visit_events)
 
     def _create_ed_admission_matching_rules(self) -> List[str]:
-        return list(self._visit_rules.ed_admission_events)
+        return list(self.rules.ed_admission_events)
 
     def _create_admission_matching_rules(self) -> List[str]:
-        return list(self._visit_rules.admission_events)
+        return list(self.rules.admission_events)
 
     def _create_discharge_matching_rules(self) -> List[str]:
-        return list(self._visit_rules.discharge_events)
+        return list(self.rules.discharge_events)
 
     def _create_text_event_to_numeric_event_rules(self) -> List[EventConversionRule]:
         return [
-            EventConversionRule(code=rule.code, parsing_pattern=re.compile(rule.pattern), mapped_event_labels=list(rule.labels))
-            for rule in self._visit_rules.text_events
+            EventConversionRule(
+                code=rule.code,
+                parsing_pattern=re.compile(rule.pattern),
+                mapped_event_labels=list(rule.labels),
+            )
+            for rule in self.rules.text_events
         ]
 
 
-class VisitIdConversion(_ConfiguredRules, MedsToCehrbertOMOP):
-    """The visits of the events that carry a visit id (cehrbert's OMOP algorithm), with configured rules."""
-
-    def __init__(self, rules: VisitRules, **kwargs):
-        self._configure(rules)
-        super().__init__(**kwargs)
-
-
-class AdmissionWindowConversion(_ConfiguredRules, MedsToBertMimic4):
-    """The visits built from admissions and discharges (cehrbert's MIMIC-IV algorithm), with configured rules."""
-
-    def __init__(self, rules: VisitRules, default_visit_id: int = 1, **kwargs):
-        self._configure(rules)
-        super().__init__(default_visit_id, **kwargs)
-
-
 def build_conversion(rules: VisitRules, default_visit_id: int = 1, **kwargs) -> MedsToCehrBertConversion:
-    """The cehrbert conversion that follows the rules, with event time as ground truth."""
-    kwargs["disconnect_problem_list_events"] = True
-    if rules.conversion == CONVERSION_OMOP:
-        return VisitIdConversion(rules, **kwargs)
-    return AdmissionWindowConversion(rules, default_visit_id=default_visit_id, **kwargs)
-
-
-def rules_of_conversion(conversion: MedsToCehrBertConversion) -> VisitRules:
-    """The rules that a conversion of cehrbert has in its code, e.g. to write them out as a rules file."""
-    conversion_type = CONVERSION_MIMIC4 if isinstance(conversion, MedsToBertMimic4) else CONVERSION_OMOP
-    return VisitRules(
-        conversion=conversion_type,
-        visit_events=list(conversion.get_other_visit_matching_rules()),
-        ed_admission_events=list(conversion.get_ed_admission_matching_rules()),
-        admission_events=list(conversion.get_admission_matching_rules()),
-        discharge_events=list(conversion.get_discharge_matching_rules()),
-        text_events=[
-            TextEventRule(rule.code, rule.parsing_pattern.pattern, list(rule.mapped_event_labels))
-            for rule in conversion._text_event_numeric_event_map.values()
-        ],
-        source=type(conversion).__name__,
-    )
+    """Build the generic conversion from YAML; no dataset-specific conversion class is used."""
+    kwargs.pop("disconnect_problem_list_events", None)
+    return YamlDrivenConversion(rules, default_visit_id=default_visit_id, **kwargs)

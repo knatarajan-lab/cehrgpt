@@ -1,7 +1,7 @@
 # Visit rules of MIMIC-IV as MEDS (MEDS_transforms, MIMIC-IV 2.2), whose events have no visit ids:
 # the visits are built from the admissions, the discharges and the ED events in time.
 #
-# These are the rules of MedsToBertMimic4, to the letter, so that the visits are the same as before.
+# These rules preserve the previous MIMIC-IV visit behavior without selecting a conversion class.
 # Checked on the 364,627 subjects of that dataset:
 #   HOSPITAL_ADMISSION//<type>//<location> and HOSPITAL_DISCHARGE//<disposition>   one pair per hospital stay
 #   TRANSFER_TO//ED//Emergency Department                                          the ED events that are matched
@@ -11,7 +11,7 @@
 # The ICU stays (ICU_ADMISSION//, ICU_DISCHARGE//) are inside a hospital stay and are not visits of their own.
 #
 # Declare it in <meds_reader database>/metadata/visit_rules.yaml, or pass --meds_visit_rules_file mimic4.
-conversion: MedsToBertMimic4
+strategy: admission_window
 visit_events: []
 ed_admission_events:
 - ED_REGISTRATION//

@@ -160,8 +160,7 @@ How the events of a MEDS dataset make visits (which events are a visit, an admis
 depends on how the dataset was made, so the dataset declares it. Put a `visit_rules.yaml` in the `metadata` folder of
 the MEDS dataset before converting it. The rules of the two common sources come with CEHR-GPT in
 `src/cehrgpt/data/visit_rules/`: `mimic4.yaml` for MIMIC-IV made with MEDS_transforms and `omop.yaml` for a dataset made
-from OMOP, whose events carry a `visit_id`. They are the rules of `MedsToBertMimic4` and `MedsToCehrbertOMOP`, written
-as data.
+from OMOP, whose events carry a `visit_id`. Both event matching and visit assignment are encoded as data.
 
 ```bash
 cp src/cehrgpt/data/visit_rules/mimic4.yaml $MEDS_DIR/metadata/visit_rules.yaml
@@ -174,10 +173,10 @@ packaged file. The format is described in `src/cehrgpt/data/meds_visit_rules.py`
 with the packaged rules of the conversion that `--meds_to_cehrbert_conversion_type` names (default `MedsToCehrbertOMOP`),
 with a warning.
 
-The YAML selects the CEHR-BERT conversion class explicitly:
+The YAML selects how events are assigned to visits; CEHR-GPT uses one generic YAML-driven converter:
 
 ```yaml
-conversion: MedsToCehrbertOMOP  # or MedsToBertMimic4
+strategy: visit_id  # or admission_window
 visit_events:
   - Visit/
 ```

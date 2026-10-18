@@ -7,33 +7,105 @@ the ones of cehrbert with the rules (cehrgpt.data.meds_visit_rules) in the place
 metadata of the dataset or from a yaml file. Datasets without rules are read with the packaged rules of the conversion that the arguments name.
 """
 
+import collections
 import functools
 import os
+from datetime import datetime
 from typing import List, Optional, Tuple
 
 import meds_reader
 import numpy as np
 import pandas as pd
+from cehrbert.data_generators.hf_data_generator import UNKNOWN_VALUE
 from cehrbert.data_generators.hf_data_generator.cache_util import CacheFileCollector
 from cehrbert.data_generators.hf_data_generator.hf_dataset import apply_cehrbert_dataset_mapping
 from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import DatasetMapping
-from cehrbert.data_generators.hf_data_generator.meds_utils import (
-    convert_one_patient,
-    get_subject_split,
+from cehrbert.data_generators.hf_data_generator.meds_utils import get_subject_split
+from cehrbert.data_generators.hf_data_generator.patient_block import (
+    mimic_meds_generate_demographics_and_patient_blocks,
+    omop_meds_generate_demographics_and_patient_blocks,
 )
-from cehrbert.med_extension.schema_extension import CehrBertPatient
+from cehrbert.med_extension.schema_extension import CehrBertPatient, Visit
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import Dataset, DatasetDict, Features, Sequence, Value
 from transformers.utils import logging
 
 from cehrgpt.data.meds_visit_rules import (
+    STRATEGY_ADMISSION_WINDOW,
     VisitRules,
+    YamlDrivenConversion,
     build_conversion,
     packaged_rules_for_conversion,
     resolve_visit_rules,
 )
 
 LOG = logging.get_logger("transformers")
+
+
+def convert_one_patient_with_rules(
+    patient: meds_reader.Subject,
+    conversion: YamlDrivenConversion,
+    prediction_time: datetime = None,
+    observation_window: int = None,
+    label=None,
+) -> CehrBertPatient:
+    """Convert one patient using the visit assignment strategy declared in YAML."""
+    common = dict(
+        patient=patient,
+        conversion=conversion,
+        prediction_time=prediction_time,
+        observation_window=observation_window,
+    )
+    if conversion.strategy == STRATEGY_ADMISSION_WINDOW:
+        demographics, patient_blocks = mimic_meds_generate_demographics_and_patient_blocks(
+            **common, default_visit_id=conversion.default_visit_id
+        )
+    else:
+        demographics, patient_blocks = omop_meds_generate_demographics_and_patient_blocks(**common)
+
+    blocks_by_visit = collections.defaultdict(list)
+    for patient_block in patient_blocks:
+        blocks_by_visit[patient_block.visit_id].append(patient_block)
+
+    visits = []
+    for blocks in blocks_by_visit.values():
+        has_discharge_facility = any(block.has_ed_or_hospital_admission for block in blocks)
+        discharge_facility = (
+            next(filter(None, (block.discharged_to for block in blocks)), None) if has_discharge_facility else None
+        )
+        events = []
+        for block in blocks:
+            events.extend(block.get_meds_events())
+        visits.append(
+            Visit(
+                visit_type=blocks[0].visit_type,
+                visit_start_datetime=min(block.get_visit_start_datetime() for block in blocks),
+                visit_end_datetime=max(block.get_visit_end_datetime() for block in blocks),
+                discharge_facility=discharge_facility or UNKNOWN_VALUE,
+                events=events,
+            )
+        )
+
+    age_at_index = -1
+    if prediction_time is not None and demographics.birth_datetime is not None:
+        age_at_index = prediction_time.year - demographics.birth_datetime.year
+        if (prediction_time.month, prediction_time.day) < (
+            demographics.birth_datetime.month,
+            demographics.birth_datetime.day,
+        ):
+            age_at_index -= 1
+
+    return CehrBertPatient(
+        patient_id=patient.subject_id,
+        birth_datetime=demographics.birth_datetime,
+        visits=visits,
+        race=demographics.race or UNKNOWN_VALUE,
+        gender=demographics.gender or UNKNOWN_VALUE,
+        ethnicity=demographics.ethnicity or UNKNOWN_VALUE,
+        index_date=prediction_time,
+        age_at_index=age_at_index,
+        label=label,
+    )
 
 
 def _meds_to_cehrbert_generator_with_rules(
@@ -52,7 +124,9 @@ def _meds_to_cehrbert_generator_with_rules(
         for shard in shards:
             for patient_id, prediction_time, observation_window, label in shard:
                 patient = patient_database[patient_id]
-                converted_patient = convert_one_patient(patient, conversion, prediction_time, observation_window, label)
+                converted_patient = convert_one_patient_with_rules(
+                    patient, conversion, prediction_time, observation_window, label
+                )
                 # there are patients whose birthdate is none
                 visits = converted_patient["visits"]
                 if converted_patient["birth_datetime"] is None:
