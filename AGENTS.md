@@ -18,9 +18,10 @@ MEDS and MIMIC-IV MEDS, while allowing datasets to add their own event patterns 
   OMOP and MIMIC-IV patterns, and every concept is annotated with its source data format.
 - Do not recreate separate OMOP and MIMIC YAML files or select rules using
   `meds_to_cehrbert_conversion_type`.
-- Dataset rules at `<MEDS reader database>/metadata/visit_rules.yaml` and a user file passed through
-  `--meds_visit_rules_file` extend the defaults. Pattern lists are merged with stable de-duplication. A later
-  `text_events` entry replaces an earlier entry with the same `code`.
+- The only inputs are `defaults.yaml` and a user YAML file passed through `--meds_visit_rules_file`, applied on top of
+  the defaults. Do not read or write rules in the `metadata` folder of the MEDS dataset: a rules file is not a standard
+  MEDS file, and MEDS metadata is parquet. Pattern lists are merged with stable de-duplication. A later `text_events`
+  entry replaces an earlier entry with the same `code`.
 - Matching patterns are regular expressions evaluated with `re.match`, so they match from the beginning of an event
   code.
 - Event timestamps are the ground truth. Do not restore a configurable `disconnect_problem_list_events` behavior.
@@ -90,7 +91,7 @@ Run the focused suite after changing this feature:
 PYTHONPATH=src python -m pytest tests/unit_tests/data/meds_visit_rules_test.py -q
 ```
 
-The current expected result is 29 passing tests. Also run `git diff --check` and the broader project tests when the
+The current expected result is 30 passing tests. Also run `git diff --check` and the broader project tests when the
 environment has all optional dependencies.
 
 Tests should continue to cover:

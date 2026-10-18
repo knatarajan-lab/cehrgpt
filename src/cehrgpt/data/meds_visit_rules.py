@@ -2,10 +2,12 @@
 The rules that turn the events of a MEDS dataset into visits: which events are a visit, an admission, an ED admission and
 a discharge. They depend on how the dataset was made and they change, so they are data and not code:
 
-  * the dataset declares them in ``<meds_reader database>/metadata/visit_rules.yaml`` (the file comes from the
-    ``metadata`` folder of the MEDS dataset, which meds_reader_convert copies);
   * CEHR-GPT's ``defaults.yaml`` provides the standard OMOP and MIMIC patterns;
-  * a yaml file given with ``--meds_visit_rules_file`` adds dataset-specific patterns.
+  * a yaml file of the user, given with ``--meds_visit_rules_file``, is applied on top of them for a dataset that
+    codes its visits differently.
+
+The MEDS dataset itself carries nothing for this: its ``metadata`` folder is the standard one, and cehrgpt neither
+writes nor reads a rules file there.
 
     visit_events: ["Visit/"]      # the event that is the visit: its code is the visit type, its time the start
     ed_admission_events: ["Visit/ER"]
@@ -41,7 +43,6 @@ from transformers.utils import logging
 
 LOG = logging.get_logger("transformers")
 
-METADATA_FILE = os.path.join("metadata", "visit_rules.yaml")
 DEFAULT_RULES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visit_rules", "defaults.yaml")
 PATTERN_LISTS = ("visit_events", "ed_admission_events", "admission_events", "discharge_events")
 KEYS = PATTERN_LISTS + ("text_events",)
@@ -153,22 +154,18 @@ def merge_rule_values(*layers: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return merged
 
 
-def resolve_visit_rules(data_folder: str, rules_file: Optional[str] = None) -> VisitRules:
+def resolve_visit_rules(rules_file: Optional[str] = None) -> VisitRules:
     """
-    The visit rules of a dataset: standard defaults plus patterns declared in its metadata and rules_file.
+    The visit rules: the standard defaults, with the yaml file of the user (rules_file) applied on top.
 
-    A dataset without its own rules uses the annotated OMOP and MIMIC defaults directly.
+    Without a file the annotated OMOP and MIMIC defaults are used as they are.
     """
-    metadata_path = os.path.join(os.path.expanduser(data_folder), METADATA_FILE)
-    declared = load_rules_file(metadata_path) if os.path.exists(metadata_path) else None
     override = load_rules_file(rules_file) if rules_file else None
     sources = [DEFAULT_RULES_PATH]
-    if declared is not None:
-        sources.append(metadata_path)
     if override is not None:
         sources.append(os.path.expanduser(rules_file))
     rules = VisitRules.from_dict(
-        merge_rule_values(load_rules_file(DEFAULT_RULES_PATH), declared, override),
+        merge_rule_values(load_rules_file(DEFAULT_RULES_PATH), override),
         source=" + ".join(sources),
     )
     LOG.info("Visit rules from %s: %s", rules.source, rules.to_dict())

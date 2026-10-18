@@ -60,10 +60,10 @@ def event(code, day, table=None, visit_id=None, end_day=None, text_value=None):
     return dict(code=code, day=day, table=table, visit_id=visit_id, end_day=end_day, text_value=text_value)
 
 
-def build_database(root, name, events, rules=None):
+def build_database(root, name, events):
     """
-    Three subjects (train, tuning, held_out) with the same events, as a meds_reader database. The visit rules,
-    a dict, are written to the metadata of the MEDS dataset.
+    Three subjects (train, tuning, held_out) with the same events, as a meds_reader database. Its metadata is the
+    standard one of MEDS: there is no file of visit rules in it.
     """
     source = os.path.join(root, name)
     os.makedirs(os.path.join(source, "data"))
@@ -107,9 +107,6 @@ def build_database(root, name, events, rules=None):
         {"code": sorted({e["code"] for e in events}), "description": None, "parent_codes": None},
         schema={"code": pl.String, "description": pl.String, "parent_codes": pl.List(pl.String)},
     ).write_parquet(os.path.join(source, "metadata", "codes.parquet"))
-    if rules is not None:
-        with open(os.path.join(source, "metadata", "visit_rules.yaml"), "w") as f:
-            yaml.safe_dump(rules, f)
     database = os.path.join(root, name + "_db")
     subprocess.run([converter(), source, database, "--num_threads", "1"], check=True, capture_output=True)
     return database
@@ -427,56 +424,49 @@ class ResolveVisitRulesTest(unittest.TestCase):
         self.root = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.root, True)
 
-    def folder(self, declared=None):
-        folder = os.path.join(self.root, "database")
-        os.makedirs(os.path.join(folder, "metadata"), exist_ok=True)
-        if declared is not None:
-            with open(os.path.join(folder, "metadata", "visit_rules.yaml"), "w") as f:
-                yaml.safe_dump(declared, f)
-        return folder
-
-    def override(self, values, name="override.yaml"):
+    def rules_file(self, values, name="rules.yaml"):
         path = os.path.join(self.root, name)
         with open(path, "w") as f:
             yaml.safe_dump(values, f)
         return path
 
-    def test_no_rules_at_all(self):
-        rules = resolve_visit_rules(self.folder())
+    def test_without_a_file_the_defaults_are_used_as_they_are(self):
+        rules = resolve_visit_rules()
         self.assertEqual(rules.source, DEFAULT_RULES)
         self.assertIn("Visit/", rules.visit_events)
         self.assertIn("HOSPITAL_ADMISSION//", rules.admission_events)
+        self.assertNotIn("ENC//INPATIENT", rules.admission_events)
 
-    def test_the_rules_of_the_dataset(self):
-        rules = resolve_visit_rules(self.folder(CUSTOM_RULES))
+    def test_a_file_of_the_user_is_applied_on_top_of_the_defaults(self):
+        rules = resolve_visit_rules(self.rules_file(CUSTOM_RULES))
         self.assertIn("HOSPITAL_ADMISSION//", rules.admission_events)
         self.assertIn("ENC//INPATIENT", rules.admission_events)
+        self.assertIn("Visit/", rules.visit_events)
+        self.assertIn("ENC//", rules.visit_events)
+        self.assertEqual(rules.source, f"{DEFAULT_RULES} + {self.rules_file(CUSTOM_RULES)}")
 
     def test_rule_files_add_patterns_with_stable_deduplication(self):
-        path = self.override(dict(discharge_events=["OTHER//", "OTHER//"]))
-        rules = resolve_visit_rules(self.folder(CUSTOM_RULES), path)
-        self.assertIn("HOSPITAL_DISCHARGE//", rules.discharge_events)
-        self.assertIn("DISCH//", rules.discharge_events)
+        rules = resolve_visit_rules(self.rules_file(dict(discharge_events=["OTHER//", "OTHER//", "HOSPITAL_DISCHARGE//"])))
         self.assertIn("OTHER//", rules.discharge_events)
         self.assertEqual(rules.discharge_events.count("OTHER//"), 1)
-        self.assertIn("Visit/", rules.visit_events)
-        self.assertIn("ENC//", rules.visit_events)
+        self.assertEqual(rules.discharge_events.count("HOSPITAL_DISCHARGE//"), 1)
 
-    def test_any_valid_rules_file_can_stand_alone(self):
-        rules = resolve_visit_rules(self.folder(), self.override(CUSTOM_RULES))
-        self.assertIn("Visit/", rules.visit_events)
-        self.assertIn("ENC//", rules.visit_events)
-        rules = resolve_visit_rules(self.folder(), self.override(dict(discharge_events=["OTHER//"])))
+    def test_a_rules_file_does_not_have_to_repeat_the_defaults(self):
+        rules = resolve_visit_rules(self.rules_file(dict(discharge_events=["OTHER//"])))
         self.assertIn("HOSPITAL_DISCHARGE//", rules.discharge_events)
-        self.assertIn("OTHER//", rules.discharge_events)
+        self.assertIn("Visit/", rules.visit_events)
 
     def test_json_is_accepted_too(self):
         path = os.path.join(self.root, "rules.json")
         with open(path, "w") as f:
             json.dump(CUSTOM_RULES, f)
-        rules = resolve_visit_rules(self.folder(), path)
-        self.assertIn("HOSPITAL_ADMISSION//", rules.admission_events)
-        self.assertIn("ENC//INPATIENT", rules.admission_events)
+        self.assertIn("ENC//INPATIENT", resolve_visit_rules(path).admission_events)
+
+    def test_a_file_that_is_not_valid_rules_is_an_error(self):
+        with self.assertRaisesRegex(VisitRulesError, "regular expression"):
+            resolve_visit_rules(self.rules_file(dict(visit_events=["Visit/("])))
+        with self.assertRaisesRegex(VisitRulesError, "discharge_event"):
+            resolve_visit_rules(self.rules_file(dict(discharge_event=["X//"])))
 
 
 @unittest.skipIf(converter() is None, "meds_reader_convert is not installed")
@@ -488,7 +478,11 @@ class VisitsFromRulesTest(unittest.TestCase):
         cls.problem_list = build_database(cls.root, "problem_list", OMOP_EVENTS + [event("ICD9CM/250.00", 2, "condition", 1)])
         cls.mimic = build_database(cls.root, "mimic", MIMIC_EVENTS)
         cls.mimic_ed = build_database(cls.root, "mimic_ed", MIMIC_ED_EVENTS)
-        cls.custom = build_database(cls.root, "custom", CUSTOM_EVENTS, rules=CUSTOM_RULES)
+        cls.custom = build_database(cls.root, "custom", CUSTOM_EVENTS)
+        # the rules of the user for the codes of that dataset
+        cls.custom_rules = os.path.join(cls.root, "custom_rules.yaml")
+        with open(cls.custom_rules, "w") as f:
+            yaml.safe_dump(CUSTOM_RULES, f)
 
     @classmethod
     def tearDownClass(cls):
@@ -564,23 +558,33 @@ class VisitsFromRulesTest(unittest.TestCase):
         by_class = describe(visits_of(self.custom, MedsToCehrbertOMOP()))
         self.assertNotEqual(by_class[0][3], "DISCH//HOME")
 
-    def test_create_meds_dataset_reads_the_rules_from_the_metadata_of_the_dataset(self):
-        args = data_args(self.custom, att_function_type="day", inpatient_att_function_type="day")
-        with unittest.mock.patch.object(datasets_config, "HF_DATASETS_CACHE", os.path.join(self.root, "cache1")):
-            dataset = create_meds_dataset(args)
-        # the visits of a patient are stored column by column
-        self.assertEqual(set(dataset["train"][0]["visits"]["visit_type"]), {"ENC//INPATIENT", "ENC//OUTPATIENT"})
-
-    def test_a_rules_file_adds_to_the_discharge_rules_of_the_dataset(self):
-        override = os.path.join(self.root, "discharge.yaml")
-        with open(override, "w") as f:
-            yaml.safe_dump(dict(discharge_events=["NO_SUCH//"]), f)
-        args = data_args(self.custom)
-        with unittest.mock.patch.object(datasets_config, "HF_DATASETS_CACHE", os.path.join(self.root, "cache2")):
-            dataset = create_meds_dataset(args, rules_file=override)
+    def _discharge_facility(self, dataset):
         visits = dataset["train"][0]["visits"]
-        facility = dict(zip(visits["visit_type"], visits["discharge_facility"]))["ENC//INPATIENT"]
-        self.assertEqual(facility, "DISCH//HOME")
+        return dict(zip(visits["visit_type"], visits["discharge_facility"]))["ENC//INPATIENT"]
+
+    def test_a_dataset_with_other_codes_is_read_with_the_rules_file_of_the_user(self):
+        args = data_args(self.custom, att_function_type="day", inpatient_att_function_type="day")
+        with unittest.mock.patch.object(datasets_config, "HF_DATASETS_CACHE", os.path.join(self.root, "cache_with")):
+            with_rules = create_meds_dataset(args, rules_file=self.custom_rules)
+        with unittest.mock.patch.object(datasets_config, "HF_DATASETS_CACHE", os.path.join(self.root, "cache_without")):
+            without_rules = create_meds_dataset(args)
+        # the visits of a patient are stored column by column
+        self.assertEqual(set(with_rules["train"][0]["visits"]["visit_type"]), {"ENC//INPATIENT", "ENC//OUTPATIENT"})
+        self.assertEqual(self._discharge_facility(with_rules), "DISCH//HOME")
+        # the defaults do not know the discharge codes of this dataset
+        self.assertNotEqual(self._discharge_facility(without_rules), "DISCH//HOME")
+
+    def test_a_rules_file_in_the_metadata_of_a_dataset_is_not_read(self):
+        # not a standard file of MEDS: whatever is left there by hand or by another tool does nothing
+        metadata = os.path.join(self.custom, "metadata")
+        with open(os.path.join(metadata, "visit_rules.yaml"), "w") as f:
+            yaml.safe_dump(CUSTOM_RULES, f)
+        pl.DataFrame({"discharge_events": [["DISCH//"]]}).write_parquet(os.path.join(metadata, "visit_rules.parquet"))
+        self.addCleanup(lambda: [os.remove(os.path.join(metadata, n)) for n in ("visit_rules.yaml", "visit_rules.parquet")])
+        args = data_args(self.custom)
+        with unittest.mock.patch.object(datasets_config, "HF_DATASETS_CACHE", os.path.join(self.root, "cache_stray")):
+            dataset = create_meds_dataset(args)
+        self.assertNotEqual(self._discharge_facility(dataset), "DISCH//HOME")
 
     def test_a_dataset_without_rules_uses_the_same_defaults_for_both_data_formats(self):
         for database, conversion_type, name, visit_types in (
@@ -602,10 +606,8 @@ class PrepareFinetuneDatasetTest(unittest.TestCase):
         cls.root = tempfile.mkdtemp()
         cls.old_cache = datasets_config.HF_DATASETS_CACHE
         datasets_config.HF_DATASETS_CACHE = os.path.join(cls.root, "hf_cache")
-        with open(DEFAULT_RULES) as f:
-            mimic_rules = yaml.safe_load(f)
         events = MIMIC_EVENTS + [event("HOSPITAL_DISCHARGE//HOME", 14)]
-        cls.database = build_database(cls.root, "mimic", events, rules=mimic_rules)
+        cls.database = build_database(cls.root, "mimic", events)
         cls.cohort = os.path.join(cls.root, "cohort")
         os.makedirs(cls.cohort)
         pd.DataFrame(
@@ -617,7 +619,7 @@ class PrepareFinetuneDatasetTest(unittest.TestCase):
         datasets_config.HF_DATASETS_CACHE = cls.old_cache
         shutil.rmtree(cls.root, ignore_errors=True)
 
-    def test_the_rules_of_the_dataset_make_a_stay_one_inpatient_visit_without_any_flag(self):
+    def test_the_defaults_make_a_stay_one_inpatient_visit_without_any_flag(self):
         args = data_args(
             self.database,
             cohort_folder=self.cohort,
@@ -625,7 +627,7 @@ class PrepareFinetuneDatasetTest(unittest.TestCase):
             inpatient_att_function_type="day",
             include_auxiliary_token=True,
         )
-        # the default of the arguments is the OMOP conversion: the rules of the dataset are what decides
+        # the default of the arguments is the OMOP conversion: the defaults decide, the argument does not
         self.assertEqual(args.meds_to_cehrbert_conversion_type, "MedsToCehrbertOMOP")
         training_args = TrainingArguments(output_dir=os.path.join(self.root, "out"), report_to="none", use_cpu=True)
         dataset = prepare_finetune_dataset(args, training_args, CehrGPTArguments(), None)

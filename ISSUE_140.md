@@ -29,13 +29,12 @@ Production code uses `YamlDrivenConversion` and generic timeline builders. It do
 OMOP MEDS and MIMIC-IV MEDS. Every packaged concept has an inline annotation identifying its corresponding data
 format.
 
-Additional rules may be supplied in either of these locations:
+A dataset that codes its visits differently supplies its own YAML file with `--meds_visit_rules_file <path>`. The MEDS
+dataset carries no rules file: nothing is read from, or written to, its `metadata` folder, because a rules file is
+not a standard MEDS file.
 
-1. `<MEDS reader database>/metadata/visit_rules.yaml`
-2. `--meds_visit_rules_file <path>`
-
-The merge order is defaults, dataset metadata, then the user file. Pattern lists extend earlier lists with stable
-de-duplication. A later text-event rule replaces an earlier rule with the same `code`.
+The merge order is defaults, then the user file. Pattern lists extend earlier lists with stable de-duplication. A later
+text-event rule replaces an earlier rule with the same `code`.
 
 ### Automatic visit-boundary detection
 
@@ -112,4 +111,4 @@ PYTHONPATH=src python -m pytest tests/unit_tests/data/meds_visit_rules_test.py -
 git diff --check
 ```
 
-Current result: `29 passed` for the focused MEDS rules and timeline suite.
+Current result: `30 passed` for the focused MEDS rules and timeline suite.

@@ -2,9 +2,8 @@
 """
 Read a MEDS dataset (a meds_reader database) as patients with visits, by the visit rules of the dataset.
 
-CEHR-GPT uses one generic visit builder whose matching rules come from cehrgpt.data.meds_visit_rules, so they can be
-declared in the metadata of the dataset or in a YAML file. Datasets without additional rules use the annotated OMOP
-and MIMIC defaults.
+CEHR-GPT uses one generic visit builder whose matching rules come from cehrgpt.data.meds_visit_rules: the annotated OMOP
+and MIMIC defaults, and a YAML file of the user for a dataset that codes its visits differently.
 """
 
 import collections
@@ -455,10 +454,10 @@ def create_meds_dataset(
     """
     The train, validation and test patients of the MEDS dataset in data_args.data_folder, with the mappings applied.
 
-    The visits are made from the standard OMOP and MIMIC defaults plus rules that the dataset declares in its metadata
-    and any additions in rules_file.
+    The visits are made from the standard OMOP and MIMIC defaults, with the yaml file of the user (rules_file) applied
+    on top. Nothing is read from the metadata of the dataset.
     """
-    rules = resolve_visit_rules(data_args.data_folder, rules_file)
+    rules = resolve_visit_rules(rules_file)
     return create_dataset_from_meds_reader_with_rules(
         data_args=data_args,
         rules=rules,
