@@ -173,8 +173,6 @@ def create_dataset_from_meds_reader_with_rules(
     LOG.info("The include_auxiliary_token: %s", data_args.include_auxiliary_token)
     LOG.info("The include_demographic_prompt: %s", data_args.include_demographic_prompt)
     LOG.info("The meds_exclude_tables: %s", "\n".join(data_args.meds_exclude_tables))
-    LOG.info("The disconnect_problem_list_events: %s", rules.disconnect_problem_list_events)
-
     train_dataset = _create_cehrbert_data_from_meds_with_rules(
         data_args=data_args,
         rules=rules,

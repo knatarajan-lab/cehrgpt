@@ -174,11 +174,9 @@ packaged file. The format is described in `src/cehrgpt/data/meds_visit_rules.py`
 with the packaged rules of the conversion that `--meds_to_cehrbert_conversion_type` names (default `MedsToCehrbertOMOP`),
 with a warning.
 
-The rules also say how to place an event that has the id of a visit (OMOP style): with `disconnect_problem_list_events`
-(true by default) the time of an event is the ground truth, and an event more than a day before the start or after
-the end of its visit (a problem list entry from years ago, a drug recorded long after) is put where its own time is.
-Set it to `false` in the rules to keep every event in the visit of its id. The argument of the same name no longer has
-an effect, the rules do.
+For an event that has the id of a visit (OMOP style), the event time is always the ground truth. An event more than a day
+before the start or after the end of its visit (a problem list entry from years ago, a drug recorded long after) is put
+where its own time is.
 
 ### Step 3: Pre-train with MEDS Data
 

@@ -64,5 +64,3 @@ text_events:
   labels:
   - LAB//50827//UNK//1
   - LAB//50827//UNK//2
-# disconnect_problem_list_events does not apply to this strategy: the events are put into visits by their time
-disconnect_problem_list_events: true

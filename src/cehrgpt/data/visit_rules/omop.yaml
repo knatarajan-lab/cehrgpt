@@ -11,9 +11,9 @@
 # Write the discharge event at the end of the visit, from a table that is not the visit table. Written at the start of the
 # visit, from the visit table, its code sorts before "Visit/" and is taken for the type of the visit.
 #
-# disconnect_problem_list_events (true by default): the time of an event is the ground truth. An event with the id of a
-# visit that is more than a day before its start or after its end (a problem list entry from years ago, a drug recorded
-# long after) is taken out of the visit and put where its own time is. MedsToCehrbertOMOP did this only when asked to.
+# The time of an event is the ground truth. An event with the id of a visit that is more than a day before its start or
+# after its end (a problem list entry from years ago, a drug recorded long after) is taken out of the visit and put where
+# its own time is.
 #
 # Declare it in <meds_reader database>/metadata/visit_rules.yaml, or pass --meds_visit_rules_file omop.
 strategy: visit_id
@@ -49,4 +49,3 @@ discharge_events:
 - CMS Place of Service/25
 - CMS Place of Service/32
 - CMS Place of Service/20
-disconnect_problem_list_events: true

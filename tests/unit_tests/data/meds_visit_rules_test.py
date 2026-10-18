@@ -210,12 +210,15 @@ class VisitRulesTest(unittest.TestCase):
         self.assertEqual(rules.text_events[0].labels, ["S", "D"])
         self.assertEqual(VisitRules.from_dict(rules.to_dict()).to_dict(), rules.to_dict())
 
-    def test_disconnecting_events_is_the_default_and_must_be_true_or_false(self):
-        self.assertTrue(VisitRules.from_dict(self.valid()).disconnect_problem_list_events)
-        self.assertFalse(VisitRules.from_dict(self.valid(disconnect_problem_list_events=False)).disconnect_problem_list_events)
-        with self.assertRaisesRegex(VisitRulesError, "true or false"):
-            VisitRules.from_dict(self.valid(disconnect_problem_list_events="no"))
-        self.assertIn("disconnect_problem_list_events", VisitRules.from_dict(self.valid()).to_dict())
+    def test_disconnecting_events_is_not_configurable(self):
+        with self.assertRaisesRegex(VisitRulesError, "Unknown keys"):
+            VisitRules.from_dict(self.valid(disconnect_problem_list_events=False))
+        self.assertNotIn("disconnect_problem_list_events", VisitRules.from_dict(self.valid()).to_dict())
+        conversion = build_conversion(
+            VisitRules.from_dict(self.valid()),
+            disconnect_problem_list_events=False,
+        )
+        self.assertTrue(conversion.disconnect_problem_list_events)
 
     def test_a_strategy_is_needed(self):
         with self.assertRaisesRegex(VisitRulesError, "strategy"):
@@ -374,7 +377,6 @@ class VisitsFromRulesTest(unittest.TestCase):
     def test_the_omop_rules_replicate_the_omop_class_with_its_options(self):
         for rules_change, options in (
             ({}, {}),
-            ({"disconnect_problem_list_events": False}, {"disconnect_problem_list_events": False}),
             ({}, {"meds_exclude_tables": ["measurement"]}),
         ):
             rules = self.rules(OMOP_RULES)
@@ -386,19 +388,16 @@ class VisitsFromRulesTest(unittest.TestCase):
         excluded = build_conversion(self.rules(OMOP_RULES), meds_exclude_tables=["measurement"])
         self.assertNotIn("LOINC/1", [e["code"] for v in visits_of(self.omop, excluded) for e in v["events"]])
 
-    def test_an_event_far_from_its_visit_is_put_where_its_time_is_unless_the_rules_say_not_to(self):
+    def test_an_event_far_from_its_visit_is_always_put_where_its_time_is(self):
         def codes_of_the_stay(rules):
             visits = visits_of(self.problem_list, build_conversion(rules))
             stay = [v for v in visits if v["visit_type"] == "Visit/IP"][0]
             return {e["code"] for e in stay["events"]}
 
         default = self.rules(OMOP_RULES)
-        self.assertTrue(default.disconnect_problem_list_events)
         # a problem list entry from 8 days before the stay is not part of the stay
         self.assertNotIn("ICD9CM/250.00", codes_of_the_stay(default))
         self.assertIn("ICD9CM/296.90", codes_of_the_stay(default))
-        keep = VisitRules.from_dict({**default.to_dict(), "disconnect_problem_list_events": False})
-        self.assertIn("ICD9CM/250.00", codes_of_the_stay(keep))
         # and it is not lost: it is in a visit of its own, at its own time
         everything = visits_of(self.problem_list, build_conversion(default))
         entry = [v for v in everything if "ICD9CM/250.00" in {e["code"] for e in v["events"]}][0]
