@@ -30,12 +30,11 @@ from cehrgpt.data.meds_dataset import (
     determine_visit_boundary_method,
 )
 from cehrgpt.data.meds_visit_rules import (
+    DEFAULT_RULES_PATH,
     VisitRules,
     VisitRulesError,
     YamlDrivenConversion,
     build_conversion,
-    packaged_rules_for_conversion,
-    packaged_rules_path,
     resolve_visit_rules,
 )
 from cehrgpt.runners.data_utils import prepare_finetune_dataset
@@ -43,8 +42,7 @@ from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 
 OMOP = "MedsToCehrbertOMOP"
 MIMIC = "MedsToBertMimic4"
-OMOP_RULES = packaged_rules_path("omop")
-MIMIC_RULES = packaged_rules_path("mimic4")
+DEFAULT_RULES = DEFAULT_RULES_PATH
 
 
 def converter():
@@ -201,6 +199,11 @@ def describe(visits):
     ]
 
 
+def without_visit_classification(visits):
+    """Compare with legacy conversion classes, which do not emit the generic builder's classification field."""
+    return [{key: value for key, value in visit.items() if key != "is_inpatient_or_ed"} for visit in visits]
+
+
 class VisitRulesTest(unittest.TestCase):
     def valid(self, **changes):
         values = dict(visit_events=["Visit/"], discharge_events=["X/1"])
@@ -245,48 +248,29 @@ class VisitRulesTest(unittest.TestCase):
         with self.assertRaisesRegex(VisitRulesError, "code, pattern and labels"):
             VisitRules.from_dict(self.valid(text_events=[dict(code="BP")]))
 
-    def test_the_packaged_rules_only_declare_event_matching_rules(self):
-        with open(OMOP_RULES) as f:
-            omop = VisitRules.from_dict(yaml.safe_load(f))
-        with open(MIMIC_RULES) as f:
-            mimic = VisitRules.from_dict(yaml.safe_load(f))
-        self.assertTrue(omop.visit_events)
-        self.assertFalse(mimic.visit_events)
-        self.assertNotIn("strategy", omop.to_dict())
-        self.assertNotIn("strategy", mimic.to_dict())
+    def test_the_default_rules_only_declare_event_matching_rules(self):
+        with open(DEFAULT_RULES) as f:
+            rules = VisitRules.from_dict(yaml.safe_load(f))
+        self.assertTrue(rules.visit_events)
+        self.assertNotIn("strategy", rules.to_dict())
 
-    def test_the_packaged_rules_match_the_codes_of_the_datasets_they_are_for(self):
+    def test_the_default_rules_match_both_supported_data_formats(self):
         def matches(patterns, code):
             return any(re.match(pattern, code) for pattern in patterns)
 
-        with open(MIMIC_RULES) as f:
-            mimic = VisitRules.from_dict(yaml.safe_load(f))
-        self.assertTrue(matches(mimic.admission_events, "HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM"))
-        self.assertTrue(matches(mimic.discharge_events, "HOSPITAL_DISCHARGE//HOME"))
-        self.assertTrue(matches(mimic.ed_admission_events, "TRANSFER_TO//ED//Emergency Department"))
+        with open(DEFAULT_RULES) as f:
+            rules = VisitRules.from_dict(yaml.safe_load(f))
+        self.assertTrue(matches(rules.admission_events, "HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM"))
+        self.assertTrue(matches(rules.discharge_events, "HOSPITAL_DISCHARGE//HOME"))
+        self.assertTrue(matches(rules.ed_admission_events, "TRANSFER_TO//ED//Emergency Department"))
         # the ICU stays are inside a hospital stay
-        self.assertFalse(matches(mimic.admission_events, "ICU_ADMISSION//Medical Intensive Care Unit (MICU)"))
-        with open(OMOP_RULES) as f:
-            omop = VisitRules.from_dict(yaml.safe_load(f))
+        self.assertFalse(matches(rules.admission_events, "ICU_ADMISSION//Medical Intensive Care Unit (MICU)"))
         for code in ("Visit/OP", "Visit/IP", "Visit/ER", "Visit/ERIP"):
-            self.assertTrue(matches(omop.visit_events, code), code)
+            self.assertTrue(matches(rules.visit_events, code), code)
         # the discharge facilities of the OMOP sample of 713 persons
         for code in ("PCORNet/Generic-NI", "CMS Place of Service/12", "SNOMED/371827001", "NUCC/261Q00000X", "Medicare Specialty/A4"):
-            self.assertTrue(matches(omop.discharge_events, code), code)
-
-    def test_a_packaged_name_stands_for_its_file(self):
-        mimic = packaged_rules_for_conversion(MIMIC)
-        omop = packaged_rules_for_conversion(OMOP)
-        for rules in (mimic, omop):
-            self.assertIn("Visit/", rules.visit_events)
-            self.assertIn("HOSPITAL_ADMISSION//", rules.admission_events)
-            self.assertIn("HOSPITAL_DISCHARGE//", rules.discharge_events)
-            self.assertIn("CMS Place of Service/12", rules.discharge_events)
-        self.assertTrue(mimic.text_events)
-        with self.assertRaisesRegex(VisitRulesError, "no packaged visit rules"):
-            packaged_rules_path("eicu")
-        with self.assertRaisesRegex(VisitRulesError, "packaged rules"):
-            packaged_rules_for_conversion("SomeConversionOfMine")
+            self.assertTrue(matches(rules.discharge_events, code), code)
+        self.assertTrue(rules.text_events)
 
     def test_yaml_builds_one_generic_conversion(self):
         conversion = build_conversion(VisitRules.from_dict(self.valid()))
@@ -458,7 +442,10 @@ class ResolveVisitRulesTest(unittest.TestCase):
         return path
 
     def test_no_rules_at_all(self):
-        self.assertIsNone(resolve_visit_rules(self.folder()))
+        rules = resolve_visit_rules(self.folder())
+        self.assertEqual(rules.source, DEFAULT_RULES)
+        self.assertIn("Visit/", rules.visit_events)
+        self.assertIn("HOSPITAL_ADMISSION//", rules.admission_events)
 
     def test_the_rules_of_the_dataset(self):
         rules = resolve_visit_rules(self.folder(CUSTOM_RULES))
@@ -512,14 +499,14 @@ class VisitsFromRulesTest(unittest.TestCase):
             return VisitRules.from_dict(yaml.safe_load(f), source=path)
 
     def test_the_omop_rules_make_the_visits_that_the_omop_class_of_cehrbert_makes(self):
-        by_rules = visits_of(self.omop, build_conversion(self.rules(OMOP_RULES)))
+        by_rules = visits_of(self.omop, build_conversion(self.rules(DEFAULT_RULES)))
         by_class = visits_of(self.omop, MedsToCehrbertOMOP(disconnect_problem_list_events=True))
         self.assertEqual(describe(by_rules), describe(by_class))
         self.assertEqual([v[0] for v in describe(by_rules)], ["Visit/IP", "Visit/OP"])
         self.assertEqual(describe(by_rules)[0][3], "CMS Place of Service/12")
 
     def test_the_mimic_rules_make_the_visits_that_the_mimic_class_of_cehrbert_makes(self):
-        by_rules = visits_of(self.mimic, build_conversion(self.rules(MIMIC_RULES), default_visit_id=1))
+        by_rules = visits_of(self.mimic, build_conversion(self.rules(DEFAULT_RULES), default_visit_id=1))
         by_class = visits_of(self.mimic, MedsToBertMimic4(default_visit_id=1))
         self.assertEqual(describe(by_rules), describe(by_class))
         # the admission and the discharge are one inpatient visit
@@ -527,9 +514,9 @@ class VisitsFromRulesTest(unittest.TestCase):
         self.assertEqual(describe(by_rules)[0][3], "HOSPITAL_DISCHARGE//HOME")
 
     def test_the_mimic_rules_replicate_the_mimic_class_on_ed_stays_and_numbers_kept_as_text(self):
-        by_rules = visits_of(self.mimic_ed, build_conversion(self.rules(MIMIC_RULES), default_visit_id=1))
+        by_rules = visits_of(self.mimic_ed, build_conversion(self.rules(DEFAULT_RULES), default_visit_id=1))
         by_class = visits_of(self.mimic_ed, MedsToBertMimic4(default_visit_id=1))
-        self.assertEqual(by_rules, by_class)
+        self.assertEqual(without_visit_classification(by_rules), by_class)
         codes = {e["code"] for v in by_rules for e in v["events"]}
         # the text events are made numeric by the rules: one event per group of the pattern
         self.assertIn("Systolic Blood Pressure", codes)
@@ -541,13 +528,13 @@ class VisitsFromRulesTest(unittest.TestCase):
             ({}, {}),
             ({}, {"meds_exclude_tables": ["measurement"]}),
         ):
-            rules = self.rules(OMOP_RULES)
+            rules = self.rules(DEFAULT_RULES)
             rules = VisitRules.from_dict({**rules.to_dict(), **rules_change})
             by_rules = visits_of(self.omop, build_conversion(rules, **options))
             class_options = {"disconnect_problem_list_events": True, **options}
             by_class = visits_of(self.omop, MedsToCehrbertOMOP(**class_options))
-            self.assertEqual(by_rules, by_class, (rules_change, options))
-        excluded = build_conversion(self.rules(OMOP_RULES), meds_exclude_tables=["measurement"])
+            self.assertEqual(without_visit_classification(by_rules), by_class, (rules_change, options))
+        excluded = build_conversion(self.rules(DEFAULT_RULES), meds_exclude_tables=["measurement"])
         self.assertNotIn("LOINC/1", [e["code"] for v in visits_of(self.omop, excluded) for e in v["events"]])
 
     def test_an_event_far_from_its_visit_is_always_put_where_its_time_is(self):
@@ -556,7 +543,7 @@ class VisitsFromRulesTest(unittest.TestCase):
             stay = [v for v in visits if v["visit_type"] == "Visit/IP"][0]
             return {e["code"] for e in stay["events"]}
 
-        default = self.rules(OMOP_RULES)
+        default = self.rules(DEFAULT_RULES)
         # a problem list entry from 8 days before the stay is not part of the stay
         self.assertNotIn("ICD9CM/250.00", codes_of_the_stay(default))
         self.assertIn("ICD9CM/296.90", codes_of_the_stay(default))
@@ -595,25 +582,16 @@ class VisitsFromRulesTest(unittest.TestCase):
         facility = dict(zip(visits["visit_type"], visits["discharge_facility"]))["ENC//INPATIENT"]
         self.assertEqual(facility, "DISCH//HOME")
 
-    def test_a_dataset_without_rules_is_read_with_the_packaged_rules_of_the_conversion_that_is_named(self):
-        for database, conversion_type, packaged in (
-            (self.omop, OMOP, "omop"),
-            (self.mimic, MIMIC, "mimic4"),
+    def test_a_dataset_without_rules_uses_the_same_defaults_for_both_data_formats(self):
+        for database, conversion_type, name, visit_types in (
+            (self.omop, OMOP, "omop", {"Visit/IP", "Visit/OP"}),
+            (self.mimic, MIMIC, "mimic4", {"Visit/IP"}),
         ):
             args = data_args(database, meds_to_cehrbert_conversion_type=conversion_type)
-            with unittest.mock.patch.object(datasets_config, "HF_DATASETS_CACHE", os.path.join(self.root, "cache_" + packaged)):
-                with self.assertLogs("transformers", level="WARNING") as logs:
-                    dataset = create_meds_dataset(args)
-            self.assertTrue(any("declares no visit rules" in line and packaged in line for line in logs.output))
+            with unittest.mock.patch.object(datasets_config, "HF_DATASETS_CACHE", os.path.join(self.root, "cache_" + name)):
+                dataset = create_meds_dataset(args)
             self.assertGreater(dataset["train"].num_rows, 0)
-        # and the visits are the ones of the class of cehrbert
-        self.assertEqual(set(dataset["train"][0]["visits"]["visit_type"]), {"Visit/IP"})
-
-    def test_a_packaged_name_can_be_the_rules_file(self):
-        args = data_args(self.omop)
-        with unittest.mock.patch.object(datasets_config, "HF_DATASETS_CACHE", os.path.join(self.root, "cache_named")):
-            dataset = create_meds_dataset(args, rules_file="omop")
-        self.assertEqual(set(dataset["train"][0]["visits"]["visit_type"]), {"Visit/IP", "Visit/OP"})
+            self.assertEqual(set(dataset["train"][0]["visits"]["visit_type"]), visit_types)
 
 @unittest.skipIf(converter() is None, "meds_reader_convert is not installed")
 class PrepareFinetuneDatasetTest(unittest.TestCase):
@@ -624,7 +602,7 @@ class PrepareFinetuneDatasetTest(unittest.TestCase):
         cls.root = tempfile.mkdtemp()
         cls.old_cache = datasets_config.HF_DATASETS_CACHE
         datasets_config.HF_DATASETS_CACHE = os.path.join(cls.root, "hf_cache")
-        with open(MIMIC_RULES) as f:
+        with open(DEFAULT_RULES) as f:
             mimic_rules = yaml.safe_load(f)
         events = MIMIC_EVENTS + [event("HOSPITAL_DISCHARGE//HOME", 14)]
         cls.database = build_database(cls.root, "mimic", events, rules=mimic_rules)

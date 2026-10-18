@@ -3,8 +3,8 @@
 Read a MEDS dataset (a meds_reader database) as patients with visits, by the visit rules of the dataset.
 
 CEHR-GPT uses one generic visit builder whose matching rules come from cehrgpt.data.meds_visit_rules, so they can be
-declared in the metadata of the dataset or in a YAML file. Datasets without rules are read with the packaged rules of
-the conversion that the arguments name for backwards compatibility.
+declared in the metadata of the dataset or in a YAML file. Datasets without additional rules use the annotated OMOP
+and MIMIC defaults.
 """
 
 import collections
@@ -37,7 +37,6 @@ from cehrgpt.data.meds_visit_rules import (
     VisitRules,
     YamlDrivenConversion,
     build_conversion,
-    packaged_rules_for_conversion,
     resolve_visit_rules,
 )
 
@@ -456,21 +455,10 @@ def create_meds_dataset(
     """
     The train, validation and test patients of the MEDS dataset in data_args.data_folder, with the mappings applied.
 
-    The visits are made by the rules that the dataset declares in its metadata, with the keys of rules_file on top. A
-    dataset that has none and no rules_file is read with the packaged rules of the conversion that data_args names
-    (meds_to_cehrbert_conversion_type: omop or mimic4), with a warning.
+    The visits are made from the standard OMOP and MIMIC defaults plus rules that the dataset declares in its metadata
+    and any additions in rules_file.
     """
     rules = resolve_visit_rules(data_args.data_folder, rules_file)
-    if rules is None:
-        rules = packaged_rules_for_conversion(data_args.meds_to_cehrbert_conversion_type)
-        LOG.warning(
-            "The dataset in %s declares no visit rules (%s) and none was given with --meds_visit_rules_file: using the "
-            "packaged rules %s for %s. Declare the rules of the dataset in its metadata.",
-            data_args.data_folder,
-            os.path.join("metadata", "visit_rules.yaml"),
-            rules.source,
-            data_args.meds_to_cehrbert_conversion_type,
-        )
     return create_dataset_from_meds_reader_with_rules(
         data_args=data_args,
         rules=rules,

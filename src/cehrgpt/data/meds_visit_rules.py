@@ -5,12 +5,7 @@ a discharge. They depend on how the dataset was made and they change, so they ar
   * the dataset declares them in ``<meds_reader database>/metadata/visit_rules.yaml`` (the file comes from the
     ``metadata`` folder of the MEDS dataset, which meds_reader_convert copies);
   * CEHR-GPT's ``defaults.yaml`` provides the standard OMOP and MIMIC patterns;
-  * a yaml file given with ``--meds_visit_rules_file`` adds dataset-specific patterns. ``omop`` and ``mimic4`` stand
-    for the two compatibility files that come with cehrgpt (visit_rules/).
-
-The two files are the rules of the two kinds of datasets that cehrgpt is used on: MEDS made from OMOP (``omop``) and
-MEDS made from MIMIC-IV with MEDS_transforms (``mimic4``). A dataset that declares nothing is read with the one that
-matches ``--meds_to_cehrbert_conversion_type``.
+  * a yaml file given with ``--meds_visit_rules_file`` adds dataset-specific patterns.
 
     visit_events: ["Visit/"]      # the event that is the visit: its code is the visit type, its time the start
     ed_admission_events: ["Visit/ER"]
@@ -47,11 +42,7 @@ from transformers.utils import logging
 LOG = logging.get_logger("transformers")
 
 METADATA_FILE = os.path.join("metadata", "visit_rules.yaml")
-PACKAGED_RULES_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visit_rules")
-DEFAULT_RULES_PATH = os.path.join(PACKAGED_RULES_FOLDER, "defaults.yaml")
-# The old conversion names remain only as a backwards-compatible way to choose a packaged YAML file when a dataset
-# does not declare rules. They are not instantiated by this module.
-PACKAGED_RULES = {"omop": "MedsToCehrbertOMOP", "mimic4": "MedsToBertMimic4"}
+DEFAULT_RULES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visit_rules", "defaults.yaml")
 PATTERN_LISTS = ("visit_events", "ed_admission_events", "admission_events", "discharge_events")
 KEYS = PATTERN_LISTS + ("text_events",)
 
@@ -118,36 +109,8 @@ class VisitRules:
         return result
 
 
-def packaged_rules_path(name: str) -> str:
-    """The path of the rules file that comes with cehrgpt under this name ("omop" or "mimic4")."""
-    if name not in PACKAGED_RULES:
-        raise VisitRulesError(f"There are no packaged visit rules called {name!r}; they are {sorted(PACKAGED_RULES)}")
-    return os.path.join(PACKAGED_RULES_FOLDER, f"{name}.yaml")
-
-
-def packaged_rules_for_conversion(conversion_type: str) -> VisitRules:
-    """
-    The packaged rules that take the place of a conversion of cehrbert that is named by its class
-    (meds_to_cehrbert_conversion_type), for a dataset that does not declare rules.
-    """
-    for name, conversion in PACKAGED_RULES.items():
-        if conversion == conversion_type:
-            path = packaged_rules_path(name)
-            return VisitRules.from_dict(
-                merge_rule_values(load_rules_file(DEFAULT_RULES_PATH), load_rules_file(path)),
-                source=f"{DEFAULT_RULES_PATH} + {path}",
-            )
-    raise VisitRulesError(
-        f"The dataset declares no visit rules and {conversion_type!r} is not a conversion with packaged rules "
-        f"({sorted(PACKAGED_RULES.values())}). Declare the rules of the dataset in {METADATA_FILE} or pass "
-        "--meds_visit_rules_file."
-    )
-
-
 def load_rules_file(path: str) -> Dict[str, Any]:
-    """The keys of a visit rules file (yaml, which includes json), or of a packaged one by its name."""
-    if path in PACKAGED_RULES:
-        path = packaged_rules_path(path)
+    """The keys of a visit rules file (YAML, which includes JSON)."""
     path = os.path.expanduser(path)
     with open(path) as f:
         values = yaml.safe_load(f)
@@ -190,23 +153,20 @@ def merge_rule_values(*layers: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return merged
 
 
-def resolve_visit_rules(data_folder: str, rules_file: Optional[str] = None) -> Optional[VisitRules]:
+def resolve_visit_rules(data_folder: str, rules_file: Optional[str] = None) -> VisitRules:
     """
     The visit rules of a dataset: standard defaults plus patterns declared in its metadata and rules_file.
 
-    Returns None when there are neither, which is the case of a dataset that does not say how its visits are made.
+    A dataset without its own rules uses the annotated OMOP and MIMIC defaults directly.
     """
     metadata_path = os.path.join(os.path.expanduser(data_folder), METADATA_FILE)
     declared = load_rules_file(metadata_path) if os.path.exists(metadata_path) else None
     override = load_rules_file(rules_file) if rules_file else None
-    if declared is None and override is None:
-        return None
-    sources = []
+    sources = [DEFAULT_RULES_PATH]
     if declared is not None:
         sources.append(metadata_path)
     if override is not None:
-        sources.append(packaged_rules_path(rules_file) if rules_file in PACKAGED_RULES else os.path.expanduser(rules_file))
-    sources.insert(0, DEFAULT_RULES_PATH)
+        sources.append(os.path.expanduser(rules_file))
     rules = VisitRules.from_dict(
         merge_rule_values(load_rules_file(DEFAULT_RULES_PATH), declared, override),
         source=" + ".join(sources),
