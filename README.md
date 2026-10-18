@@ -154,13 +154,22 @@ export MEDS_READER_DIR=""       # MEDS reader output directory
 
 Transform MIMIC files to MEDS format following the [MEDS_transforms](https://github.com/mmcdermott/MEDS_transforms/) repository instructions.
 
-### Step 2: Prepare MEDS Reader
+### Step 2: Declare the Visit Rules and Prepare MEDS Reader
 
-Convert MEDS data for CEHR-GPT compatibility:
+How the events of a MEDS dataset make visits (which events are a visit, an admission, an ED admission and a discharge)
+depends on how the dataset was made, so the dataset declares it. Put a `visit_rules.yaml` in the `metadata` folder of
+the MEDS dataset before converting it. Start from an example in `sample_configs/meds_visit_rules/`: `mimic4.yaml` for
+MIMIC-IV and `omop.yaml` for a dataset made from OMOP, whose events carry a `visit_id`.
 
 ```bash
+cp sample_configs/meds_visit_rules/mimic4.yaml $MEDS_DIR/metadata/visit_rules.yaml
 meds_reader_convert $MEDS_DIR $MEDS_READER_DIR --num_threads 10
 ```
+
+`--meds_visit_rules_file my_rules.yaml` replaces the keys that the file has and keeps the other rules of the dataset,
+which is the way to try a change without touching the dataset. The format is described in
+`src/cehrgpt/data/meds_visit_rules.py`. A dataset without rules is still read by the conversion that
+`--meds_to_cehrbert_conversion_type` names (default `MedsToCehrbertOMOP`), with a warning.
 
 ### Step 3: Pre-train with MEDS Data
 
@@ -185,10 +194,6 @@ python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner \
   --att_function_type day --include_inpatient_hour_token \
   --include_auxiliary_token --include_demographic_prompt
 ```
-
-> **Note**: You do not need to say what shape the MEDS dataset has. The conversion that finds the visits
-> (`MedsToBertMimic4` for MIMIC-IV, `MedsToCehrbertOMOP` for OMOP-derived data) is chosen from the event codes of the
-> dataset. To force a conversion, pass `--meds_to_cehrbert_conversion_type <name>`.
 
 ### Step 4: Generate MEDS Trajectories
 

@@ -1,0 +1,58 @@
+# Visit rules of a MEDS dataset: which events make a visit, an admission, an ED admission and a discharge.
+# Written from the rules of MedsToBertMimic4: MIMIC-IV, whose events have no visit ids.
+# A dataset declares its rules in <meds_reader database>/metadata/visit_rules.yaml (copy this file into the metadata
+# folder of the MEDS dataset before meds_reader_convert). A file passed with --meds_visit_rules_file replaces the keys
+# that it has. The codes are regular expressions matched from the start of the code of an event (re.match).
+# See cehrgpt/data/meds_visit_rules.py.
+strategy: admission_window
+visit_events: []
+ed_admission_events:
+- ED_REGISTRATION//
+- TRANSFER_TO//ED
+admission_events:
+- HOSPITAL_ADMISSION//
+discharge_events:
+- HOSPITAL_DISCHARGE//
+text_events:
+- code: Blood Pressure
+  pattern: (\d+)/(\d+)
+  labels:
+  - Systolic Blood Pressure
+  - Diastolic Blood Pressure
+- code: Blood Pressure Lying
+  pattern: (\d+)/(\d+)
+  labels:
+  - Systolic Blood Pressure Lying
+  - Diastolic Blood Pressure Lying
+- code: Blood Pressure Sitting
+  pattern: (\d+)/(\d+)
+  labels:
+  - Systolic Blood Pressure Sitting
+  - Diastolic Blood Pressure Sitting
+- code: Blood Pressure Standing (1 min)
+  pattern: (\d+)/(\d+)
+  labels:
+  - Systolic Blood Pressure Standing (1 min)
+  - Diastolic Blood Pressure Standing (1 min)
+- code: Blood Pressure Standing (3 mins)
+  pattern: (\d+)/(\d+)
+  labels:
+  - Systolic Blood Pressure Standing (3 mins)
+  - Diastolic Blood Pressure Standing (3 mins)
+- code: Weight (Lbs)
+  pattern: (\d+)
+  labels:
+  - Weight (Lbs)
+- code: Height (Inches)
+  pattern: (\d+)
+  labels:
+  - Height (Inches)
+- code: BMI (kg/m2)
+  pattern: (\d+)
+  labels:
+  - BMI (kg/m2)
+- code: LAB//50827//UNK
+  pattern: (\d+)/(\d+)
+  labels:
+  - LAB//50827//UNK//1
+  - LAB//50827//UNK//2
