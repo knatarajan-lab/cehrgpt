@@ -29,6 +29,15 @@ cd cehrgpt
 pip install .
 ```
 
+The Spark tools (building OMOP tables, merging datasets, the analyses) need `pyspark`: `pip install ".[spark]"`.
+
+CEHR-GPT does not depend on `cehrbert` or `cehrbert_data`. A few scripts in `scripts/` call command line apps of
+those packages (the OMOP cohort and pretraining data apps, `cehrbert.evaluations.evaluation`); install them yourself
+if you run those scripts.
+
+The conversion of OMOP and MEDS data into patient sequences lives in
+[meds_to_cehr](https://github.com/knatarajan-lab/meds_to_cehr), which is installed with CEHR-GPT.
+
 ## 📋 Prerequisites
 
 Before getting started, set up the required environment variables:
@@ -183,9 +192,12 @@ python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner \
   --use_early_stopping --early_stopping_threshold 0.001 \
   --is_data_in_meds --inpatient_att_function_type day \
   --att_function_type day --include_inpatient_hour_token \
-  --include_auxiliary_token --include_demographic_prompt \
-  --meds_to_cehrbert_conversion_type "MedsToBertMimic4"
+  --include_auxiliary_token --include_demographic_prompt
 ```
+
+> **Note**: You do not need to say what shape the MEDS dataset has. The conversion that finds the visits
+> (`MedsToBertMimic4` for MIMIC-IV, `MedsToCehrbertOMOP` for OMOP-derived data) is chosen from the event codes of the
+> dataset. To force a conversion, pass `--meds_to_cehrbert_conversion_type <name>`.
 
 ### Step 4: Generate MEDS Trajectories
 
@@ -216,7 +228,6 @@ python -u -m cehrgpt.generation.cehrgpt_conditional_generation \
   --generation_max_new_tokens 4096 \
   --is_data_in_meds \
   --att_function_type day --inpatient_att_function_type day \
-  --meds_to_cehrbert_conversion_type MedsToBertMimic4 \
   --include_auxiliary_token --include_demographic_prompt \
   --include_inpatient_hour_token
 ```

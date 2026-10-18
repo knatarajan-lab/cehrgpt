@@ -28,8 +28,20 @@ classifiers = [
 ]
 
 dependencies = [
-    "cehrbert==1.4.9",
-    "cehrbert_data==0.1.1",
+    # The conversion of MEDS and OMOP data into patient sequences. TODO: point this at the released package.
+    "meds_to_cehr @ git+https://github.com/knatarajan-lab/meds_to_cehr.git",
+    # The libraries cehrgpt imports
+    "datasets>=2.16.1,<=3.6.0",
+    "numpy>=1.24.3",
+    "pandas>=2.2.0",
+    "pyarrow>=15.0.0",
+    "scikit-learn==1.4.0",
+    "scipy==1.12.0",
+    "torch>=2.4.0,<=2.8.0",
+    "accelerate>=0.31.0",
+    "femr>=0.2.0,<=0.2.4",
+    "PyYAML==6.0.1",
+    "Jinja2==3.1.3",
     "openai==1.54.3",
     "optuna==4.0.0",
     "transformers==4.44.1",
@@ -49,4 +61,8 @@ dev = [
 ]
 flash_attn = [
     "flash_attn"
+]
+# The Spark tools: building OMOP tables, merging datasets, the analyses
+spark = [
+    "pyspark==3.1.2"
 ]

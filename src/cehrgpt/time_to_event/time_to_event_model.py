@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from cehrbert_data.decorators.patient_event_decorator_base import time_month_token
+from meds_to_cehr.att_function import time_month_token
 from transformers import GenerationConfig
 
 from cehrgpt.gpt_utils import (

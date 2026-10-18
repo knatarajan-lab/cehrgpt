@@ -3,8 +3,8 @@ from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
-from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import Dataset
+from meds_to_cehr.arguments import DataTrainingArguments
 
 from cehrgpt.runners.data_utils import create_dataset_splits
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments

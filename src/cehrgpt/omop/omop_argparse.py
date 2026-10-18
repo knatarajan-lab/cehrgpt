@@ -1,6 +1,6 @@
 import argparse
 
-from cehrbert_data.utils.spark_utils import validate_table_names
+from cehrgpt.omop.spark_utils import validate_table_names
 
 
 def create_omop_argparse():
