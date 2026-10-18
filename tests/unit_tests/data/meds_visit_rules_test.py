@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 import unittest.mock
 
@@ -22,10 +23,12 @@ from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import config as datasets_config
 from transformers import TrainingArguments
 
-from cehrgpt.data.meds_dataset import convert_one_patient_with_rules, create_meds_dataset
+from cehrgpt.data.meds_dataset import (
+    convert_one_patient_with_rules,
+    create_meds_dataset,
+    determine_visit_boundary_method,
+)
 from cehrgpt.data.meds_visit_rules import (
-    STRATEGY_ADMISSION_WINDOW,
-    STRATEGY_VISIT_ID,
     VisitRules,
     VisitRulesError,
     YamlDrivenConversion,
@@ -136,7 +139,6 @@ CUSTOM_EVENTS = [
     event("LOINC/1", 20, "measurement", 2),
 ]
 CUSTOM_RULES = dict(
-    strategy=STRATEGY_VISIT_ID,
     visit_events=["ENC//"],
     admission_events=["ENC//INPATIENT"],
     discharge_events=["DISCH//"],
@@ -202,13 +204,12 @@ def describe(visits):
 
 class VisitRulesTest(unittest.TestCase):
     def valid(self, **changes):
-        values = dict(strategy=STRATEGY_VISIT_ID, visit_events=["Visit/"], discharge_events=["X/1"])
+        values = dict(visit_events=["Visit/"], discharge_events=["X/1"])
         values.update(changes)
         return values
 
     def test_valid_rules(self):
         rules = VisitRules.from_dict(self.valid(text_events=[dict(code="BP", pattern=r"(\d+)/(\d+)", labels=["S", "D"])]))
-        self.assertEqual(rules.strategy, STRATEGY_VISIT_ID)
         self.assertEqual(rules.visit_events, ["Visit/"])
         self.assertEqual(rules.text_events[0].labels, ["S", "D"])
         self.assertEqual(VisitRules.from_dict(rules.to_dict()).to_dict(), rules.to_dict())
@@ -223,11 +224,11 @@ class VisitRulesTest(unittest.TestCase):
         )
         self.assertTrue(conversion.disconnect_problem_list_events)
 
-    def test_a_strategy_is_needed(self):
-        with self.assertRaisesRegex(VisitRulesError, "strategy"):
-            VisitRules.from_dict(dict(visit_events=["Visit/"]))
-        with self.assertRaisesRegex(VisitRulesError, "strategy"):
-            VisitRules.from_dict(self.valid(strategy="by_magic"))
+    def test_visit_assignment_is_not_a_yaml_switch(self):
+        rules = VisitRules.from_dict(dict(visit_events=["Visit/"]))
+        self.assertNotIn("strategy", rules.to_dict())
+        with self.assertRaisesRegex(VisitRulesError, "Unknown keys"):
+            VisitRules.from_dict(self.valid(strategy="visit_id"))
 
     def test_a_typo_in_a_key_is_an_error_and_not_a_missing_rule(self):
         with self.assertRaisesRegex(VisitRulesError, "discharge_event"):
@@ -245,11 +246,15 @@ class VisitRulesTest(unittest.TestCase):
         with self.assertRaisesRegex(VisitRulesError, "code, pattern and labels"):
             VisitRules.from_dict(self.valid(text_events=[dict(code="BP")]))
 
-    def test_the_packaged_rules_declare_their_visit_assignment_strategies(self):
+    def test_the_packaged_rules_only_declare_event_matching_rules(self):
         with open(OMOP_RULES) as f:
-            self.assertEqual(VisitRules.from_dict(yaml.safe_load(f)).strategy, STRATEGY_VISIT_ID)
+            omop = VisitRules.from_dict(yaml.safe_load(f))
         with open(MIMIC_RULES) as f:
-            self.assertEqual(VisitRules.from_dict(yaml.safe_load(f)).strategy, STRATEGY_ADMISSION_WINDOW)
+            mimic = VisitRules.from_dict(yaml.safe_load(f))
+        self.assertTrue(omop.visit_events)
+        self.assertFalse(mimic.visit_events)
+        self.assertNotIn("strategy", omop.to_dict())
+        self.assertNotIn("strategy", mimic.to_dict())
 
     def test_the_packaged_rules_match_the_codes_of_the_datasets_they_are_for(self):
         def matches(patterns, code):
@@ -271,22 +276,35 @@ class VisitRulesTest(unittest.TestCase):
             self.assertTrue(matches(omop.discharge_events, code), code)
 
     def test_a_packaged_name_stands_for_its_file(self):
-        self.assertEqual(packaged_rules_for_conversion(MIMIC).strategy, STRATEGY_ADMISSION_WINDOW)
-        self.assertEqual(packaged_rules_for_conversion(OMOP).strategy, STRATEGY_VISIT_ID)
+        self.assertFalse(packaged_rules_for_conversion(MIMIC).visit_events)
+        self.assertTrue(packaged_rules_for_conversion(OMOP).visit_events)
         with self.assertRaisesRegex(VisitRulesError, "no packaged visit rules"):
             packaged_rules_path("eicu")
         with self.assertRaisesRegex(VisitRulesError, "packaged rules"):
             packaged_rules_for_conversion("SomeConversionOfMine")
 
-    def test_yaml_builds_one_generic_conversion_for_both_strategies(self):
-        visit_id = build_conversion(VisitRules.from_dict(self.valid()))
-        admission_window = build_conversion(
-            VisitRules.from_dict(self.valid(strategy=STRATEGY_ADMISSION_WINDOW))
+    def test_yaml_builds_one_generic_conversion(self):
+        conversion = build_conversion(VisitRules.from_dict(self.valid()))
+        self.assertIs(type(conversion), YamlDrivenConversion)
+
+    def test_visit_boundaries_are_detected_from_the_events(self):
+        visit_rules = build_conversion(VisitRules.from_dict(self.valid()))
+        admission_rules = build_conversion(
+            VisitRules.from_dict(dict(admission_events=["ADMIT//"], discharge_events=["DISCHARGE//"]))
         )
-        self.assertIs(type(visit_id), YamlDrivenConversion)
-        self.assertIs(type(admission_window), YamlDrivenConversion)
-        self.assertEqual(visit_id.strategy, STRATEGY_VISIT_ID)
-        self.assertEqual(admission_window.strategy, STRATEGY_ADMISSION_WINDOW)
+
+        def patient(*events):
+            return types.SimpleNamespace(events=list(events))
+
+        def event(code, visit_id=None):
+            return types.SimpleNamespace(code=code, visit_id=visit_id)
+
+        self.assertEqual(determine_visit_boundary_method(patient(event("LAB", 12)), visit_rules), "visit_id")
+        self.assertEqual(determine_visit_boundary_method(patient(event("Visit/IP")), visit_rules), "visit_id")
+        self.assertEqual(
+            determine_visit_boundary_method(patient(event("ADMIT//IP"), event("DISCHARGE//HOME")), admission_rules),
+            "admission_window",
+        )
 
 
 class ResolveVisitRulesTest(unittest.TestCase):
@@ -320,12 +338,11 @@ class ResolveVisitRulesTest(unittest.TestCase):
         rules = resolve_visit_rules(self.folder(CUSTOM_RULES), path)
         self.assertEqual(rules.discharge_events, ["OTHER//"])
         self.assertEqual(rules.visit_events, ["ENC//"])
-        self.assertEqual(rules.strategy, STRATEGY_VISIT_ID)
 
-    def test_a_file_can_stand_alone_if_it_has_a_strategy(self):
+    def test_any_valid_rules_file_can_stand_alone(self):
         self.assertEqual(resolve_visit_rules(self.folder(), self.override(CUSTOM_RULES)).visit_events, ["ENC//"])
-        with self.assertRaisesRegex(VisitRulesError, "strategy"):
-            resolve_visit_rules(self.folder(), self.override(dict(discharge_events=["OTHER//"])))
+        rules = resolve_visit_rules(self.folder(), self.override(dict(discharge_events=["OTHER//"])))
+        self.assertEqual(rules.discharge_events, ["OTHER//"])
 
     def test_json_is_accepted_too(self):
         path = os.path.join(self.root, "rules.json")

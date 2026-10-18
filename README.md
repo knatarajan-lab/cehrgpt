@@ -173,13 +173,16 @@ packaged file. The format is described in `src/cehrgpt/data/meds_visit_rules.py`
 with the packaged rules of the conversion that `--meds_to_cehrbert_conversion_type` names (default `MedsToCehrbertOMOP`),
 with a warning.
 
-The YAML selects how events are assigned to visits; CEHR-GPT uses one generic YAML-driven converter:
+The YAML contains only event-matching rules; CEHR-GPT uses one generic converter and detects visit boundaries from the
+events automatically:
 
 ```yaml
-strategy: visit_id  # or admission_window
 visit_events:
   - Visit/
 ```
+
+If any event has a `visit_id`, those IDs define the boundaries. Otherwise, a matching `visit_events` event defines an
+explicit visit. When neither is present, admission and discharge events define the visit windows.
 
 For an event that has the id of a visit (OMOP style), the event time is always the ground truth. An event more than a day
 before the start or after the end of its visit (a problem list entry from years ago, a drug recorded long after) is put

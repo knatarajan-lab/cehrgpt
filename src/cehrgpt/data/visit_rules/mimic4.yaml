@@ -11,7 +11,6 @@
 # The ICU stays (ICU_ADMISSION//, ICU_DISCHARGE//) are inside a hospital stay and are not visits of their own.
 #
 # Declare it in <meds_reader database>/metadata/visit_rules.yaml, or pass --meds_visit_rules_file mimic4.
-strategy: admission_window
 visit_events: []
 ed_admission_events:
 - ED_REGISTRATION//

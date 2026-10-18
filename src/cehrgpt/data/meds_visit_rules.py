@@ -11,7 +11,6 @@ The two files are the rules of the two kinds of datasets that cehrgpt is used on
 MEDS made from MIMIC-IV with MEDS_transforms (``mimic4``). A dataset that declares nothing is read with the one that
 matches ``--meds_to_cehrbert_conversion_type``.
 
-    strategy: visit_id            # how events are assigned to visits
     visit_events: ["Visit/"]      # the event that is the visit: its code is the visit type, its time the start
     ed_admission_events: ["Visit/ER"]
     admission_events: ["Visit/IP", "Visit/ERIP"]
@@ -28,9 +27,8 @@ For ``visit_id`` data, the time of an event is always the ground truth. An event
 more than a day before its start or after its end (a problem list entry from years ago, a drug that is recorded long
 after the visit) is taken out of that visit and put where its own time is.
 
-The visit assignment strategy is data too:
-  * ``visit_id``: events carry the id of their visit (a ``visit_id`` property), as in OMOP.
-  * ``admission_window``: visits are built from admission and discharge events and the time between them, as in MIMIC-IV.
+Visit assignment is detected automatically. Events with visit ids (or explicit visit events) use those visit boundaries;
+otherwise visits are built from the admission and discharge events and the time between them.
 """
 
 import dataclasses
@@ -52,11 +50,8 @@ PACKAGED_RULES_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # The old conversion names remain only as a backwards-compatible way to choose a packaged YAML file when a dataset
 # does not declare rules. They are not instantiated by this module.
 PACKAGED_RULES = {"omop": "MedsToCehrbertOMOP", "mimic4": "MedsToBertMimic4"}
-STRATEGY_VISIT_ID = "visit_id"
-STRATEGY_ADMISSION_WINDOW = "admission_window"
-STRATEGIES = (STRATEGY_VISIT_ID, STRATEGY_ADMISSION_WINDOW)
 PATTERN_LISTS = ("visit_events", "ed_admission_events", "admission_events", "discharge_events")
-KEYS = ("strategy",) + PATTERN_LISTS + ("text_events",)
+KEYS = PATTERN_LISTS + ("text_events",)
 
 
 class VisitRulesError(ValueError):
@@ -72,7 +67,6 @@ class TextEventRule:
 
 @dataclasses.dataclass(frozen=True)
 class VisitRules:
-    strategy: str
     visit_events: List[str] = dataclasses.field(default_factory=list)
     ed_admission_events: List[str] = dataclasses.field(default_factory=list)
     admission_events: List[str] = dataclasses.field(default_factory=list)
@@ -86,11 +80,6 @@ class VisitRules:
         unknown = sorted(set(values) - set(KEYS))
         if unknown:
             raise VisitRulesError(f"Unknown keys in the visit rules ({source}): {unknown}; the keys are {list(KEYS)}")
-        strategy = values.get("strategy")
-        if strategy not in STRATEGIES:
-            raise VisitRulesError(
-                f"The visit rules ({source}) need a strategy, one of {list(STRATEGIES)}; got {strategy!r}"
-            )
         lists = {}
         for key in PATTERN_LISTS:
             patterns = values.get(key) or []
@@ -116,10 +105,10 @@ class VisitRules:
                     f"{len(entry['labels'])} labels"
                 )
             text_events.append(TextEventRule(entry["code"], entry["pattern"], list(entry["labels"])))
-        return cls(strategy=strategy, text_events=text_events, source=source, **lists)
+        return cls(text_events=text_events, source=source, **lists)
 
     def to_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {"strategy": self.strategy}
+        result: Dict[str, Any] = {}
         for key in PATTERN_LISTS:
             result[key] = list(getattr(self, key))
         if self.text_events:
@@ -188,7 +177,6 @@ class YamlDrivenConversion(MedsToCehrBertConversion):
 
     def __init__(self, rules: VisitRules, default_visit_id: int = 1, **kwargs):
         self.rules = rules
-        self.strategy = rules.strategy
         self.default_visit_id = default_visit_id
         # Event time is always the ground truth for visit_id data.
         self.disconnect_problem_list_events = True

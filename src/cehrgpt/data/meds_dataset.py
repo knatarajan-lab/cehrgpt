@@ -10,8 +10,9 @@ metadata of the dataset or from a yaml file. Datasets without rules are read wit
 import collections
 import functools
 import os
+import re
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import List, Literal, Optional, Tuple
 
 import meds_reader
 import numpy as np
@@ -31,7 +32,6 @@ from datasets import Dataset, DatasetDict, Features, Sequence, Value
 from transformers.utils import logging
 
 from cehrgpt.data.meds_visit_rules import (
-    STRATEGY_ADMISSION_WINDOW,
     VisitRules,
     YamlDrivenConversion,
     build_conversion,
@@ -42,6 +42,40 @@ from cehrgpt.data.meds_visit_rules import (
 LOG = logging.get_logger("transformers")
 
 
+def determine_visit_boundary_method(
+    patient: meds_reader.Subject, conversion: YamlDrivenConversion
+) -> Literal["visit_id", "admission_window"]:
+    """Infer how this patient's events define visits, without a dataset-specific conversion class or YAML switch."""
+    if any(getattr(event, "visit_id", None) for event in patient.events):
+        return "visit_id"
+
+    visit_patterns = conversion.get_other_visit_matching_rules()
+    if any(any(re.match(pattern, event.code) for pattern in visit_patterns) for event in patient.events):
+        return "visit_id"
+
+    return "admission_window"
+
+
+def generate_demographics_and_patient_blocks_from_rules(
+    patient: meds_reader.Subject,
+    conversion: YamlDrivenConversion,
+    prediction_time: datetime = None,
+    observation_window: int = None,
+):
+    """Automatically determine visit boundaries and return the resulting patient blocks."""
+    common = dict(
+        patient=patient,
+        conversion=conversion,
+        prediction_time=prediction_time,
+        observation_window=observation_window,
+    )
+    if determine_visit_boundary_method(patient, conversion) == "admission_window":
+        return mimic_meds_generate_demographics_and_patient_blocks(
+            **common, default_visit_id=conversion.default_visit_id
+        )
+    return omop_meds_generate_demographics_and_patient_blocks(**common)
+
+
 def convert_one_patient_with_rules(
     patient: meds_reader.Subject,
     conversion: YamlDrivenConversion,
@@ -49,19 +83,13 @@ def convert_one_patient_with_rules(
     observation_window: int = None,
     label=None,
 ) -> CehrBertPatient:
-    """Convert one patient using the visit assignment strategy declared in YAML."""
-    common = dict(
+    """Convert one patient using automatically detected boundaries and the event rules declared in YAML."""
+    demographics, patient_blocks = generate_demographics_and_patient_blocks_from_rules(
         patient=patient,
         conversion=conversion,
         prediction_time=prediction_time,
         observation_window=observation_window,
     )
-    if conversion.strategy == STRATEGY_ADMISSION_WINDOW:
-        demographics, patient_blocks = mimic_meds_generate_demographics_and_patient_blocks(
-            **common, default_visit_id=conversion.default_visit_id
-        )
-    else:
-        demographics, patient_blocks = omop_meds_generate_demographics_and_patient_blocks(**common)
 
     blocks_by_visit = collections.defaultdict(list)
     for patient_block in patient_blocks:
