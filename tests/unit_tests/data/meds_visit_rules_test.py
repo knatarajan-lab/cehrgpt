@@ -342,6 +342,43 @@ class VisitRulesTest(unittest.TestCase):
         for hour_token in ("i-H2", "i-H4", "i-H6", "i-H3"):
             self.assertIn(hour_token, concepts)
 
+    def test_an_active_visit_at_prediction_time_has_no_visit_end_token(self):
+        conversion = build_conversion(VisitRules.from_dict(dict(admission_events=["ADMIT//"])))
+
+        def raw_event(code, time):
+            return types.SimpleNamespace(
+                code=code,
+                time=time,
+                end=None,
+                table=None,
+                visit_id=None,
+                text_value=None,
+                numeric_value=None,
+                unit=None,
+            )
+
+        prediction_time = dt.datetime(2020, 1, 2, 12)
+        patient = types.SimpleNamespace(
+            subject_id=1,
+            events=[
+                raw_event("MEDS_BIRTH", dt.datetime(1990, 1, 1)),
+                raw_event("Gender/F", dt.datetime(1990, 1, 1)),
+                raw_event("Race/White", dt.datetime(1990, 1, 1)),
+                raw_event("ADMIT//URGENT", dt.datetime(2020, 1, 1, 2)),
+                raw_event("LAB//OBSERVED", dt.datetime(2020, 1, 2, 2)),
+            ],
+        )
+        converted = convert_one_patient_with_rules(patient, conversion, prediction_time=prediction_time)
+        self.assertIsNone(converted["visits"][0]["visit_end_datetime"])
+
+        args = data_args("unused", att_function_type="day", inpatient_att_function_type="day")
+        concepts = MedToCehrGPTDatasetMapping(args, include_inpatient_hour_token=True).transform(converted)[
+            "concept_ids"
+        ]
+        self.assertEqual(concepts.count("[VS]"), 1)
+        self.assertNotIn("[VE]", concepts)
+        self.assertIn("i-D1", concepts)
+
 
 class ResolveVisitRulesTest(unittest.TestCase):
     def setUp(self):

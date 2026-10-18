@@ -375,13 +375,15 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                         age=relativedelta(datetime_cursor, birth_datetime).years,
                     )
 
-            # Reuse the age and date calculated for the last event in the patient timeline
-            self._update_cehrgpt_record(
-                cehrgpt_record,
-                code="[VE]",
-                time=datetime_cursor,
-                age=relativedelta(datetime_cursor, birth_datetime).years,
-            )
+            # A visit that is still active at the prediction cutoff remains open. [VE] means that an actual end was
+            # observed or inferred for a completed visit, rather than merely that the observed prefix stopped.
+            if visit_end_datetime is not None or record.get("index_date", None) is None:
+                self._update_cehrgpt_record(
+                    cehrgpt_record,
+                    code="[VE]",
+                    time=datetime_cursor,
+                    age=relativedelta(datetime_cursor, birth_datetime).years,
+                )
 
         # Generate the orders of the concepts that the cehrbert dataset mapping function expects
         cehrgpt_record["orders"] = list(

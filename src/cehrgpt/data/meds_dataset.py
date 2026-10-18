@@ -167,6 +167,7 @@ def _build_admission_window_patient_blocks(events, conversion, default_visit_id,
         patient_blocks.append(PatientBlock(daily_events, default_visit_id + offset, conversion))
 
     admission_discharge_pairs = []
+    incomplete_pairs = set()
     active_ed_index = None
     active_admission_index = None
     for index, block in enumerate(patient_blocks):
@@ -187,13 +188,16 @@ def _build_admission_window_patient_blocks(events, conversion, default_visit_id,
             active_admission_index = None
             active_ed_index = None
         elif index == len(patient_blocks) - 1 and active_admission_index is not None and prediction_time is not None:
-            admission_discharge_pairs.append((active_admission_index, index))
+            pair = (active_admission_index, index)
+            admission_discharge_pairs.append(pair)
+            incomplete_pairs.add(pair)
 
     for admission_index, discharge_index in admission_discharge_pairs:
         visit_id = patient_blocks[admission_index].visit_id
         for index in range(admission_index, discharge_index + 1):
             patient_blocks[index].visit_id = visit_id
             patient_blocks[index].visit_type = DEFAULT_INPATIENT_CONCEPT_ID
+            patient_blocks[index].is_incomplete = (admission_index, discharge_index) in incomplete_pairs
 
         next_index = discharge_index + 1
         if next_index < len(patient_blocks):
@@ -233,6 +237,7 @@ def convert_one_patient_with_rules(
     visits = []
     for blocks in blocks_by_visit.values():
         has_discharge_facility = any(block.has_ed_or_hospital_admission for block in blocks)
+        is_incomplete = any(getattr(block, "is_incomplete", False) for block in blocks)
         discharge_facility = (
             next(filter(None, (block.discharged_to for block in blocks)), None) if has_discharge_facility else None
         )
@@ -243,7 +248,9 @@ def convert_one_patient_with_rules(
             Visit(
                 visit_type=blocks[0].visit_type,
                 visit_start_datetime=min(block.get_visit_start_datetime() for block in blocks),
-                visit_end_datetime=max(block.get_visit_end_datetime() for block in blocks),
+                visit_end_datetime=(
+                    None if is_incomplete else max(block.get_visit_end_datetime() for block in blocks)
+                ),
                 discharge_facility=discharge_facility or UNKNOWN_VALUE,
                 events=events,
             )

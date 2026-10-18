@@ -184,8 +184,9 @@ visit_events:
 If any event has a `visit_id`, those IDs define the boundaries. Otherwise, a matching `visit_events` event defines an
 explicit visit. When neither is present, admission and discharge events define the visit windows.
 
-The shared CEHR-GPT timeline mapping wraps every detected visit in `[VS]` and `[VE]`, inserts `D...` tokens between
-visits, and inserts `i-D...` plus optional `i-H...` tokens inside inpatient and emergency visits.
+The shared CEHR-GPT timeline mapping starts every detected visit with `[VS]` and ends every completed visit with `[VE]`.
+A visit that is still active at a prediction cutoff remains open without `[VE]`. The mapping inserts `D...` tokens
+between visits and `i-D...` plus optional `i-H...` tokens inside inpatient and emergency visits.
 
 For an event that has the id of a visit (OMOP style), the event time is always the ground truth. An event more than a day
 before the start or after the end of its visit (a problem list entry from years ago, a drug recorded long after) is put
