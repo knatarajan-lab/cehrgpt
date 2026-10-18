@@ -23,6 +23,7 @@ from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import config as datasets_config
 from transformers import TrainingArguments
 
+from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
 from cehrgpt.data.meds_dataset import (
     convert_one_patient_with_rules,
     create_meds_dataset,
@@ -170,8 +171,6 @@ MIMIC_ED_EVENTS = [
     event("HOSPITAL_ADMISSION//ELECTIVE//PHYSICIAN REFERRAL", 50),
     event("HOSPITAL_DISCHARGE//SKILLED NURSING FACILITY", 55),
 ]
-
-
 def data_args(folder, **extra):
     arguments = dict(
         data_folder=folder,
@@ -305,6 +304,43 @@ class VisitRulesTest(unittest.TestCase):
             determine_visit_boundary_method(patient(event("ADMIT//IP"), event("DISCHARGE//HOME")), admission_rules),
             "admission_window",
         )
+
+    def test_visit_objects_become_visit_intervisit_and_inpatient_time_tokens(self):
+        args = data_args("unused", att_function_type="day", inpatient_att_function_type="day")
+        mapping = MedToCehrGPTDatasetMapping(args, include_inpatient_hour_token=True)
+        record = {
+            "patient_id": 1,
+            "birth_datetime": dt.datetime(1990, 1, 1),
+            "gender": "Gender/F",
+            "race": "Race/White",
+            "visits": [
+                {
+                    "visit_type": "Visit/IP",
+                    "visit_start_datetime": dt.datetime(2020, 1, 10, 2),
+                    "visit_end_datetime": dt.datetime(2020, 1, 13),
+                    "discharge_facility": "HOME",
+                    "events": [
+                        {"code": "LAB//SAME_DAY", "time": dt.datetime(2020, 1, 10, 6)},
+                        {"code": "LAB//NEXT_DAY", "time": dt.datetime(2020, 1, 11, 6)},
+                    ],
+                },
+                {
+                    "visit_type": "Visit/IP",
+                    "visit_start_datetime": dt.datetime(2020, 1, 20),
+                    "visit_end_datetime": dt.datetime(2020, 1, 21),
+                    "discharge_facility": "HOME",
+                    "events": [{"code": "LAB//SECOND_STAY", "time": dt.datetime(2020, 1, 20, 3)}],
+                },
+            ],
+        }
+
+        concepts = mapping.transform(record)["concept_ids"]
+        self.assertEqual(concepts.count("[VS]"), 2)
+        self.assertEqual(concepts.count("[VE]"), 2)
+        self.assertIn("D7", concepts)
+        self.assertIn("i-D1", concepts)
+        for hour_token in ("i-H2", "i-H4", "i-H6", "i-H3"):
+            self.assertIn(hour_token, concepts)
 
 
 class ResolveVisitRulesTest(unittest.TestCase):
@@ -474,7 +510,6 @@ class VisitsFromRulesTest(unittest.TestCase):
             dataset = create_meds_dataset(args, rules_file="omop")
         self.assertEqual(set(dataset["train"][0]["visits"]["visit_type"]), {"Visit/IP", "Visit/OP"})
 
-
 @unittest.skipIf(converter() is None, "meds_reader_convert is not installed")
 class PrepareFinetuneDatasetTest(unittest.TestCase):
     """The runners read MEDS through prepare_finetune_dataset: nothing is passed about the shape of the data."""
@@ -513,5 +548,7 @@ class PrepareFinetuneDatasetTest(unittest.TestCase):
         dataset = prepare_finetune_dataset(args, training_args, CehrGPTArguments(), None)
         concept_ids = list(dataset["train"][0]["concept_ids"])
         self.assertEqual(concept_ids.count("[VS]"), 1)
+        self.assertEqual(concept_ids.count("[VE]"), 1)
+        self.assertIn("i-D1", concept_ids)
         self.assertIn("Visit/IP", concept_ids)
         self.assertIn("HOSPITAL_DISCHARGE//HOME", concept_ids)
