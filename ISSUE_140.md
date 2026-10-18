@@ -36,18 +36,24 @@ not a standard MEDS file.
 The merge order is defaults, then the user file. Pattern lists extend earlier lists with stable de-duplication. A later
 text-event rule replaces an earlier rule with the same `code`.
 
-### Automatic visit-boundary detection
+### Visit building: visit ids plus rules
 
-For each patient, the generic builder selects the available evidence:
+One builder makes the visits of a patient. It does not choose between two methods for the patient:
 
-- Events with `visit_id`, or explicit events matching `visit_events`, use visit-ID boundaries.
-- Otherwise, ED, admission, and discharge events form admission windows.
+1. Events with a `visit_id` make one block per id.
+2. Events without one, and the ones disconnected from their block, join the visit whose dates contain their date.
+3. The events that are still alone are grouped into daily blocks and joined into stays by the ED, admission and
+   discharge patterns. A new block never takes the id of an existing visit.
+
+A dataset with visit ids (OMOP) is built by 1 and 2, a dataset without any (MIMIC-IV) by 3, and a patient with some
+of both gets both. On 2,863 real MIMIC-IV and OMOP patients (with and without a prediction cutoff in the middle of the
+record) it makes the same visits and events as the two builders it replaced.
 
 For visit-ID data, event timestamps are authoritative. An event linked to a visit but occurring more than one day
 outside that visit is disconnected and placed according to its own time. This behavior is always enabled and is no
 longer exposed as `disconnect_problem_list_events`.
 
-For admission-window data, daily blocks are joined using these rules:
+For the events that are placed by the rules, daily blocks are joined using these:
 
 - an ED event can start a stay when an admission follows within 24 hours;
 - a discharge closes the stay;

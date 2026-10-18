@@ -171,8 +171,8 @@ meds_reader_convert $MEDS_DIR $MEDS_READER_DIR --num_threads 10
 `src/cehrgpt/data/meds_visit_rules.py`. Without the argument `defaults.yaml` is used directly; the old
 conversion-class argument does not select the visit rules.
 
-The YAML contains only event-matching rules; CEHR-GPT uses one generic converter and detects visit boundaries from the
-events automatically:
+The YAML contains only event-matching rules; CEHR-GPT uses one generic converter. It builds visits from the visit ids that
+the events carry, and from these rules for the events that have none:
 
 ```yaml
 visit_events:

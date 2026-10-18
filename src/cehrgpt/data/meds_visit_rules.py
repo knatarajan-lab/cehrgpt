@@ -25,8 +25,8 @@ For ``visit_id`` data, the time of an event is always the ground truth. An event
 more than a day before its start or after its end (a problem list entry from years ago, a drug that is recorded long
 after the visit) is taken out of that visit and put where its own time is.
 
-Visit assignment is detected automatically. Events with visit ids (or explicit visit events) use those visit boundaries;
-otherwise visits are built from the admission and discharge events and the time between them.
+Visits are built from the visit ids that the events carry and, for the events that have none, from the admission and
+discharge events and the time between them (see ``meds_dataset._build_patient_blocks``).
 """
 
 import dataclasses

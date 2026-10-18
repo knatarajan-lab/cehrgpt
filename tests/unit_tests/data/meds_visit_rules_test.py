@@ -27,7 +27,7 @@ from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
 from cehrgpt.data.meds_dataset import (
     convert_one_patient_with_rules,
     create_meds_dataset,
-    determine_visit_boundary_method,
+    generate_demographics_and_patient_blocks_from_rules,
 )
 from cehrgpt.data.meds_visit_rules import (
     DEFAULT_RULES_PATH,
@@ -139,6 +139,17 @@ CUSTOM_RULES = dict(
     admission_events=["ENC//INPATIENT"],
     discharge_events=["DISCH//"],
 )
+# Some events carry the id of their visit and a stay has none: the stay is found by the admission and discharge rules
+MIXED_EVENTS = [
+    event("MEDS_BIRTH", 0),
+    event("Gender/F", 0),
+    event("Race/White", 0),
+    event("Visit/OP", 10, "visit", 1, end_day=10),
+    event("LOINC/1", 10, "measurement", 1),
+    event("HOSPITAL_ADMISSION//EW EMER.", 20),
+    event("LAB//1", 21),
+    event("HOSPITAL_DISCHARGE//HOME", 23),
+]
 # A MIMIC-IV style dataset: no visit ids, the stay is the time between the admission and the discharge
 MIMIC_EVENTS = [
     event("MEDS_BIRTH", 0),
@@ -272,25 +283,6 @@ class VisitRulesTest(unittest.TestCase):
     def test_yaml_builds_one_generic_conversion(self):
         conversion = build_conversion(VisitRules.from_dict(self.valid()))
         self.assertIs(type(conversion), YamlDrivenConversion)
-
-    def test_visit_boundaries_are_detected_from_the_events(self):
-        visit_rules = build_conversion(VisitRules.from_dict(self.valid()))
-        admission_rules = build_conversion(
-            VisitRules.from_dict(dict(admission_events=["ADMIT//"], discharge_events=["DISCHARGE//"]))
-        )
-
-        def patient(*events):
-            return types.SimpleNamespace(events=list(events))
-
-        def event(code, visit_id=None):
-            return types.SimpleNamespace(code=code, visit_id=visit_id)
-
-        self.assertEqual(determine_visit_boundary_method(patient(event("LAB", 12)), visit_rules), "visit_id")
-        self.assertEqual(determine_visit_boundary_method(patient(event("Visit/IP")), visit_rules), "visit_id")
-        self.assertEqual(
-            determine_visit_boundary_method(patient(event("ADMIT//IP"), event("DISCHARGE//HOME")), admission_rules),
-            "admission_window",
-        )
 
     def test_visit_objects_become_visit_intervisit_and_inpatient_time_tokens(self):
         args = data_args("unused", att_function_type="day", inpatient_att_function_type="day")
@@ -479,6 +471,7 @@ class VisitsFromRulesTest(unittest.TestCase):
         cls.mimic = build_database(cls.root, "mimic", MIMIC_EVENTS)
         cls.mimic_ed = build_database(cls.root, "mimic_ed", MIMIC_ED_EVENTS)
         cls.custom = build_database(cls.root, "custom", CUSTOM_EVENTS)
+        cls.mixed = build_database(cls.root, "mixed", MIXED_EVENTS)
         # the rules of the user for the codes of that dataset
         cls.custom_rules = os.path.join(cls.root, "custom_rules.yaml")
         with open(cls.custom_rules, "w") as f:
@@ -545,6 +538,26 @@ class VisitsFromRulesTest(unittest.TestCase):
         everything = visits_of(self.problem_list, build_conversion(default))
         entry = [v for v in everything if "ICD9CM/250.00" in {e["code"] for e in v["events"]}][0]
         self.assertEqual(entry["visit_start_datetime"].date(), dt.date(2020, 1, 3))
+
+    def test_visit_ids_and_rules_build_the_visits_of_one_patient_together(self):
+        conversion = YamlDrivenConversion(resolve_visit_rules(), default_visit_id=1)
+        with meds_reader.SubjectDatabase(self.mixed) as database:
+            visits = convert_one_patient_with_rules(database[1], conversion)["visits"]
+            _, blocks = generate_demographics_and_patient_blocks_from_rules(database[1], conversion)
+        outpatient, stay = visits
+        # the visit with an id is built from its id
+        self.assertEqual(outpatient["visit_type"], "Visit/OP")
+        self.assertEqual([e["code"] for e in outpatient["events"]], ["LOINC/1"])
+        # the events without one are joined into a stay by the admission and discharge rules
+        self.assertEqual(stay["visit_type"], "Visit/IP")
+        self.assertTrue(stay["is_inpatient_or_ed"])
+        self.assertEqual((stay["visit_start_datetime"].day, stay["visit_end_datetime"].day), (21, 24))
+        self.assertEqual(stay["discharge_facility"], "HOSPITAL_DISCHARGE//HOME")
+        self.assertIn("LAB//1", [e["code"] for e in stay["events"]])
+        # a block that the rules make never takes the id of a visit
+        from_the_id = [block for block in blocks if "LOINC/1" in {e.code for e in block.events}]
+        self.assertEqual([block.visit_id for block in from_the_id], [1])
+        self.assertTrue(all(block.visit_id > 1 for block in blocks if block not in from_the_id))
 
     def test_the_codes_of_a_dataset_that_cehrbert_does_not_know_are_read_from_its_rules(self):
         rules = VisitRules.from_dict(CUSTOM_RULES)

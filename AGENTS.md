@@ -28,16 +28,19 @@ MEDS and MIMIC-IV MEDS, while allowing datasets to add their own event patterns 
 
 ## Visit-boundary rules
 
-Boundary selection is automatic for each patient:
+There is one builder (`_build_patient_blocks`): the visit ids that the events carry, then the rules for the events that
+have none. There is no per-patient choice between two methods.
 
-1. Use visit-ID boundaries when events contain `visit_id`, or when an explicit `visit_events` pattern matches.
-2. Otherwise, construct admission windows from ED, admission, and discharge events.
+1. Events with a `visit_id` make one block per id. Events more than one day outside their referenced visit are
+   disconnected and placed according to their own timestamps.
+2. Events without a visit id, and the disconnected ones, join the visit whose dates contain their date.
+3. The events that are still alone are grouped into daily blocks and joined into stays by the ED, admission and
+   discharge patterns (below). A new block never takes the id of an existing visit.
 
-For visit-ID data, events more than one day outside their referenced visit are disconnected and placed according to
-their own timestamps. Unlinked events occurring within a visit's date range are attached to that visit; remaining
-events form timestamp-based visits.
+Visit-ID data (OMOP) is built by 1 and 2, data without visit ids (MIMIC-IV) by 3, and a patient with some of both gets
+both. Contained visits are merged when there are visit ids.
 
-For admission-window data, events are first grouped into daily blocks. ED activity can begin a stay when followed by
+In 3, events are first grouped into daily blocks. ED activity can begin a stay when followed by
 an admission within 24 hours. A discharge closes the stay. An event block starting within 12 hours after discharge is
 kept with that stay. If a prediction cutoff occurs during an active admission, the final visit remains open by setting
 `visit_end_datetime` to `None`.
@@ -76,7 +79,7 @@ packaged default concept.
 
 - `src/cehrgpt/data/visit_rules/defaults.yaml`: standard annotated OMOP and MIMIC-IV rules.
 - `src/cehrgpt/data/meds_visit_rules.py`: YAML validation, layered rule merging, and the generic conversion adapter.
-- `src/cehrgpt/data/meds_dataset.py`: boundary detection and MEDS-to-visit construction.
+- `src/cehrgpt/data/meds_dataset.py`: the visit builder (visit ids plus rules) and MEDS-to-visit construction.
 - `src/cehrgpt/data/hf_cehrgpt_dataset_mapping.py`: `[VS]`, `[VE]`, inter-visit, inpatient-day, and optional
   inpatient-hour token generation.
 - `src/cehrgpt/runners/data_utils.py`: finetuning integration.
@@ -98,7 +101,7 @@ Tests should continue to cover:
 
 - default and user-rule merging;
 - both OMOP and MIMIC-IV event shapes through the same defaults;
-- visit-ID and admission-window boundary detection;
+- visit-ID and rule-based (admission-window) building, alone and together for one patient;
 - event-time handling for events linked to the wrong visit;
 - ED-to-inpatient merging and discharge handling;
 - open visits at prediction time without `[VE]`;
