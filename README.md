@@ -29,12 +29,11 @@ cd cehrgpt
 pip install .
 ```
 
-Some workflows call other packages as command-line tools, so they are optional:
+The Spark tools (building OMOP tables, merging datasets, the analyses) need `pyspark`: `pip install ".[spark]"`.
 
-```bash
-pip install ".[spark]"     # the Spark tools and the cehrbert_data cohort and pretraining data apps
-pip install ".[cehrbert]"  # cehrbert.evaluations.evaluation, called by scripts/level_three_evaluation.sh
-```
+CEHR-GPT does not depend on `cehrbert` or `cehrbert_data`. A few scripts in `scripts/` call command line apps of
+those packages (the OMOP cohort and pretraining data apps, `cehrbert.evaluations.evaluation`); install them yourself
+if you run those scripts.
 
 The conversion of OMOP and MEDS data into patient sequences lives in
 [meds_to_cehr](https://github.com/knatarajan-lab/meds_to_cehr), which is installed with CEHR-GPT.
