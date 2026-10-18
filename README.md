@@ -157,19 +157,20 @@ Transform MIMIC files to MEDS format following the [MEDS_transforms](https://git
 ### Step 2: Declare the Visit Rules and Prepare MEDS Reader
 
 How the events of a MEDS dataset make visits (which events are a visit, an admission, an ED admission and a discharge)
-depends on how the dataset was made, so the dataset declares it. Put a `visit_rules.yaml` in the `metadata` folder of
-the MEDS dataset before converting it. The rules of the two common sources come with CEHR-GPT in
-`src/cehrgpt/data/visit_rules/`: `mimic4.yaml` for MIMIC-IV made with MEDS_transforms and `omop.yaml` for a dataset made
-from OMOP, whose events carry a `visit_id`. Both event matching and visit assignment are encoded as data.
+depends on how the dataset was made. CEHR-GPT starts with `src/cehrgpt/data/visit_rules/defaults.yaml`, which contains
+the standard visit, admission, ED and discharge patterns for MEDS converted from OMOP and MIMIC-IV. Put a
+`visit_rules.yaml` in the `metadata` folder of the MEDS dataset before converting it to add source-specific patterns.
+The same folder also contains the `mimic4.yaml` and `omop.yaml` compatibility rule files.
 
 ```bash
 cp src/cehrgpt/data/visit_rules/mimic4.yaml $MEDS_DIR/metadata/visit_rules.yaml
 meds_reader_convert $MEDS_DIR $MEDS_READER_DIR --num_threads 10
 ```
 
-`--meds_visit_rules_file my_rules.yaml` replaces the keys that the file has and keeps the other rules of the dataset,
-which is the way to try a change without touching the dataset; `--meds_visit_rules_file mimic4` or `omop` stands for the
-packaged file. The format is described in `src/cehrgpt/data/meds_visit_rules.py`. A dataset that declares nothing is read
+`--meds_visit_rules_file my_rules.yaml` adds its patterns to the defaults and the dataset rules, with stable
+de-duplication. For text-event rules, a later entry with the same code replaces the earlier entry.
+`--meds_visit_rules_file mimic4` or `omop` stands for the packaged file. The format is described in
+`src/cehrgpt/data/meds_visit_rules.py`. A dataset that declares nothing is read
 with the packaged rules of the conversion that `--meds_to_cehrbert_conversion_type` names (default `MedsToCehrbertOMOP`),
 with a warning.
 

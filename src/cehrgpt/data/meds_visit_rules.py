@@ -4,8 +4,9 @@ a discharge. They depend on how the dataset was made and they change, so they ar
 
   * the dataset declares them in ``<meds_reader database>/metadata/visit_rules.yaml`` (the file comes from the
     ``metadata`` folder of the MEDS dataset, which meds_reader_convert copies);
-  * a yaml file given with ``--meds_visit_rules_file`` overrides them: the keys that it has replace the ones of the
-    dataset, the others stay. ``omop`` and ``mimic4`` stand for the two files that come with cehrgpt (visit_rules/).
+  * CEHR-GPT's ``defaults.yaml`` provides the standard OMOP and MIMIC patterns;
+  * a yaml file given with ``--meds_visit_rules_file`` adds dataset-specific patterns. ``omop`` and ``mimic4`` stand
+    for the two compatibility files that come with cehrgpt (visit_rules/).
 
 The two files are the rules of the two kinds of datasets that cehrgpt is used on: MEDS made from OMOP (``omop``) and
 MEDS made from MIMIC-IV with MEDS_transforms (``mimic4``). A dataset that declares nothing is read with the one that
@@ -47,6 +48,7 @@ LOG = logging.get_logger("transformers")
 
 METADATA_FILE = os.path.join("metadata", "visit_rules.yaml")
 PACKAGED_RULES_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visit_rules")
+DEFAULT_RULES_PATH = os.path.join(PACKAGED_RULES_FOLDER, "defaults.yaml")
 # The old conversion names remain only as a backwards-compatible way to choose a packaged YAML file when a dataset
 # does not declare rules. They are not instantiated by this module.
 PACKAGED_RULES = {"omop": "MedsToCehrbertOMOP", "mimic4": "MedsToBertMimic4"}
@@ -131,7 +133,10 @@ def packaged_rules_for_conversion(conversion_type: str) -> VisitRules:
     for name, conversion in PACKAGED_RULES.items():
         if conversion == conversion_type:
             path = packaged_rules_path(name)
-            return VisitRules.from_dict(load_rules_file(path), source=path)
+            return VisitRules.from_dict(
+                merge_rule_values(load_rules_file(DEFAULT_RULES_PATH), load_rules_file(path)),
+                source=f"{DEFAULT_RULES_PATH} + {path}",
+            )
     raise VisitRulesError(
         f"The dataset declares no visit rules and {conversion_type!r} is not a conversion with packaged rules "
         f"({sorted(PACKAGED_RULES.values())}). Declare the rules of the dataset in {METADATA_FILE} or pass "
@@ -151,9 +156,43 @@ def load_rules_file(path: str) -> Dict[str, Any]:
     return values
 
 
+def merge_rule_values(*layers: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge rule files so later files add patterns; a repeated text-event code replaces its earlier definition."""
+    merged: Dict[str, Any] = {}
+    for layer in layers:
+        if layer is None:
+            continue
+        for key, value in layer.items():
+            if key in PATTERN_LISTS:
+                if not isinstance(value, list):
+                    merged[key] = value
+                    continue
+                existing = merged.get(key, [])
+                if not isinstance(existing, list):
+                    existing = []
+                combined = list(existing)
+                for pattern in value:
+                    if pattern not in combined:
+                        combined.append(pattern)
+                merged[key] = combined
+            elif key == "text_events" and isinstance(value, list):
+                existing = merged.get(key, [])
+                if not isinstance(existing, list):
+                    existing = []
+                replacements = {entry.get("code") for entry in value if isinstance(entry, dict)}
+                merged[key] = [
+                    entry
+                    for entry in existing
+                    if not isinstance(entry, dict) or entry.get("code") not in replacements
+                ] + list(value)
+            else:
+                merged[key] = value
+    return merged
+
+
 def resolve_visit_rules(data_folder: str, rules_file: Optional[str] = None) -> Optional[VisitRules]:
     """
-    The visit rules of a dataset: the ones declared in its metadata, with the keys of rules_file on top.
+    The visit rules of a dataset: standard defaults plus patterns declared in its metadata and rules_file.
 
     Returns None when there are neither, which is the case of a dataset that does not say how its visits are made.
     """
@@ -167,7 +206,11 @@ def resolve_visit_rules(data_folder: str, rules_file: Optional[str] = None) -> O
         sources.append(metadata_path)
     if override is not None:
         sources.append(packaged_rules_path(rules_file) if rules_file in PACKAGED_RULES else os.path.expanduser(rules_file))
-    rules = VisitRules.from_dict({**(declared or {}), **(override or {})}, source=" + ".join(sources))
+    sources.insert(0, DEFAULT_RULES_PATH)
+    rules = VisitRules.from_dict(
+        merge_rule_values(load_rules_file(DEFAULT_RULES_PATH), declared, override),
+        source=" + ".join(sources),
+    )
     LOG.info("Visit rules from %s: %s", rules.source, rules.to_dict())
     return rules
 

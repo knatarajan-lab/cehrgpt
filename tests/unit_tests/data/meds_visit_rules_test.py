@@ -275,8 +275,14 @@ class VisitRulesTest(unittest.TestCase):
             self.assertTrue(matches(omop.discharge_events, code), code)
 
     def test_a_packaged_name_stands_for_its_file(self):
-        self.assertFalse(packaged_rules_for_conversion(MIMIC).visit_events)
-        self.assertTrue(packaged_rules_for_conversion(OMOP).visit_events)
+        mimic = packaged_rules_for_conversion(MIMIC)
+        omop = packaged_rules_for_conversion(OMOP)
+        for rules in (mimic, omop):
+            self.assertIn("Visit/", rules.visit_events)
+            self.assertIn("HOSPITAL_ADMISSION//", rules.admission_events)
+            self.assertIn("HOSPITAL_DISCHARGE//", rules.discharge_events)
+            self.assertIn("CMS Place of Service/12", rules.discharge_events)
+        self.assertTrue(mimic.text_events)
         with self.assertRaisesRegex(VisitRulesError, "no packaged visit rules"):
             packaged_rules_path("eicu")
         with self.assertRaisesRegex(VisitRulesError, "packaged rules"):
@@ -456,24 +462,34 @@ class ResolveVisitRulesTest(unittest.TestCase):
 
     def test_the_rules_of_the_dataset(self):
         rules = resolve_visit_rules(self.folder(CUSTOM_RULES))
-        self.assertEqual(rules.admission_events, ["ENC//INPATIENT"])
+        self.assertIn("HOSPITAL_ADMISSION//", rules.admission_events)
+        self.assertIn("ENC//INPATIENT", rules.admission_events)
 
-    def test_the_keys_of_a_file_replace_the_ones_of_the_dataset_and_the_others_stay(self):
-        path = self.override(dict(discharge_events=["OTHER//"]))
+    def test_rule_files_add_patterns_with_stable_deduplication(self):
+        path = self.override(dict(discharge_events=["OTHER//", "OTHER//"]))
         rules = resolve_visit_rules(self.folder(CUSTOM_RULES), path)
-        self.assertEqual(rules.discharge_events, ["OTHER//"])
-        self.assertEqual(rules.visit_events, ["ENC//"])
+        self.assertIn("HOSPITAL_DISCHARGE//", rules.discharge_events)
+        self.assertIn("DISCH//", rules.discharge_events)
+        self.assertIn("OTHER//", rules.discharge_events)
+        self.assertEqual(rules.discharge_events.count("OTHER//"), 1)
+        self.assertIn("Visit/", rules.visit_events)
+        self.assertIn("ENC//", rules.visit_events)
 
     def test_any_valid_rules_file_can_stand_alone(self):
-        self.assertEqual(resolve_visit_rules(self.folder(), self.override(CUSTOM_RULES)).visit_events, ["ENC//"])
+        rules = resolve_visit_rules(self.folder(), self.override(CUSTOM_RULES))
+        self.assertIn("Visit/", rules.visit_events)
+        self.assertIn("ENC//", rules.visit_events)
         rules = resolve_visit_rules(self.folder(), self.override(dict(discharge_events=["OTHER//"])))
-        self.assertEqual(rules.discharge_events, ["OTHER//"])
+        self.assertIn("HOSPITAL_DISCHARGE//", rules.discharge_events)
+        self.assertIn("OTHER//", rules.discharge_events)
 
     def test_json_is_accepted_too(self):
         path = os.path.join(self.root, "rules.json")
         with open(path, "w") as f:
             json.dump(CUSTOM_RULES, f)
-        self.assertEqual(resolve_visit_rules(self.folder(), path).admission_events, ["ENC//INPATIENT"])
+        rules = resolve_visit_rules(self.folder(), path)
+        self.assertIn("HOSPITAL_ADMISSION//", rules.admission_events)
+        self.assertIn("ENC//INPATIENT", rules.admission_events)
 
 
 @unittest.skipIf(converter() is None, "meds_reader_convert is not installed")
@@ -568,7 +584,7 @@ class VisitsFromRulesTest(unittest.TestCase):
         # the visits of a patient are stored column by column
         self.assertEqual(set(dataset["train"][0]["visits"]["visit_type"]), {"ENC//INPATIENT", "ENC//OUTPATIENT"})
 
-    def test_a_rules_file_replaces_the_discharge_of_the_dataset(self):
+    def test_a_rules_file_adds_to_the_discharge_rules_of_the_dataset(self):
         override = os.path.join(self.root, "discharge.yaml")
         with open(override, "w") as f:
             yaml.safe_dump(dict(discharge_events=["NO_SUCH//"]), f)
@@ -577,7 +593,7 @@ class VisitsFromRulesTest(unittest.TestCase):
             dataset = create_meds_dataset(args, rules_file=override)
         visits = dataset["train"][0]["visits"]
         facility = dict(zip(visits["visit_type"], visits["discharge_facility"]))["ENC//INPATIENT"]
-        self.assertNotEqual(facility, "DISCH//HOME")
+        self.assertEqual(facility, "DISCH//HOME")
 
     def test_a_dataset_without_rules_is_read_with_the_packaged_rules_of_the_conversion_that_is_named(self):
         for database, conversion_type, packaged in (

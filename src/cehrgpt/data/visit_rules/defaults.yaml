@@ -1,0 +1,38 @@
+# Standard event roles recognized in MEDS datasets converted from OMOP and MIMIC-IV. Dataset and user YAML files add
+# patterns to these lists, so they only need to declare source-specific codes that are not already covered here.
+visit_events:
+- Visit/
+ed_admission_events:
+- Visit/ER
+- ED_REGISTRATION//
+- TRANSFER_TO//ED
+admission_events:
+- Visit/IP
+- Visit/ERIP
+- CMS Place of Service/51
+- CMS Place of Service/61
+- HOSPITAL_ADMISSION//
+discharge_events:
+- HOSPITAL_DISCHARGE//
+- PCORNet/Generic-NI
+- CMS Place of Service/12
+- SNOMED/371827001
+- CMS Place of Service/21
+- NUCC/261Q00000X
+- CMS Place of Service/31
+- SNOMED/397709008
+- Medicare Specialty/A4
+- SNOMED/225928004
+- CMS Place of Service/34
+- CMS Place of Service/61
+- CMS Place of Service/51
+- CMS Place of Service/23
+- PCORNet/Generic-OT
+- CMS Place of Service/27
+- CMS Place of Service/24
+- CMS Place of Service/09
+- CMS Place of Service/33
+- SNOMED/34596002
+- CMS Place of Service/25
+- CMS Place of Service/32
+- CMS Place of Service/20
