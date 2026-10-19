@@ -323,7 +323,7 @@ def convert_one_patient(
     )
 
 
-def _meds_to_cehrbert_generator(
+def _meds_to_cehrgpt_generator(
     shards: List[Tuple[np.ndarray, np.ndarray, np.ndarray]],
     path_to_db: str,
     default_visit_id: int,
@@ -352,7 +352,7 @@ def _meds_to_cehrbert_generator(
                     yield converted_patient
 
 
-def _create_cehrbert_data_from_meds(
+def _create_cehrgpt_data_from_meds(
     data_args: DataTrainingArguments,
     rules: VisitRules,
     split: str,
@@ -415,7 +415,7 @@ def _create_cehrbert_data_from_meds(
 
     split_batches = np.array_split(np.asarray(batches), data_args.preprocessing_num_workers)
     batch_func = functools.partial(
-        _meds_to_cehrbert_generator,
+        _meds_to_cehrgpt_generator,
         path_to_db=os.path.expanduser(data_args.data_folder),
         default_visit_id=default_visit_id,
         rules=rules,
@@ -463,7 +463,7 @@ def create_dataset_from_meds_reader(
     LOG.info("The include_auxiliary_token: %s", data_args.include_auxiliary_token)
     LOG.info("The include_demographic_prompt: %s", data_args.include_demographic_prompt)
     LOG.info("The meds_exclude_tables: %s", "\n".join(data_args.meds_exclude_tables))
-    train_dataset = _create_cehrbert_data_from_meds(
+    train_dataset = _create_cehrgpt_data_from_meds(
         data_args=data_args,
         rules=rules,
         split="train",
@@ -471,7 +471,7 @@ def create_dataset_from_meds_reader(
         dataset_mappings=dataset_mappings,
         cache_file_collector=cache_file_collector,
     )
-    tuning_dataset = _create_cehrbert_data_from_meds(
+    tuning_dataset = _create_cehrgpt_data_from_meds(
         data_args=data_args,
         rules=rules,
         split="tuning",
@@ -479,7 +479,7 @@ def create_dataset_from_meds_reader(
         dataset_mappings=dataset_mappings,
         cache_file_collector=cache_file_collector,
     )
-    held_out_dataset = _create_cehrbert_data_from_meds(
+    held_out_dataset = _create_cehrgpt_data_from_meds(
         data_args=data_args,
         rules=rules,
         split="held_out",
