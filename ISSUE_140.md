@@ -55,8 +55,8 @@ longer exposed as `disconnect_problem_list_events`.
 
 For the events that are placed by the rules, daily blocks are joined using these:
 
-- an ED event can start a stay when an admission follows within 24 hours; an earlier ED is a visit of its own and the
-  admission still starts a stay;
+- an ED event can start a stay when an admission follows within 24 hours, and the stay is `Visit/ERIP`; an earlier ED is
+  a visit of its own and the admission still starts a `Visit/IP` stay;
 - a discharge closes the stay, and a day is cut after a discharge that an ED or admission event follows;
 - a block beginning within 12 hours after discharge remains part of that stay, unless it starts a stay itself; and
 - a stay that never gets a discharge ends at its last event after `max_stay_gap_days` (rule, default 7) without an
@@ -125,4 +125,4 @@ PYTHONPATH=src python -m pytest tests/unit_tests/data/meds_visit_rules_test.py -
 git diff --check
 ```
 
-Current result: `40 passed` for the focused MEDS rules and timeline suite.
+Current result: `41 passed` for the focused MEDS rules and timeline suite.

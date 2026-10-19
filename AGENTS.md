@@ -42,7 +42,7 @@ both. Contained visits are merged when there are visit ids.
 
 In 3, events are first grouped into daily blocks; a day is cut where a discharge is followed by an ED or admission event
 (at the same time, the discharge comes first), so back-to-back stays are two. ED activity begins a stay when followed by
-an admission within 24 hours; an ED visit further before an admission stays a visit of its own and the stay starts at the
+an admission within 24 hours, and that stay is `Visit/ERIP` (a stay without the ED is `Visit/IP`); an ED visit further before an admission stays a visit of its own and the stay starts at the
 admission. A discharge closes the stay, however long it took. An event block starting within 12 hours after discharge is
 kept with that stay, unless it starts a stay itself (ED or admission).
 
@@ -101,7 +101,7 @@ Run the focused suite after changing this feature:
 PYTHONPATH=src python -m pytest tests/unit_tests/data/meds_visit_rules_test.py -q
 ```
 
-The current expected result is 40 passing tests. Also run `git diff --check` and the broader project tests when the
+The current expected result is 41 passing tests. Also run `git diff --check` and the broader project tests when the
 environment has all optional dependencies.
 
 Tests should continue to cover:

@@ -16,7 +16,11 @@ from typing import List, Optional, Tuple
 import meds_reader
 import numpy as np
 import pandas as pd
-from cehrbert.data_generators.hf_data_generator import DEFAULT_INPATIENT_CONCEPT_ID, UNKNOWN_VALUE
+from cehrbert.data_generators.hf_data_generator import (
+    DEFAULT_ED_TO_INPATIENT_CONCEPT_ID,
+    DEFAULT_INPATIENT_CONCEPT_ID,
+    UNKNOWN_VALUE,
+)
 from cehrbert.data_generators.hf_data_generator.cache_util import CacheFileCollector
 from cehrbert.data_generators.hf_data_generator.hf_dataset import apply_cehrbert_dataset_mapping
 from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import DatasetMapping
@@ -175,6 +179,7 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
         for offset, daily_events in enumerate(_split_days_at_discharges(unlinked_by_date.values(), conversion))
     ]
     admission_discharge_pairs = []
+    stays_through_the_ed = set()  # the (admission, discharge) pairs whose stay began in the ED
     incomplete_pairs = set()
     max_gap_hours = conversion.rules.max_stay_gap_days * 24
 
@@ -190,6 +195,7 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
 
     active_ed_index = None
     active_admission_index = None
+    active_stay_through_the_ed = False
     for index, block in enumerate(daily_blocks):
         if block.has_ed_admission and active_admission_index is None:
             active_ed_index = index
@@ -199,20 +205,26 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
             ):
                 # the ED visit leads to this admission and the stay starts with it
                 active_admission_index = active_ed_index
+                active_stay_through_the_ed = True
             else:
                 # an ED visit more than 24 hours before stays a visit of its own; the stay starts at the admission
                 if active_admission_index is not None:
                     # the stay before had no discharge: it ends where its events stop
-                    admission_discharge_pairs.append(
-                        (active_admission_index, end_of_events(active_admission_index, index - 1))
-                    )
+                    pair = (active_admission_index, end_of_events(active_admission_index, index - 1))
+                    admission_discharge_pairs.append(pair)
+                    if active_stay_through_the_ed:
+                        stays_through_the_ed.add(pair)
                 active_admission_index = index
+                active_stay_through_the_ed = False
             active_ed_index = None
 
         if block.has_discharge:
             if active_admission_index is not None:
                 admission_discharge_pairs.append((active_admission_index, index))
+                if active_stay_through_the_ed:
+                    stays_through_the_ed.add((active_admission_index, index))
             active_admission_index = None
+            active_stay_through_the_ed = False
             active_ed_index = None
 
     if active_admission_index is not None:
@@ -220,6 +232,8 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
         last_index = len(daily_blocks) - 1
         pair = (active_admission_index, end_of_events(active_admission_index, last_index))
         admission_discharge_pairs.append(pair)
+        if active_stay_through_the_ed:
+            stays_through_the_ed.add(pair)
         hours_to_prediction = (
             (prediction_time - daily_blocks[last_index].max_time).total_seconds() / 3600
             if prediction_time is not None
@@ -230,9 +244,14 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
 
     for admission_index, discharge_index in admission_discharge_pairs:
         visit_id = daily_blocks[admission_index].visit_id
+        visit_type = (
+            DEFAULT_ED_TO_INPATIENT_CONCEPT_ID
+            if (admission_index, discharge_index) in stays_through_the_ed
+            else DEFAULT_INPATIENT_CONCEPT_ID
+        )
         for index in range(admission_index, discharge_index + 1):
             daily_blocks[index].visit_id = visit_id
-            daily_blocks[index].visit_type = DEFAULT_INPATIENT_CONCEPT_ID
+            daily_blocks[index].visit_type = visit_type
             daily_blocks[index].is_incomplete = (admission_index, discharge_index) in incomplete_pairs
 
         next_index = discharge_index + 1
@@ -247,7 +266,7 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
             # a block that starts a stay of its own (an ED visit or an admission) is not the tail of this one
             if hours_after_discharge <= 12 and not next_block.has_ed_or_hospital_admission:
                 next_block.visit_id = visit_id
-                next_block.visit_type = DEFAULT_INPATIENT_CONCEPT_ID
+                next_block.visit_type = visit_type
 
     # the visits of the visit ids and the ones of the rules, in time; contained visits are merged
     blocks = list(blocks_by_visit.values())

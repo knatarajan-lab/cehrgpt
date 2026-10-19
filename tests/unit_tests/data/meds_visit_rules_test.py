@@ -510,7 +510,14 @@ class VisitsFromRulesTest(unittest.TestCase):
     def test_the_mimic_rules_replicate_the_mimic_class_on_ed_stays_and_numbers_kept_as_text(self):
         by_rules = visits_of(self.mimic_ed, build_conversion(self.rules(DEFAULT_RULES), default_visit_id=1))
         by_class = visits_of(self.mimic_ed, MedsToBertMimic4(default_visit_id=1))
-        self.assertEqual(without_visit_classification(by_rules), by_class)
+        # the one difference from the class: an ED visit followed by an admission is Visit/ERIP, not Visit/IP
+        self.assertEqual([v["visit_type"] for v in by_rules], ["Visit/OP", "Visit/ERIP", "Visit/OP", "Visit/IP"])
+        self.assertEqual([v["visit_type"] for v in by_class], ["Visit/OP", "Visit/IP", "Visit/OP", "Visit/IP"])
+        as_inpatient = [
+            {**v, "visit_type": "Visit/IP" if v["visit_type"] == "Visit/ERIP" else v["visit_type"]}
+            for v in without_visit_classification(by_rules)
+        ]
+        self.assertEqual(as_inpatient, by_class)
         codes = {e["code"] for v in by_rules for e in v["events"]}
         # the text events are made numeric by the rules: one event per group of the pattern
         self.assertIn("Systolic Blood Pressure", codes)
@@ -654,6 +661,15 @@ LONE_ADMISSION_EVENTS = [
     event("HOSPITAL_ADMISSION//EW EMER.", 10),
     event("LAB//1", 200),
 ]
+ED_THEN_AN_ADMISSION_EVENTS = [
+    event("MEDS_BIRTH", 0),
+    event("Gender/F", 0),
+    event("Race/White", 0),
+    event("TRANSFER_TO//ED//Emergency Department", 10),
+    event("HOSPITAL_ADMISSION//EW EMER.//EMERGENCY ROOM", 10),
+    event("LAB//1", 11),
+    event("HOSPITAL_DISCHARGE//HOME", 12),
+]
 ED_THEN_A_LATER_ADMISSION_EVENTS = [
     event("MEDS_BIRTH", 0),
     event("Gender/F", 0),
@@ -689,6 +705,7 @@ class StaysWithoutADischargeTest(unittest.TestCase):
         cls.late_discharge = build_database(cls.root, "late_discharge", DISCHARGE_AFTER_A_LONG_GAP_EVENTS)
         cls.two_admissions = build_database(cls.root, "two_admissions", TWO_ADMISSIONS_EVENTS)
         cls.lone_admission = build_database(cls.root, "lone_admission", LONE_ADMISSION_EVENTS)
+        cls.ed_then_admission_within_a_day = build_database(cls.root, "ed_then_admission_within_a_day", ED_THEN_AN_ADMISSION_EVENTS)
         cls.back_to_back = build_database(cls.root, "back_to_back", BACK_TO_BACK_STAYS_EVENTS)
         cls.ed_then_admission = build_database(cls.root, "ed_then_admission", ED_THEN_A_LATER_ADMISSION_EVENTS)
 
@@ -711,6 +728,9 @@ class StaysWithoutADischargeTest(unittest.TestCase):
             return None if value is None else (value - self.START).days
 
         return [(v["visit_type"], day(v["visit_start_datetime"]), day(v["visit_end_datetime"])) for v in visits]
+
+    def test_an_ed_visit_followed_by_an_admission_is_one_emergency_room_and_inpatient_visit(self):
+        self.assertEqual(self.visits(self.ed_then_admission_within_a_day), [("Visit/ERIP", 10, 12)])
 
     def test_a_discharge_and_the_next_admission_on_the_same_day_are_two_stays(self):
         self.assertEqual(self.visits(self.back_to_back), [("Visit/IP", 10, 11), ("Visit/IP", 11, 15)])
