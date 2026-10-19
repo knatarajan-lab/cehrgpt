@@ -60,7 +60,7 @@ For the events that are placed by the rules, daily blocks are joined using these
 - a discharge closes the stay, and a day is cut after a discharge that an ED or admission event follows;
 - a block beginning within 12 hours after discharge remains part of that stay, unless it starts a stay itself;
 - a block whose events do not identify a visit is `Visit/0` (unknown), not `Visit/OP`;
-- a stay that never gets a discharge ends at its last event after `max_stay_gap_days` (rule, default 7) without an
+- a stay that never gets a discharge ends at its last event after `max_stay_gap_days` (rule, default 3) without an
   event, so it cannot last until the next admission or the cutoff; and
 - an admission still active at prediction time produces an open visit with `visit_end_datetime: null`, if the cutoff is
   within `max_stay_gap_days` of its last event.
@@ -126,4 +126,4 @@ PYTHONPATH=src python -m pytest tests/unit_tests/data/meds_visit_rules_test.py -
 git diff --check
 ```
 
-Current result: `41 passed` for the focused MEDS rules and timeline suite.
+Current result: `42 passed` for the focused MEDS rules and timeline suite.

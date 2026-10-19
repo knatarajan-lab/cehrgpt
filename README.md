@@ -181,7 +181,7 @@ visit_events:
 
 Events with a `visit_id` make one visit per id. The events that have none join the visit whose dates contain them, and
 the ones that are left are joined into stays by the admission, ED and discharge patterns. A stay that never gets a
-discharge event ends where its events stop, after `max_stay_gap_days` (default 7) without any, instead of lasting until
+discharge event ends where its events stop, after `max_stay_gap_days` (default 3) without any, instead of lasting until
 the next admission or the end of the record; set `max_stay_gap_days` in your rules file to change it.
 
 The shared CEHR-GPT timeline mapping starts every detected visit with `[VS]` and ends every completed visit with `[VE]`.

@@ -25,7 +25,7 @@ For ``visit_id`` data, the time of an event is always the ground truth. An event
 more than a day before its start or after its end (a problem list entry from years ago, a drug that is recorded long
 after the visit) is taken out of that visit and put where its own time is.
 
-``max_stay_gap_days`` (default 7): a stay with an admission but no discharge event ends at its last event once this many
+``max_stay_gap_days`` (default 3): a stay with an admission but no discharge event ends at its last event once this many
 days pass without any, instead of lasting until the next admission or the end of the record. Stays that have a discharge
 event are not affected, however long they are.
 
@@ -50,7 +50,7 @@ LOG = logging.get_logger("transformers")
 DEFAULT_RULES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visit_rules", "defaults.yaml")
 PATTERN_LISTS = ("visit_events", "ed_admission_events", "admission_events", "discharge_events")
 KEYS = PATTERN_LISTS + ("text_events", "max_stay_gap_days")
-DEFAULT_MAX_STAY_GAP_DAYS = 7.0
+DEFAULT_MAX_STAY_GAP_DAYS = 3.0
 
 
 class VisitRulesError(ValueError):

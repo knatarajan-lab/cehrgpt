@@ -257,7 +257,7 @@ class VisitRulesTest(unittest.TestCase):
             VisitRules.from_dict(self.valid(text_events=[dict(code="BP")]))
 
     def test_a_stay_without_a_discharge_ends_after_a_week_by_default_and_the_limit_is_a_positive_number(self):
-        self.assertEqual(VisitRules.from_dict({}).max_stay_gap_days, 7.0)
+        self.assertEqual(VisitRules.from_dict({}).max_stay_gap_days, 3.0)
         self.assertEqual(VisitRules.from_dict(dict(max_stay_gap_days=2)).max_stay_gap_days, 2.0)
         for bad in (0, -1, "week", True, None):
             with self.assertRaisesRegex(VisitRulesError, "max_stay_gap_days"):
@@ -663,6 +663,14 @@ LONE_ADMISSION_EVENTS = [
     event("HOSPITAL_ADMISSION//EW EMER.", 10),
     event("LAB//1", 200),
 ]
+VISIT_WITH_AN_END_EVENTS = [
+    event("MEDS_BIRTH", 0),
+    event("Gender/F", 0),
+    event("Race/White", 0),
+    event("Visit/IP", 10, "visit", 1, end_day=15),
+    event("LAB//1", 11, "measurement", 1),
+    event("LAB//2", 13, "measurement", 1),
+]
 ED_THEN_AN_ADMISSION_EVENTS = [
     event("MEDS_BIRTH", 0),
     event("Gender/F", 0),
@@ -708,6 +716,7 @@ class StaysWithoutADischargeTest(unittest.TestCase):
         cls.two_admissions = build_database(cls.root, "two_admissions", TWO_ADMISSIONS_EVENTS)
         cls.lone_admission = build_database(cls.root, "lone_admission", LONE_ADMISSION_EVENTS)
         cls.ed_then_admission_within_a_day = build_database(cls.root, "ed_then_admission_within_a_day", ED_THEN_AN_ADMISSION_EVENTS)
+        cls.visit_with_an_end = build_database(cls.root, "visit_with_an_end", VISIT_WITH_AN_END_EVENTS)
         cls.back_to_back = build_database(cls.root, "back_to_back", BACK_TO_BACK_STAYS_EVENTS)
         cls.ed_then_admission = build_database(cls.root, "ed_then_admission", ED_THEN_A_LATER_ADMISSION_EVENTS)
 
@@ -734,6 +743,20 @@ class StaysWithoutADischargeTest(unittest.TestCase):
     def test_an_ed_visit_followed_by_an_admission_is_one_emergency_room_and_inpatient_visit(self):
         self.assertEqual(self.visits(self.ed_then_admission_within_a_day), [("Visit/ERIP", 10, 12)])
 
+    def test_nothing_after_the_prediction_time_is_in_the_visits(self):
+        # the visit is recorded with its end (day 15) and the lab of day 13 is after the cutoff of day 12
+        conversion = YamlDrivenConversion(resolve_visit_rules(None), default_visit_id=1)
+        with meds_reader.SubjectDatabase(self.visit_with_an_end) as db:
+            visits = convert_one_patient(db[1], conversion, prediction_time=self.START + dt.timedelta(days=12))["visits"]
+        self.assertEqual(len(visits), 1)
+        self.assertIsNone(visits[0]["visit_end_datetime"])
+        self.assertEqual(visits[0]["discharge_facility"], "Unknown")
+        self.assertEqual([(e["time"] - self.START).days for e in visits[0]["events"]], [11])
+        # a cutoff after the end of the visit sees the end
+        with meds_reader.SubjectDatabase(self.visit_with_an_end) as db:
+            visits = convert_one_patient(db[1], conversion, prediction_time=self.START + dt.timedelta(days=20))["visits"]
+        self.assertEqual((visits[0]["visit_end_datetime"] - self.START).days, 15)
+
     def test_a_discharge_and_the_next_admission_on_the_same_day_are_two_stays(self):
         self.assertEqual(self.visits(self.back_to_back), [("Visit/IP", 10, 11), ("Visit/IP", 11, 15)])
 
@@ -758,9 +781,9 @@ class StaysWithoutADischargeTest(unittest.TestCase):
 
     def test_a_cutoff_right_after_the_last_event_of_the_stay_leaves_it_open(self):
         self.assertEqual(self.visits(self.no_discharge, cutoff_day=13), [("Visit/IP", 10, None)])
-        # a week later is still within the limit, a day more is not
-        self.assertEqual(self.visits(self.no_discharge, cutoff_day=19), [("Visit/IP", 10, None)])
-        self.assertEqual(self.visits(self.no_discharge, cutoff_day=20), [("Visit/IP", 10, 12)])
+        # three days later is still within the limit, a day more is not
+        self.assertEqual(self.visits(self.no_discharge, cutoff_day=15), [("Visit/IP", 10, None)])
+        self.assertEqual(self.visits(self.no_discharge, cutoff_day=16), [("Visit/IP", 10, 12)])
 
     def test_a_discharge_ends_a_stay_however_long_it_took(self):
         # 14 days without an event inside the stay: the discharge still closes it

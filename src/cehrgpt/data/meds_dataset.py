@@ -328,13 +328,17 @@ def convert_one_patient(
         events = []
         for block in blocks:
             events.extend(block.get_meds_events())
+        visit_end_datetime = max(block.get_visit_end_datetime() for block in blocks)
+        if prediction_time is not None and visit_end_datetime > prediction_time:
+            # the end and the discharge are after the prediction time: the visit is still active, and how it
+            # ends is not known
+            is_incomplete = True
+            discharge_facility = None
         visits.append(
             Visit(
                 visit_type=blocks[0].visit_type,
                 visit_start_datetime=min(block.get_visit_start_datetime() for block in blocks),
-                visit_end_datetime=(
-                    None if is_incomplete else max(block.get_visit_end_datetime() for block in blocks)
-                ),
+                visit_end_datetime=None if is_incomplete else visit_end_datetime,
                 discharge_facility=discharge_facility or UNKNOWN_VALUE,
                 events=events,
                 is_inpatient_or_ed=is_inpatient_or_ed,

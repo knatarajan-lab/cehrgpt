@@ -49,10 +49,16 @@ A block whose events do not identify a visit (no visit, ED or admission event) h
 assumed to be outpatient.
 
 A stay that never gets a discharge (before the next admission, or before the record ends) must not last forever. It ends
-at its last event once `max_stay_gap_days` (a rule, default 7) pass without an event; the default comes from real
+at its last event once `max_stay_gap_days` (a rule, default 3) pass without an event; the default follows real
 MIMIC-IV stays, where 99.9% of the gaps between event days are under 3.1 days. If a prediction cutoff occurs during an
 active admission, the final visit remains open by setting `visit_end_datetime` to `None`, but only when the cutoff is
 within `max_stay_gap_days` of its last event; a cutoff months later finds a closed stay.
+
+## Prediction time
+
+No information from after the prediction time may reach the visits. Events after it are dropped, and a visit whose
+recorded end is after it (an OMOP visit event carries its end and discharge facility from its start) is left open with
+no end and an unknown discharge facility.
 
 ## CEHR-GPT token semantics
 
@@ -103,7 +109,7 @@ Run the focused suite after changing this feature:
 PYTHONPATH=src python -m pytest tests/unit_tests/data/meds_visit_rules_test.py -q
 ```
 
-The current expected result is 41 passing tests. Also run `git diff --check` and the broader project tests when the
+The current expected result is 42 passing tests. Also run `git diff --check` and the broader project tests when the
 environment has all optional dependencies.
 
 Tests should continue to cover:
