@@ -58,7 +58,8 @@ For the events that are placed by the rules, daily blocks are joined using these
 - an ED event can start a stay when an admission follows within 24 hours, and the stay is `Visit/ERIP`; an earlier ED is
   a visit of its own and the admission still starts a `Visit/IP` stay;
 - a discharge closes the stay, and a day is cut after a discharge that an ED or admission event follows;
-- a block beginning within 12 hours after discharge remains part of that stay, unless it starts a stay itself; and
+- a block beginning within 12 hours after discharge remains part of that stay, unless it starts a stay itself;
+- a block whose events do not identify a visit is `Visit/0` (unknown), not `Visit/OP`;
 - a stay that never gets a discharge ends at its last event after `max_stay_gap_days` (rule, default 7) without an
   event, so it cannot last until the next admission or the cutoff; and
 - an admission still active at prediction time produces an open visit with `visit_end_datetime: null`, if the cutoff is

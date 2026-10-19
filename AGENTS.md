@@ -45,6 +45,8 @@ In 3, events are first grouped into daily blocks; a day is cut where a discharge
 an admission within 24 hours, and that stay is `Visit/ERIP` (a stay without the ED is `Visit/IP`); an ED visit further before an admission stays a visit of its own and the stay starts at the
 admission. A discharge closes the stay, however long it took. An event block starting within 12 hours after discharge is
 kept with that stay, unless it starts a stay itself (ED or admission).
+A block whose events do not identify a visit (no visit, ED or admission event) has the unknown type `Visit/0`; it is not
+assumed to be outpatient.
 
 A stay that never gets a discharge (before the next admission, or before the record ends) must not last forever. It ends
 at its last event once `max_stay_gap_days` (a rule, default 7) pass without an event; the default comes from real

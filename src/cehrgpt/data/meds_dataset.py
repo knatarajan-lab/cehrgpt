@@ -19,6 +19,7 @@ import pandas as pd
 from cehrbert.data_generators.hf_data_generator import (
     DEFAULT_ED_TO_INPATIENT_CONCEPT_ID,
     DEFAULT_INPATIENT_CONCEPT_ID,
+    DEFAULT_OUTPATIENT_CONCEPT_ID,
     UNKNOWN_VALUE,
 )
 from cehrbert.data_generators.hf_data_generator.cache_util import CacheFileCollector
@@ -88,6 +89,25 @@ def generate_demographics_and_patient_blocks(
     return demographics, patient_blocks
 
 
+UNKNOWN_VISIT_CONCEPT_ID = "Visit/0"
+
+
+class VisitBlock(PatientBlock):
+    """
+    A block of events whose visit type is unknown unless the events say it.
+
+    PatientBlock calls a block that has no visit, ED or admission event an outpatient visit. That is a guess: such a
+    block is a day of labs or diagnoses, and nothing in it says where the patient was. It is the unknown visit
+    (Visit/0 of OMOP) instead. A visit event that has the code of an outpatient visit still gives Visit/OP.
+    """
+
+    def _infer_visit_type(self):
+        visit_type, start_time = super()._infer_visit_type()
+        if visit_type == DEFAULT_OUTPATIENT_CONCEPT_ID and not any(event.code == visit_type for event in self.events):
+            visit_type = UNKNOWN_VISIT_CONCEPT_ID
+        return visit_type, start_time
+
+
 def _split_days_at_discharges(days_of_events, conversion):
     """
     Cut a day where a stay ends and another begins, so that the discharge is not in the block of the next stay.
@@ -132,7 +152,8 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
        discharge closes it, and a block that starts within 12 hours after a discharge stays with it. A stay that
        never gets a discharge (before the next admission, or before the record ends) ends where its events stop:
        after ``max_stay_gap_days`` without one. It stays open only if the prediction time is that close to its last
-       event. A day without such events is a visit of its own.
+       event. A day without such events is a visit of its own, of the unknown type Visit/0 unless its events say
+       otherwise.
 
     A dataset with visit ids is built by 1 and 2. A dataset without any, such as MIMIC-IV, is built by 3. A dataset
     with some of both gets both. The blocks of a visit that contain each other are merged when there are visit ids.
@@ -149,7 +170,7 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
     # 1. the blocks of the visit ids
     blocks_by_visit = {}
     for visit_id, visit_events in events_by_visit.items():
-        block = PatientBlock(visit_events, visit_id, conversion)
+        block = VisitBlock(visit_events, visit_id, conversion)
         events_inside_boundary = []
         for event in block.events:
             before_start = (block.block_start_time - event.time).days > 1
@@ -175,7 +196,7 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
     # 3. what is left is one block per day, joined into stays by the rules; a new block never takes the id of a visit
     next_visit_id = max([*blocks_by_visit, conversion.default_visit_id - 1]) + 1
     daily_blocks = [
-        PatientBlock(daily_events, next_visit_id + offset, conversion)
+        VisitBlock(daily_events, next_visit_id + offset, conversion)
         for offset, daily_events in enumerate(_split_days_at_discharges(unlinked_by_date.values(), conversion))
     ]
     admission_discharge_pairs = []

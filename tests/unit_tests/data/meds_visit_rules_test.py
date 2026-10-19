@@ -510,11 +510,13 @@ class VisitsFromRulesTest(unittest.TestCase):
     def test_the_mimic_rules_replicate_the_mimic_class_on_ed_stays_and_numbers_kept_as_text(self):
         by_rules = visits_of(self.mimic_ed, build_conversion(self.rules(DEFAULT_RULES), default_visit_id=1))
         by_class = visits_of(self.mimic_ed, MedsToBertMimic4(default_visit_id=1))
-        # the one difference from the class: an ED visit followed by an admission is Visit/ERIP, not Visit/IP
-        self.assertEqual([v["visit_type"] for v in by_rules], ["Visit/OP", "Visit/ERIP", "Visit/OP", "Visit/IP"])
+        # the differences from the class: an ED visit followed by an admission is Visit/ERIP (not Visit/IP), and a day
+        # whose events do not say what visit it is, is the unknown visit Visit/0 (not Visit/OP)
+        self.assertEqual([v["visit_type"] for v in by_rules], ["Visit/0", "Visit/ERIP", "Visit/0", "Visit/IP"])
         self.assertEqual([v["visit_type"] for v in by_class], ["Visit/OP", "Visit/IP", "Visit/OP", "Visit/IP"])
+        legacy_types = {"Visit/ERIP": "Visit/IP", "Visit/0": "Visit/OP"}
         as_inpatient = [
-            {**v, "visit_type": "Visit/IP" if v["visit_type"] == "Visit/ERIP" else v["visit_type"]}
+            {**v, "visit_type": legacy_types.get(v["visit_type"], v["visit_type"])}
             for v in without_visit_classification(by_rules)
         ]
         self.assertEqual(as_inpatient, by_class)
@@ -745,13 +747,13 @@ class StaysWithoutADischargeTest(unittest.TestCase):
     def test_the_stay_ends_where_its_events_stop_and_the_later_events_are_not_part_of_it(self):
         self.assertEqual(
             self.visits(self.no_discharge),
-            [("Visit/IP", 10, 12), ("Visit/OP", 100, 100), ("Visit/OP", 200, 200), ("Visit/OP", 300, 300)],
+            [("Visit/IP", 10, 12), ("Visit/0", 100, 100), ("Visit/0", 200, 200), ("Visit/0", 300, 300)],
         )
 
     def test_a_cutoff_months_after_the_last_event_of_the_stay_does_not_leave_it_open(self):
         self.assertEqual(
             self.visits(self.no_discharge, cutoff_day=250),
-            [("Visit/IP", 10, 12), ("Visit/OP", 100, 100), ("Visit/OP", 200, 200)],
+            [("Visit/IP", 10, 12), ("Visit/0", 100, 100), ("Visit/0", 200, 200)],
         )
 
     def test_a_cutoff_right_after_the_last_event_of_the_stay_leaves_it_open(self):
@@ -774,13 +776,13 @@ class StaysWithoutADischargeTest(unittest.TestCase):
         )
 
     def test_an_admission_with_nothing_after_it_is_an_inpatient_visit_of_its_own(self):
-        self.assertEqual(self.visits(self.lone_admission), [("Visit/IP", 10, 10), ("Visit/OP", 200, 200)])
+        self.assertEqual(self.visits(self.lone_admission), [("Visit/IP", 10, 10), ("Visit/0", 200, 200)])
 
     def test_the_limit_is_a_rule_of_the_user(self):
         # longer: the stay reaches the events of day 100 (88 days later) only with a limit of that size
         self.assertEqual(self.visits(self.no_discharge, max_stay_gap_days=100)[0], ("Visit/IP", 10, 300))
         # shorter: even the next day is too far
-        self.assertEqual(self.visits(self.no_discharge, max_stay_gap_days=0.5)[:2], [("Visit/IP", 10, 10), ("Visit/OP", 11, 11)])
+        self.assertEqual(self.visits(self.no_discharge, max_stay_gap_days=0.5)[:2], [("Visit/IP", 10, 10), ("Visit/0", 11, 11)])
 
 
 @unittest.skipIf(converter() is None, "meds_reader_convert is not installed")
