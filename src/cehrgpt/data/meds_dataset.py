@@ -19,7 +19,6 @@ import pandas as pd
 from cehrbert.data_generators.hf_data_generator import (
     DEFAULT_ED_TO_INPATIENT_CONCEPT_ID,
     DEFAULT_INPATIENT_CONCEPT_ID,
-    DEFAULT_OUTPATIENT_CONCEPT_ID,
     UNKNOWN_VALUE,
 )
 from cehrbert.data_generators.hf_data_generator.cache_util import CacheFileCollector
@@ -29,6 +28,7 @@ from cehrbert.data_generators.hf_data_generator.meds_utils import get_subject_sp
 from cehrbert.data_generators.hf_data_generator.patient_block import (
     PatientBlock,
     PatientDemographics,
+    is_visit_table,
     merge_patient_blocks,
 )
 from cehrbert.med_extension.schema_extension import CehrBertPatient, Visit
@@ -92,28 +92,63 @@ def generate_demographics_and_patient_blocks(
 UNKNOWN_VISIT_CONCEPT_ID = "Visit/0"
 
 
+@functools.lru_cache(maxsize=None)
+def _matcher(rules: Tuple[str, ...]):
+    """A function that tells whether a code matches one of the rules (re.match, as the blocks do), once per code."""
+    if not rules:
+        return lambda code: False
+    pattern = re.compile("|".join(f"(?:{rule})" for rule in rules))
+    matched = {}
+
+    def matches(code):
+        result = matched.get(code)
+        if result is None:
+            result = matched[code] = pattern.match(code) is not None
+        return result
+
+    return matches
+
+
+def _any_of(rules):
+    return _matcher(tuple(rules))
+
+
 class VisitBlock(PatientBlock):
     """
-    A block of events whose visit type is unknown unless the events say it.
+    A block of events, with the visit type unknown unless the events say it, and with the codes matched fast.
 
     PatientBlock calls a block that has no visit, ED or admission event an outpatient visit. That is a guess: such a
     block is a day of labs or diagnoses, and nothing in it says where the patient was. It is the unknown visit
     (Visit/0 of OMOP) instead. A visit event that has the code of an outpatient visit still gives Visit/OP.
+
+    PatientBlock matches each event against each rule as text on each call, which is most of the time of a conversion.
+    Here the rules of a kind are one expression, and a code is matched once. The first event that matches is the same.
     """
 
+    def _first_match(self, rules):
+        matches = _any_of(rules)
+        for event in self.events:
+            if matches(event.code):
+                return event.code, event.time
+        return None, None
+
+    def _find_ed_admission(self):
+        return self._first_match(self.conversion.get_ed_admission_matching_rules())
+
+    def _find_admission(self):
+        return self._first_match(self.conversion.get_admission_matching_rules())
+
+    def _find_discharge_facility(self):
+        return self._first_match(self.conversion.get_discharge_matching_rules())
+
     def _infer_visit_type(self):
-        visit_type, start_time = super()._infer_visit_type()
-        if visit_type == DEFAULT_OUTPATIENT_CONCEPT_ID and not any(event.code == visit_type for event in self.events):
-            visit_type = UNKNOWN_VISIT_CONCEPT_ID
-        return visit_type, start_time
-
-
-def _any_of(rules):
-    """A function that tells whether a code matches one of the rules (re.match, as the blocks do)."""
-    if not rules:
-        return lambda code: False
-    pattern = re.compile("|".join(f"(?:{rule})" for rule in rules))
-    return lambda code: pattern.match(code) is not None
+        is_other_visit = _any_of(self.conversion.get_other_visit_matching_rules())
+        for event in self.events:
+            if is_other_visit(event.code):
+                return event.code, event.time
+            if is_visit_table(getattr(event, "table", None)):
+                return event.code, event.time
+        return UNKNOWN_VISIT_CONCEPT_ID, self._infer_block_start_time()
 
 
 def _split_days_at_discharges(days_of_events, conversion):
