@@ -6,9 +6,6 @@ import numpy as np
 import polars as pl
 import torch
 from cehrbert.data_generators.hf_data_generator.cache_util import CacheFileCollector
-from cehrbert.data_generators.hf_data_generator.meds_utils import (
-    create_dataset_from_meds_reader,
-)
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from cehrbert.runners.runner_util import (
     get_meds_extension_path,
@@ -23,6 +20,7 @@ from cehrgpt.data.hf_cehrgpt_dataset_mapping import (
     ExtractTokenizedSequenceDataMapping,
     MedToCehrGPTDatasetMapping,
 )
+from cehrgpt.data.meds_dataset import create_meds_dataset
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 
 LOG = logging.get_logger("transformers")
@@ -75,8 +73,9 @@ def prepare_finetune_dataset(
                     )
         except Exception as e:
             LOG.warning(e)
-            dataset = create_dataset_from_meds_reader(
+            dataset = create_meds_dataset(
                 data_args=data_args,
+                rules_file=cehrgpt_args.meds_visit_rules_file,
                 dataset_mappings=[
                     MedToCehrGPTDatasetMapping(
                         data_args=data_args,

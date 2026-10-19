@@ -9,10 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.distributed as dist
-from cehrbert.data_generators.hf_data_generator.meds_utils import (
-    CacheFileCollector,
-    create_dataset_from_meds_reader,
-)
+from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
 from cehrbert.runners.hf_runner_argument_dataclass import (
     DataTrainingArguments,
     ModelArguments,
@@ -34,6 +31,7 @@ from cehrgpt.data.hf_cehrgpt_dataset_collator import (
     SamplePackingCehrGptDataCollator,
 )
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
+from cehrgpt.data.meds_dataset import create_meds_dataset
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
@@ -356,8 +354,9 @@ def main():
                             )
                 except FileNotFoundError as e:
                     LOG.warning(e)
-                    dataset = create_dataset_from_meds_reader(
+                    dataset = create_meds_dataset(
                         data_args=data_args,
+                        rules_file=cehrgpt_args.meds_visit_rules_file,
                         dataset_mappings=[
                             MedToCehrGPTDatasetMapping(
                                 data_args=data_args,

@@ -154,13 +154,43 @@ export MEDS_READER_DIR=""       # MEDS reader output directory
 
 Transform MIMIC files to MEDS format following the [MEDS_transforms](https://github.com/mmcdermott/MEDS_transforms/) repository instructions.
 
-### Step 2: Prepare MEDS Reader
+### Step 2: Declare the Visit Rules and Prepare MEDS Reader
 
-Convert MEDS data for CEHR-GPT compatibility:
+How the events of a MEDS dataset make visits (which events are a visit, an admission, an ED admission and a discharge)
+depends on how the dataset was made. CEHR-GPT starts with `src/cehrgpt/data/visit_rules/defaults.yaml`, which contains
+the standard visit, admission, ED and discharge patterns for MEDS converted from OMOP and MIMIC-IV. Every concept in
+that file is annotated with its corresponding data format. The MEDS dataset carries nothing for this: CEHR-GPT neither
+writes nor reads a rules file in its `metadata` folder. A dataset that codes its visits differently gets a YAML file
+of your own, kept anywhere, and passed when the data is read.
 
 ```bash
 meds_reader_convert $MEDS_DIR $MEDS_READER_DIR --num_threads 10
 ```
+
+`--meds_visit_rules_file my_rules.yaml` applies the file on top of the defaults. The format is described in
+`src/cehrgpt/data/meds_visit_rules.py`. Without the argument `defaults.yaml` is used directly; the old
+conversion-class argument does not select the visit rules.
+
+The YAML contains only event-matching rules; CEHR-GPT uses one generic converter. It builds visits from the visit ids that
+the events carry, and from these rules for the events that have none:
+
+```yaml
+visit_events:
+  - Visit/
+```
+
+Events with a `visit_id` make one visit per id. The events that have none join the visit whose dates contain them, and
+the ones that are left are joined into stays by the admission, ED and discharge patterns. A stay that never gets a
+discharge event ends where its events stop, after `max_stay_gap_days` (default 3) without any, instead of lasting until
+the next admission or the end of the record; set `max_stay_gap_days` in your rules file to change it.
+
+The shared CEHR-GPT timeline mapping starts every detected visit with `[VS]` and ends every completed visit with `[VE]`.
+A visit that is still active at a prediction cutoff remains open without `[VE]`. The mapping inserts `D...` tokens
+between visits and `i-D...` plus optional `i-H...` tokens inside inpatient and emergency visits.
+
+For an event that has the id of a visit (OMOP style), the event time is always the ground truth. An event more than a day
+before the start or after the end of its visit (a problem list entry from years ago, a drug recorded long after) is put
+where its own time is.
 
 ### Step 3: Pre-train with MEDS Data
 
@@ -183,8 +213,7 @@ python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner \
   --use_early_stopping --early_stopping_threshold 0.001 \
   --is_data_in_meds --inpatient_att_function_type day \
   --att_function_type day --include_inpatient_hour_token \
-  --include_auxiliary_token --include_demographic_prompt \
-  --meds_to_cehrbert_conversion_type "MedsToBertMimic4"
+  --include_auxiliary_token --include_demographic_prompt
 ```
 
 ### Step 4: Generate MEDS Trajectories
@@ -216,7 +245,6 @@ python -u -m cehrgpt.generation.cehrgpt_conditional_generation \
   --generation_max_new_tokens 4096 \
   --is_data_in_meds \
   --att_function_type day --inpatient_att_function_type day \
-  --meds_to_cehrbert_conversion_type MedsToBertMimic4 \
   --include_auxiliary_token --include_demographic_prompt \
   --include_inpatient_hour_token
 ```
