@@ -1,4 +1,5 @@
 import datetime
+import functools
 from collections import defaultdict
 from typing import Any, Dict, Generator, List, Optional, Union
 
@@ -94,6 +95,28 @@ class DatasetMappingDecorator(DatasetMapping):
         raise NotImplemented("Must be implemented")
 
 
+def _age_in_years(later: datetime.datetime, birth: datetime.datetime) -> int:
+    """
+    The full years from birth to later, as relativedelta(later, birth).years, without building a relativedelta.
+
+    A relativedelta takes about 8 microseconds, and there is one for each token. The years are the difference of the
+    years, less one if the birthday is not yet reached (the time of the day counts). The rare cases that
+    relativedelta decides differently (a date before the birth, the 29th of February, a time zone) are left to it.
+    """
+    if later < birth or (birth.month == 2 and birth.day == 29) or birth.tzinfo is not None or later.tzinfo is not None:
+        return relativedelta(later, birth).years
+    years = later.year - birth.year
+    if (later.month, later.day, later.time()) < (birth.month, birth.day, birth.time()):
+        years -= 1
+    return years
+
+
+@functools.lru_cache(maxsize=None)
+def _clean_code(code: str) -> str:
+    """replace_escape_chars of a code, once per code."""
+    return replace_escape_chars(code)
+
+
 class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
     def __init__(
         self,
@@ -145,7 +168,7 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
         is_numeric_type: int = 0,
         unit: str = NA,
     ) -> None:
-        cehrgpt_record["concept_ids"].append(replace_escape_chars(code))
+        cehrgpt_record["concept_ids"].append(_clean_code(code))
         cehrgpt_record["ages"].append(age)
         cehrgpt_record["concept_value_masks"].append(concept_value_mask)
         cehrgpt_record["number_as_values"].append(number_as_value)
@@ -188,7 +211,7 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
         first_visit_start_datetime: datetime.datetime = get_value(
             first_visit, "visit_start_datetime"
         )
-        starting_age = relativedelta(first_visit_start_datetime, birth_datetime).years
+        starting_age = _age_in_years(first_visit_start_datetime, birth_datetime)
         year_str = f"year:{str(first_visit_start_datetime.year)}"
         age_str = f"age:{starting_age}"
         self._update_cehrgpt_record(
@@ -241,7 +264,7 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                     cehrgpt_record,
                     code=self._time_token_function(time_delta),
                     time=visit_start_datetime,
-                    age=relativedelta(datetime_cursor, birth_datetime).years,
+                    age=_age_in_years(datetime_cursor, birth_datetime),
                 )
 
             datetime_cursor = visit_start_datetime
@@ -250,14 +273,14 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                 cehrgpt_record,
                 code="[VS]",
                 time=datetime_cursor,
-                age=relativedelta(datetime_cursor, birth_datetime).years,
+                age=_age_in_years(datetime_cursor, birth_datetime),
             )
             # Add a visit type token
             self._update_cehrgpt_record(
                 cehrgpt_record,
                 code=visit_type,
                 time=datetime_cursor,
-                age=relativedelta(datetime_cursor, birth_datetime).years,
+                age=_age_in_years(datetime_cursor, birth_datetime),
             )
             # We need to insert an inpatient hour token right after the visit type, we calculate the hour interval
             # with respect to the midnight of the day
@@ -268,11 +291,11 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                         cehrgpt_record,
                         code=f"i-H{datetime_cursor.hour}",
                         time=datetime_cursor,
-                        age=relativedelta(datetime_cursor, birth_datetime).years,
+                        age=_age_in_years(datetime_cursor, birth_datetime),
                     )
 
             # Keep track of the existing outpatient events, we don't want to add them again
-            existing_duplicate_events = list()
+            existing_duplicate_events = set()
             for e in events:
                 # If the event doesn't have a time stamp, we skip it
                 event_time: datetime.datetime = e["time"]
@@ -292,7 +315,7 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                         numeric_value = float(text_value)
 
                 is_numeric_type = int(numeric_value is not None)
-                code = replace_escape_chars(e["code"])
+                code = _clean_code(e["code"])
 
                 # Create the event identity
                 event_identity = (
@@ -315,7 +338,7 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                             cehrgpt_record,
                             code=f"i-{self._inpatient_time_token_function(time_diff_days)}",
                             time=event_time,
-                            age=relativedelta(event_time, birth_datetime).years,
+                            age=_age_in_years(event_time, birth_datetime),
                         )
 
                     if self._include_inpatient_hour_token:
@@ -335,7 +358,7 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                                 cehrgpt_record,
                                 code=f"i-H{time_diff_hours}",
                                 time=event_time,
-                                age=relativedelta(event_time, birth_datetime).years,
+                                age=_age_in_years(event_time, birth_datetime),
                             )
 
                 if event_identity in existing_duplicate_events:
@@ -345,7 +368,7 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                     cehrgpt_record,
                     code=code,
                     time=event_time,
-                    age=relativedelta(event_time, birth_datetime).years,
+                    age=_age_in_years(event_time, birth_datetime),
                     concept_value_mask=concept_value_mask,
                     unit=unit,
                     number_as_value=numeric_value if numeric_value else 0.0,
@@ -354,7 +377,7 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                     ),
                     is_numeric_type=is_numeric_type,
                 )
-                existing_duplicate_events.append(event_identity)
+                existing_duplicate_events.add(event_identity)
                 # we only want to update the time stamp when data_cursor is less than the event time
                 if datetime_cursor < event_time or datetime_cursor is None:
                     datetime_cursor = event_time
@@ -385,7 +408,7 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                         cehrgpt_record,
                         code=discharge_facility,
                         time=datetime_cursor,
-                        age=relativedelta(datetime_cursor, birth_datetime).years,
+                        age=_age_in_years(datetime_cursor, birth_datetime),
                     )
 
             # A visit that is still active at the prediction cutoff remains open. [VE] means that an actual end was
@@ -395,7 +418,7 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                     cehrgpt_record,
                     code="[VE]",
                     time=datetime_cursor,
-                    age=relativedelta(datetime_cursor, birth_datetime).years,
+                    age=_age_in_years(datetime_cursor, birth_datetime),
                 )
 
         # Generate the orders of the concepts that the cehrbert dataset mapping function expects

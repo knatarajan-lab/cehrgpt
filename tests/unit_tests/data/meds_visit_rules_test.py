@@ -418,6 +418,26 @@ class VisitRulesTest(unittest.TestCase):
         self.assertTrue(converted[0].is_inpatient_or_ed)
 
 
+class AgeInYearsTest(unittest.TestCase):
+    """The age of a token is a full number of years as relativedelta computes it, without building one."""
+
+    def test_it_agrees_with_relativedelta(self):
+        from dateutil.relativedelta import relativedelta
+
+        from cehrgpt.data.hf_cehrgpt_dataset_mapping import _age_in_years
+
+        births = [dt.datetime(2000, 2, 29, 13), dt.datetime(1980, 5, 17, 8, 30), dt.datetime(1999, 12, 31, 23, 59, 59)]
+        for birth in births:
+            for days in (-3000, -1, 0, 1, 364, 365, 366, 6574, 6575, 6576, 29000):
+                for seconds in (-1, 0, 1, 43200):
+                    later = birth + dt.timedelta(days=days, seconds=seconds)
+                    self.assertEqual(_age_in_years(later, birth), relativedelta(later, birth).years, (birth, later))
+        # the day of the birthday counts only once the time of the day is reached
+        birth = dt.datetime(1980, 5, 17, 8, 30)
+        self.assertEqual(_age_in_years(dt.datetime(2000, 5, 17, 8, 29), birth), 19)
+        self.assertEqual(_age_in_years(dt.datetime(2000, 5, 17, 8, 30), birth), 20)
+
+
 class ResolveVisitRulesTest(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()

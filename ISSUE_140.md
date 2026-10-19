@@ -126,4 +126,4 @@ PYTHONPATH=src python -m pytest tests/unit_tests/data/meds_visit_rules_test.py -
 git diff --check
 ```
 
-Current result: `43 passed` for the focused MEDS rules and timeline suite.
+Current result: `44 passed` for the focused MEDS rules and timeline suite.
