@@ -120,6 +120,19 @@ class VisitRules:
         result["max_stay_gap_days"] = self.max_stay_gap_days
         return result
 
+    def pretty(self) -> str:
+        """The rules as lines to read, one pattern per line, for the log."""
+        lines = [f"Visit rules from {self.source or 'the code'}:"]
+        for key in PATTERN_LISTS:
+            patterns = getattr(self, key)
+            lines.append(f"  {key} ({len(patterns)}):")
+            lines.extend(f"    - {pattern}" for pattern in patterns)
+        lines.append(f"  text_events ({len(self.text_events)}):")
+        for rule in self.text_events:
+            lines.append(f"    - {rule.code}: {rule.pattern} -> {', '.join(rule.labels)}")
+        lines.append(f"  max_stay_gap_days: {self.max_stay_gap_days:g}")
+        return "\n".join(lines)
+
 
 def load_rules_file(path: str) -> Dict[str, Any]:
     """The keys of a visit rules file (YAML, which includes JSON)."""
@@ -179,7 +192,6 @@ def resolve_visit_rules(rules_file: Optional[str] = None) -> VisitRules:
         merge_rule_values(load_rules_file(DEFAULT_RULES_PATH), override),
         source=" + ".join(sources),
     )
-    LOG.info("Visit rules from %s: %s", rules.source, rules.to_dict())
     return rules
 
 

@@ -429,6 +429,30 @@ class ResolveVisitRulesTest(unittest.TestCase):
             yaml.safe_dump(values, f)
         return path
 
+    def test_the_rules_are_printed_one_pattern_per_line(self):
+        rules = VisitRules.from_dict(
+            dict(
+                admission_events=["Visit/IP"],
+                text_events=[dict(code="Blood Pressure", pattern="(\\d+)/(\\d+)", labels=["Systolic", "Diastolic"])],
+                max_stay_gap_days=3,
+            ),
+            source="mine.yaml",
+        )
+        self.assertEqual(
+            rules.pretty().splitlines(),
+            [
+                "Visit rules from mine.yaml:",
+                "  visit_events (0):",
+                "  ed_admission_events (0):",
+                "  admission_events (1):",
+                "    - Visit/IP",
+                "  discharge_events (0):",
+                "  text_events (1):",
+                "    - Blood Pressure: (\\d+)/(\\d+) -> Systolic, Diastolic",
+                "  max_stay_gap_days: 3",
+            ],
+        )
+
     def test_without_a_file_the_defaults_are_used_as_they_are(self):
         rules = resolve_visit_rules()
         self.assertEqual(rules.source, DEFAULT_RULES)

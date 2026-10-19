@@ -546,7 +546,7 @@ def create_dataset_from_meds_reader(
     cache_file_collector: Optional[CacheFileCollector] = None,
 ) -> DatasetDict:
 
-    LOG.info("The visit rules: %s", rules.to_dict())
+    LOG.info("%s", rules.pretty())
     LOG.info("The att_function_type: %s", data_args.att_function_type)
     LOG.info("The inpatient_att_function_type: %s", data_args.inpatient_att_function_type)
     LOG.info("The include_auxiliary_token: %s", data_args.include_auxiliary_token)
