@@ -18,16 +18,16 @@ from cehrbert.data_generators.hf_data_generator.meds_to_cehrbert_conversion_rule
     MedsToBertMimic4,
     MedsToCehrbertOMOP,
 )
-from cehrbert.data_generators.hf_data_generator.meds_utils import convert_one_patient
+from cehrbert.data_generators.hf_data_generator.meds_utils import convert_one_patient as legacy_convert_one_patient
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import config as datasets_config
 from transformers import TrainingArguments
 
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
 from cehrgpt.data.meds_dataset import (
-    convert_one_patient_with_rules,
+    convert_one_patient,
     create_meds_dataset,
-    generate_demographics_and_patient_blocks_from_rules,
+    generate_demographics_and_patient_blocks,
 )
 from cehrgpt.data.meds_visit_rules import (
     DEFAULT_RULES_PATH,
@@ -190,7 +190,7 @@ def data_args(folder, **extra):
 
 def visits_of(database, conversion, subject=1):
     with meds_reader.SubjectDatabase(database) as db:
-        convert = convert_one_patient_with_rules if isinstance(conversion, YamlDrivenConversion) else convert_one_patient
+        convert = convert_one_patient if isinstance(conversion, YamlDrivenConversion) else legacy_convert_one_patient
         return convert(db[subject], conversion)["visits"]
 
 
@@ -354,7 +354,7 @@ class VisitRulesTest(unittest.TestCase):
                 raw_event("LAB//OBSERVED", dt.datetime(2020, 1, 2, 2)),
             ],
         )
-        converted = convert_one_patient_with_rules(patient, conversion, prediction_time=prediction_time)
+        converted = convert_one_patient(patient, conversion, prediction_time=prediction_time)
         self.assertIsNone(converted["visits"][0]["visit_end_datetime"])
         self.assertTrue(converted["visits"][0]["is_inpatient_or_ed"])
 
@@ -549,8 +549,8 @@ class VisitsFromRulesTest(unittest.TestCase):
     def test_visit_ids_and_rules_build_the_visits_of_one_patient_together(self):
         conversion = YamlDrivenConversion(resolve_visit_rules(), default_visit_id=1)
         with meds_reader.SubjectDatabase(self.mixed) as database:
-            visits = convert_one_patient_with_rules(database[1], conversion)["visits"]
-            _, blocks = generate_demographics_and_patient_blocks_from_rules(database[1], conversion)
+            visits = convert_one_patient(database[1], conversion)["visits"]
+            _, blocks = generate_demographics_and_patient_blocks(database[1], conversion)
         outpatient, stay = visits
         # the visit with an id is built from its id
         self.assertEqual(outpatient["visit_type"], "Visit/OP")
@@ -705,7 +705,7 @@ class StaysWithoutADischargeTest(unittest.TestCase):
         conversion = YamlDrivenConversion(resolve_visit_rules(path), default_visit_id=1)
         cutoff = None if cutoff_day is None else self.START + dt.timedelta(days=cutoff_day)
         with meds_reader.SubjectDatabase(database) as db:
-            visits = convert_one_patient_with_rules(db[1], conversion, prediction_time=cutoff)["visits"]
+            visits = convert_one_patient(db[1], conversion, prediction_time=cutoff)["visits"]
 
         def day(value):
             return None if value is None else (value - self.START).days

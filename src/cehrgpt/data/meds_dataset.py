@@ -42,7 +42,7 @@ from cehrgpt.data.meds_visit_rules import (
 LOG = logging.get_logger("transformers")
 
 
-def generate_demographics_and_patient_blocks_from_rules(
+def generate_demographics_and_patient_blocks(
     patient: meds_reader.Subject,
     conversion: YamlDrivenConversion,
     prediction_time: datetime = None,
@@ -259,7 +259,7 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
     return merge_patient_blocks(patient, blocks)
 
 
-def convert_one_patient_with_rules(
+def convert_one_patient(
     patient: meds_reader.Subject,
     conversion: YamlDrivenConversion,
     prediction_time: datetime = None,
@@ -267,7 +267,7 @@ def convert_one_patient_with_rules(
     label=None,
 ) -> CehrBertPatient:
     """Convert one patient with the visit ids of the events and the event rules declared in YAML."""
-    demographics, patient_blocks = generate_demographics_and_patient_blocks_from_rules(
+    demographics, patient_blocks = generate_demographics_and_patient_blocks(
         patient=patient,
         conversion=conversion,
         prediction_time=prediction_time,
@@ -323,7 +323,7 @@ def convert_one_patient_with_rules(
     )
 
 
-def _meds_to_cehrbert_generator_with_rules(
+def _meds_to_cehrbert_generator(
     shards: List[Tuple[np.ndarray, np.ndarray, np.ndarray]],
     path_to_db: str,
     default_visit_id: int,
@@ -339,7 +339,7 @@ def _meds_to_cehrbert_generator_with_rules(
         for shard in shards:
             for patient_id, prediction_time, observation_window, label in shard:
                 patient = patient_database[patient_id]
-                converted_patient = convert_one_patient_with_rules(
+                converted_patient = convert_one_patient(
                     patient, conversion, prediction_time, observation_window, label
                 )
                 # there are patients whose birthdate is none
@@ -352,7 +352,7 @@ def _meds_to_cehrbert_generator_with_rules(
                     yield converted_patient
 
 
-def _create_cehrbert_data_from_meds_with_rules(
+def _create_cehrbert_data_from_meds(
     data_args: DataTrainingArguments,
     rules: VisitRules,
     split: str,
@@ -415,7 +415,7 @@ def _create_cehrbert_data_from_meds_with_rules(
 
     split_batches = np.array_split(np.asarray(batches), data_args.preprocessing_num_workers)
     batch_func = functools.partial(
-        _meds_to_cehrbert_generator_with_rules,
+        _meds_to_cehrbert_generator,
         path_to_db=os.path.expanduser(data_args.data_folder),
         default_visit_id=default_visit_id,
         rules=rules,
@@ -449,7 +449,7 @@ def _create_cehrbert_data_from_meds_with_rules(
     return dataset
 
 
-def create_dataset_from_meds_reader_with_rules(
+def create_dataset_from_meds_reader(
     data_args: DataTrainingArguments,
     rules: VisitRules,
     default_visit_id: int = 1,
@@ -463,7 +463,7 @@ def create_dataset_from_meds_reader_with_rules(
     LOG.info("The include_auxiliary_token: %s", data_args.include_auxiliary_token)
     LOG.info("The include_demographic_prompt: %s", data_args.include_demographic_prompt)
     LOG.info("The meds_exclude_tables: %s", "\n".join(data_args.meds_exclude_tables))
-    train_dataset = _create_cehrbert_data_from_meds_with_rules(
+    train_dataset = _create_cehrbert_data_from_meds(
         data_args=data_args,
         rules=rules,
         split="train",
@@ -471,7 +471,7 @@ def create_dataset_from_meds_reader_with_rules(
         dataset_mappings=dataset_mappings,
         cache_file_collector=cache_file_collector,
     )
-    tuning_dataset = _create_cehrbert_data_from_meds_with_rules(
+    tuning_dataset = _create_cehrbert_data_from_meds(
         data_args=data_args,
         rules=rules,
         split="tuning",
@@ -479,7 +479,7 @@ def create_dataset_from_meds_reader_with_rules(
         dataset_mappings=dataset_mappings,
         cache_file_collector=cache_file_collector,
     )
-    held_out_dataset = _create_cehrbert_data_from_meds_with_rules(
+    held_out_dataset = _create_cehrbert_data_from_meds(
         data_args=data_args,
         rules=rules,
         split="held_out",
@@ -504,7 +504,7 @@ def create_meds_dataset(
     on top. Nothing is read from the metadata of the dataset.
     """
     rules = resolve_visit_rules(rules_file)
-    return create_dataset_from_meds_reader_with_rules(
+    return create_dataset_from_meds_reader(
         data_args=data_args,
         rules=rules,
         default_visit_id=default_visit_id,
