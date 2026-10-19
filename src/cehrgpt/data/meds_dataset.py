@@ -108,6 +108,14 @@ class VisitBlock(PatientBlock):
         return visit_type, start_time
 
 
+def _any_of(rules):
+    """A function that tells whether a code matches one of the rules (re.match, as the blocks do)."""
+    if not rules:
+        return lambda code: False
+    pattern = re.compile("|".join(f"(?:{rule})" for rule in rules))
+    return lambda code: pattern.match(code) is not None
+
+
 def _split_days_at_discharges(days_of_events, conversion):
     """
     Cut a day where a stay ends and another begins, so that the discharge is not in the block of the next stay.
@@ -116,27 +124,29 @@ def _split_days_at_discharges(days_of_events, conversion):
     with the discharge and the admission at the same time) within that day. The events from the ED or admission event
     on, and those after the discharge, go in a block of their own.
     """
-    discharge = [re.compile(rule) for rule in conversion.get_discharge_matching_rules()]
-    starts = [
-        re.compile(rule)
-        for rule in conversion.get_ed_admission_matching_rules() + conversion.get_admission_matching_rules()
-    ]
+    discharge = _any_of(conversion.get_discharge_matching_rules())
+    starts = _any_of(conversion.get_ed_admission_matching_rules() + conversion.get_admission_matching_rules())
 
-    def is_discharge(event):
-        return any(rule.match(event.code) for rule in discharge)
-
-    def is_start(event):
-        return any(rule.match(event.code) for rule in starts) and not is_discharge(event)
+    # the same few codes repeat in a day, and each is matched once
+    @functools.lru_cache(maxsize=None)
+    def kind(code):
+        if discharge(code):
+            return "discharge"
+        return "start" if starts(code) else "other"
 
     for events in days_of_events:
         # at the same time the discharge comes first: it is the end of the stay that the admission follows
-        events = sorted(events, key=lambda event: (event.time, not is_discharge(event), event.code))
+        events = sorted(events, key=lambda event: (event.time, kind(event.code) != "discharge", event.code))
         part = []
+        discharged = False
         for event in events:
-            if part and any(is_discharge(e) for e in part) and is_start(event):
+            event_kind = kind(event.code)
+            if discharged and event_kind == "start":
                 yield part
                 part = []
+                discharged = False
             part.append(event)
+            discharged = discharged or event_kind == "discharge"
         yield part
 
 
