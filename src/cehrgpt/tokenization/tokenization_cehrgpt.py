@@ -596,15 +596,27 @@ class CehrGptTokenizer(PreTrainedTokenizer):
     def pretrained_concept_embedding_model(self):
         return self._pretrained_concept_embedding_model
 
-    def get_motor_task_prevalence_rates(self) -> List[float]:
+    def get_motor_task_prevalence_rates(self) -> Optional[List[float]]:
         """
         Returns the per-task hazard rate for each MOTOR task in sorted code order.
         Rate = frac_events / mean_event_tte (days), matching the original MOTOR
         implementation. Used to initialize task_layer bias in MotorTaskHead.
+
+        A tokenizer that was trained before the mean time to event of the tasks was kept has no rates (None):
+        the head then starts as it did before the rates existed. Giving every task the same floor would start all
+        of them at a rate that no task has.
         """
+        if not self._motor_time_to_event_codes:
+            return None
         task_tte = self._motor_task_info.get("task_tte_stats", {})
         task_censor = self._motor_task_info.get("task_censor_stats", {})
-        task_tte_time = self._motor_task_info.get("task_tte_time_stats", {})
+        task_tte_time = self._motor_task_info.get("task_tte_time_stats")
+        if not task_tte_time:
+            LOG.warning(
+                "The tokenizer has no mean time to event of its MOTOR tasks (it was trained before they were "
+                "kept), so there are no task prevalence rates and the task head keeps its default bias."
+            )
+            return None
         rates = []
         for code in sorted(self._motor_time_to_event_codes):
             events = task_tte.get(code, 0)
@@ -1137,6 +1149,21 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                     cehrgpt_tokenizer_copy._motor_time_to_event_codes.append(
                         motor_time_to_event_code
                     )
+                    # The statistics of the task come with it; the rates are only made for a tokenizer that has
+                    # them for its tasks, so they are not started for a tokenizer that does not.
+                    existing_info = cehrgpt_tokenizer_copy._motor_task_info
+                    new_info = new_tokenizer._motor_task_info
+                    for key in (
+                        "task_tte_stats",
+                        "task_censor_stats",
+                        "task_tte_time_stats",
+                    ):
+                        if existing_info.get(key) is not None and (
+                            motor_time_to_event_code in new_info.get(key, {})
+                        ):
+                            existing_info[key][motor_time_to_event_code] = new_info[
+                                key
+                            ][motor_time_to_event_code]
 
         for gender in new_tokenizer._gender_map.keys():
             if gender not in cehrgpt_tokenizer_copy._gender_map:
@@ -1429,6 +1456,12 @@ class CehrGptTokenizer(PreTrainedTokenizer):
                 "motor_event_times": motor_tte_statistics["motor_event_times"],
                 "task_tte_stats": motor_tte_statistics["task_tte_stats"],
                 "task_censor_stats": motor_tte_statistics["task_censor_stats"],
+                # the mean time to event of each task, for the hazard rate that starts the bias of the task head
+                "task_tte_time_stats": {
+                    code: motor_tte_statistics["task_tte_time_stats"][code]
+                    for code in motor_time_to_event_codes
+                    if code in motor_tte_statistics["task_tte_time_stats"]
+                },
                 "motor_time_to_event_codes": motor_time_to_event_codes,
             }
 
