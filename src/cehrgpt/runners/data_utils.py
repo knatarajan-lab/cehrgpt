@@ -19,6 +19,7 @@ from meds import held_out_split, subject_id_field, train_split, tuning_split
 from transformers import TrainingArguments
 from transformers.utils import logging
 
+from cehrgpt.data.cache_cleanup import clean_up_dataset_caches
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import (
     ExtractTokenizedSequenceDataMapping,
     MedToCehrGPTDatasetMapping,
@@ -88,14 +89,12 @@ def prepare_finetune_dataset(
             )
             if not data_args.streaming:
                 dataset.save_to_disk(str(meds_extension_path))
-                stats = dataset.cleanup_cache_files()
+                # The files created from the data generator are removed with the cache files of the dataset
+                stats = clean_up_dataset_caches(dataset, cache_file_collector)
                 LOG.info(
                     "Clean up the cached files for the cehrgpt dataset transformed from the MEDS: %s",
                     stats,
                 )
-                if cache_file_collector:
-                    # Clean up the files created from the data generator
-                    cache_file_collector.remove_cache_files()
                 dataset = load_from_disk(str(meds_extension_path))
 
         train_set = dataset["train"]

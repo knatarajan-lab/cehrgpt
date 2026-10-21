@@ -38,6 +38,7 @@ from transformers import (
 from transformers.trainer_utils import is_main_process
 from transformers.utils import logging
 
+from cehrgpt.data.cache_cleanup import clean_up_dataset_caches
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import (
     CehrGptDataCollator,
@@ -328,12 +329,13 @@ def main():
             )
             if not data_args.streaming:
                 processed_dataset.save_to_disk(str(prepared_ds_path))
-                stats = processed_dataset.cleanup_cache_files()
+                stats = clean_up_dataset_caches(processed_dataset, cache_file_collector)
                 LOG.info(
                     "Clean up the cached files for the cehrgpt finetuning dataset: %s",
                     stats,
                 )
-            cache_file_collector.remove_cache_files()
+            else:
+                cache_file_collector.remove_cache_files()
 
         # After main-process-only operations, synchronize all processes to ensure consistency
         if dist.is_available() and dist.is_initialized():

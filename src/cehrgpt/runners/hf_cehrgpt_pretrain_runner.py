@@ -43,6 +43,7 @@ from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.omop.ontology import Ontology
 from cehrgpt.runners.data_utils import get_torch_dtype, load_patient_splits, filter_by_patient_ids
+from cehrgpt.data.cache_cleanup import clean_up_dataset_caches
 from cehrgpt.runners.gpt_runner_util import (
     parse_runner_args,
     resolve_attn_implementation,
@@ -449,12 +450,11 @@ def _load_meds_dataset(
         )
         if not data_args.streaming:
             dataset.save_to_disk(str(meds_extension_path))
-            stats = dataset.cleanup_cache_files()
+            stats = clean_up_dataset_caches(dataset, cache_file_collector)
             LOG.info(
                 "Clean up the cached files for the cehrgpt dataset transformed from the MEDS: %s",
                 stats,
             )
-            cache_file_collector.remove_cache_files()
             dataset = load_from_disk(str(meds_extension_path))
     return dataset
 
@@ -581,12 +581,13 @@ def main():
             # Only save the data to disk if it is not streaming
             if not data_args.streaming:
                 processed_dataset.save_to_disk(str(prepared_ds_path))
-                stats = processed_dataset.cleanup_cache_files()
+                stats = clean_up_dataset_caches(processed_dataset, cache_file_collector)
                 LOG.info(
                     "Clean up the cached files for the cehrgpt pretraining dataset: %s",
                     stats,
                 )
-            cache_file_collector.remove_cache_files()
+            else:
+                cache_file_collector.remove_cache_files()
 
         # After main-process-only operations, synchronize all processes to ensure consistency
         if dist.is_available() and dist.is_initialized():
