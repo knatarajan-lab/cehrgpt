@@ -1,4 +1,5 @@
 import datetime
+import functools
 import hashlib
 import pickle
 from collections import defaultdict
@@ -661,6 +662,26 @@ class _PredictionTimeIndex:
         )
 
 
+@functools.lru_cache(maxsize=None)
+def _is_att_code(code: str) -> bool:
+    """is_att_token of a code, once per code for the whole run of a worker."""
+    return is_att_token(code)
+
+
+def _is_att_mask(concept_ids: np.ndarray) -> np.ndarray:
+    """
+    Which of the tokens are time tokens, as [is_att_token(c) for c in concept_ids].
+
+    is_att_token matches several regular expressions, and a patient has tens of thousands of tokens that are a few
+    thousand different codes (the same ones for every patient), so each code is tested once and the answer is looked
+    up for every token.
+    """
+    codes, uniques = pd.factorize(concept_ids)
+    flags = np.fromiter((_is_att_code(code) for code in uniques), dtype=bool, count=len(uniques))
+    # a token that is missing (code -1) is not a time token; the extra False at the end is where -1 points
+    return np.append(flags, False)[codes]
+
+
 class ExtractTokenizedSequenceDataMapping:
     def __init__(
         self,
@@ -726,7 +747,7 @@ class ExtractTokenizedSequenceDataMapping:
 
         # Precompute a boolean ATT mask and the sorted array of [VS] positions
         # so each prediction window needs only O(log n) work.
-        is_att_mask = np.array([is_att_token(c) for c in concept_ids])
+        is_att_mask = _is_att_mask(concept_ids_arr)
         vs_indices = np.where(concept_ids_arr == "[VS]")[0]
         vs_indices = vs_indices[vs_indices >= DEMOGRAPHIC_PROMPT_SIZE]
         vs_epoch_times = epoch_times[vs_indices]  # sorted because epoch_times is sorted
