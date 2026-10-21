@@ -433,3 +433,22 @@ class TestExtractIndexDateMidVisit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IsAttMaskTest(unittest.TestCase):
+    """The mask of time tokens is the per-token is_att_token, found once for each distinct code."""
+
+    def test_it_agrees_with_testing_every_token(self):
+        from cehrgpt.data.hf_cehrgpt_dataset_mapping import _is_att_mask
+        from cehrgpt.gpt_utils import is_att_token
+
+        tokens = ["year:2020", "age:50", "8532", "8527", "[VS]", "D1", "320128", "D1", "i-D3", "W2", "[VE]",
+                  "LT", "M6", "D1", "i-H12", "[VS]", "Visit/IP", "i-D3", "W2", "44054006"]
+        mask = _is_att_mask(np.asarray(tokens))
+        self.assertEqual(mask.tolist(), [is_att_token(t) for t in tokens])
+        self.assertTrue(mask.any() and not mask.all())
+
+    def test_an_empty_sequence(self):
+        from cehrgpt.data.hf_cehrgpt_dataset_mapping import _is_att_mask
+
+        self.assertEqual(_is_att_mask(np.asarray([], dtype=object)).tolist(), [])
