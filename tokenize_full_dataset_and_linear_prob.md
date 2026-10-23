@@ -106,6 +106,17 @@ scripts/run_linear_prob.sh ... --feature_sets=global,local
   `--report_to wandb` each feature set is its own run, `<cohort>/<model_name>` for `concatenated` and
   `<cohort>/<model_name>/<set>` for the others, in the same group.
 
+### Reproducible Results
+
+Before the logistic regressions are trained, the training and the test samples are ordered by `subject_id` and
+`prediction_time` and then shuffled with a seed (`--seed`, default 42), so the order of the samples does not depend on
+the feature files, whose names are random. Training twice on the same features gives the same models and predictions.
+
+The results still differ if the features themselves differ. Each run of the extraction writes new files into
+`features_with_label/`, and the old ones are not removed, so extracting again into the same
+`<cohort>/<model_name>/` folder leaves every sample in the data twice. Use a new output folder, or remove
+`features_with_label/`, `feature_processor*.pickle` and `logistic*/` before extracting again.
+
 ### Evaluating Any Predictions Folder
 
 `run_linear_prob.sh` runs `meds-evaluation` on each feature set with `scripts/run_meds_evaluation.sh`, which works on

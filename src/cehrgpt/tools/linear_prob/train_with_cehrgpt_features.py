@@ -21,6 +21,35 @@ from cehrgpt.tools.linear_prob.feature_io import (
 )
 
 
+DEFAULT_SEED = 42
+
+
+def order_samples(df: pd.DataFrame, seed: int = DEFAULT_SEED) -> pd.DataFrame:
+    """
+    The samples ordered by subject_id and prediction_time, and then shuffled with the seed.
+
+    The feature files have random names, so the order in which the files of a folder are read, and the samples in it,
+    differs from one run to the next. This puts the samples in an order that depends on the samples and the seed only.
+    Samples of the same subject and time (the same sample extracted twice) are ordered by their label and their first
+    feature, which does not depend on the files either.
+    """
+    first_feature = np.fromiter(
+        (np.asarray(features).flat[0] if len(features) else 0.0 for features in df["features"]),
+        dtype=float,
+        count=len(df),
+    )
+    # np.lexsort sorts by the last key first
+    order = np.lexsort(
+        (
+            first_feature,
+            df["boolean_value"].to_numpy().astype(int),
+            pd.to_datetime(df["prediction_time"]).to_numpy(),
+            df["subject_id"].to_numpy(),
+        )
+    )
+    return df.iloc[order].sample(frac=1.0, random_state=seed, replace=False)
+
+
 def stack_features(df: pd.DataFrame) -> np.ndarray:
     return np.stack(df["features"].apply(lambda x: np.array(x).flatten()))
 
@@ -197,7 +226,7 @@ def train_feature_set(
         # Train logistic regression
         model = LogisticRegressionCV(
             scoring="roc_auc",
-            random_state=42,
+            random_state=getattr(args, "seed", DEFAULT_SEED),
             max_iter=1000,
             n_jobs=8,
         )
@@ -292,11 +321,10 @@ def main(args):
     feature_train = pd.read_parquet(train_dir)
     feature_test = pd.read_parquet(test_dir)
 
-    feature_train = feature_train.sort_values(["subject_id", "prediction_time"]).sample(
-        frac=1.0,
-        random_state=42,
-        replace=False,
-    )
+    # The order of the samples does not depend on the files that they were read from
+    seed = getattr(args, "seed", DEFAULT_SEED)
+    feature_train = order_samples(feature_train, seed)
+    feature_test = order_samples(feature_test, seed)
     data = {
         "feature_train": feature_train,
         "feature_test": feature_test,
@@ -330,6 +358,13 @@ if __name__ == "__main__":
         "can only be told apart in features that were extracted with --combine_global_local_features true "
         "(twice the hidden size). Default: all of them when the features allow, else the saved vectors. "
         "The saved vectors are written to logistic/, the others to logistic_global/ and logistic_local/",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
+        help="The seed of the shuffle of the samples (they are first ordered by subject_id and prediction_time, "
+        "so the order does not depend on the feature files) and of the logistic regression (default: 42)",
     )
     parser.add_argument(
         "--hidden_size",
