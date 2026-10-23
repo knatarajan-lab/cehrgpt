@@ -21,6 +21,7 @@ from cehrgpt.models.pretrained_embeddings import (
 )
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import main as train_main
 from cehrgpt.tools.linear_prob import compute_cehrgpt_features as cf
+from cehrgpt.tools.linear_prob.feature_io import read_feature_info
 
 
 class LinearProbMultiWorkerIntegrationTest(unittest.TestCase):
@@ -178,6 +179,20 @@ class LinearProbMultiWorkerIntegrationTest(unittest.TestCase):
         self.assertEqual(set(single["race_concept_id"]), {8527})
         self.assertTrue(set(single["gender_concept_id"]).issubset({8507, 8532}))
         self.assertNotIn(0, set(single["gender_concept_id"]))
+        # the layout of the vectors is saved with them, by the single worker and by the sharded workers alike
+        vectors = np.stack(single["features"].to_numpy())
+        for output_dir in (single_dir, sharded_dir):
+            info = read_feature_info(Path(output_dir))
+            self.assertEqual(info["layout"], ["global", "local"], output_dir)
+            self.assertEqual(info["num_features"], vectors.shape[1], output_dir)
+            self.assertEqual(2 * info["hidden_size"], vectors.shape[1], output_dir)
+            self.assertEqual(sorted(p.name for p in Path(output_dir).glob("feature_info*")), ["feature_info.json"])
+        # a model without a MOTOR head has no linear probe state: its global features are its local features
+        halves = np.split(vectors, 2, axis=1)
+        self.assertEqual(
+            read_feature_info(Path(single_dir))["global_is_last_hidden_state"],
+            bool(np.allclose(halves[0], halves[1], atol=1e-6)),
+        )
         # both workers produced files and the shard folder was cleaned up
         self.assertEqual(len(glob.glob(os.path.join(sharded_dir, "worker_logs", "*.log"))), 2)
         self.assertFalse(os.path.exists(os.path.join(sharded_dir, "temp", "shards")))

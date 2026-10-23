@@ -103,8 +103,7 @@ class TestLinearProbingWandb(unittest.TestCase):
         first = self.wandb.init.call_args.kwargs
         metrics = json.loads((self.output_dir / "logistic" / "metrics.json").read_text())
         self.wandb.reset_mock()
-        with self.assertRaises(SystemExit):
-            train.main(make_args(self.output_dir, report_to="wandb"))
+        train.main(make_args(self.output_dir, report_to="wandb"))
         again = self.wandb.init.call_args.kwargs
         self.assertEqual(again["id"], first["id"])
         self.wandb.init.return_value.summary.update.assert_called_once_with(metrics)
