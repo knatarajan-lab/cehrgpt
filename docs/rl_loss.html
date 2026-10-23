@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CEHR-GPT RL Training Loss</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" async></script>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --card: #1a1d27;
+      --border: #2a2d3a;
+      --text: #e2e8f0;
+      --muted: #8892a4;
+      --accent: #6c8ef7;
+      --green: #4ade80;
+      --orange: #fb923c;
+      --red: #f87171;
+      --purple: #c084fc;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      line-height: 1.6;
+      padding: 24px;
+    }
+    h1 { font-size: 1.6rem; font-weight: 700; margin-bottom: 4px; }
+    h2 { font-size: 1.1rem; font-weight: 600; color: var(--accent); margin-bottom: 12px; }
+    .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 28px; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+    .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+    }
+    .chart-wrap { position: relative; height: 200px; }
+    .chart-wrap-tall { position: relative; height: 260px; }
+    .stat-row {
+      display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap;
+    }
+    .stat {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 20px;
+      flex: 1; min-width: 140px;
+    }
+    .stat-label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat-val { font-size: 1.6rem; font-weight: 700; margin-top: 2px; }
+    .formula-box {
+      background: #12141e;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px 20px;
+      font-size: 0.9rem;
+      margin-bottom: 16px;
+      overflow-x: auto;
+    }
+    .formula-title { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      margin-right: 6px;
+    }
+    .tag-pg  { background: rgba(108,142,247,0.15); color: var(--accent); }
+    .tag-kl  { background: rgba(251,146,60,0.15);  color: var(--orange); }
+    .tag-rew { background: rgba(74,222,128,0.15);  color: var(--green); }
+    .tag-tot { background: rgba(192,132,252,0.15); color: var(--purple); }
+    .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; }
+    .legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--muted); }
+    .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+    @media (max-width: 768px) {
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<h1>CEHR-GPT &mdash; RL Fine-tuning Dashboard</h1>
+<p class="subtitle">REINFORCE + KL regularisation &nbsp;|&nbsp; Rare condition prediction objective</p>
+
+<!-- Live stats row -->
+<div class="stat-row">
+  <div class="stat">
+    <div class="stat-label">Total Loss</div>
+    <div class="stat-val" id="stat-total" style="color:var(--purple)">—</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">PG Loss</div>
+    <div class="stat-val" id="stat-pg" style="color:var(--accent)">—</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">KL Loss</div>
+    <div class="stat-val" id="stat-kl" style="color:var(--orange)">—</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Mean Reward</div>
+    <div class="stat-val" id="stat-rew" style="color:var(--green)">—</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Baseline</div>
+    <div class="stat-val" id="stat-base" style="color:var(--muted)">—</div>
+  </div>
+</div>
+
+<!-- Formulas -->
+<div class="formula-box">
+  <div class="formula-title">Objective</div>
+  \[\mathcal{L} = \underbrace{-A_i \cdot \frac{1}{K}\sum_k \overline{\log\pi_\theta(\tau_k|\text{prefix}_i)}}_{\mathcal{L}_{\text{PG}}} + \;\beta \cdot \underbrace{\frac{1}{K}\sum_k \overline{\log\pi_\theta - \log\pi_{\text{ref}}}}_{\mathcal{L}_{\text{KL}}}\]
+</div>
+<div class="formula-box">
+  <div class="formula-title">Reward</div>
+  \[R_i = \frac{\displaystyle\sum_{(c,\tau)\in F_i} \alpha(c,w(\tau))\;\hat{p}(c,w(\tau))}{\displaystyle\sum_{(c,\tau)\in F_i}\alpha(c,w(\tau))},\quad \alpha(c,w)=\min\!\left(\alpha_{\max},\tfrac{1}{(\pi_{c,w}+\varepsilon)^\gamma}\right)\cdot\!\left(1+\eta\log\!\left(1+\tfrac{w}{w_{\text{ref}}}\right)\right)\]
+</div>
+
+<!-- Main training curves -->
+<div class="grid-2">
+  <div class="card">
+    <h2>Training Loss Components</h2>
+    <div class="chart-wrap-tall"><canvas id="lossChart"></canvas></div>
+    <div class="legend">
+      <div class="legend-item"><div class="legend-dot" style="background:var(--purple)"></div>Total Loss</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div>PG Loss</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--orange)"></div>β · KL Loss</div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Mean Reward &amp; Baseline</h2>
+    <div class="chart-wrap-tall"><canvas id="rewardChart"></canvas></div>
+    <div class="legend">
+      <div class="legend-item"><div class="legend-dot" style="background:var(--green)"></div>Mean Reward R</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--muted)"></div>Baseline b (EMA)</div>
+    </div>
+  </div>
+</div>
+
+<div class="grid-3">
+  <div class="card">
+    <h2>PG Loss</h2>
+    <div class="chart-wrap"><canvas id="pgChart"></canvas></div>
+  </div>
+  <div class="card">
+    <h2>KL Loss</h2>
+    <div class="chart-wrap"><canvas id="klChart"></canvas></div>
+  </div>
+  <div class="card">
+    <h2>Advantage A = R &minus; b</h2>
+    <div class="chart-wrap"><canvas id="advChart"></canvas></div>
+  </div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Synthetic demo data (replace with real logged values)
+// ---------------------------------------------------------------------------
+const N = 80;
+
+function smooth(arr, w) {
+  const out = [];
+  for (let i = 0; i < arr.length; i++) {
+    let s = 0, c = 0;
+    for (let j = Math.max(0, i - w); j <= Math.min(arr.length - 1, i + w); j++) {
+      s += arr[j]; c++;
+    }
+    out.push(s / c);
+  }
+  return out;
+}
+
+function randn() {
+  let u = 0, v = 0;
+  while (!u) u = Math.random();
+  while (!v) v = Math.random();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+const steps = Array.from({length: N}, (_, i) => i + 1);
+
+// PG loss: starts high, decays with noise
+const pgRaw  = steps.map(i => 1.4 * Math.exp(-i / 40) + 0.3 + 0.08 * randn());
+const klRaw  = steps.map(i => 0.05 * Math.exp(-i / 60) + 0.02 + 0.005 * randn());
+const beta   = 0.05;
+const klScaled = klRaw.map(v => v * beta);
+const totalRaw = pgRaw.map((v, i) => v + klScaled[i]);
+
+// Reward: starts low, grows
+const rewRaw = steps.map(i => 0.05 + 0.35 * (1 - Math.exp(-i / 25)) + 0.03 * randn());
+
+// Baseline: EMA of reward
+const baseRaw = [];
+let b = 0;
+for (let i = 0; i < rewRaw.length; i++) {
+  b = 0.99 * b + 0.01 * rewRaw[i];
+  baseRaw.push(b);
+}
+
+const advRaw = rewRaw.map((r, i) => r - baseRaw[i]);
+
+// Smooth for display
+const pg    = smooth(pgRaw,    3);
+const kl    = smooth(klScaled, 3);
+const total = smooth(totalRaw, 3);
+const rew   = smooth(rewRaw,   3);
+const base  = baseRaw;
+const adv   = smooth(advRaw,   3);
+
+// Update stat cards with last values
+document.getElementById('stat-total').textContent = total[N-1].toFixed(4);
+document.getElementById('stat-pg').textContent    = pg[N-1].toFixed(4);
+document.getElementById('stat-kl').textContent    = kl[N-1].toFixed(4);
+document.getElementById('stat-rew').textContent   = rew[N-1].toFixed(4);
+document.getElementById('stat-base').textContent  = base[N-1].toFixed(4);
+
+// ---------------------------------------------------------------------------
+// Chart defaults
+// ---------------------------------------------------------------------------
+const FONT = { color: '#8892a4', family: 'Segoe UI, system-ui, sans-serif' };
+Chart.defaults.color = '#8892a4';
+Chart.defaults.borderColor = '#2a2d3a';
+
+function makeChart(id, datasets, opts = {}) {
+  const ctx = document.getElementById(id).getContext('2d');
+  return new Chart(ctx, {
+    type: 'line',
+    data: { labels: steps, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 600 },
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1a1d27',
+          borderColor: '#2a2d3a',
+          borderWidth: 1,
+          titleColor: '#e2e8f0',
+          bodyColor: '#8892a4',
+          callbacks: {
+            label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(5)}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          title: { display: true, text: 'Step', font: FONT },
+          grid: { color: '#1e2130' },
+          ticks: { maxTicksLimit: 10 }
+        },
+        y: {
+          grid: { color: '#1e2130' },
+          ...opts.yScale
+        }
+      }
+    }
+  });
+}
+
+function ds(label, data, color, fill = false) {
+  return {
+    label, data,
+    borderColor: color,
+    backgroundColor: fill ? color + '22' : 'transparent',
+    borderWidth: 2,
+    pointRadius: 0,
+    tension: 0.35,
+    fill
+  };
+}
+
+// Loss combo
+makeChart('lossChart', [
+  ds('Total Loss', total, '#c084fc', true),
+  ds('PG Loss',    pg,    '#6c8ef7'),
+  ds('β·KL Loss',  kl,    '#fb923c'),
+]);
+
+// Reward + baseline
+makeChart('rewardChart', [
+  ds('Mean Reward R', rew,  '#4ade80', true),
+  ds('Baseline b',    base, '#8892a4'),
+]);
+
+// Individual small charts
+makeChart('pgChart',  [ds('PG Loss',   pg,  '#6c8ef7', true)]);
+makeChart('klChart',  [ds('KL Loss',   kl,  '#fb923c', true)]);
+makeChart('advChart', [ds('Advantage', adv, '#facc15', true)], {
+  yScale: {
+    ticks: {
+      callback: v => v > 0 ? '+' + v.toFixed(3) : v.toFixed(3)
+    }
+  }
+});
+</script>
+</body>
+</html>
