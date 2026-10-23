@@ -49,7 +49,11 @@ from cehrgpt.runners.multi_gpu_util import (
     run_workers,
     strip_cli_option,
 )
-from cehrgpt.tools.linear_prob.feature_io import AsyncParquetWriter, DemographicsLookup
+from cehrgpt.tools.linear_prob.feature_io import (
+    AsyncParquetWriter,
+    DemographicsLookup,
+    write_feature_info,
+)
 
 LOG = logging.get_logger("transformers")
 
@@ -467,6 +471,9 @@ def main():
     data_loaders = [("train", train_loader), ("test", test_dataloader)]
     # Write the parquet files from background threads so the GPU loop does not wait on disk
     writer = AsyncParquetWriter()
+    # What the training needs to know to take the global or the local features out of the vectors
+    num_features = None
+    global_is_last_hidden_state = False
 
     for split, data_loader in data_loaders:
         feature_output_folder = (
@@ -519,6 +526,7 @@ def main():
                 linear_prob_hs = cehrgpt_output.linear_prob_hidden_states
                 if linear_prob_hs is None:
                     linear_prob_hs = cehrgpt_output.hidden_states[-1]
+                    global_is_last_hidden_state = True
 
                 if cehrgpt_args.sample_packing:
                     features = (
@@ -563,6 +571,7 @@ def main():
                         )
                         features = np.concatenate([features, last_features], axis=-1)
 
+                num_features = int(features.shape[-1])
                 features_list = [feature for feature in features]
                 gender_concept_ids, race_concept_ids = demographics_lookup.lookup(
                     person_ids
@@ -585,6 +594,14 @@ def main():
         writer.flush()
 
     writer.close()
+    if num_features is not None:
+        info = write_feature_info(
+            Path(training_args.output_dir),
+            num_features,
+            combined=bool(cehrgpt_args.combine_global_local_features),
+            global_is_last_hidden_state=global_is_last_hidden_state,
+        )
+        LOG.info("The layout of the features: %s", info)
 
 
 if __name__ == "__main__":
