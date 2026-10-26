@@ -151,12 +151,18 @@ def resolve_feature_sets(
     (an extraction from before it was written). The first set is the vectors as saved. A set that the vectors do not
     allow is an error when it was asked for by name.
     """
-    hidden_size = info["hidden_size"] if info else hidden_size
-    combined = bool(hidden_size) and num_features == 2 * hidden_size
     if info and info.get("num_features") not in (None, num_features):
         raise ValueError(
             f"feature_info.json describes {info['num_features']} features but the vectors have {num_features}"
         )
+    hidden_size = info["hidden_size"] if info else hidden_size
+    if hidden_size and num_features not in (hidden_size, 2 * hidden_size):
+        # a vector is the global features (the hidden size) or the global and the local features (twice)
+        raise ValueError(
+            f"The features are {num_features} wide, which is neither the hidden size {hidden_size} (global features "
+            f"only) nor twice it (global and local features combined)"
+        )
+    combined = bool(hidden_size) and num_features == 2 * hidden_size
     if info and len(info["layout"]) == 2 and not combined:
         raise ValueError(f"The features are {num_features} wide, not twice the hidden size {hidden_size}")
     # The vectors as saved are the global features alone when they are known not to be combined; when nothing says

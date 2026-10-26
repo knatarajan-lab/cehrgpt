@@ -93,6 +93,15 @@ class ResolveFeatureSetsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "--hidden_size"):
             resolve_feature_sets(["global"], 2 * HIDDEN, None)
 
+    def test_a_hidden_size_that_does_not_fit_the_width_is_an_error(self):
+        # neither the width nor half of it: the vectors would be trained as global features without being them
+        for wrong in (HIDDEN + 1, 3 * HIDDEN, 2 * HIDDEN + 2):
+            with self.assertRaisesRegex(ValueError, "neither the hidden size"):
+                resolve_feature_sets(["global"], 2 * HIDDEN, None, wrong)
+        # the width itself is features that were not combined; half of it is combined
+        self.assertEqual(resolve_feature_sets(["global"], 2 * HIDDEN, None, 2 * HIDDEN), {"global": None})
+        self.assertEqual(resolve_feature_sets(["global"], 2 * HIDDEN, None, HIDDEN)["global"], slice(0, HIDDEN))
+
     def test_a_model_without_a_motor_head_has_the_same_global_and_local_features(self):
         info = dict(COMBINED, global_is_last_hidden_state=True)
         self.assertEqual(list(resolve_feature_sets(None, 2 * HIDDEN, info)), ["concatenated", "global"])

@@ -203,3 +203,113 @@ class LinearProbScriptTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# Stands for python: records the training call and writes what the training writes
+PYTHON_STUB = """#!/bin/sh
+echo "$@" >> "$STUB_LOG"
+case "$*" in
+  *compute_cehrgpt_features*) echo "EXTRACTION" >> "$STUB_LOG"; exit 0 ;;
+esac
+while [ $# -gt 0 ]; do
+  case "$1" in --output_dir) out="$2"; shift ;; esac
+  shift
+done
+mkdir -p "$out/logistic/test_predictions"
+echo '{"roc_auc": 0.7, "pr_auc": 0.6}' > "$out/logistic/metrics.json"
+touch "$out/logistic/test_predictions/predictions.parquet"
+"""
+
+
+class SkipFeatureExtractionTest(unittest.TestCase):
+    """run_linear_prob.sh --skip_feature_extraction trains on the features that are there."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        for name, text in (("python", PYTHON_STUB), ("meds-evaluation-cli", STUB)):
+            path = bin_dir / name
+            path.write_text(text)
+            path.chmod(path.stat().st_mode | stat.S_IEXEC)
+        self.log = self.root / "calls.log"
+        self.env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "STUB_LOG": str(self.log)}
+        self.out = self.root / "results"
+        self.out.mkdir()
+
+    def features(self, cohort: str, model: str = "my_model"):
+        folder = self.out / cohort / model / "features_with_label"
+        for split in ("train", "test"):
+            (folder / f"{split}_features").mkdir(parents=True)
+            (folder / f"{split}_features" / "part.parquet").write_bytes(b"x")
+        return self.out / cohort / model
+
+    def run_script(self, *args):
+        return subprocess.run(
+            ["sh", str(LINEAR_PROB), "--skip_feature_extraction", f"--output_dir={self.out}", *args],
+            capture_output=True, text=True, env=self.env,
+        )
+
+    def calls(self):
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def test_only_the_output_directory_is_needed_and_nothing_is_extracted(self):
+        readmission = self.features("readmission")
+        mortality = self.features("mortality")
+        result = self.run_script("--model_name=my_model")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertNotIn("EXTRACTION", calls)
+        self.assertFalse(any("compute_cehrgpt_features" in c for c in calls))
+        training = [c for c in calls if "train_with_cehrgpt_features" in c]
+        self.assertEqual(len(training), 2)
+        for cohort in (readmission, mortality):
+            self.assertTrue(any(f"--features_data_dir {cohort}" in c and f"--output_dir {cohort}" in c for c in training))
+            self.assertTrue((cohort / "logistic" / "metrics.json").exists())
+            self.assertTrue((cohort / "logistic" / "results.json").exists())  # evaluated
+        self.assertTrue(all("--feature_sets all" in c for c in training))
+        self.assertIn("Skipping the feature extraction", result.stdout)
+
+    def test_cohorts_without_the_features_of_the_model_are_left_out(self):
+        self.features("readmission")
+        self.features("other_model_only", model="another_model")
+        (self.out / "empty").mkdir()
+        result = self.run_script("--model_name=my_model")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        training = [c for c in self.calls() if "train_with_cehrgpt_features" in c]
+        self.assertEqual(len(training), 1)
+        self.assertIn("readmission", training[0])
+        self.assertIn("Skipping other_model_only: no features of my_model", result.stdout)
+        self.assertNotIn("Found 0 cohorts", result.stdout)
+
+    def test_the_feature_sets_and_finished_cohorts(self):
+        done = self.features("done")
+        (done / "logistic").mkdir()
+        (done / "logistic" / "metrics.json").write_text("{}")
+        self.features("todo")
+        result = self.run_script("--model_name=my_model", "--feature_sets=concatenated")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        training = [c for c in self.calls() if "train_with_cehrgpt_features" in c]
+        self.assertEqual(len(training), 1)  # the finished cohort is not trained again
+        self.assertIn("--feature_sets concatenated", training[0])
+        self.assertIn("Skipping cohort done", result.stdout)
+
+    def test_no_features_at_all_is_an_error(self):
+        result = self.run_script("--model_name=my_model")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("No valid cohorts", result.stdout)
+        self.assertEqual(self.calls(), [])
+
+    def test_without_the_option_the_other_arguments_are_still_required(self):
+        result = subprocess.run(
+            ["sh", str(LINEAR_PROB), f"--output_dir={self.out}"], capture_output=True, text=True, env=self.env
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Missing required arguments", result.stdout)
+        missing_output = subprocess.run(
+            ["sh", str(LINEAR_PROB), "--skip_feature_extraction"], capture_output=True, text=True, env=self.env
+        )
+        self.assertNotEqual(missing_output.returncode, 0)
+        self.assertIn("--output_dir is required", missing_output.stdout)
