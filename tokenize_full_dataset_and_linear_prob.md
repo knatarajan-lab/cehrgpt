@@ -106,6 +106,22 @@ scripts/run_linear_prob.sh ... --feature_sets=global,local
   `--report_to wandb` each feature set is its own run, `<cohort>/<model_name>` for `concatenated` and
   `<cohort>/<model_name>/<set>` for the others, in the same group.
 
+### Training on Features That Are Already Extracted
+
+The extraction (the pass through the model) is the expensive step. To train the logistic regressions again on the
+features of an earlier run, for example for another `--feature_sets` or after a failed training, skip it:
+
+```bash
+scripts/run_linear_prob.sh --skip_feature_extraction \
+    --output_dir /path/to/results --model_name my_model --feature_sets=all
+```
+
+Only `--output_dir` is needed (and `--model_name` if it is not the default): no model, dataset or batch size. The cohorts
+are the folders of `--output_dir` that have `<cohort>/<model_name>/features_with_label/{train,test}_features`; the others
+are left out with a message. Cohorts whose results exist are skipped as usual, and the trained models are evaluated with
+`meds-evaluation`. Without the script, `python -m cehrgpt.tools.linear_prob.train_with_cehrgpt_features
+--features_data_dir <cohort>/<model_name> --output_dir <cohort>/<model_name>` does the training for one cohort.
+
 ### Reproducible Results
 
 Before the logistic regressions are trained, the training and the test samples are ordered by `subject_id` and
