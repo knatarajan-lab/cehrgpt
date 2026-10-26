@@ -25,7 +25,14 @@ usage() {
     echo "                                 (default: none)"
     echo "  --wandb_project=NAME           wandb project (default: \$WANDB_PROJECT, else cehrgpt-linear-probing)"
     echo "  --disable_sample_packing       Disable sample packing (enabled by default)"
-    echo "  --disable_combine_global_local Disable combining global and local features (enabled by default)"
+    echo "  --disable_combine_global_local Disable combining global and local features (enabled by default)."
+    echo "                                 The extracted features are then the global features alone"
+    echo "  --feature_sets=LIST            The features to train a logistic regression on, comma separated:"
+    echo "                                 concatenated (the extracted features, global then local), global (the"
+    echo "                                 linear probe state) and local (the last token state), or all (default)."
+    echo "                                 Global and local need the features combined (the default). The"
+    echo "                                 concatenated features are written to <cohort>/<model_name>/logistic/,"
+    echo "                                 the others to logistic_global/ and logistic_local/ next to it"
     echo "  --add_random_token             Enable adding random token (disabled by default)"
     echo "  --preprocessing_batch_size=NUM Batch size for dataset preprocessing (optional, default: 1000)"
     echo "  --refresh_processed_dataset    Delete and rebuild the cached prepared dataset (disabled by default)"
@@ -52,6 +59,8 @@ usage() {
     exit 1
 }
 
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+
 # Default values
 MODEL_NAME="cehrgpt_model"
 REPORT_TO="none"
@@ -59,6 +68,7 @@ MAX_TOKENS_PER_BATCH="16384"
 TORCH_TYPE="bfloat16"
 DISABLE_SAMPLE_PACKING="false"
 DISABLE_COMBINE_GLOBAL_LOCAL="false"
+FEATURE_SETS=""
 ADD_RANDOM_TOKEN="false"
 REFRESH_PROCESSED_DATASET="false"
 IS_DATA_IN_MEDS="false"
@@ -121,6 +131,9 @@ for arg in "$@"; do
             ;;
         --disable_combine_global_local)
             DISABLE_COMBINE_GLOBAL_LOCAL="true"
+            ;;
+        --feature_sets=*)
+            FEATURE_SETS="${arg#*=}"
             ;;
         --add_random_token)
             ADD_RANDOM_TOKEN="true"
@@ -262,6 +275,64 @@ if [ "$DISABLE_COMBINE_GLOBAL_LOCAL" != "true" ] && [ "$DISABLE_COMBINE_GLOBAL_L
     exit 1
 fi
 
+# The feature sets, as the words that train_with_cehrgpt_features takes
+FEATURE_SETS_ARGS=$(echo "$FEATURE_SETS" | tr ',' ' ')
+for feature_set in $FEATURE_SETS_ARGS; do
+    case "$feature_set" in
+        all|concatenated|global|local) ;;
+        *)
+            echo "Error: unknown feature set '$feature_set' in --feature_sets=$FEATURE_SETS (use all, concatenated, global, local)"
+            exit 1
+            ;;
+    esac
+    if [ "$DISABLE_COMBINE_GLOBAL_LOCAL" = "true" ] && { [ "$feature_set" = "local" ] || [ "$feature_set" = "concatenated" ]; }; then
+        echo "Error: the $feature_set features need the global and local features combined, which --disable_combine_global_local turns off"
+        exit 1
+    fi
+done
+
+# The result folders of the feature sets that were asked for, one per line, in <output_dir>. The extracted features
+# (concatenated, or the global features when they were not combined) are written to logistic/, the global and the
+# local features of combined features to logistic_global/ and logistic_local/. feature_info.json, which the
+# extraction writes, tells whether the features were combined and whether the model has a separate global state.
+required_result_dirs() {
+    info="$1/feature_info.json"
+    combined="false"
+    if [ -f "$info" ] && grep -q '"local"' "$info"; then
+        combined="true"
+    fi
+    if [ -z "$FEATURE_SETS_ARGS" ] || [ "$FEATURE_SETS_ARGS" = "all" ]; then
+        echo "logistic"
+        if [ "$combined" = "true" ]; then
+            echo "logistic_global"
+            # A model without a MOTOR head has the same global and local features: they are trained once
+            if ! grep -q '"global_is_last_hidden_state": true' "$info"; then
+                echo "logistic_local"
+            fi
+        fi
+        return
+    fi
+    for feature_set in $FEATURE_SETS_ARGS; do
+        case "$feature_set" in
+            concatenated) echo "logistic" ;;
+            global)
+                if [ "$combined" = "true" ] || [ ! -f "$info" ]; then echo "logistic_global"; else echo "logistic"; fi
+                ;;
+            local) echo "logistic_local" ;;
+            all) echo "logistic" ;;
+        esac
+    done
+}
+
+# Succeeds when every result folder that is required has its metrics
+results_complete() {
+    for result_dir in $(required_result_dirs "$1"); do
+        if [ ! -f "$1/$result_dir/metrics.json" ]; then
+            return 1
+        fi
+    done
+    return 0
+}
 
 # Log file setup
 LOG_DIR="$BASE_DIR/logs"
@@ -293,6 +364,7 @@ log "  --torch_type=$TORCH_TYPE"
 log "  --report_to=$REPORT_TO"
 log "  --disable_sample_packing=$DISABLE_SAMPLE_PACKING"
 log "  --disable_combine_global_local=$DISABLE_COMBINE_GLOBAL_LOCAL"
+log "  --feature_sets=${FEATURE_SETS:-all}"
 log "  --add_random_token=$ADD_RANDOM_TOKEN"
 log "  --preprocessing_batch_size=$PREPROCESSING_BATCH_SIZE"
 log "  --refresh_processed_dataset=$REFRESH_PROCESSED_DATASET"
@@ -339,12 +411,13 @@ while read -r cohort_name; do
     # Remove trailing slash from OUTPUT_DIR if present, then add cohort_name
     cohort_dir="${OUTPUT_DIR%/}/$cohort_name"
     output_dir="$cohort_dir/$MODEL_NAME"
-    metrics_file="$output_dir/logistic/metrics.json"
 
-    # Check if metrics file exists to determine if cohort has already been processed
-    if [ -f "$metrics_file" ]; then
-        log "Skipping cohort $cohort_name: results already exist at $metrics_file"
-        log "$(cat "$metrics_file")"
+    # Check if the metrics of the feature sets exist to determine if cohort has already been processed
+    if results_complete "$output_dir"; then
+        log "Skipping cohort $cohort_name: results already exist in $output_dir"
+        for result_dir in $(required_result_dirs "$output_dir"); do
+            log "$result_dir: $(cat "$output_dir/$result_dir/metrics.json")"
+        done
         continue
     fi
 
@@ -461,12 +534,14 @@ while read -r cohort_name; do
 
     # Step 2: Model training
     log "Starting model training for $cohort_name..."
-    log "Command: python -u -m cehrgpt.tools.linear_prob.train_with_cehrgpt_features --features_data_dir $output_dir --output_dir $output_dir --report_to $REPORT_TO"
+    log "Command: python -u -m cehrgpt.tools.linear_prob.train_with_cehrgpt_features --features_data_dir $output_dir --output_dir $output_dir --report_to $REPORT_TO --feature_sets ${FEATURE_SETS_ARGS:-all}"
 
+    # shellcheck disable=SC2086 -- the feature sets are separate words
     python -u -m cehrgpt.tools.linear_prob.train_with_cehrgpt_features \
         --features_data_dir "$output_dir" \
         --output_dir "$output_dir" \
         --report_to "$REPORT_TO" \
+        --feature_sets ${FEATURE_SETS_ARGS:-all} \
         >> "$cohort_log" 2>&1
 
     model_training_status=$?
@@ -475,38 +550,25 @@ while read -r cohort_name; do
         continue
     fi
 
-    # Step 3: meds-evaluation
-    log "Running meds-evaluation for logistic regression for $cohort_name..."
-    meds-evaluation-cli predictions_path="$output_dir/logistic/test_predictions" \
-      output_dir="$output_dir/logistic/" >> "$cohort_log" 2>&1
-
-    # Check if the evaluation command succeeded
-    if [ $? -ne 0 ]; then
-        log "ERROR: Running meds-evaluation failed for logistic regression for cohort $cohort_name. Check $cohort_log for details."
-        continue
-    fi
-
-    # Print results.json if it exists
-    results_file="$output_dir/logistic/results.json"
-    log "Looking for results file at: $results_file"
-    # Check for results.json
-    if [ -f "$results_file" ]; then
-        log "Results for $cohort_name:"
-        log "$(cat "$results_file")"
-    else
-        log "Results file not found at $results_file"
-        # Check if there are any JSON files in the logistic directory
-        if [ -d "$output_dir/logistic" ]; then
-            json_files=$(find "$output_dir/logistic" -name "*.json" 2>/dev/null)
-            if [ -n "$json_files" ]; then
-                log "Found other JSON files in logistic directory:"
-                echo "$json_files" | while read json_file; do
-                    log "  $json_file"
-                done
-            else
-                log "No JSON files found in logistic directory"
-            fi
+    # Step 3: meds-evaluation of every feature set that was trained
+    evaluation_failed="false"
+    for result_dir in $(required_result_dirs "$output_dir"); do
+        log "Running meds-evaluation for logistic regression ($result_dir) for $cohort_name..."
+        evaluation_output=$("$SCRIPT_DIR/run_meds_evaluation.sh" \
+            --output_dir="$output_dir/$result_dir/" \
+            "$output_dir/$result_dir/test_predictions" 2>&1)
+        evaluation_status=$?
+        echo "$evaluation_output" >> "$cohort_log"
+        if [ $evaluation_status -ne 0 ]; then
+            log "ERROR: Running meds-evaluation failed for logistic regression ($result_dir) for cohort $cohort_name. Check $cohort_log for details."
+            evaluation_failed="true"
+            continue
         fi
+        log "Results for $cohort_name ($result_dir):"
+        log "$evaluation_output"
+    done
+    if [ "$evaluation_failed" = "true" ]; then
+        continue
     fi
 
     log "Successfully completed processing for $cohort_name"

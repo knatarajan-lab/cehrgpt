@@ -460,7 +460,9 @@ class CehrGPTArguments:
         default=True,
         metadata={
             "help": "A flag to indicate whether we want to combine global (linear prob) "
-            "and local (last token hidden states) features"
+            "and local (last token hidden states) features. The saved vector is then [global | local], twice the "
+            "hidden size, and the linear probing can train on the global features, the local features or both "
+            "(train_with_cehrgpt_features --feature_sets). Without it only the global features are saved"
         },
     )
     add_random_token: Optional[bool] = dataclasses.field(
