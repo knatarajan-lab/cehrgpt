@@ -43,6 +43,8 @@ import glob as glob_module
 import json
 import math
 import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 import os
 import time
 from pathlib import Path
@@ -632,12 +634,13 @@ def _process_shard(
     monotherapy_window_days: float = 7.0,
     population_window_days: Optional[float] = None,
     censor_at_switch: bool = False,
+    show_progress: bool = True,
 ) -> Tuple[int, int]:
     """
-    Process one shard of patient rows and write chunked parquet files.
+    Process the patients of some parquet files and write chunked parquet files.
 
-    Each worker receives a list of parquet files assigned exclusively to it,
-    so there is no I/O contention between workers.
+    The files are read one at a time.  ``extract`` gives every file to a task of its own, so
+    a task holds the patients of one file and workers take the next file as soon as they are free.
 
     Chunk files are named ``shard_{shard_id:03d}_chunk_{chunk_idx:05d}.parquet``
     so that outputs from parallel shards never collide.
@@ -646,17 +649,13 @@ def _process_shard(
     -------
     (n_found, n_skipped)
     """
-    # Read only the files assigned to this shard — no overlap with other workers
-    print(
-        f"[shard {shard_id:03d}] reading {len(shard_files)} file(s) …",
-        flush=True,
-    )
-    t0 = time.time()
-    df_shard = pl.read_parquet(shard_files, columns=needed_cols)
-    print(
-        f"[shard {shard_id:03d}] loaded {len(df_shard):,} rows in {time.time() - t0:.1f}s",
-        flush=True,
-    )
+    # The row count comes from the parquet metadata.  The files are read one at a time while the
+    # rows are processed: a worker never holds more than one file, not its whole shard.
+    n_shard_rows = pl.scan_parquet(shard_files).select(pl.len()).collect().item()
+
+    def _iter_shard_rows():
+        for shard_file in shard_files:
+            yield from pl.read_parquet(shard_file, columns=needed_cols).iter_rows(named=True)
 
     # Load tokenizer in the worker process (not picklable across processes)
     tokenizer: Optional[CehrGptTokenizer] = None
@@ -738,11 +737,12 @@ def _process_shard(
     competing_for_comparator: Set[str] = (source_concepts | _excl) if censor_at_switch else set()
 
     for row in tqdm(
-        df_shard.iter_rows(named=True),
-        total=len(df_shard),
-        desc=f"[shard {shard_id:03d}]",
-        position=shard_id + 1,
-        leave=True,
+        _iter_shard_rows(),
+        total=n_shard_rows,
+        desc=f"[file {shard_id:03d}]",
+        position=1,
+        leave=False,
+        disable=not show_progress,
     ):
         concept_ids = _to_list(row["concept_ids"])
 
@@ -1236,12 +1236,12 @@ def process(
     CHUNK_SIZE = 25_000
     effective_workers = min(num_workers, len(all_files))
 
-    # Round-robin file assignment: worker i gets files [i, i+N, i+2N, ...]
-    file_groups = [all_files[i::effective_workers] for i in range(effective_workers)]
+    # One task per file: a worker holds the patients of one file, and takes the next file when done
+    file_groups = [[f] for f in all_files]
 
     print(
-        f"Processing {n_rows:,} patients with {effective_workers} worker(s) "
-        f"({len(all_files)} files distributed round-robin) …"
+        f"Processing {n_rows:,} patients of {len(all_files)} file(s) with {effective_workers} worker(s), "
+        "one file at a time each …"
     )
 
     # Only read the columns we actually need — skip unrelated columns
@@ -1283,28 +1283,44 @@ def process(
             monotherapy_window_days if monotherapy_window_days is not None else 7.0,
             population_window_days,
             censor_at_switch,
+            effective_workers == 1,
         )
-        for shard_id in range(effective_workers)
+        for shard_id in range(len(file_groups))
     ]
 
     if effective_workers == 1:
-        total_found, total_skipped = _process_shard(*shard_args[0])
+        results = [
+            _process_shard(*args)
+            for args in tqdm(shard_args, desc="[overall] files done", unit="file", position=0, leave=True)
+        ]
+        total_found = sum(r[0] for r in results)
+        total_skipped = sum(r[1] for r in results)
     else:
         # Use 'spawn' (not the default 'fork') to avoid deadlocks caused by
         # forking a process that already has background threads from Polars /
         # NumPy / HuggingFace.  With spawn each worker starts clean.
+        # A ProcessPoolExecutor raises BrokenProcessPool when a worker dies (for example when the
+        # kernel kills it for memory); a multiprocessing Pool would wait for its result forever.
         ctx = mp.get_context("spawn")
-        with ctx.Pool(processes=effective_workers) as pool:
-            results = list(
-                tqdm(
-                    pool.imap_unordered(_process_shard_star, shard_args),
-                    total=effective_workers,
-                    desc="[overall] shards done",
-                    unit="shard",
-                    position=0,
-                    leave=True,
-                )
-            )
+        try:
+            with ProcessPoolExecutor(max_workers=effective_workers, mp_context=ctx) as executor:
+                futures = [executor.submit(_process_shard_star, args) for args in shard_args]
+                results = [
+                    future.result()
+                    for future in tqdm(
+                        as_completed(futures),
+                        total=len(shard_args),
+                        desc="[overall] files done",
+                        unit="file",
+                        position=0,
+                        leave=True,
+                    )
+                ]
+        except BrokenProcessPool as error:
+            raise RuntimeError(
+                "a worker process died, most likely killed for lack of memory (see dmesg); "
+                "rerun with fewer workers"
+            ) from error
         total_found   = sum(r[0] for r in results)
         total_skipped = sum(r[1] for r in results)
 

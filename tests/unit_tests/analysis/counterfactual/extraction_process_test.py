@@ -1,9 +1,13 @@
 import tempfile
 import unittest
+from concurrent.futures import Future
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
+from unittest import mock
 
 import polars as pl
 
+from cehrgpt.analysis.counterfactual import extract_drug_initiation_sequences as extraction
 from cehrgpt.analysis.counterfactual.extract_drug_initiation_sequences import process
 
 DAY = 86_400
@@ -147,6 +151,58 @@ class ExtractionProcessTest(unittest.TestCase):
         self.run_process(overwrite=True, min_prior_observation_days=0)
         self.assertEqual(self.drug_info()["person_id"].to_list(), [1])
         self.assertFalse((self.output / "drug_info" / "shard_007_chunk_00000.parquet").exists())
+
+    def write_folder(self, n_files=4):
+        folder = self.root / "patients"
+        folder.mkdir()
+        for i in range(n_files):
+            pl.DataFrame(
+                [patient(2 * i + 1, [(0, [str(SOURCE)])]), patient(2 * i + 2, [(0, [str(COMPARATOR)])])]
+            ).write_parquet(folder / f"part{i}.parquet")
+        return folder
+
+    def process_folder(self, folder, num_workers):
+        process(
+            patient_sequence_path=str(folder),
+            vocab_path=str(self.root / "vocab"),
+            source_ingredient_ids=[SOURCE],
+            comparator_ingredient_ids=[COMPARATOR],
+            output_dir=self.output,
+            min_context_length=1,
+            num_workers=num_workers,
+        )
+
+    def test_the_files_of_a_shard_are_read_one_after_the_other(self):
+        folder = self.write_folder()
+        self.process_folder(folder, num_workers=1)
+        self.assertEqual(self.drug_info()["person_id"].to_list(), list(range(1, 9)))
+
+    def test_several_workers_process_the_files_between_them(self):
+        folder = self.write_folder()
+        self.process_folder(folder, num_workers=2)
+        self.assertEqual(self.drug_info()["person_id"].to_list(), list(range(1, 9)))
+
+    def test_a_worker_that_dies_raises_instead_of_waiting_for_ever(self):
+        folder = self.write_folder()
+
+        class DyingExecutor:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def submit(self, function, *args):
+                future = Future()
+                future.set_exception(BrokenProcessPool("a process in the pool was terminated"))
+                return future
+
+        with mock.patch.object(extraction, "ProcessPoolExecutor", DyingExecutor):
+            with self.assertRaisesRegex(RuntimeError, "worker process died"):
+                self.process_folder(folder, num_workers=2)
 
 
 if __name__ == "__main__":
