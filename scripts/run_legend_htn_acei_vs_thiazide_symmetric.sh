@@ -42,15 +42,16 @@
 #   Step 3  : Generate N trajectories per patient per arm.
 #   Step 4  : Estimate hazard ratios from generated trajectories.
 #
-# Outcomes (OMOP concept_ids)
-# ----------------------------
-#    312327  Acute myocardial infarction
-#    316139  Heart failure
-#   4310996  Ischemic stroke
-#    376713  Cerebral hemorrhage
-#   3655355  Erectile dysfunction
-#    437833   Hypokalemia
-#    434610  Hyperkalemia
+# Outcomes
+# --------
+#   Step 0 reads the LEGEND-HTN outcomes and negative controls from the SQL of the LEGEND
+#   study (LEGEND_DIR) and writes outcome_definitions.json.  The 15 outcomes that the study
+#   links to an inpatient or ER visit (acute myocardial infarction, acute pancreatitis, acute
+#   renal failure, anaphylactoid reaction, angioedema, cardiovascular disease,
+#   gastrointestinal bleeding, hemorrhagic stroke, hospitalization with heart failure,
+#   ischemic stroke, rhabdomyolysis, stroke, sudden cardiac death, transient ischemic attack
+#   and unstable angina) only count inside such a visit, as does coronary heart disease in
+#   the SQL.
 #
 # Published LEGEND-HTN reference HRs (ACEi vs Thiazide):
 #   AMI           : 0.99  (95% CI 0.87–1.13)
@@ -151,6 +152,12 @@ GPU_ACEI=0
 GPU_THIAZIDE=1
 SINGLE_GPU=false
 
+# Several GPUs for the generation step: "all" or a list such as "0,1,2,3".  One worker per GPU
+# generates a share of the batches of both arms, so every GPU stays busy; an interrupted run
+# continues where it stopped (rerun the script with SKIP_STEP1=true SKIP_STEP2=true).  Takes
+# precedence over GPU_ACEI / GPU_THIAZIDE / SINGLE_GPU.  Empty = the settings above.
+GPU_IDS="${GPU_IDS:-}"
+
 # -----------------------------------------------------------------------------
 # Skip flags — set to "true" to skip steps already completed
 # -----------------------------------------------------------------------------
@@ -187,16 +194,16 @@ THIAZIDE_CONCEPT_IDS="1395058,974166,978555,907013"
 # 978555   Indapamide
 # 907013   Metolazone
 
-OUTCOME_CONCEPT_IDS="312327,316139,4310996,376713,3655355,437833,434610"
-# 312327   Acute myocardial infarction
-# 316139   Heart failure
-# 4310996  Ischemic stroke
-# 376713   Cerebral hemorrhage
-# 3655355  Erectile dysfunction
-# 437833   Hypokalemia
-# 434610   Hyperkalemia
+# Outcomes: the LEGEND-HTN outcomes and negative controls, read from the SQL of the LEGEND study
+# (https://github.com/OHDSI/Legend).  The concepts of every outcome (descendants, exclusions) and
+# the inpatient / ER visit restriction of the outcomes that need one come from there; outcomes the
+# token sequences cannot represent are listed in Step 0 and left out.
+LEGEND_DIR="${LEGEND_DIR:-/data/Legend}"
 
-INPATIENT_OUTCOME_CONCEPT_IDS="312327,316139,4310996,376713"
+# Further outcomes by concept_id (descendants included), optional
+OUTCOME_CONCEPT_IDS=""
+# ... of which these must occur inside an inpatient or ER visit (9201/9203/262)
+INPATIENT_OUTCOME_CONCEPT_IDS=""
 
 # Optional control outcomes (leave empty for none).  A negative control is an outcome
 # neither drug is expected to affect (expected HR = 1); a positive control has a known
@@ -238,6 +245,9 @@ COMBINED_DRUG_INFO="${SYMMETRIC_DIR}/drug_info"
 
 TRAJ_DIR="${OUTPUT_ROOT}/trajectories"
 RESULTS_DIR="${OUTPUT_ROOT}/results"
+OUTCOME_DEFS_DIR="${OUTPUT_ROOT}/outcome_definitions"
+OUTCOME_DEFINITIONS="${OUTCOME_DEFS_DIR}/outcome_definitions.json"
+OUTCOME_SCRIPT="src/cehrgpt/analysis/counterfactual/legend_outcomes.py"
 
 EXTRACT_SCRIPT="src/cehrgpt/analysis/counterfactual/extract_drug_initiation_sequences.py"
 SWAP_SCRIPT="src/cehrgpt/analysis/counterfactual/create_drug_swap_context.py"
@@ -258,6 +268,23 @@ _step_end() {
     local elapsed=$(( $(date +%s) - _STEP_T0 ))
     echo "Elapsed: $(( elapsed / 60 ))m $(( elapsed % 60 ))s"
 }
+
+# =============================================================================
+# STEP 0 — Outcome definitions from the SQL of the LEGEND study
+#
+#   Writes outcome_definitions.json (the concepts of every outcome, with descendants and
+#   exclusions resolved, and its inpatient / ER restriction) and the raw concept sets.
+# =============================================================================
+echo "============================================================"
+echo "STEP 0: LEGEND outcome definitions  [$(date '+%H:%M:%S')]"
+echo "============================================================"
+mkdir -p "${OUTCOME_DEFS_DIR}"
+python "${OUTCOME_SCRIPT}" \
+    --legend_dir  "${LEGEND_DIR}" \
+    --indication  Hypertension \
+    --vocab_path  "${VOCAB_PATH}" \
+    --output_dir  "${OUTCOME_DEFS_DIR}"
+echo ""
 
 # =============================================================================
 # STEP 1 — Extract drug initiation sequences for both drug classes
@@ -305,6 +332,7 @@ else
         --tokenizer_path          "${TOKENIZER_PATH}" \
         --outcome_concept_ids     "${EXTRACT_OUTCOME_CONCEPT_IDS}" \
         --inpatient_outcome_concept_ids "${INPATIENT_OUTCOME_CONCEPT_IDS}" \
+        --outcome_definitions_path "${OUTCOME_DEFINITIONS}" \
         --era_gap_days            "${ERA_GAP_DAYS}" \
         --min_context_length      "${MIN_CONTEXT_LENGTH}" \
         --num_workers             "${EXTRACTION_NUM_WORKERS}" \
@@ -331,6 +359,7 @@ else
         --tokenizer_path          "${TOKENIZER_PATH}" \
         --outcome_concept_ids     "${EXTRACT_OUTCOME_CONCEPT_IDS}" \
         --inpatient_outcome_concept_ids "${INPATIENT_OUTCOME_CONCEPT_IDS}" \
+        --outcome_definitions_path "${OUTCOME_DEFINITIONS}" \
         --era_gap_days            "${ERA_GAP_DAYS}" \
         --min_context_length      "${MIN_CONTEXT_LENGTH}" \
         --num_workers             "${EXTRACTION_NUM_WORKERS}" \
@@ -498,7 +527,9 @@ if [ "${SKIP_STEP3}" = "true" ]; then
 else
     echo "============================================================"
     echo "STEP 3: Generate trajectories  (${NUM_TRAJECTORIES} per patient per arm)  [$(date '+%H:%M:%S')]"
-    if [ "${SINGLE_GPU}" = "true" ]; then
+    if [ -n "${GPU_IDS}" ]; then
+        echo "  Mode              : one worker per GPU (GPU_IDS=${GPU_IDS}), both arms in one run"
+    elif [ "${SINGLE_GPU}" = "true" ]; then
         echo "  Mode              : sequential (SINGLE_GPU=true, GPU ${GPU_ACEI})"
     else
         echo "  GPU ${GPU_ACEI} → ${ARM_A}/     (conditioned on ACEi initiation)"
@@ -532,7 +563,23 @@ else
 
     _step_start
 
-    if [ "${SINGLE_GPU}" = "true" ]; then
+    if [ -n "${GPU_IDS}" ]; then
+        _ARM_ARGS=(--arm_context "${ARM_A}:${ARM_A_CTX}" --arm_context "${ARM_B}:${ARM_B_CTX}")
+        _MULTI_SUPPRESS_ARGS=()
+        if [ "${SUPPRESS_CONCEPTS}" = "true" ]; then
+            _MULTI_SUPPRESS_ARGS=(
+                --vocab_path "${VOCAB_PATH}"
+                --arm_suppress_concepts "${ARM_A}:${_SUPPRESS_CONCEPTS_A}"
+                --arm_suppress_concepts "${ARM_B}:${_SUPPRESS_CONCEPTS_B}"
+            )
+        fi
+        python "${GENERATE_SCRIPT}" \
+            "${_ARM_ARGS[@]}" \
+            "${_COMMON_GENERATE_ARGS[@]}" \
+            "${_MULTI_SUPPRESS_ARGS[@]}" \
+            --gpu_ids "${GPU_IDS}" \
+            > "${OUTPUT_ROOT}/generate.log" 2>&1
+    elif [ "${SINGLE_GPU}" = "true" ]; then
         echo "Running ${ARM_A} arm …"
         CUDA_VISIBLE_DEVICES="${GPU_ACEI}" python "${GENERATE_SCRIPT}" \
             --arm_context "${ARM_A}:${ARM_A_CTX}" \
@@ -595,14 +642,7 @@ else
     echo "  Arm A (treated)    : ${ARM_A}"
     echo "  Arm B (comparator) : ${ARM_B}"
     echo "  Drug info          : ${COMBINED_DRUG_INFO}"
-    echo "  Outcomes:"
-    echo "     312327  Acute myocardial infarction"
-    echo "     316139  Heart failure"
-    echo "    4310996  Ischemic stroke"
-    echo "     376713  Cerebral hemorrhage"
-    echo "    3655355  Erectile dysfunction"
-    echo "     437833   Hypokalemia"
-    echo "     434610  Hyperkalemia"
+    echo "  Outcomes: ${OUTCOME_DEFINITIONS}"
     echo "============================================================"
 
     mkdir -p "${RESULTS_DIR}"
@@ -623,6 +663,7 @@ else
         --drug_info_path          "${COMBINED_DRUG_INFO}" \
         --outcome_concept_ids     "${OUTCOME_CONCEPT_IDS}" \
         --inpatient_outcome_concept_ids "${INPATIENT_OUTCOME_CONCEPT_IDS}" \
+        --outcome_definitions_path "${OUTCOME_DEFINITIONS}" \
         --follow_up_days          "${FOLLOW_UP_DAYS}" \
         --arm_a                   "${ARM_A}" \
         --arm_b                   "${ARM_B}" \

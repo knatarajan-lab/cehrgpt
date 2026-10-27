@@ -39,6 +39,8 @@ import polars as pl
 from scipy.optimize import minimize_scalar
 from scipy.stats import chi2
 
+from cehrgpt.analysis.counterfactual.legend_outcomes import load_outcome_definitions
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -1234,14 +1236,31 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     outcome_ids, outcome_types, expected_hr = parse_outcome_specs(
-        args.outcome_concept_ids,
+        args.outcome_concept_ids or "",
         args.negative_control_outcome_ids,
         args.positive_control_outcome_ids,
     )
+    defined_concepts: Dict[str, Set[str]] = {}
+    defined_inpatient: Set[str] = set()
+    if args.outcome_definitions_path:
+        for entry in load_outcome_definitions(args.outcome_definitions_path):
+            label = entry["label"]
+            if label in outcome_types:
+                raise ValueError(f"outcome {label} is given twice")
+            outcome_ids.append(label)
+            outcome_types[label] = entry["role"]
+            if entry["role"] == NEGATIVE_CONTROL:
+                expected_hr[label] = 1.0
+            defined_concepts[label] = set(entry["concepts"])
+            if entry["inpatient_only"]:
+                defined_inpatient.add(label)
+    if not outcome_ids:
+        raise ValueError("give --outcome_concept_ids and/or --outcome_definitions_path")
     for outcome_type in (PRIMARY, NEGATIVE_CONTROL, POSITIVE_CONTROL):
         members = [o for o in outcome_ids if outcome_types[o] == outcome_type]
         if members:
-            print(f"{outcome_type} outcomes: {members}")
+            shown = members if len(members) <= 10 else members[:10] + ["..."]
+            print(f"{len(members)} {outcome_type} outcomes: {shown}")
 
     inpatient_outcome_ids: Set[str] = set()
     if args.inpatient_outcome_concept_ids:
@@ -1249,18 +1268,22 @@ def main() -> None:
             x.strip() for x in args.inpatient_outcome_concept_ids.split(",")
         }
         print(f"Inpatient-only outcomes: {sorted(inpatient_outcome_ids)}")
+    inpatient_outcome_ids |= defined_inpatient
 
     # Expand each outcome concept to all descendants so that any descendant
     # code in a generated trajectory counts toward the ancestor outcome.
-    outcome_expanded: Dict[str, Set[str]] = {}
+    outcome_expanded: Dict[str, Set[str]] = dict(defined_concepts)
     if args.vocab_path:
         print("Expanding outcome concepts …")
         for oid in outcome_ids:
+            if oid in defined_concepts:
+                continue
             outcome_expanded[oid] = expand_to_descendants(args.vocab_path, [int(oid)])
             print(f"  {oid}: {len(outcome_expanded[oid]):,} concepts (including descendants)")
     else:
         for oid in outcome_ids:
-            outcome_expanded[oid] = {oid}
+            if oid not in defined_concepts:
+                outcome_expanded[oid] = {oid}
 
     dropped_person_ids: Set[int] = set()
     if args.overlap_scores_path:
@@ -1437,9 +1460,17 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--outcome_concept_ids",
-        required=True,
+        default=None,
         help="Comma-separated OMOP concept_ids of the primary outcomes, "
-             "e.g. 4329847,316139,4110192,376713",
+             "e.g. 4329847,316139,4110192,376713. Needed unless "
+             "--outcome_definitions_path gives the outcomes.",
+    )
+    parser.add_argument(
+        "--outcome_definitions_path",
+        default=None,
+        help="outcome_definitions.json from legend_outcomes.py: outcomes (and negative "
+             "controls) defined by concept sets, with their inpatient/ER restriction. "
+             "Analysed next to the outcomes given here; use the file of the extraction step.",
     )
     parser.add_argument(
         "--negative_control_outcome_ids",

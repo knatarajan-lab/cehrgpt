@@ -52,6 +52,10 @@ import numpy as np
 import polars as pl
 from tqdm import tqdm
 
+from cehrgpt.analysis.counterfactual.legend_outcomes import (
+    definitions_fingerprint,
+    load_outcome_definitions,
+)
 from cehrgpt.models.tokenization_hf_cehrgpt import NONE_BIN, UNKNOWN_BIN, CehrGptTokenizer
 
 # ---------------------------------------------------------------------------
@@ -147,12 +151,22 @@ def _encode_values(record: Dict[str, Any], tokenizer: CehrGptTokenizer) -> Dict[
     return record
 
 
+def build_labels_by_token(outcome_concept_groups: Dict[str, Set[str]]) -> Dict[str, List[str]]:
+    """For each concept the outcome labels it belongs to, so a token is looked up once."""
+    labels_by_token: Dict[str, List[str]] = {}
+    for label, concepts in outcome_concept_groups.items():
+        for concept in concepts:
+            labels_by_token.setdefault(concept, []).append(label)
+    return labels_by_token
+
+
 def find_outcomes_after_drug(
     concept_ids: List[str],
     epoch_times: List[float],
     start_pos: int,
     outcome_concept_groups: Dict[str, Set[str]],
     inpatient_outcome_labels: Optional[Set[str]] = None,
+    labels_by_token: Optional[Dict[str, List[str]]] = None,
 ) -> Dict[str, Optional[float]]:
     """
     Scan *concept_ids[start_pos:]* for the first occurrence of each outcome
@@ -165,6 +179,9 @@ def find_outcomes_after_drug(
         visit (visit concept immediately following ``[VS]`` must be in
         ``INPATIENT_ER_VISIT_CONCEPTS``).  If None, no visit-type filter
         is applied to any outcome.
+    labels_by_token
+        ``build_labels_by_token(outcome_concept_groups)``; pass it when scanning many
+        patients, with many outcomes it saves a pass over every outcome for every token.
 
     Returns
     -------
@@ -173,6 +190,8 @@ def find_outcomes_after_drug(
     """
     result: Dict[str, Optional[float]] = {k: None for k in outcome_concept_groups}
     remaining = set(outcome_concept_groups.keys())
+    if labels_by_token is None:
+        labels_by_token = build_labels_by_token(outcome_concept_groups)
     in_qualifying_visit = False  # currently inside an inpatient/ER visit
 
     for i in range(start_pos, len(concept_ids)):
@@ -194,19 +213,19 @@ def find_outcomes_after_drug(
             in_qualifying_visit = False
             continue
 
-        for label in list(remaining):
-            if token in outcome_concept_groups[label]:
-                # Skip if this outcome requires inpatient context but we are not
-                # currently inside a qualifying (inpatient/ER) visit.
-                if (
-                    inpatient_outcome_labels
-                    and label in inpatient_outcome_labels
-                    and not in_qualifying_visit
-                ):
-                    break
-                result[label] = float(epoch_times[i])
-                remaining.discard(label)
-                break
+        for label in labels_by_token.get(token, ()):
+            if label not in remaining:
+                continue
+            # Skip if this outcome requires inpatient context but we are not
+            # currently inside a qualifying (inpatient/ER) visit.
+            if (
+                inpatient_outcome_labels
+                and label in inpatient_outcome_labels
+                and not in_qualifying_visit
+            ):
+                continue
+            result[label] = float(epoch_times[i])
+            remaining.discard(label)
 
     return result
 
@@ -629,6 +648,7 @@ def _process_shard(
     # drug.  Comparator patients' era ends if they encounter a source or
     # exclusion drug.
     _excl: Set[str] = exclusion_concepts or set()
+    labels_by_token = build_labels_by_token(outcome_concept_groups)
     competing_for_source: Set[str]     = comparator_concepts | _excl
     competing_for_comparator: Set[str] = source_concepts | _excl
 
@@ -775,6 +795,7 @@ def _process_shard(
             oc_times = find_outcomes_after_drug(
                 concept_ids, epoch_times, drug_pos + 1, outcome_concept_groups,
                 inpatient_outcome_labels=inpatient_outcome_labels,
+                labels_by_token=labels_by_token,
             )
             observed_outcomes_chunk.append(
                 {"person_id": person_id, "drug_epoch_time": drug_epoch_time, **oc_times}
@@ -808,6 +829,7 @@ def process(
     population_concept_ids: Optional[List[int]] = None,
     exclusion_concept_ids: Optional[List[int]] = None,
     inpatient_outcome_concept_ids: Optional[List[int]] = None,
+    outcome_definitions_path: Optional[str] = None,
     min_prior_observation_days: float = 0.0,
     era_gap_days: int = 30,
     min_context_length: int = 4,
@@ -857,6 +879,11 @@ def process(
         inpatient or ER visit (visit concept in {9201, 9203, 262}) to be
         counted.  Typical use: heart failure, AMI, stroke hospitalisations.
         Each id is expanded to descendants before matching.
+    outcome_definitions_path
+        ``outcome_definitions.json`` written by ``legend_outcomes.py``: outcomes defined by a
+        concept set (descendants and exclusions already resolved) and whether they must occur
+        in an inpatient or ER visit.  They are extracted next to *outcome_concept_ids*, each
+        under its label.
     min_prior_observation_days
         Washout: patients need at least this many days between the start of
         their first visit and the index drug to count as new users (default 0,
@@ -903,6 +930,9 @@ def process(
         "population_concept_ids": sorted(population_concept_ids or []),
         "exclusion_concept_ids": sorted(exclusion_concept_ids or []),
         "inpatient_outcome_concept_ids": sorted(inpatient_outcome_concept_ids or []),
+        "outcome_definitions": (
+            definitions_fingerprint(outcome_definitions_path) if outcome_definitions_path else None
+        ),
         "min_prior_observation_days": min_prior_observation_days,
         "era_gap_days": era_gap_days,
         "min_context_length": min_context_length,
@@ -930,7 +960,9 @@ def process(
                 f"Outputs in {output_dir} {changed}. Use --overwrite to extract again, or a "
                 f"different --output_dir."
             )
-        if outcome_concept_ids and not _dir_has_parquets(observed_outcomes_dir):
+        if (outcome_concept_ids or outcome_definitions_path) and not _dir_has_parquets(
+            observed_outcomes_dir
+        ):
             raise RuntimeError(
                 f"{observed_outcomes_dir} has no parquets although outcomes were requested. "
                 f"Use --overwrite to extract again."
@@ -971,6 +1003,21 @@ def process(
             descendants = load_drug_descendant_concepts(vocab_path, [oc_id])
             outcome_concept_groups[str(oc_id)] = descendants
             print(f"  → outcome {oc_id}: {len(descendants):,} descendants")
+    definition_inpatient_labels: Set[str] = set()
+    if outcome_definitions_path:
+        for entry in load_outcome_definitions(outcome_definitions_path):
+            if entry["label"] in outcome_concept_groups:
+                raise ValueError(
+                    f"outcome label {entry['label']} is both in --outcome_concept_ids and in "
+                    f"{outcome_definitions_path}"
+                )
+            outcome_concept_groups[entry["label"]] = set(entry["concepts"])
+            if entry["inpatient_only"]:
+                definition_inpatient_labels.add(entry["label"])
+        print(
+            f"  → {len(outcome_concept_groups)} outcomes in total, "
+            f"{len(definition_inpatient_labels)} of the defined ones inpatient-only"
+        )
 
     # ------------------------------------------------------------------ #
     # 2b. Expand population concept IDs to descendants (optional filter)  #
@@ -1002,6 +1049,8 @@ def process(
             if str(oc_id) in outcome_concept_groups
         }
         print(f"  Inpatient-only outcome labels: {sorted(inpatient_outcome_labels)}")
+    if definition_inpatient_labels:
+        inpatient_outcome_labels = (inpatient_outcome_labels or set()) | definition_inpatient_labels
 
     # ------------------------------------------------------------------ #
     # 3. Enumerate parquet files and inspect schema without loading data  #
@@ -1150,6 +1199,13 @@ def _parse_args() -> argparse.Namespace:
              "Each is expanded to descendants. Writes observed_outcomes/ chunks.",
     )
     parser.add_argument(
+        "--outcome_definitions_path",
+        default=None,
+        help="outcome_definitions.json from legend_outcomes.py: outcomes defined by concept "
+             "sets (exclusions, no-descendant members, inpatient/ER restriction), extracted "
+             "next to --outcome_concept_ids. Pass the same file to hazard_ratio_estimation.py.",
+    )
+    parser.add_argument(
         "--population_concept_ids",
         default=None,
         help="Comma-separated OMOP concept_ids defining the eligible population "
@@ -1246,6 +1302,7 @@ def main() -> None:
         population_concept_ids=population_concept_ids,
         exclusion_concept_ids=exclusion_concept_ids,
         inpatient_outcome_concept_ids=inpatient_outcome_concept_ids,
+        outcome_definitions_path=args.outcome_definitions_path,
         min_prior_observation_days=args.min_prior_observation_days,
         era_gap_days=args.era_gap_days,
         min_context_length=args.min_context_length,
