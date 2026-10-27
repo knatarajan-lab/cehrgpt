@@ -1,29 +1,34 @@
 #!/usr/bin/env bash
 # =============================================================================
-# LEGEND-HTN Replication: ACEi vs Thiazide (within-patient counterfactual)
+# LEGEND-HTN replication of one pair of drug classes (within-patient counterfactual)
 # =============================================================================
+#
+# The two classes (TARGET_CLASS and COMPARATOR_CLASS, by default ACE inhibitors vs thiazide or
+# thiazide-like diuretics), the ingredients of each, the exclusion list and the rules of the cohorts
+# are the LEGEND-HTN definitions bundled with the package (legend_study.py), and the outcomes are
+# the LEGEND outcomes (legend_outcomes.py).
 #
 # Study design
 # ------------
-#   Population  : Patients who initiated an ACE inhibitor (new users).
-#   Arm A (ACEi): History up to and including the ACEi initiation visit.
-#                 Model generates the future conditional on ACEi.
-#   Arm B (Thiazide counterfactual):
-#                 Same history, but the ACEi concept is swapped to a
-#                 thiazide concept sampled proportional to the empirical
-#                 frequency of thiazide ingredients in the data.
-#                 Model generates the counterfactual future as if the
-#                 patient had received a thiazide instead.
+#   Population  : Patients who initiated a drug of the target class (new users: no
+#                 antihypertensive before the index date, one ingredient in the first week,
+#                 a hypertension diagnosis in the year before, a year of history).
+#   Arm A (target): History up to and including the target initiation visit.
+#                 Model generates the future conditional on the target drug.
+#   Arm B (comparator counterfactual):
+#                 Same history, but the target drug is swapped to a comparator ingredient
+#                 sampled proportional to the empirical frequency of the comparator ingredients
+#                 in the data.  Model generates the counterfactual future as if the patient had
+#                 received the comparator instead.
 #   Each patient produces N trajectories in each arm.
-#   HR is computed by comparing ACEi vs Thiazide generated trajectories.
+#   HR is computed by comparing target vs comparator generated trajectories.
 #
-# Why we also extract thiazide patients in Step 1
-# -----------------------------------------------
-#   We need the empirical frequency of each thiazide ingredient (HCTZ,
-#   chlorthalidone, indapamide, metolazone) to weight the drug swap in
-#   Step 2.  We obtain this by including thiazide patients in the
-#   extraction so they appear in drug_info.parquet.  Thiazide patients
-#   are NOT used in any other step.
+# Why we also extract comparator patients in Step 1
+# -------------------------------------------------
+#   We need the empirical frequency of each comparator ingredient to weight the drug swap in
+#   Step 2.  We obtain this by including comparator patients in the extraction so they appear in
+#   drug_info.parquet.  They also form the observed comparator cohort of the observed baseline
+#   hazard ratio in Step 4.
 #
 # Outcomes
 # --------
@@ -36,10 +41,11 @@
 #   and unstable angina) only count inside such a visit, as does coronary heart disease in
 #   the SQL.
 #
-# Published LEGEND-HTN reference HRs (ACEi vs Thiazide):
-#   AMI           : 0.99  (95% CI 0.87–1.13)
-#   Heart failure : 1.18  (95% CI 1.07–1.30)  [ACEi worse]
-#   Stroke        : 1.09  (95% CI 0.99–1.20)
+# Published LEGEND-HTN results for ACE inhibitors vs thiazides, to compare with when those are the
+# two classes (target hazard ratio, 95% CI):
+#   AMI           : 0.99  (0.87–1.13)
+#   Heart failure : 1.18  (1.07–1.30)
+#   Stroke        : 1.09  (0.99–1.20)
 #
 # Usage
 # -----
@@ -52,8 +58,28 @@
 #   To run both arms on a single GPU sequentially:
 #     SINGLE_GPU=true bash run_legend_htn_acei_vs_thiazide.sh
 #
+#
+#   Another pair of classes (see legend_study.py --list):
+#     TARGET_CLASS="Angiotensin receptor blockers (ARBs)" \
+#     COMPARATOR_CLASS="Dihydropyridine calcium channel blockers (dCCB)" \
+#       bash run_legend_htn_acei_vs_thiazide.sh
 # =============================================================================
 set -euo pipefail
+
+# =============================================================================
+# STUDY — the two drug classes to compare
+#
+#   The classes, their ingredients, the exclusion list (every other antihypertensive ingredient)
+#   and the rules of the cohorts (indication, washout, exposure gap, monotherapy window, minimum
+#   time at risk) are the LEGEND-HTN definitions bundled with the package; see
+#   `python src/cehrgpt/analysis/counterfactual/legend_study.py --list` for the classes.
+#   Export a variable of the same name before running to change one of the rules.
+# =============================================================================
+TARGET_CLASS="${TARGET_CLASS:-ACE inhibitors}"
+COMPARATOR_CLASS="${COMPARATOR_CLASS:-Thiazide or thiazide-like diuretics}"
+STUDY_SCRIPT="src/cehrgpt/analysis/counterfactual/legend_study.py"
+_STUDY_ENV="$(python "${STUDY_SCRIPT}" --target "${TARGET_CLASS}" --comparator "${COMPARATOR_CLASS}")"
+eval "${_STUDY_ENV}"
 
 # =============================================================================
 # CONFIGURATION — edit these paths before running
@@ -63,13 +89,13 @@ PATIENT_SEQUENCE_PATH="/data/patient_sequence"
 VOCAB_PATH="/data/omop_vocab"
 MODEL_PATH="/models/cehrgpt"
 TOKENIZER_PATH="/models/tokenizer"
-OUTPUT_ROOT="/data/legend_htn_acei_vs_thiazide"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/data/legend_htn_${TARGET_LABEL}_vs_${COMPARATOR_LABEL}}"
 
 # Number of stochastic trajectories per patient per arm
 NUM_TRAJECTORIES=5
 
-# Maximum ACEi patients to use (random sample); set to "" to use all patients
-MAX_ACEI_PATIENTS=500
+# Maximum target patients to use (random sample); set to "" to use all patients
+MAX_TARGET_PATIENTS=500
 
 BATCH_SIZE=8
 GENERATION_INPUT_LENGTH=2048
@@ -89,13 +115,9 @@ RANDOM_SEED=42
 # Set to "true" to re-run Step 1 even when output files already exist
 OVERWRITE=false
 
-# Drug era persistence window in days.
-# Two drug events within this many days belong to the same era.
-# The era end time is stored in drug_info/ and used by Step 4 as an additional
-# censoring bound (treatment discontinuation or switch to another antihypertensive).
-ERA_GAP_DAYS="${ERA_GAP_DAYS:-30}"
-# New-user washout: days of observed history required before the index drug.
-MIN_PRIOR_OBSERVATION_DAYS="${MIN_PRIOR_OBSERVATION_DAYS:-365}"
+# ERA_GAP_DAYS (two drug events within this many days belong to the same era; the era end is
+# stored in drug_info/ and bounds the follow-up in Step 4) and MIN_PRIOR_OBSERVATION_DAYS (washout:
+# days of observed history before the index drug) come from the study definition above.
 
 # LEGEND's cohort and time-at-risk rules (CreateExposureCohortsHypertension.sql and the
 # cmAnalysisList of the study):
@@ -108,63 +130,27 @@ MIN_PRIOR_OBSERVATION_DAYS="${MIN_PRIOR_OBSERVATION_DAYS:-365}"
 #     on-treatment design ends it when the continuous exposure to the patient's own class ends
 #     (a gap above ERA_GAP_DAYS), the intent-to-treat design with the observation of the patient.
 #     Starting another drug does not end it (CENSOR_AT_SWITCH=true does).
-MONOTHERAPY_WINDOW_DAYS="${MONOTHERAPY_WINDOW_DAYS:-7}"
-POPULATION_WINDOW_DAYS="${POPULATION_WINDOW_DAYS:-365}"
 TIME_AT_RISK="${TIME_AT_RISK:-on_treatment}"      # or intent_to_treat
-MIN_DAYS_AT_RISK="${MIN_DAYS_AT_RISK:-1}"
 CENSOR_AT_SWITCH="${CENSOR_AT_SWITCH:-false}"
 
 # Set to "true" to suppress the other arm's drugs and the exclusion drugs during generation.
 # LEGEND does not (patients may add drugs), so the default is false.
 SUPPRESS_CONCEPTS="${SUPPRESS_CONCEPTS:-false}"
 
-# Comma-separated OMOP concept_ids restricting the eligible population: one of them (with
-# descendants) has to be recorded within POPULATION_WINDOW_DAYS up to the index date.
-# 316866 = Hypertensive disorder, as in LEGEND.  Leave empty ("") for no filter.
-POPULATION_CONCEPT_IDS="316866"
-
-# Exclusion concept IDs — "new users" eligibility criterion.
-# Patients who have ANY of these drugs in their pre-index history are excluded.
-# This enforces a treatment-naive design: only patients who have never received
-# another first-line or second-line antihypertensive before their index drug are
-# eligible.  Leave empty ("") to disable exclusion filtering.
-#
-# ARBs
-#   40235485  Azilsartan     1351557  Candesartan   1346686  Eprosartan
-#    1347384  Irbesartan     1367500  Losartan     40226742  Olmesartan
-#    1317640  Telmisartan    1308842  Valsartan
-# Dihydropyridine CCBs (dCCBs)
-#    1332418  Amlodipine     1353776  Felodipine    1326012  Isradipine
-#    1318137  Nicardipine    1318853  Nifedipine    1319880  Nisoldipine
-# Non-dihydropyridine CCBs (ndCCBs)
-#    1328165  Diltiazem      1307863  Verapamil
-# Second-line agents
-#    1319998  Acebutolol     1317967  Aliskiren      991382  Amiloride
-#    1314002  Atenolol       1322081  Betaxolol     1338005  Bisoprolol
-#     932745  Bumetanide     1346823  Carvedilol    1398937  Clonidine
-#    1363053  Doxazosin      1309799  Eplerenone     956874  Furosemide
-#    1344965  Guanfacine     1373928  Hydralazine   1386957  Labetalol
-#    1305447  Methyldopa     1307046  Metoprolol    1309068  Minoxidil
-#    1313200  Nadolol        1314577  Nebivolol     1327978  Penbutolol
-#    1345858  Pindolol       1350489  Prazosin      1353766  Propranolol
-#     970250  Spironolactone 1341238  Terazosin      942350  Torsemide
-#     904542  Triamterene
-EXCLUSION_CONCEPT_IDS="40235485,1351557,1346686,1347384,1367500,40226742,1317640,1308842,1332418,1353776,1326012,1318137,1318853,1319880,1328165,1307863,1319998,1317967,991382,1314002,1322081,1338005,932745,1346823,1398937,1363053,1309799,956874,1344965,1373928,1386957,1305447,1307046,1309068,1313200,1314577,1327978,1345858,1350489,1353766,970250,1341238,942350,904542"
-
 # -----------------------------------------------------------------------------
 # GPU configuration
 # -----------------------------------------------------------------------------
-# GPU device IDs for the ACEi arm (GPU_ACEI) and Thiazide arm (GPU_THIAZIDE).
-# Set SINGLE_GPU=true to run both arms sequentially on GPU_ACEI (e.g. when only
+# GPU device IDs for the target arm (GPU_TARGET) and comparator arm (GPU_COMPARATOR).
+# Set SINGLE_GPU=true to run both arms sequentially on GPU_TARGET (e.g. when only
 # one GPU is available or for debugging).
-GPU_ACEI=0
-GPU_THIAZIDE=1
+GPU_TARGET=0
+GPU_COMPARATOR=1
 SINGLE_GPU=false
 
 # Several GPUs for the generation step: "all" or a list such as "0,1,2,3".  One worker per GPU
 # generates a share of the batches of both arms, so every GPU stays busy; an interrupted run
 # continues where it stopped (rerun the script with SKIP_STEP1=true SKIP_STEP2=true).  Takes
-# precedence over GPU_ACEI / GPU_THIAZIDE / SINGLE_GPU.  Empty = the settings above.
+# precedence over GPU_TARGET / GPU_COMPARATOR / SINGLE_GPU.  Empty = the settings above.
 GPU_IDS="${GPU_IDS:-}"
 
 # -----------------------------------------------------------------------------
@@ -178,30 +164,8 @@ SKIP_STEP4=false
 # =============================================================================
 # ARM NAMES — used as sub-directory names under TRAJ_DIR and as arm labels
 # =============================================================================
-ARM_A="acei"
-ARM_B="thiazide"
-
-# =============================================================================
-# DRUG CONCEPT IDs
-# =============================================================================
-
-ACEI_CONCEPT_IDS="1308216,1334456,1341927,1335471,1331235,1340128,1363749,1310756,1373225,1342439"
-# 1308216  Lisinopril
-# 1334456  Ramipril
-# 1341927  Enalapril
-# 1335471  Benazepril
-# 1331235  Quinapril
-# 1340128  Captopril
-# 1363749  Fosinopril
-# 1310756  Moexipril
-# 1373225  Perindopril
-# 1342439  Trandolapril
-
-THIAZIDE_CONCEPT_IDS="1395058,974166,978555,907013"
-# 1395058  Chlorthalidone
-# 974166   Hydrochlorothiazide
-# 978555   Indapamide
-# 907013   Metolazone
+ARM_A="${TARGET_LABEL}"
+ARM_B="${COMPARATOR_LABEL}"
 
 # Outcomes: the LEGEND-HTN outcomes and negative controls (https://github.com/OHDSI/Legend),
 # bundled with the package in cehrgpt/analysis/counterfactual/legend_hypertension (see source.json
@@ -252,7 +216,7 @@ OUTCOME_SCRIPT="src/cehrgpt/analysis/counterfactual/legend_outcomes.py"
 TREATED_CTX="${CONTEXT_DIR}/treated_context"
 DRUG_INFO="${CONTEXT_DIR}/drug_info"
 
-# Arm A (ACEi) — actual context; Arm B (Thiazide) — counterfactual context
+# Arm A (target) — actual context; Arm B (comparator) — counterfactual context
 ARM_A_CTX="${SWAP_DIR}/${ARM_A}_arm_ctx.parquet"
 ARM_B_CTX="${SWAP_DIR}/${ARM_B}_arm_ctx.parquet"
 
@@ -295,18 +259,18 @@ echo ""
 # =============================================================================
 # STEP 1 — Extract drug initiation sequences
 #
-#   Include BOTH ACEi AND thiazide patients so that drug_info.parquet
-#   contains real thiazide prescriptions.  These are used in Step 2 to
-#   compute the empirical frequency of each thiazide ingredient for
-#   frequency-weighted sampling.  Thiazide patients are not used elsewhere.
+#   Include BOTH target AND comparator patients so that drug_info.parquet
+#   contains real comparator prescriptions.  These are used in Step 2 to
+#   compute the empirical frequency of each comparator ingredient for
+#   frequency-weighted sampling.  comparator patients are not used elsewhere.
 # =============================================================================
 if [ "${SKIP_STEP1}" = "true" ]; then
     echo "Skipping Step 1 (SKIP_STEP1=true)"
 else
     echo "============================================================"
     echo "STEP 1: Extract drug initiation sequences  [$(date '+%H:%M:%S')]"
-    echo "  ACEi patients   : ${ACEI_CONCEPT_IDS}"
-    echo "  Thiazide (freq) : ${THIAZIDE_CONCEPT_IDS}"
+    echo "  ${TARGET_NAME} patients   : ${TARGET_CONCEPT_IDS}"
+    echo "  ${COMPARATOR_NAME} (freq) : ${COMPARATOR_CONCEPT_IDS}"
     if [ -n "${POPULATION_CONCEPT_IDS}" ]; then
         echo "  Population filter: ${POPULATION_CONCEPT_IDS}"
     fi
@@ -344,8 +308,8 @@ else
     python "${EXTRACT_SCRIPT}" \
         --patient_sequence_path   "${PATIENT_SEQUENCE_PATH}" \
         --vocab_path              "${VOCAB_PATH}" \
-        --source_concept_ids      "${ACEI_CONCEPT_IDS}" \
-        --comparator_concept_ids  "${THIAZIDE_CONCEPT_IDS}" \
+        --source_concept_ids      "${TARGET_CONCEPT_IDS}" \
+        --comparator_concept_ids  "${COMPARATOR_CONCEPT_IDS}" \
         --output_dir              "${CONTEXT_DIR}" \
         --tokenizer_path          "${TOKENIZER_PATH}" \
         --outcome_concept_ids     "${EXTRACT_OUTCOME_CONCEPT_IDS}" \
@@ -362,22 +326,22 @@ else
 fi
 
 # =============================================================================
-# STEP 2 — Create the two arm contexts for ACEi patients
+# STEP 2 — Create the two arm contexts for target patients
 #
-#   For each ACEi patient we produce:
-#     Arm A (${ARM_A}_arm_ctx) : treated_context as-is (ACEi in context)
-#     Arm B (${ARM_B}_arm_ctx) : treated_context with ACEi concept swapped
-#                                to a thiazide concept sampled proportional
-#                                to the empirical thiazide frequency derived
-#                                from real thiazide patients in drug_info.parquet
+#   For each target patient we produce:
+#     Arm A (${ARM_A}_arm_ctx) : treated_context as-is (target in context)
+#     Arm B (${ARM_B}_arm_ctx) : treated_context with target concept swapped
+#                                to a comparator concept sampled proportional
+#                                to the empirical comparator frequency derived
+#                                from real comparator patients in drug_info.parquet
 # =============================================================================
 if [ "${SKIP_STEP2}" = "true" ]; then
     echo "Skipping Step 2 (SKIP_STEP2=true)"
 else
     echo "============================================================"
-    echo "STEP 2: Create ACEi (actual) and Thiazide (counterfactual) contexts  [$(date '+%H:%M:%S')]"
-    echo "  Source      : ACEi patients"
-    echo "  Comparator  : thiazide (frequency-sampled from real thiazide Rx)"
+    echo "STEP 2: Create ${TARGET_NAME} (actual) and ${COMPARATOR_NAME} (counterfactual) contexts  [$(date '+%H:%M:%S')]"
+    echo "  Source      : ${TARGET_NAME} patients"
+    echo "  Comparator  : ${COMPARATOR_NAME} (frequency-sampled from real ${COMPARATOR_NAME} Rx)"
     echo "  Random seed : ${RANDOM_SEED}"
     echo "============================================================"
 
@@ -393,8 +357,8 @@ else
             --batch_size "${BATCH_SIZE}"
         )
     fi
-    if [ -n "${MAX_ACEI_PATIENTS:-}" ]; then
-        _SWAP_EXTRA_ARGS+=(--max_source_patients "${MAX_ACEI_PATIENTS}")
+    if [ -n "${MAX_TARGET_PATIENTS:-}" ]; then
+        _SWAP_EXTRA_ARGS+=(--max_source_patients "${MAX_TARGET_PATIENTS}")
     fi
 
     _step_start
@@ -403,8 +367,8 @@ else
         --drug_info_path          "${DRUG_INFO}" \
         --vocab_path              "${VOCAB_PATH}" \
         --tokenizer_path          "${TOKENIZER_PATH}" \
-        --source_concept_ids      "${ACEI_CONCEPT_IDS}" \
-        --comparator_concept_ids  "${THIAZIDE_CONCEPT_IDS}" \
+        --source_concept_ids      "${TARGET_CONCEPT_IDS}" \
+        --comparator_concept_ids  "${COMPARATOR_CONCEPT_IDS}" \
         --output_path             "${ARM_B_CTX}" \
         --also_write_treated_path "${ARM_A_CTX}" \
         "${_SWAP_EXTRA_ARGS[@]}"
@@ -416,7 +380,7 @@ else
     ARM_A="${ARM_A}" ARM_B="${ARM_B}" \
     python - <<'PYEOF'
 import polars as pl, os
-for label, key in [("ACEi arm (actual)", "ARM_A"), ("Thiazide arm (counterfactual)", "ARM_B")]:
+for label, key in [("Target arm (actual)", "ARM_A"), ("Comparator arm (counterfactual)", "ARM_B")]:
     f = os.environ[f"{key}_CTX"]
     arm = os.environ[key]
     n = len(pl.read_parquet(f))
@@ -431,12 +395,12 @@ fi
 # STEP 3 — Generate trajectories for both arms
 #
 #   When SINGLE_GPU=false (default):
-#     GPU_ACEI:    ${ARM_A}/  — N futures per patient conditioned on ACEi
-#     GPU_THIAZIDE: ${ARM_B}/ — N counterfactual futures conditioned on thiazide
+#     GPU_TARGET:    ${ARM_A}/  — N futures per patient conditioned on target
+#     GPU_COMPARATOR: ${ARM_B}/ — N counterfactual futures conditioned on comparator
 #     Both processes run simultaneously; the script waits for both to finish.
 #
 #   When SINGLE_GPU=true:
-#     Both arms run sequentially on GPU_ACEI (useful when only one GPU is
+#     Both arms run sequentially on GPU_TARGET (useful when only one GPU is
 #     available or for debugging).
 # =============================================================================
 if [ "${SKIP_STEP3}" = "true" ]; then
@@ -447,10 +411,10 @@ else
     if [ -n "${GPU_IDS}" ]; then
         echo "  Mode              : one worker per GPU (GPU_IDS=${GPU_IDS}), both arms in one run"
     elif [ "${SINGLE_GPU}" = "true" ]; then
-        echo "  Mode              : sequential (SINGLE_GPU=true, GPU ${GPU_ACEI})"
+        echo "  Mode              : sequential (SINGLE_GPU=true, GPU ${GPU_TARGET})"
     else
-        echo "  GPU ${GPU_ACEI} → ${ARM_A}/     (conditioned on ACEi initiation)"
-        echo "  GPU ${GPU_THIAZIDE} → ${ARM_B}/ (counterfactual: ACEi concept swapped to thiazide)"
+        echo "  GPU ${GPU_TARGET} → ${ARM_A}/     (conditioned on ${TARGET_NAME} initiation)"
+        echo "  GPU ${GPU_COMPARATOR} → ${ARM_B}/ (counterfactual: ${TARGET_NAME} concept swapped to ${COMPARATOR_NAME})"
     fi
     echo "  Suppress concepts : ${SUPPRESS_CONCEPTS}"
     echo "  Era gap days      : ${ERA_GAP_DAYS}"
@@ -459,13 +423,13 @@ else
     mkdir -p "${TRAJ_DIR}"
 
     # Competing concept IDs to suppress per arm:
-    #   arm_a (ACEi) suppresses thiazide + all excluded antihypertensives
-    #   arm_b (thiazide) suppresses ACEi  + all excluded antihypertensives
+    #   arm_a (target) suppresses comparator + all excluded antihypertensives
+    #   arm_b (comparator) suppresses target  + all excluded antihypertensives
     _SUPPRESS_ARGS_A=()
     _SUPPRESS_ARGS_B=()
     if [ "${SUPPRESS_CONCEPTS}" = "true" ]; then
-        _SUPPRESS_CONCEPTS_A="${THIAZIDE_CONCEPT_IDS},${EXCLUSION_CONCEPT_IDS}"
-        _SUPPRESS_CONCEPTS_B="${ACEI_CONCEPT_IDS},${EXCLUSION_CONCEPT_IDS}"
+        _SUPPRESS_CONCEPTS_A="${COMPARATOR_CONCEPT_IDS},${EXCLUSION_CONCEPT_IDS}"
+        _SUPPRESS_CONCEPTS_B="${TARGET_CONCEPT_IDS},${EXCLUSION_CONCEPT_IDS}"
         _SUPPRESS_ARGS_A=(--vocab_path "${VOCAB_PATH}" --arm_suppress_concepts "${ARM_A}:${_SUPPRESS_CONCEPTS_A}")
         _SUPPRESS_ARGS_B=(--vocab_path "${VOCAB_PATH}" --arm_suppress_concepts "${ARM_B}:${_SUPPRESS_CONCEPTS_B}")
     fi
@@ -501,26 +465,26 @@ else
             > "${OUTPUT_ROOT}/generate.log" 2>&1
     elif [ "${SINGLE_GPU}" = "true" ]; then
         echo "Running ${ARM_A} arm …"
-        CUDA_VISIBLE_DEVICES="${GPU_ACEI}" python "${GENERATE_SCRIPT}" \
+        CUDA_VISIBLE_DEVICES="${GPU_TARGET}" python "${GENERATE_SCRIPT}" \
             --arm_context "${ARM_A}:${ARM_A_CTX}" \
             "${_COMMON_GENERATE_ARGS[@]}" \
             "${_SUPPRESS_ARGS_A[@]}" \
             > "${OUTPUT_ROOT}/generate_${ARM_A}.log" 2>&1
         echo "Running ${ARM_B} arm …"
-        CUDA_VISIBLE_DEVICES="${GPU_ACEI}" python "${GENERATE_SCRIPT}" \
+        CUDA_VISIBLE_DEVICES="${GPU_TARGET}" python "${GENERATE_SCRIPT}" \
             --arm_context "${ARM_B}:${ARM_B_CTX}" \
             "${_COMMON_GENERATE_ARGS[@]}" \
             "${_SUPPRESS_ARGS_B[@]}" \
             > "${OUTPUT_ROOT}/generate_${ARM_B}.log" 2>&1
     else
-        CUDA_VISIBLE_DEVICES="${GPU_ACEI}" python "${GENERATE_SCRIPT}" \
+        CUDA_VISIBLE_DEVICES="${GPU_TARGET}" python "${GENERATE_SCRIPT}" \
             --arm_context "${ARM_A}:${ARM_A_CTX}" \
             "${_COMMON_GENERATE_ARGS[@]}" \
             "${_SUPPRESS_ARGS_A[@]}" \
             > "${OUTPUT_ROOT}/generate_${ARM_A}.log" 2>&1 &
         PID_A=$!
 
-        CUDA_VISIBLE_DEVICES="${GPU_THIAZIDE}" python "${GENERATE_SCRIPT}" \
+        CUDA_VISIBLE_DEVICES="${GPU_COMPARATOR}" python "${GENERATE_SCRIPT}" \
             --arm_context "${ARM_B}:${ARM_B_CTX}" \
             "${_COMMON_GENERATE_ARGS[@]}" \
             "${_SUPPRESS_ARGS_B[@]}" \
@@ -552,7 +516,7 @@ else
 fi
 
 # =============================================================================
-# STEP 4 — Estimate Hazard Ratios (ACEi vs Thiazide)
+# STEP 4 — Estimate Hazard Ratios (target vs comparator)
 # =============================================================================
 if [ "${SKIP_STEP4}" = "true" ]; then
     echo "Skipping Step 4 (SKIP_STEP4=true)"
@@ -594,8 +558,8 @@ else
         --arm_b                   "${ARM_B}" \
         --output_dir              "${RESULTS_DIR}" \
         --vocab_path              "${VOCAB_PATH}" \
-        --arm_a_concept_ids       "${ACEI_CONCEPT_IDS}" \
-        --arm_b_concept_ids       "${THIAZIDE_CONCEPT_IDS}" \
+        --arm_a_concept_ids       "${TARGET_CONCEPT_IDS}" \
+        --arm_b_concept_ids       "${COMPARATOR_CONCEPT_IDS}" \
         --exclusion_concept_ids   "${EXCLUSION_CONCEPT_IDS}" \
         --era_gap_days            "${ERA_GAP_DAYS}" \
         "${_HR_EXTRA_ARGS[@]}"
@@ -612,13 +576,15 @@ echo "============================================================"
 echo "Done.  Output directory: ${OUTPUT_ROOT}"
 echo ""
 echo "Key files:"
-echo "  ${RESULTS_DIR}/observed_hazard_ratio_summary.csv  (observed ACEi vs observed Thiazide from Step 1 data)"
-echo "  ${RESULTS_DIR}/hazard_ratio_summary.csv           (generated ACEi vs generated Thiazide)"
+echo "  ${RESULTS_DIR}/observed_hazard_ratio_summary.csv  (observed ${TARGET_NAME} vs observed ${COMPARATOR_NAME} from Step 1 data)"
+echo "  ${RESULTS_DIR}/hazard_ratio_summary.csv           (generated ${TARGET_NAME} vs generated ${COMPARATOR_NAME})"
 echo "  ${RESULTS_DIR}/control_outcome_summary.csv        (negative / positive controls, when given)"
 echo "  ${RESULTS_DIR}/km_<concept_id>.csv"
 echo ""
-echo "Published LEGEND-HTN reference HRs (ACEi vs Thiazide):"
-echo "  AMI           : 0.99  (95% CI 0.87–1.13)"
-echo "  Heart failure : 1.18  (95% CI 1.07–1.30)"
-echo "  Stroke        : 1.09  (95% CI 0.99–1.20)"
+if [ "${TARGET_CLASS}" = "ACE inhibitors" ] && [ "${COMPARATOR_CLASS}" = "Thiazide or thiazide-like diuretics" ]; then
+    echo "Published LEGEND-HTN reference HRs (ACE inhibitors vs thiazides):"
+    echo "  AMI           : 0.99  (95% CI 0.87–1.13)"
+    echo "  Heart failure : 1.18  (95% CI 1.07–1.30)"
+    echo "  Stroke        : 1.09  (95% CI 0.99–1.20)"
+fi
 echo "============================================================"

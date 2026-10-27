@@ -14,83 +14,18 @@ from cehrgpt.analysis.counterfactual.extract_drug_initiation_sequences import (
     process,
 )
 
-LEGEND = Path("/Users/chaopang/Documents/Legend")
+def codeset(codeset_id, include=(), descendants=(), exclude=(), exclude_descendants=()):
+    return lo.Codeset(codeset_id, list(include), list(descendants), list(exclude), list(exclude_descendants))
 
 
-def codeset_sql(codeset_id, include=(), descendants=(), exclude=(), exclude_descendants=()):
-    """The shape of the #Codesets inserts that ATLAS generates."""
-
-    def part(plain, with_descendants):
-        listed = ",".join(map(str, sorted(set(plain) | set(with_descendants))))
-        sql = (
-            "( \n  select concept_id from @vocabulary_database_schema.CONCEPT where concept_id in "
-            f"({listed})and invalid_reason is null\n"
-        )
-        if with_descendants:
-            sql += (
-                "UNION  select c.concept_id\n  from @vocabulary_database_schema.CONCEPT c\n"
-                "  join @vocabulary_database_schema.CONCEPT_ANCESTOR ca on c.concept_id = ca.descendant_concept_id\n"
-                f"  and ca.ancestor_concept_id in ({','.join(map(str, with_descendants))})\n"
-                "  and c.invalid_reason is null\n"
-            )
-        return sql + "\n) "
-
-    sql = (
-        "INSERT INTO #Codesets (codeset_id, concept_id)\n"
-        f"SELECT {codeset_id} as codeset_id, c.concept_id FROM (select distinct I.concept_id FROM\n"
-        + part(include, descendants)
-        + "I\n"
+def outcome(name, codesets, primary, correlated=()):
+    """primary / correlated: (domain, codeset id or None) pairs."""
+    return lo.OutcomeDefinition(
+        name=name,
+        codesets={c.codeset_id: c for c in codesets},
+        primary=[lo.Criterion(d, [] if i is None else [i]) for d, i in primary],
+        correlated=[lo.Criterion(d, [] if i is None else [i]) for d, i in correlated],
     )
-    if exclude or exclude_descendants:
-        sql += "LEFT JOIN\n" + part(exclude, exclude_descendants) + "E ON I.concept_id = E.concept_id\nWHERE E.concept_id is null\n"
-    return sql + ") C;\n"
-
-
-def criteria_sql(domain, codeset_id):
-    return (
-        f"-- Begin {domain} Criteria\nSELECT C.person_id FROM (\n  SELECT x.* FROM T x\n"
-        f"  JOIN #Codesets codesets on ((x.concept_id = codesets.concept_id and codesets.codeset_id = {codeset_id}))\n"
-        f") C\n-- End {domain} Criteria\n"
-    )
-
-
-def outcome_sql(codesets, primary, correlated=()):
-    sql = "".join(codesets)
-    sql += "with primary_events as (\n-- Begin Primary Events\n" + "".join(criteria_sql(*p) for p in primary)
-    sql += "-- End Primary Events\n)\nSELECT 1\n"
-    for domain, codeset_id in correlated:
-        sql += "-- Begin Correlated Criteria\n" + criteria_sql(domain, codeset_id) + "-- End Correlated Criteria\n"
-    return sql
-
-
-class ParseTest(unittest.TestCase):
-    def test_plain_descendant_and_excluded_concepts_are_told_apart(self):
-        sql = codeset_sql(3, include=[11], descendants=[12], exclude=[21], exclude_descendants=[22])
-        codeset = lo.parse_codesets(sql)[3]
-        self.assertEqual(codeset.include, [11])
-        self.assertEqual(codeset.include_descendants, [12])
-        self.assertEqual(codeset.exclude, [21])
-        self.assertEqual(codeset.exclude_descendants, [22])
-
-    def test_a_codeset_without_exclusions(self):
-        codeset = lo.parse_codesets(codeset_sql(0, descendants=[262, 9201]))[0]
-        self.assertEqual(codeset.include_descendants, [262, 9201])
-        self.assertEqual((codeset.exclude, codeset.exclude_descendants), ([], []))
-
-    def test_several_codesets_in_one_file(self):
-        sql = codeset_sql(2, descendants=[262]) + codeset_sql(3, descendants=[4], exclude_descendants=[5])
-        self.assertEqual(sorted(lo.parse_codesets(sql)), [2, 3])
-
-    def test_primary_and_correlated_criteria(self):
-        sql = outcome_sql(
-            [codeset_sql(2, descendants=[262]), codeset_sql(3, descendants=[4])],
-            primary=[("Condition Occurrence", 3)],
-            correlated=[("Visit Occurrence", 2)],
-        )
-        outcome = lo.parse_outcome("x", sql)
-        self.assertEqual([(c.domain, c.codeset_ids) for c in outcome.primary], [("Condition Occurrence", [3])])
-        self.assertEqual([(c.domain, c.codeset_ids) for c in outcome.correlated], [("Visit Occurrence", [2])])
-        self.assertEqual(outcome.visit_codeset_ids, [2])
 
 
 class ResolveTest(unittest.TestCase):
@@ -106,65 +41,77 @@ class ResolveTest(unittest.TestCase):
         ).write_parquet(self.root / "vocab" / "concept_ancestor" / "part.parquet")
         self.vocab = str(self.root / "vocab")
 
-    def resolve(self, sql, name="Outcome"):
-        outcome = lo.parse_outcome(name, sql)
-        ids = lo.codeset_concept_ids(list(outcome.codesets.values()))
-        return lo.resolve_outcome(outcome, lo.descendants_of(self.vocab, ids))
+    def resolve(self, definition):
+        ids = lo.codeset_concept_ids(list(definition.codesets.values()))
+        return lo.resolve_outcome(definition, lo.descendants_of(self.vocab, ids))
 
     def test_descendants_are_expanded_and_exclusions_removed(self):
-        sql = outcome_sql(
-            [codeset_sql(1, include=[9], descendants=[4], exclude=[42])],
-            primary=[("Condition Occurrence", 1)],
+        resolved = self.resolve(
+            outcome(
+                "Outcome",
+                [codeset(1, include=[9], descendants=[4], exclude=[42])],
+                primary=[("Condition Occurrence", 1)],
+            )
         )
-        resolved = self.resolve(sql)
         self.assertTrue(resolved.supported)
         self.assertEqual(resolved.concepts, ["4", "41", "9"])
         self.assertFalse(resolved.inpatient_only)
         self.assertEqual(resolved.label, "outcome")
 
     def test_an_excluded_ancestor_removes_its_descendants_too(self):
-        sql = outcome_sql(
-            [codeset_sql(1, descendants=[4, 5], exclude_descendants=[5])],
-            primary=[("Condition Occurrence", 1)],
+        resolved = self.resolve(
+            outcome(
+                "Outcome",
+                [codeset(1, descendants=[4, 5], exclude_descendants=[5])],
+                primary=[("Condition Occurrence", 1)],
+            )
         )
-        self.assertEqual(self.resolve(sql).concepts, ["4", "41", "42"])
+        self.assertEqual(resolved.concepts, ["4", "41", "42"])
 
     def test_a_visit_criterion_makes_the_outcome_inpatient_only(self):
-        sql = outcome_sql(
-            [codeset_sql(2, descendants=[262]), codeset_sql(3, descendants=[4])],
-            primary=[("Condition Occurrence", 3)],
-            correlated=[("Visit Occurrence", 2)],
+        resolved = self.resolve(
+            outcome(
+                "Outcome",
+                [codeset(2, descendants=[262]), codeset(3, descendants=[4])],
+                primary=[("Condition Occurrence", 3)],
+                correlated=[("Visit Occurrence", 2)],
+            )
         )
-        resolved = self.resolve(sql)
         self.assertTrue(resolved.inpatient_only)
         self.assertEqual(resolved.concepts, ["4", "41", "42"])
 
     def test_a_hospitalization_is_the_condition_during_an_inpatient_visit(self):
-        sql = outcome_sql(
-            [codeset_sql(0, descendants=[262]), codeset_sql(1, descendants=[5])],
-            primary=[("Visit Occurrence", 0)],
-            correlated=[("Visit Occurrence", 0), ("Condition Occurrence", 1)],
+        resolved = self.resolve(
+            outcome(
+                "Hospitalization",
+                [codeset(0, descendants=[262]), codeset(1, descendants=[5])],
+                primary=[("Visit Occurrence", 0)],
+                correlated=[("Visit Occurrence", 0), ("Condition Occurrence", 1)],
+            )
         )
-        resolved = self.resolve(sql, "Hospitalization")
         self.assertTrue(resolved.supported and resolved.inpatient_only)
         self.assertEqual(resolved.concepts, ["5", "51"])
 
     def test_death_is_the_death_token(self):
-        sql = outcome_sql([], primary=[("Death", 0)]).replace("codesets.codeset_id = 0", "")
-        resolved = self.resolve(sql, "All-cause mortality")
+        resolved = self.resolve(outcome("All-cause mortality", [], primary=[("Death", None)]))
         self.assertTrue(resolved.supported)
         self.assertEqual(resolved.concepts, [lo.DEATH_TOKEN])
 
     def test_outcomes_that_cannot_be_matched_on_tokens_say_why(self):
-        confirmed = outcome_sql(
-            [codeset_sql(1, descendants=[4])],
-            primary=[("Condition Occurrence", 1)],
-            correlated=[("Condition Occurrence", 1)],
+        confirmed = self.resolve(
+            outcome(
+                "Confirmed",
+                [codeset(1, descendants=[4])],
+                primary=[("Condition Occurrence", 1)],
+                correlated=[("Condition Occurrence", 1)],
+            )
         )
-        measured = outcome_sql([codeset_sql(1, descendants=[4])], primary=[("Measurement", 1)])
-        self.assertIn("confirming record", self.resolve(confirmed).unsupported_reason)
-        self.assertIn("Measurement", self.resolve(measured).unsupported_reason)
-        self.assertFalse(self.resolve(measured).supported)
+        measured = self.resolve(
+            outcome("Measured", [codeset(1, descendants=[4])], primary=[("Measurement", 1)])
+        )
+        self.assertIn("confirming record", confirmed.unsupported_reason)
+        self.assertIn("Measurement", measured.unsupported_reason)
+        self.assertFalse(measured.supported)
 
     def test_a_negative_control_is_the_concept_and_its_descendants(self):
         resolved = lo.resolve_negative_control(7, 1001, "Rash", lo.descendants_of(self.vocab, [7]))
@@ -172,32 +119,65 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(resolved.concepts, ["7", "71"])
 
     def test_the_definitions_round_trip_and_unsupported_outcomes_are_left_out(self):
-        supported = outcome_sql([codeset_sql(1, descendants=[4])], primary=[("Condition Occurrence", 1)])
-        measured = outcome_sql([codeset_sql(1, descendants=[4])], primary=[("Measurement", 1)])
-        resolved = [self.resolve(supported, "A b"), self.resolve(measured, "C")]
+        supported = self.resolve(
+            outcome("A b", [codeset(1, descendants=[4])], primary=[("Condition Occurrence", 1)])
+        )
+        measured = self.resolve(
+            outcome("C", [codeset(1, descendants=[4])], primary=[("Measurement", 1)])
+        )
         path = self.root / "definitions.json"
-        lo.write_resolved(resolved, path)
+        lo.write_resolved([supported, measured], path)
         loaded = lo.load_outcome_definitions(str(path))
         self.assertEqual([e["label"] for e in loaded], ["a_b"])
         self.assertEqual(lo.definitions_fingerprint(str(path)), lo.definitions_fingerprint(str(path)))
 
 
-@unittest.skipUnless(LEGEND.is_dir(), "the LEGEND checkout is not available")
-class LegendFilesTest(unittest.TestCase):
+class BundledDefinitionsTest(unittest.TestCase):
+    """The pipeline reads the bundled definitions, so it does not need a checkout of LEGEND."""
+
     @classmethod
     def setUpClass(cls):
-        cls.outcomes = {o.name: o for o in lo.read_outcomes(LEGEND)}
+        cls.outcomes = {o.name: o for o in lo.read_outcomes()}
 
-    def test_the_hypertension_outcomes_and_controls_are_read(self):
-        self.assertEqual(len(self.outcomes), 58)
-        self.assertEqual(len(lo.negative_controls(LEGEND)), 76)
+    def test_the_hypertension_outcomes_and_controls_are_bundled(self):
+        self.assertEqual((len(self.outcomes), len(lo.negative_controls())), (58, 76))
+        self.assertEqual(len({o.cohort_id for o in self.outcomes.values()}), 58)
+
+    def test_the_bundled_files_say_which_version_of_legend_they_come_from(self):
+        source = json.loads((lo.BUNDLED_DIR / "source.json").read_text())
+        self.assertEqual(source["repository"], lo.LEGEND_REPOSITORY)
+        self.assertRegex(source["commit"], r"^[0-9a-f]{40}$")
+        self.assertEqual((source["n_outcomes"], source["n_negative_controls"]), (58, 76))
 
     def test_acute_myocardial_infarction_keeps_its_exclusion_and_visit_restriction(self):
-        outcome = self.outcomes["Acute myocardial infarction"]
-        codeset = outcome.codesets[3]
-        self.assertEqual(codeset.include_descendants, [4329847])
-        self.assertEqual(codeset.exclude_descendants, [314666])
-        self.assertEqual(outcome.codesets[outcome.visit_codeset_ids[0]].include_descendants, [262, 9201, 9203])
+        mi = self.outcomes["Acute myocardial infarction"]
+        self.assertEqual(mi.codesets[3].include_descendants, [4329847])
+        self.assertEqual(mi.codesets[3].exclude_descendants, [314666])
+        self.assertEqual(mi.visit_codeset_ids, [2])
+        self.assertEqual(mi.codesets[2].include_descendants, [262, 9201, 9203])
+
+    def test_hemorrhagic_stroke_members_do_not_include_descendants(self):
+        codeset_4 = self.outcomes["Hemorrhagic stroke"].codesets[4]
+        self.assertEqual(codeset_4.include, [376713, 432923, 439847])
+        self.assertEqual(codeset_4.include_descendants, [])
+
+    def test_a_hospitalization_is_a_visit_with_a_condition_inside(self):
+        hospitalization = self.outcomes["Hospitalization with heart failure"]
+        self.assertEqual([c.domain for c in hospitalization.primary], ["Visit Occurrence"] * 2)
+        self.assertIn("Condition Occurrence", [c.domain for c in hospitalization.correlated])
+
+    def resolve_all(self):
+        outcomes = lo.read_outcomes()
+        ids = lo.codeset_concept_ids([cs for o in outcomes for cs in o.codesets.values()])
+        ids = sorted(set(ids) | {c for c, _, _ in lo.negative_controls()})
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        root = Path(folder.name)
+        (root / "vocab" / "concept_ancestor").mkdir(parents=True)
+        pl.DataFrame({"ancestor_concept_id": ids, "descendant_concept_id": ids}).write_parquet(
+            root / "vocab" / "concept_ancestor" / "part.parquet"
+        )
+        return {r.name: r for r in lo.resolve_outcomes(outcomes, lo.negative_controls(), str(root / "vocab"))}
 
     def test_the_outcomes_of_the_paper_that_need_an_inpatient_or_er_visit_have_the_constraint(self):
         needs_visit = [
@@ -207,49 +187,20 @@ class LegendFilesTest(unittest.TestCase):
             "Ischemic stroke", "Rhabdomyolysis", "Stroke", "Sudden cardiac death",
             "Transient ischemic attack", "Hospitalization with preinfarction syndrome",
         ]  # fmt: skip
-        with tempfile.TemporaryDirectory() as folder:
-            ids = lo.codeset_concept_ids([cs for o in self.outcomes.values() for cs in o.codesets.values()])
-            (Path(folder) / "concept_ancestor").mkdir()
-            pl.DataFrame({"ancestor_concept_id": ids, "descendant_concept_id": ids}).write_parquet(
-                Path(folder) / "concept_ancestor" / "part.parquet"
-            )
-            descendants = lo.descendants_of(folder, ids)
-            resolved = {n: lo.resolve_outcome(o, descendants) for n, o in self.outcomes.items()}
+        resolved = self.resolve_all()
+        self.assertEqual(len(needs_visit), 15)
         for name in needs_visit:
             self.assertTrue(resolved[name].supported, name)
             self.assertTrue(resolved[name].inpatient_only, name)
-        self.assertEqual(len(needs_visit), 15)
         self.assertIn("creatine kinase", resolved["Rhabdomyolysis"].approximation)
         self.assertFalse(resolved["Hyperkalemia"].inpatient_only)
 
-    def test_hemorrhagic_stroke_members_do_not_include_descendants(self):
-        codeset = self.outcomes["Hemorrhagic stroke"].codesets[4]
-        self.assertEqual(codeset.include, [376713, 432923, 439847])
-        self.assertEqual(codeset.include_descendants, [])
-
-
-class BundledDefinitionsTest(unittest.TestCase):
-    """The pipeline reads the bundled definitions, so it does not need a checkout of LEGEND."""
-
-    def test_the_hypertension_outcomes_and_controls_are_bundled(self):
-        outcomes = lo.read_outcomes()
-        controls = lo.negative_controls()
-        self.assertEqual((len(outcomes), len(controls)), (58, 76))
-        by_name = {o.name: o for o in outcomes}
-        mi = by_name["Acute myocardial infarction"]
-        self.assertEqual(mi.codesets[3].include_descendants, [4329847])
-        self.assertEqual(mi.codesets[3].exclude_descendants, [314666])
-        self.assertEqual(mi.visit_codeset_ids, [2])
-
-    def test_the_bundled_files_say_which_version_of_legend_they_come_from(self):
-        source = json.loads((lo.BUNDLED_DIR / "source.json").read_text())
-        self.assertEqual(source["repository"], lo.LEGEND_REPOSITORY)
-        self.assertRegex(source["commit"], r"^[0-9a-f]{40}$")
-        self.assertEqual((source["n_outcomes"], source["n_negative_controls"]), (58, 76))
-
-    def test_other_indications_need_a_checkout(self):
-        with self.assertRaisesRegex(ValueError, "Depression"):
-            lo.read_outcomes(indication="Depression")
+    def test_the_numbers_of_supported_and_unsupported_outcomes(self):
+        resolved = self.resolve_all()
+        self.assertEqual(len(resolved), 134)
+        self.assertEqual(sum(r.supported for r in resolved.values()), 121)
+        self.assertEqual(resolved["All-cause mortality"].concepts, [lo.DEATH_TOKEN])
+        self.assertFalse(resolved["Heart failure"].supported)
 
     def test_the_command_line_resolves_the_bundled_definitions_for_a_vocabulary(self):
         outcomes = lo.read_outcomes()
@@ -265,24 +216,8 @@ class BundledDefinitionsTest(unittest.TestCase):
             with mock.patch("sys.argv", argv):
                 lo.main()
             entries = json.loads((root / "out" / "outcome_definitions.json").read_text())
-        by_name = {e["name"]: e for e in entries}
         self.assertEqual(len(entries), 134)
-        self.assertTrue(by_name["Acute myocardial infarction"]["inpatient_only"])
-        self.assertEqual(by_name["All-cause mortality"]["concepts"], [lo.DEATH_TOKEN])
         self.assertEqual(sum(e["role"] == lo.NEGATIVE_CONTROL for e in entries), 76)
-
-    def test_the_command_line_needs_a_checkout_to_update_the_bundled_files(self):
-        with mock.patch("sys.argv", ["prog", "--update_bundled", "--output_dir", "x"]):
-            with self.assertRaises(SystemExit):
-                lo.main()
-
-    @unittest.skipUnless(LEGEND.is_dir(), "the LEGEND checkout is not available")
-    def test_the_bundled_definitions_equal_what_the_legend_source_gives(self):
-        parsed = lo.read_outcomes(LEGEND)
-        self.assertEqual(
-            [lo.outcome_to_dict(o) for o in lo.read_outcomes()], [lo.outcome_to_dict(o) for o in parsed]
-        )
-        self.assertEqual(lo.negative_controls(), lo.negative_controls(LEGEND))
 
 
 class FindOutcomesTest(unittest.TestCase):

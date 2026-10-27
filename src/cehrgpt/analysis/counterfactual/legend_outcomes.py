@@ -2,40 +2,32 @@
 """
 The outcome definitions of the LEGEND study, bundled with this package.
 
-Every outcome of the OHDSI LEGEND study (https://github.com/OHDSI/Legend) is a cohort
-definition that the SQL files in ``inst/sql/sql_server`` spell out.  This module parses
-those files, so the concepts of an outcome come from the study itself rather than from a
-hand-typed list.  The result for the hypertension study is bundled in
-``legend_hypertension/`` (see ``source.json`` there for the version of LEGEND it comes from),
-so the analysis does not need a checkout of LEGEND; ``--legend_dir`` is only for refreshing the
-bundled files (``--update_bundled``) or checking them against the source.  What is extracted:
+Every outcome of the OHDSI LEGEND study (https://github.com/OHDSI/Legend) is a cohort definition
+that the SQL files in ``inst/sql/sql_server`` spell out.  The hypertension outcomes and negative
+controls are bundled as data in ``legend_hypertension/`` (``outcomes.json`` and
+``negative_controls.csv``; ``source.json`` names the LEGEND version).  How they were read from the
+LEGEND repository, and how to read them again, is written down in
+``legend_hypertension/README.md``; there is no code that parses LEGEND.
 
-* the concept sets (``#Codesets``): the concepts that are included as they are, the ones
-  included with all their descendants, and the excluded ones;
-* the criteria that select the events: the domain (condition, death, measurement, ...) and
-  the concept set of the primary criteria, plus the concept sets of the correlated criteria
-  (for example "during an inpatient or ER visit").
+What this module does with the bundled data:
 
-``read_outcomes`` lists the outcomes of one indication (``Hypertension``) in the order and
-with the ids of ``OutcomesOfInterest.csv``.  ``negative_controls`` reads ``NegativeControls.csv``.
-
-``resolve_outcomes`` turns the concept sets into the concepts that mark an event in the token
-sequences of CEHR-GPT (descendants expanded, exclusions removed) and says which outcomes can
-be evaluated that way.  The result, ``outcome_definitions.json``, is what the extraction and
-hazard ratio steps read with ``--outcome_definitions_path``.  An outcome is supported when its
-events are records of a concept set (condition, observation, procedure), optionally during an
-inpatient or ER visit, or the death record; outcomes that need a confirming second record, a
-drug or a measured value are listed with the reason and left out.  Two outcomes (see
-``PARTIAL_DEFINITIONS``) have one branch that depends on a measured value; the other branch is
-kept and the dropped one is recorded in the ``approximation`` of the definition.
+* ``read_outcomes`` and ``negative_controls`` load them: the concept sets of each outcome (the
+  concepts that count as they are, those that count with all their descendants, and the excluded
+  ones), the domain and concept sets of the criteria that select the events (condition, death,
+  visit, ...) and the correlated criteria (for example "during an inpatient or ER visit").
+* ``resolve_outcomes`` turns the concept sets into the concepts that mark an event in the token
+  sequences of CEHR-GPT (descendants expanded with the vocabulary, exclusions removed) and says which
+  outcomes can be evaluated that way.  The result, ``outcome_definitions.json``, is what the
+  extraction and hazard ratio steps read with ``--outcome_definitions_path``.  An outcome is
+  supported when its events are records of a concept set (condition, observation, procedure),
+  optionally during an inpatient or ER visit, or the death record; outcomes that need a confirming
+  second record, a drug or a measured value are listed with the reason and left out.  Two outcomes
+  (see ``PARTIAL_DEFINITIONS``) have one branch that depends on a measured value; the other branch
+  is kept and the dropped one is recorded in the ``approximation`` of the definition.
 
 Usage
 -----
-# the outcome definitions for a vocabulary (what the pipeline uses)
 python legend_outcomes.py --vocab_path /path/to/omop_vocab --output_dir /path/to/outcome_definitions
-
-# refresh the bundled files from a checkout of LEGEND (maintainers)
-python legend_outcomes.py --legend_dir /path/to/Legend --update_bundled --output_dir /tmp/out
 """
 
 import argparse
@@ -51,23 +43,7 @@ from typing import Dict, List, Optional, Set, Tuple
 BUNDLED_DIR = Path(__file__).resolve().parent / "legend_hypertension"
 BUNDLED_INDICATION = "Hypertension"
 LEGEND_REPOSITORY = "https://github.com/OHDSI/Legend"
-SQL_FOLDER = Path("inst") / "sql" / "sql_server"
-SETTINGS_FOLDER = Path("inst") / "settings"
-
-_CODESET = re.compile(
-    r"INSERT INTO #Codesets \(codeset_id, concept_id\)\s*SELECT\s+(\d+)\s+as\s+codeset_id,"
-    r".*?select distinct I\.concept_id FROM(.*?)\)\s*C;",
-    re.S,
-)
-_LISTED = re.compile(r"CONCEPT\s+where\s+concept_id\s+in\s*\(([^)]*)\)", re.S)
-_WITH_DESCENDANTS = re.compile(r"ancestor_concept_id\s+in\s*\(([^)]*)\)", re.S)
-_CRITERIA = re.compile(r"-- Begin ([A-Za-z ]+?) Criteria(.*?)-- End \1 Criteria", re.S)
-_CODESET_USE = re.compile(r"codesets\.codeset_id\s*=\s*(\d+)")
 _VISIT_DOMAIN = "Visit Occurrence"
-
-
-def _ids(text: str) -> List[int]:
-    return [int(x) for x in re.findall(r"\d+", text)]
 
 
 @dataclass
@@ -119,67 +95,6 @@ class OutcomeDefinition:
         return [self.codesets[i] for c in self.primary for i in c.codeset_ids if i in self.codesets]
 
 
-def parse_codesets(sql: str) -> Dict[int, Codeset]:
-    codesets: Dict[int, Codeset] = {}
-    for match in _CODESET.finditer(sql):
-        codeset_id, body = int(match.group(1)), match.group(2)
-        included, _, excluded = body.partition("LEFT JOIN")
-        codeset = Codeset(codeset_id)
-        for part, plain, with_descendants in (
-            (included, codeset.include, codeset.include_descendants),
-            (excluded, codeset.exclude, codeset.exclude_descendants),
-        ):
-            if not part:
-                continue
-            listed = [i for m in _LISTED.findall(part) for i in _ids(m)]
-            descendants = [i for m in _WITH_DESCENDANTS.findall(part) for i in _ids(m)]
-            with_descendants.extend(sorted(set(descendants)))
-            plain.extend(sorted(set(listed) - set(descendants)))
-        codesets[codeset_id] = codeset
-    return codesets
-
-
-def _criteria(text: str) -> List[Criterion]:
-    criteria = []
-    for domain, block in _CRITERIA.findall(text):
-        if domain == "Correlated":
-            continue
-        used = []
-        for codeset_id in map(int, _CODESET_USE.findall(block)):
-            if codeset_id not in used:
-                used.append(codeset_id)
-        criteria.append(Criterion(domain.strip(), used))
-    return criteria
-
-
-def parse_outcome(name: str, sql: str) -> OutcomeDefinition:
-    start = sql.index("-- Begin Primary Events")
-    end = sql.index("-- End Primary Events")
-    # Correlated criteria wrap domain criteria of their own, inside or after the primary events
-    correlated: List[Criterion] = []
-    for match in re.finditer(r"-- Begin Correlated Criteria(.*?)-- End Correlated Criteria", sql, re.S):
-        for criterion in _criteria(match.group(1)):
-            if criterion not in correlated:
-                correlated.append(criterion)
-    return OutcomeDefinition(
-        name=name,
-        codesets=parse_codesets(sql),
-        primary=_criteria(sql[start:end]),
-        correlated=correlated,
-    )
-
-
-def outcome_to_dict(outcome: OutcomeDefinition) -> Dict:
-    return {
-        "name": outcome.name,
-        "cohort_id": outcome.cohort_id,
-        "atlas_id": outcome.atlas_id,
-        "codesets": {str(i): asdict(cs) for i, cs in outcome.codesets.items()},
-        "primary": [asdict(c) for c in outcome.primary],
-        "correlated": [asdict(c) for c in outcome.correlated],
-    }
-
-
 def outcome_from_dict(entry: Dict) -> OutcomeDefinition:
     return OutcomeDefinition(
         name=entry["name"],
@@ -191,105 +106,16 @@ def outcome_from_dict(entry: Dict) -> OutcomeDefinition:
     )
 
 
-def _check_bundled(indication: str) -> None:
-    if indication != BUNDLED_INDICATION:
-        raise ValueError(
-            f"only the {BUNDLED_INDICATION} outcomes are bundled; give legend_dir for {indication}"
-        )
+def read_outcomes() -> List[OutcomeDefinition]:
+    """The bundled hypertension outcomes, with the ids of LEGEND's ``OutcomesOfInterest.csv``."""
+    entries = json.loads((BUNDLED_DIR / "outcomes.json").read_text())
+    return [outcome_from_dict(entry) for entry in entries]
 
 
-def read_outcomes(
-    legend_dir: Optional[Path] = None, indication: str = BUNDLED_INDICATION
-) -> List[OutcomeDefinition]:
-    """
-    The outcomes of *indication*, with the ids of ``OutcomesOfInterest.csv``: the bundled
-    ones, or parsed from a checkout of LEGEND when *legend_dir* is given.
-    """
-    if legend_dir is None:
-        _check_bundled(indication)
-        entries = json.loads((BUNDLED_DIR / "outcomes.json").read_text())
-        return [outcome_from_dict(entry) for entry in entries]
-    legend_dir = Path(legend_dir)
-    with open(legend_dir / SETTINGS_FOLDER / "OutcomesOfInterest.csv") as f:
-        rows = [r for r in csv.DictReader(f) if r["indicationId"] == indication]
-    outcomes = []
-    for row in rows:
-        sql_path = legend_dir / SQL_FOLDER / f"{row['name']}.sql"
-        outcome = parse_outcome(row["name"], sql_path.read_text())
-        outcome.cohort_id = int(row["cohortId"])
-        outcome.atlas_id = int(row["atlasId"])
-        outcomes.append(outcome)
-    return outcomes
-
-
-def negative_controls(
-    legend_dir: Optional[Path] = None, indication: str = BUNDLED_INDICATION
-) -> List[Tuple[int, int, str]]:
-    """
-    ``(concept_id, cohort_id, name)`` of the negative control outcomes of *indication*, from
-    the bundled file or from a checkout of LEGEND.
-    """
-    if legend_dir is None:
-        _check_bundled(indication)
-        with open(BUNDLED_DIR / "negative_controls.csv") as f:
-            return [
-                (int(r["concept_id"]), int(r["cohort_id"]), r["name"]) for r in csv.DictReader(f)
-            ]
-    with open(Path(legend_dir) / SETTINGS_FOLDER / "NegativeControls.csv") as f:
-        return [
-            (int(r["conceptId"]), int(r["cohortId"]), r["name"])
-            for r in csv.DictReader(f)
-            if r["indicationId"] == indication
-        ]
-
-
-def write_bundled(
-    outcomes: List[OutcomeDefinition],
-    controls: List[Tuple[int, int, str]],
-    legend_dir: Path,
-    indication: str = BUNDLED_INDICATION,
-) -> None:
-    """Refresh ``legend_hypertension/`` from a checkout of LEGEND and record which version it was."""
-    import subprocess
-
-    BUNDLED_DIR.mkdir(parents=True, exist_ok=True)
-    (BUNDLED_DIR / "outcomes.json").write_text(
-        json.dumps([outcome_to_dict(o) for o in outcomes], indent=1) + "\n"
-    )
-    with open(BUNDLED_DIR / "negative_controls.csv", "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["cohort_id", "concept_id", "name"])
-        for concept_id, cohort_id, name in controls:
-            writer.writerow([cohort_id, concept_id, name])
-
-    def git(*args: str) -> Optional[str]:
-        try:
-            return subprocess.run(
-                ["git", "-C", str(legend_dir), *args], capture_output=True, text=True, check=True
-            ).stdout.strip()
-        except (OSError, subprocess.CalledProcessError):
-            return None
-
-    (BUNDLED_DIR / "source.json").write_text(
-        json.dumps(
-            {
-                "repository": LEGEND_REPOSITORY,
-                "commit": git("rev-parse", "HEAD"),
-                "commit_date": git("log", "-1", "--format=%cI"),
-                "indication": indication,
-                "files": [
-                    "inst/sql/sql_server/<outcome>.sql",
-                    "inst/settings/OutcomesOfInterest.csv",
-                    "inst/settings/NegativeControls.csv",
-                ],
-                "n_outcomes": len(outcomes),
-                "n_negative_controls": len(controls),
-                "generated_by": "python -m cehrgpt.analysis.counterfactual.legend_outcomes --update_bundled",
-            },
-            indent=1,
-        )
-        + "\n"
-    )
+def negative_controls() -> List[Tuple[int, int, str]]:
+    """``(concept_id, cohort_id, name)`` of the bundled negative control outcomes."""
+    with open(BUNDLED_DIR / "negative_controls.csv") as f:
+        return [(int(r["concept_id"]), int(r["cohort_id"]), r["name"]) for r in csv.DictReader(f)]
 
 
 # ---------------------------------------------------------------------------
@@ -489,84 +315,33 @@ def definitions_fingerprint(path: str) -> str:
     return hashlib.sha1(Path(path).read_bytes()).hexdigest()
 
 
-def write_definitions(outcomes: List[OutcomeDefinition], controls, output_dir: Path) -> None:
-    """One row per concept of every concept set, one row per criterion, and the controls."""
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    with open(output_dir / "outcome_concepts.csv", "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["cohort_id", "outcome", "codeset_id", "role", "include_descendants", "concept_id"])
-        for o in outcomes:
-            for cs in o.codesets.values():
-                for role, flag, ids in (
-                    ("include", False, cs.include),
-                    ("include", True, cs.include_descendants),
-                    ("exclude", False, cs.exclude),
-                    ("exclude", True, cs.exclude_descendants),
-                ):
-                    for concept_id in ids:
-                        writer.writerow([o.cohort_id, o.name, cs.codeset_id, role, int(flag), concept_id])
-    with open(output_dir / "outcome_criteria.csv", "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["cohort_id", "outcome", "kind", "domain", "codeset_ids"])
-        for o in outcomes:
-            for kind, criteria in (("primary", o.primary), ("correlated", o.correlated)):
-                for c in criteria:
-                    writer.writerow([o.cohort_id, o.name, kind, c.domain, ";".join(map(str, c.codeset_ids))])
-    with open(output_dir / "negative_controls.csv", "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["cohort_id", "concept_id", "name"])
-        for concept_id, cohort_id, name in controls:
-            writer.writerow([cohort_id, concept_id, name])
-    with open(output_dir / "outcomes.json", "w") as f:
-        json.dump([outcome_to_dict(o) for o in outcomes], f, indent=1)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="The LEGEND outcome concepts, resolved for a vocabulary")
     parser.add_argument(
-        "--legend_dir",
-        default=None,
-        help="Checkout of OHDSI/Legend to parse instead of the bundled definitions "
-             "(to refresh or check them)",
-    )
-    parser.add_argument("--indication", default=BUNDLED_INDICATION)
-    parser.add_argument(
-        "--update_bundled",
-        action="store_true",
-        help="With --legend_dir: rewrite the bundled definitions from that checkout",
-    )
-    parser.add_argument("--output_dir", required=True)
-    parser.add_argument(
         "--vocab_path",
-        default=None,
-        help="OMOP vocabulary root with concept_ancestor/: also writes outcome_definitions.json",
+        required=True,
+        help="OMOP vocabulary root with concept_ancestor/ (to expand the descendants)",
     )
+    parser.add_argument("--output_dir", required=True, help="Where outcome_definitions.json is written")
     args = parser.parse_args()
-    legend_dir = Path(args.legend_dir) if args.legend_dir else None
-    if args.update_bundled and legend_dir is None:
-        parser.error("--update_bundled needs --legend_dir")
-    outcomes = read_outcomes(legend_dir, args.indication)
-    controls = negative_controls(legend_dir, args.indication)
-    if args.update_bundled:
-        write_bundled(outcomes, controls, legend_dir, args.indication)
-        print(f"Bundled definitions refreshed in {BUNDLED_DIR}")
-    write_definitions(outcomes, controls, Path(args.output_dir))
-    print(f"{len(outcomes)} outcomes, {len(controls)} negative controls → {args.output_dir}")
-    if args.vocab_path:
-        resolved = resolve_outcomes(outcomes, controls, args.vocab_path)
-        write_resolved(resolved, Path(args.output_dir) / "outcome_definitions.json")
-        supported = [r for r in resolved if r.supported]
-        print(f"{len(supported)} of {len(resolved)} can be evaluated on token sequences:")
-        for r in resolved:
-            if not r.supported:
-                print(f"  not supported: {r.name}: {r.unsupported_reason}")
-            elif r.approximation:
-                print(f"  partial: {r.name}: {r.approximation}")
-        inpatient = [r.name for r in supported if r.inpatient_only and r.role == PRIMARY]
-        print(f"{len(inpatient)} supported outcomes must occur in an inpatient or ER visit:")
-        for name in inpatient:
-            print(f"  {name}")
+    outcomes = read_outcomes()
+    controls = negative_controls()
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    resolved = resolve_outcomes(outcomes, controls, args.vocab_path)
+    write_resolved(resolved, output_dir / "outcome_definitions.json")
+    supported = [r for r in resolved if r.supported]
+    print(f"{len(outcomes)} outcomes, {len(controls)} negative controls → {output_dir}")
+    print(f"{len(supported)} of {len(resolved)} can be evaluated on token sequences:")
+    for r in resolved:
+        if not r.supported:
+            print(f"  not supported: {r.name}: {r.unsupported_reason}")
+        elif r.approximation:
+            print(f"  partial: {r.name}: {r.approximation}")
+    inpatient = [r.name for r in supported if r.inpatient_only and r.role == PRIMARY]
+    print(f"{len(inpatient)} supported outcomes must occur in an inpatient or ER visit:")
+    for name in inpatient:
+        print(f"  {name}")
 
 
 if __name__ == "__main__":

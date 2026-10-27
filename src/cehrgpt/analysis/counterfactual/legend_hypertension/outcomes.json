@@ -1,0 +1,2951 @@
+[
+ {
+  "name": "Abdominal pain",
+  "cohort_id": 24,
+  "atlas_id": 7397,
+  "codesets": {
+   "9": {
+    "codeset_id": 9,
+    "include": [],
+    "include_descendants": [
+     200219
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     9
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Abnormal weight gain",
+  "cohort_id": 25,
+  "atlas_id": 7415,
+  "codesets": {
+   "11": {
+    "codeset_id": 11,
+    "include": [],
+    "include_descendants": [
+     439141
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Observation",
+    "codeset_ids": [
+     11
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Abnormal weight loss",
+  "cohort_id": 26,
+  "atlas_id": 7416,
+  "codesets": {
+   "12": {
+    "codeset_id": 12,
+    "include": [],
+    "include_descendants": [
+     435928
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Observation",
+    "codeset_ids": [
+     12
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Acute myocardial infarction",
+  "cohort_id": 2,
+  "atlas_id": 7364,
+  "codesets": {
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     262,
+     9201,
+     9203
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "3": {
+    "codeset_id": 3,
+    "include": [],
+    "include_descendants": [
+     4329847
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     314666
+    ]
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     3
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Acute pancreatitis",
+  "cohort_id": 27,
+  "atlas_id": 7400,
+  "codesets": {
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     262,
+     9201,
+     9203
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "9": {
+    "codeset_id": 9,
+    "include": [],
+    "include_descendants": [
+     199074
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     9
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Acute renal failure",
+  "cohort_id": 28,
+  "atlas_id": 7382,
+  "codesets": {
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     262,
+     9201,
+     9203
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "8": {
+    "codeset_id": 8,
+    "include": [],
+    "include_descendants": [
+     197320,
+     432961,
+     444044
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     8
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "All-cause mortality",
+  "cohort_id": 29,
+  "atlas_id": 7361,
+  "codesets": {},
+  "primary": [
+   {
+    "domain": "Death",
+    "codeset_ids": []
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Anaphylactoid reaction",
+  "cohort_id": 30,
+  "atlas_id": 7378,
+  "codesets": {
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     262,
+     9201,
+     9203
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "6": {
+    "codeset_id": 6,
+    "include": [],
+    "include_descendants": [
+     432791
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "7": {
+    "codeset_id": 7,
+    "include": [],
+    "include_descendants": [
+     441202
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     434219,
+     4084633,
+     4084634,
+     4086737,
+     4299299,
+     4330225,
+     40479646
+    ]
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     7
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Anemia",
+  "cohort_id": 31,
+  "atlas_id": 7412,
+  "codesets": {
+   "8": {
+    "codeset_id": 8,
+    "include": [],
+    "include_descendants": [
+     24006,
+     25518,
+     137829,
+     439777
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     437090,
+     440218,
+     4301602
+    ]
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     8
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Angioedema",
+  "cohort_id": 32,
+  "atlas_id": 7377,
+  "codesets": {
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     262,
+     9201,
+     9203
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "6": {
+    "codeset_id": 6,
+    "include": [],
+    "include_descendants": [
+     432791
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     6
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Anxiety",
+  "cohort_id": 33,
+  "atlas_id": 7407,
+  "codesets": {
+   "8": {
+    "codeset_id": 8,
+    "include": [
+     442077
+    ],
+    "include_descendants": [
+     381537,
+     434613,
+     436074,
+     4199892,
+     4338031,
+     37109206
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     4304010
+    ]
+   },
+   "9": {
+    "codeset_id": 9,
+    "include": [],
+    "include_descendants": [
+     21604686
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "10": {
+    "codeset_id": 10,
+    "include": [],
+    "include_descendants": [
+     702865,
+     715259,
+     715939,
+     717607,
+     722031,
+     723013,
+     724816,
+     733301,
+     739138,
+     739323,
+     743670,
+     751412,
+     755695,
+     777221,
+     781039,
+     790253,
+     791967,
+     797617,
+     798874,
+     990678,
+     19050832
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "11": {
+    "codeset_id": 11,
+    "include": [],
+    "include_descendants": [
+     440383,
+     442306,
+     4175329
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     436665
+    ]
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     8
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     8
+    ]
+   },
+   {
+    "domain": "Drug Exposure",
+    "codeset_ids": [
+     10
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Bradycardia",
+  "cohort_id": 34,
+  "atlas_id": 7404,
+  "codesets": {
+   "5": {
+    "codeset_id": 5,
+    "include": [
+     316999
+    ],
+    "include_descendants": [
+     317302,
+     4169095,
+     4171683
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     5
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     5
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Cardiac arrhythmia",
+  "cohort_id": 35,
+  "atlas_id": 7399,
+  "codesets": {
+   "0": {
+    "codeset_id": 0,
+    "include": [],
+    "include_descendants": [
+     315078,
+     444070,
+     38001137,
+     38001138,
+     44784217
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "1": {
+    "codeset_id": 1,
+    "include": [],
+    "include_descendants": [
+     1309204,
+     1310149,
+     21600248,
+     40228152,
+     40241331,
+     43013024,
+     45892847
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     2107068,
+     4051932,
+     45890325,
+     45890400
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   },
+   {
+    "domain": "Drug Exposure",
+    "codeset_ids": [
+     1
+    ]
+   },
+   {
+    "domain": "Procedure Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Cardiovascular disease",
+  "cohort_id": 36,
+  "atlas_id": 7367,
+  "codesets": {
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     262,
+     9201,
+     9203
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "3": {
+    "codeset_id": 3,
+    "include": [],
+    "include_descendants": [
+     4329847
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     314666
+    ]
+   },
+   "4": {
+    "codeset_id": 4,
+    "include": [],
+    "include_descendants": [
+     321042,
+     442289,
+     4048809,
+     4132309,
+     4317150
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     437894
+    ]
+   },
+   "5": {
+    "codeset_id": 5,
+    "include": [
+     372924,
+     375557,
+     441874
+    ],
+    "include_descendants": [
+     443454
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "7": {
+    "codeset_id": 7,
+    "include": [
+     376713,
+     432923,
+     439847
+    ],
+    "include_descendants": [],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "9": {
+    "codeset_id": 9,
+    "include": [],
+    "include_descendants": [
+     316139
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     315295
+    ]
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     3
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     4
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     5
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     7
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     9
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Cardiovascular-related mortality",
+  "cohort_id": 37,
+  "atlas_id": 7362,
+  "codesets": {
+   "0": {
+    "codeset_id": 0,
+    "include": [],
+    "include_descendants": [
+     4329847
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     314666
+    ]
+   },
+   "1": {
+    "codeset_id": 1,
+    "include": [
+     376713,
+     432923,
+     439847
+    ],
+    "include_descendants": [],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "3": {
+    "codeset_id": 3,
+    "include": [],
+    "include_descendants": [
+     321042,
+     442289,
+     4048809,
+     4132309,
+     4317150
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     437894
+    ]
+   },
+   "4": {
+    "codeset_id": 4,
+    "include": [],
+    "include_descendants": [
+     316139
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     315295
+    ]
+   },
+   "5": {
+    "codeset_id": 5,
+    "include": [],
+    "include_descendants": [
+     262,
+     9201,
+     9203
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "6": {
+    "codeset_id": 6,
+    "include": [
+     372924,
+     375557,
+     441874
+    ],
+    "include_descendants": [
+     443454
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Death",
+    "codeset_ids": []
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     6
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     1
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     3
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     4
+    ]
+   },
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     5
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Chest pain or angina",
+  "cohort_id": 38,
+  "atlas_id": 7396,
+  "codesets": {
+   "3": {
+    "codeset_id": 3,
+    "include": [
+     77670
+    ],
+    "include_descendants": [
+     321318
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     3
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Kidney disease",
+  "cohort_id": 39,
+  "atlas_id": 7373,
+  "codesets": {
+   "0": {
+    "codeset_id": 0,
+    "include": [
+     193253
+    ],
+    "include_descendants": [
+     192279,
+     192359,
+     193016,
+     194385,
+     195314,
+     195834,
+     201313,
+     261071,
+     444044,
+     4103224,
+     4128219,
+     4263367,
+     46271022
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     195014,
+     195289,
+     195737,
+     197930,
+     4066005,
+     37116834,
+     43530912,
+     45769152
+    ]
+   },
+   "1": {
+    "codeset_id": 1,
+    "include": [],
+    "include_descendants": [
+     4032243,
+     4090651,
+     45889365
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   },
+   {
+    "domain": "Procedure Occurrence",
+    "codeset_ids": [
+     1
+    ]
+   },
+   {
+    "domain": "Observation",
+    "codeset_ids": [
+     1
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Coronary heart disease",
+  "cohort_id": 40,
+  "atlas_id": 7366,
+  "codesets": {
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     262,
+     9201,
+     9203
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "3": {
+    "codeset_id": 3,
+    "include": [],
+    "include_descendants": [
+     4329847
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     314666
+    ]
+   },
+   "4": {
+    "codeset_id": 4,
+    "include": [],
+    "include_descendants": [
+     321042,
+     442289,
+     4048809,
+     4132309,
+     4317150
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     437894
+    ]
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     3
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     4
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Cough",
+  "cohort_id": 41,
+  "atlas_id": 7388,
+  "codesets": {
+   "4": {
+    "codeset_id": 4,
+    "include": [],
+    "include_descendants": [
+     254761
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     4
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Decreased libido",
+  "cohort_id": 5,
+  "atlas_id": 7394,
+  "codesets": {
+   "1": {
+    "codeset_id": 1,
+    "include": [],
+    "include_descendants": [
+     436246,
+     443262,
+     4087317
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     1
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Dementia",
+  "cohort_id": 42,
+  "atlas_id": 7414,
+  "codesets": {
+   "10": {
+    "codeset_id": 10,
+    "include": [],
+    "include_descendants": [
+     4182210
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     372610,
+     377788,
+     4244346,
+     37017247,
+     37017549,
+     37116464
+    ]
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     10
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Depression",
+  "cohort_id": 43,
+  "atlas_id": 7405,
+  "codesets": {
+   "6": {
+    "codeset_id": 6,
+    "include": [],
+    "include_descendants": [
+     440383,
+     442306,
+     4175329
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     436665
+    ]
+   },
+   "7": {
+    "codeset_id": 7,
+    "include": [],
+    "include_descendants": [
+     21604686
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "8": {
+    "codeset_id": 8,
+    "include": [],
+    "include_descendants": [
+     434613,
+     436074,
+     436676,
+     436962,
+     438407,
+     440374,
+     440690,
+     4242733,
+     4311708
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "9": {
+    "codeset_id": 9,
+    "include": [],
+    "include_descendants": [
+     2795675,
+     2795842,
+     4030840,
+     4327941,
+     45887951
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     6
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     6
+    ]
+   },
+   {
+    "domain": "Drug Exposure",
+    "codeset_ids": [
+     7
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     8
+    ]
+   },
+   {
+    "domain": "Procedure Occurrence",
+    "codeset_ids": [
+     9
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Diarrhea",
+  "cohort_id": 7,
+  "atlas_id": 7391,
+  "codesets": {
+   "7": {
+    "codeset_id": 7,
+    "include": [
+     201773,
+     4207688,
+     4324838
+    ],
+    "include_descendants": [
+     80141,
+     196523,
+     196620,
+     197596,
+     4134607
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     7
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Edema",
+  "cohort_id": 44,
+  "atlas_id": 7409,
+  "codesets": {
+   "11": {
+    "codeset_id": 11,
+    "include": [
+     433595
+    ],
+    "include_descendants": [
+     133299,
+     4155910,
+     4171917
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     11
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "End stage renal disease",
+  "cohort_id": 45,
+  "atlas_id": 7374,
+  "codesets": {
+   "0": {
+    "codeset_id": 0,
+    "include": [],
+    "include_descendants": [
+     193782,
+     443611
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "1": {
+    "codeset_id": 1,
+    "include": [],
+    "include_descendants": [
+     4032243,
+     4090651,
+     45889365
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   },
+   {
+    "domain": "Procedure Occurrence",
+    "codeset_ids": [
+     1
+    ]
+   },
+   {
+    "domain": "Observation",
+    "codeset_ids": [
+     1
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Fall",
+  "cohort_id": 46,
+  "atlas_id": 7411,
+  "codesets": {
+   "13": {
+    "codeset_id": 13,
+    "include": [],
+    "include_descendants": [
+     436583
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Observation",
+    "codeset_ids": [
+     13
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Gastrointestinal bleeding",
+  "cohort_id": 9,
+  "atlas_id": 7376,
+  "codesets": {
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     262,
+     9201,
+     9203
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "5": {
+    "codeset_id": 5,
+    "include": [
+     4147683
+    ],
+    "include_descendants": [
+     28779,
+     192671,
+     198798,
+     2002608,
+     2108878,
+     2108900,
+     4027663,
+     4112183,
+     4198381,
+     4265600,
+     40482685
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     23808,
+     24973,
+     195584,
+     197925,
+     200769,
+     434400,
+     438795,
+     443530,
+     4101104,
+     4138962,
+     4163865,
+     4177387,
+     4195231,
+     4204555,
+     4209746,
+     4222896,
+     4248429,
+     4291028,
+     4296611
+    ]
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     5
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Gout",
+  "cohort_id": 47,
+  "atlas_id": 7413,
+  "codesets": {
+   "9": {
+    "codeset_id": 9,
+    "include": [],
+    "include_descendants": [
+     80070,
+     440674,
+     4096347,
+     4128219
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     9
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Headache",
+  "cohort_id": 48,
+  "atlas_id": 7392,
+  "codesets": {
+   "8": {
+    "codeset_id": 8,
+    "include": [],
+    "include_descendants": [
+     375527,
+     378253
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     8
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Heart failure",
+  "cohort_id": 49,
+  "atlas_id": 7369,
+  "codesets": {
+   "1": {
+    "codeset_id": 1,
+    "include": [],
+    "include_descendants": [
+     316139
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     315295
+    ]
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     1
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     1
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Hemorrhagic stroke",
+  "cohort_id": 50,
+  "atlas_id": 7372,
+  "codesets": {
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     262,
+     9201,
+     9203
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "4": {
+    "codeset_id": 4,
+    "include": [
+     376713,
+     432923,
+     439847
+    ],
+    "include_descendants": [],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     4
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Hepatic failure",
+  "cohort_id": 51,
+  "atlas_id": 7381,
+  "codesets": {
+   "0": {
+    "codeset_id": 0,
+    "include": [
+     377604,
+     4029488
+    ],
+    "include_descendants": [
+     4245975,
+     4337543
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Hospitalization with heart failure",
+  "cohort_id": 52,
+  "atlas_id": 7368,
+  "codesets": {
+   "0": {
+    "codeset_id": 0,
+    "include": [],
+    "include_descendants": [
+     262,
+     9201,
+     9203
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "1": {
+    "codeset_id": 1,
+    "include": [],
+    "include_descendants": [
+     316139
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     315295
+    ]
+   }
+  },
+  "primary": [
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   },
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     1
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Hospitalization with preinfarction syndrome",
+  "cohort_id": 53,
+  "atlas_id": 7371,
+  "codesets": {
+   "0": {
+    "codeset_id": 0,
+    "include": [],
+    "include_descendants": [
+     262,
+     9201,
+     9203
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     315296
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   },
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Hyperkalemia",
+  "cohort_id": 54,
+  "atlas_id": 7383,
+  "codesets": {
+   "0": {
+    "codeset_id": 0,
+    "include": [],
+    "include_descendants": [
+     434610
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "1": {
+    "codeset_id": 1,
+    "include": [],
+    "include_descendants": [
+     4245152,
+     4276440,
+     40789893
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   },
+   {
+    "domain": "Measurement",
+    "codeset_ids": [
+     1
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Hypokalemia",
+  "cohort_id": 55,
+  "atlas_id": 7386,
+  "codesets": {
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     437833
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     45769152
+    ]
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Hypomagnesemia",
+  "cohort_id": 56,
+  "atlas_id": 7417,
+  "codesets": {
+   "13": {
+    "codeset_id": 13,
+    "include": [],
+    "include_descendants": [
+     438725,
+     4098604
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     13
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Hyponatremia",
+  "cohort_id": 11,
+  "atlas_id": 7387,
+  "codesets": {
+   "3": {
+    "codeset_id": 3,
+    "include": [],
+    "include_descendants": [
+     435515,
+     4232311
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     3
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Hypotension",
+  "cohort_id": 12,
+  "atlas_id": 7379,
+  "codesets": {
+   "0": {
+    "codeset_id": 0,
+    "include": [],
+    "include_descendants": [
+     317002
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     313232,
+     314432
+    ]
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Impotence",
+  "cohort_id": 57,
+  "atlas_id": 7395,
+  "codesets": {
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     4250163
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Ischemic stroke",
+  "cohort_id": 58,
+  "atlas_id": 7363,
+  "codesets": {
+   "0": {
+    "codeset_id": 0,
+    "include": [
+     372924,
+     375557,
+     441874
+    ],
+    "include_descendants": [
+     443454
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     262,
+     9201,
+     9203
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Malignant neoplasm",
+  "cohort_id": 59,
+  "atlas_id": 7375,
+  "codesets": {
+   "0": {
+    "codeset_id": 0,
+    "include": [],
+    "include_descendants": [
+     443392
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     432851,
+     4111921,
+     4112752
+    ]
+   },
+   "1": {
+    "codeset_id": 1,
+    "include": [],
+    "include_descendants": [
+     4112853
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     432851
+    ]
+   },
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     200962,
+     4163261
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     432851,
+     4111921,
+     4112752
+    ]
+   },
+   "3": {
+    "codeset_id": 3,
+    "include": [
+     4311499
+    ],
+    "include_descendants": [
+     443388
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     432851,
+     4111921,
+     4112752
+    ]
+   },
+   "4": {
+    "codeset_id": 4,
+    "include": [],
+    "include_descendants": [
+     437233
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     432851,
+     4111921,
+     4112752
+    ]
+   },
+   "5": {
+    "codeset_id": 5,
+    "include": [],
+    "include_descendants": [
+     443390,
+     4180790
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     432851,
+     4111921,
+     4112752
+    ]
+   },
+   "6": {
+    "codeset_id": 6,
+    "include": [],
+    "include_descendants": [
+     196360,
+     197508
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     432851,
+     4111921,
+     4112752
+    ]
+   },
+   "7": {
+    "codeset_id": 7,
+    "include": [],
+    "include_descendants": [
+     432571
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     432851,
+     4082311,
+     4111921,
+     4112752
+    ]
+   },
+   "8": {
+    "codeset_id": 8,
+    "include": [],
+    "include_descendants": [
+     4181351
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     432851,
+     4111921,
+     4112752
+    ]
+   },
+   "9": {
+    "codeset_id": 9,
+    "include": [],
+    "include_descendants": [
+     4178976,
+     4181483
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     432851,
+     4111921,
+     4112752
+    ]
+   },
+   "10": {
+    "codeset_id": 10,
+    "include": [],
+    "include_descendants": [
+     196653,
+     198985
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     432851,
+     4111921,
+     4112752
+    ]
+   },
+   "11": {
+    "codeset_id": 11,
+    "include": [],
+    "include_descendants": [
+     317510
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     432851,
+     4111921,
+     4112752
+    ]
+   },
+   "12": {
+    "codeset_id": 12,
+    "include": [],
+    "include_descendants": [
+     443588
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     432851,
+     4111921,
+     4112752
+    ]
+   },
+   "13": {
+    "codeset_id": 13,
+    "include": [],
+    "include_descendants": [
+     4180793
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     432851,
+     4111921,
+     4112752
+    ]
+   },
+   "14": {
+    "codeset_id": 14,
+    "include": [],
+    "include_descendants": [
+     4246127
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     432851,
+     4111921,
+     4112752
+    ]
+   },
+   "15": {
+    "codeset_id": 15,
+    "include": [],
+    "include_descendants": [
+     197230
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     432851,
+     4111921,
+     4112752
+    ]
+   },
+   "16": {
+    "codeset_id": 16,
+    "include": [],
+    "include_descendants": [
+     4162276
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     432851,
+     4111921,
+     4112752
+    ]
+   },
+   "17": {
+    "codeset_id": 17,
+    "include": [],
+    "include_descendants": [
+     138994
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     432851
+    ]
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     1
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     3
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     4
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     5
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     6
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     7
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     8
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     9
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     10
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     11
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     12
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     13
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     14
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     15
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     16
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     17
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Measured renal dysfunction",
+  "cohort_id": 60,
+  "atlas_id": 7384,
+  "codesets": {
+   "0": {
+    "codeset_id": 0,
+    "include": [],
+    "include_descendants": [
+     40796376
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Measurement",
+    "codeset_ids": [
+     0
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Nausea",
+  "cohort_id": 15,
+  "atlas_id": 7389,
+  "codesets": {
+   "5": {
+    "codeset_id": 5,
+    "include": [],
+    "include_descendants": [
+     31967
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     30284
+    ]
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     5
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Neutropenia or agranulocytosis",
+  "cohort_id": 61,
+  "atlas_id": 7380,
+  "codesets": {
+   "0": {
+    "codeset_id": 0,
+    "include": [
+     320073,
+     432289,
+     440689,
+     4119158,
+     4135712,
+     4150156,
+     4174297,
+     4190716,
+     4211401,
+     4322386
+    ],
+    "include_descendants": [],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Rash",
+  "cohort_id": 62,
+  "atlas_id": 7408,
+  "codesets": {
+   "10": {
+    "codeset_id": 10,
+    "include": [],
+    "include_descendants": [
+     139900,
+     140214
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     10
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Rhabdomyolysis",
+  "cohort_id": 63,
+  "atlas_id": 7418,
+  "codesets": {
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     262,
+     9201,
+     9203
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "10": {
+    "codeset_id": 10,
+    "include": [],
+    "include_descendants": [
+     439142,
+     4345578
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "11": {
+    "codeset_id": 11,
+    "include": [
+     137967
+    ],
+    "include_descendants": [
+     439142,
+     4345578
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "12": {
+    "codeset_id": 12,
+    "include": [],
+    "include_descendants": [
+     4265595,
+     40782593
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     10
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     11
+    ]
+   },
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     11
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     11
+    ]
+   },
+   {
+    "domain": "Measurement",
+    "codeset_ids": [
+     12
+    ]
+   },
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Stroke",
+  "cohort_id": 18,
+  "atlas_id": 7464,
+  "codesets": {
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     262,
+     9201,
+     9203
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "3": {
+    "codeset_id": 3,
+    "include": [
+     372924,
+     375557,
+     376713,
+     432923,
+     439847,
+     441874
+    ],
+    "include_descendants": [
+     443454
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     3
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Sudden cardiac death",
+  "cohort_id": 64,
+  "atlas_id": 7365,
+  "codesets": {
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     262,
+     9201,
+     9203
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "4": {
+    "codeset_id": 4,
+    "include": [],
+    "include_descendants": [
+     321042,
+     442289,
+     4048809,
+     4132309,
+     4317150
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     437894
+    ]
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     4
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Syncope",
+  "cohort_id": 65,
+  "atlas_id": 7410,
+  "codesets": {
+   "12": {
+    "codeset_id": 12,
+    "include": [
+     38001140
+    ],
+    "include_descendants": [
+     135360
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     140586
+    ]
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     12
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Thrombocytopenia",
+  "cohort_id": 66,
+  "atlas_id": 7402,
+  "codesets": {
+   "3": {
+    "codeset_id": 3,
+    "include": [],
+    "include_descendants": [
+     432870
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     3
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Transient ischemic attack",
+  "cohort_id": 67,
+  "atlas_id": 7370,
+  "codesets": {
+   "2": {
+    "codeset_id": 2,
+    "include": [],
+    "include_descendants": [
+     262,
+     9201,
+     9203
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "4": {
+    "codeset_id": 4,
+    "include": [],
+    "include_descendants": [
+     373503
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     4
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Visit Occurrence",
+    "codeset_ids": [
+     2
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Type 2 diabetes mellitus",
+  "cohort_id": 68,
+  "atlas_id": 7403,
+  "codesets": {
+   "4": {
+    "codeset_id": 4,
+    "include": [],
+    "include_descendants": [
+     192279,
+     201826,
+     376065,
+     443729,
+     443732,
+     443735,
+     443767
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     200687,
+     201254,
+     201531,
+     435216,
+     4224254,
+     4225656,
+     4227210,
+     4228112,
+     4295011,
+     37016355
+    ]
+   },
+   "5": {
+    "codeset_id": 5,
+    "include": [],
+    "include_descendants": [
+     21600744
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "6": {
+    "codeset_id": 6,
+    "include": [
+     2212392,
+     3003309,
+     3004410,
+     3005673,
+     3007263,
+     3034639,
+     4197971,
+     40758583,
+     40762352,
+     44786901
+    ],
+    "include_descendants": [],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     4
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     4
+    ]
+   },
+   {
+    "domain": "Drug Exposure",
+    "codeset_ids": [
+     5
+    ]
+   },
+   {
+    "domain": "Measurement",
+    "codeset_ids": [
+     6
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Vasculitis",
+  "cohort_id": 69,
+  "atlas_id": 7406,
+  "codesets": {
+   "7": {
+    "codeset_id": 7,
+    "include": [],
+    "include_descendants": [
+     195289,
+     313223,
+     314381,
+     314963,
+     320749,
+     436642,
+     4096220,
+     4101602,
+     4324395,
+     44783716
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   },
+   "8": {
+    "codeset_id": 8,
+    "include": [],
+    "include_descendants": [
+     903963,
+     920458,
+     1305058,
+     1310317,
+     1506270,
+     1507705,
+     1518254,
+     1550557,
+     1551099
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     7
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     7
+    ]
+   },
+   {
+    "domain": "Drug Exposure",
+    "codeset_ids": [
+     8
+    ]
+   }
+  ]
+ },
+ {
+  "name": "Venous thromboembolic events ",
+  "cohort_id": 70,
+  "atlas_id": 7398,
+  "codesets": {
+   "10": {
+    "codeset_id": 10,
+    "include": [],
+    "include_descendants": [
+     254662,
+     440417,
+     444247
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     195294,
+     196715,
+     199837,
+     318137,
+     433832,
+     435026,
+     435616,
+     435887,
+     438820,
+     440477,
+     442055,
+     4062269,
+     4187790,
+     4235812
+    ]
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     10
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Vertigo",
+  "cohort_id": 23,
+  "atlas_id": 7393,
+  "codesets": {
+   "0": {
+    "codeset_id": 0,
+    "include": [],
+    "include_descendants": [
+     78162,
+     381035,
+     437496,
+     439383
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Vomiting",
+  "cohort_id": 71,
+  "atlas_id": 7390,
+  "codesets": {
+   "6": {
+    "codeset_id": 6,
+    "include": [],
+    "include_descendants": [
+     441408
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     440785,
+     4216862,
+     40480291
+    ]
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     6
+    ]
+   }
+  ],
+  "correlated": []
+ },
+ {
+  "name": "Chronic kidney disease",
+  "cohort_id": 72,
+  "atlas_id": 7614,
+  "codesets": {
+   "0": {
+    "codeset_id": 0,
+    "include": [
+     193253
+    ],
+    "include_descendants": [
+     192279,
+     192359,
+     194385,
+     195314,
+     201313,
+     261071,
+     4103224,
+     4263367,
+     46271022
+    ],
+    "exclude": [],
+    "exclude_descendants": [
+     195014,
+     195289,
+     195737,
+     197320,
+     197930,
+     4066005,
+     37116834,
+     43530912,
+     45769152
+    ]
+   },
+   "1": {
+    "codeset_id": 1,
+    "include": [],
+    "include_descendants": [
+     4032243,
+     4090651,
+     45889365
+    ],
+    "exclude": [],
+    "exclude_descendants": []
+   }
+  },
+  "primary": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   }
+  ],
+  "correlated": [
+   {
+    "domain": "Condition Occurrence",
+    "codeset_ids": [
+     0
+    ]
+   },
+   {
+    "domain": "Procedure Occurrence",
+    "codeset_ids": [
+     1
+    ]
+   },
+   {
+    "domain": "Observation",
+    "codeset_ids": [
+     1
+    ]
+   }
+  ]
+ }
+]
