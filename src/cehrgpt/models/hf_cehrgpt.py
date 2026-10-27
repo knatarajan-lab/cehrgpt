@@ -1874,8 +1874,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         linear_prob_hidden_states = None
         # We don't process this during the generation phase, indicated by
         # attention_mask.shape[1] != hidden_states.shape[1].  When attention_mask
-        # is None (a forward pass without a mask) we treat the full sequence as
-        # non-generation context.
+        # is None (e.g. called from RL PG/KL forward pass without a mask) we treat
+        # the full sequence as non-generation context.
         if (
             self.config.include_motor_time_to_event
             and attention_mask is not None
