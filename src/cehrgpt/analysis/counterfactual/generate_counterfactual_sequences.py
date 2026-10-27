@@ -22,11 +22,26 @@ python generate_counterfactual_sequences.py \\
     --batch_size         8 \\
     --generation_input_length  1024 \\
     --generation_max_new_tokens 1024
+
+Several GPUs
+------------
+Add ``--gpu_ids all`` (or e.g. ``--gpu_ids 0,1,3``) to run one worker process per GPU.
+The work is cut into tasks of one batch of one trajectory of one arm; the pending tasks
+are dealt out to the workers, each of which loads its own copy of the model and writes
+its batches into the same ``<arm>/<trajectory_id>`` folders.  A batch is finished once its
+parquet exists, so rerunning the same command (also with a different number of GPUs)
+continues where an interrupted run stopped.  Worker logs are in ``<output_dir>/worker_logs``.
 """
 
 import argparse
 import datetime
+import json
+import math
 import os
+import shutil
+import signal
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -53,6 +68,10 @@ from cehrgpt.gpt_utils import (
 )
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.time_to_event.time_to_event_prediction import (
+    resolve_gpu_ids,
+    strip_cli_option,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -404,6 +423,46 @@ def generate_trajectories_for_batch(
     )
 
 
+def context_num_rows(context_parquet: str) -> int:
+    """Number of patient contexts in a parquet file or a directory of parquet shards."""
+    path = str(context_parquet)
+    pattern = os.path.join(path, "*.parquet") if os.path.isdir(path) else path
+    return int(pl.scan_parquet(pattern).select(pl.len()).collect().item())
+
+
+def batch_output_path(output_dir: Path, arm: str, traj_id: int, batch_i: int) -> Path:
+    return output_dir / arm / str(traj_id) / f"batch_{batch_i:05d}.parquet"
+
+
+def pending_tasks(
+    arm: str,
+    num_rows: int,
+    batch_size: int,
+    num_trajectories: int,
+    output_dir: Path,
+) -> List[Tuple[int, int]]:
+    """
+    ``(trajectory_id, batch_index)`` of every batch of *arm* whose parquet does not exist yet.
+
+    Batch ``i`` always holds contexts ``[i * batch_size, (i + 1) * batch_size)`` of the arm,
+    so a finished batch stays valid whatever else changes between runs (also the number of GPUs).
+    """
+    num_batches = math.ceil(num_rows / batch_size)
+    return [
+        (traj_id, batch_i)
+        for traj_id in range(num_trajectories)
+        for batch_i in range(num_batches)
+        if not batch_output_path(output_dir, arm, traj_id, batch_i).exists()
+    ]
+
+
+def write_parquet_atomically(df: pl.DataFrame, path: Path) -> None:
+    """A batch counts as finished once its parquet exists, so never leave a partial one."""
+    temp_path = path.with_name(path.name + ".tmp")
+    df.write_parquet(temp_path)
+    os.replace(temp_path, path)
+
+
 def run_generation(
     context_parquet: str,
     arm: str,
@@ -418,6 +477,7 @@ def run_generation(
     include_values: bool,
     num_workers: int,
     forbidden_token_ids: Optional[List[int]] = None,
+    tasks: Optional[List[Tuple[int, int]]] = None,
 ) -> None:
     """
     Load a context parquet, run *num_trajectories* generation passes, and
@@ -431,14 +491,31 @@ def run_generation(
     max_length
         Total sequence length budget for model.generate()
         (= context_length + generation_max_new_tokens).
+    tasks
+        ``(trajectory_id, batch_index)`` pairs to generate, as handed out to a worker by
+        ``run_on_multiple_gpus``.  Default: every batch whose parquet is missing.
     """
+    output_dir = Path(output_dir)
+    num_rows = context_num_rows(context_parquet)
+    if tasks is None:
+        tasks = pending_tasks(arm, num_rows, batch_size, num_trajectories, output_dir)
+    else:
+        tasks = [
+            (traj_id, batch_i)
+            for traj_id, batch_i in tasks
+            if not batch_output_path(output_dir, arm, traj_id, batch_i).exists()
+        ]
+    if not tasks:
+        print(f"[{arm}] nothing to generate ({num_rows:,} patient contexts)")
+        return
+
     print(f"\n[{arm}] Loading context from {context_parquet} …")
     # Accept either a single .parquet file or a directory of parquet shards
     if os.path.isdir(context_parquet):
         df = pl.read_parquet(os.path.join(context_parquet, "*.parquet"))
     else:
         df = pl.read_parquet(context_parquet)
-    print(f"[{arm}] {len(df):,} patient contexts")
+    print(f"[{arm}] {len(df):,} patient contexts, {len(tasks):,} batches to generate")
 
     # Left-truncate to context_length, preserving demographics header tokens
     # and updating the year/age tokens to the new temporal reference point.
@@ -460,26 +537,27 @@ def run_generation(
     )
     collator = CounterfactualDataCollator(base_collator)
 
-    for traj_id in range(num_trajectories):
-        traj_dir = output_dir / arm / str(traj_id)
-        traj_dir.mkdir(parents=True, exist_ok=True)
+    batches_by_trajectory: Dict[int, List[int]] = {}
+    for traj_id, batch_i in tasks:
+        batches_by_trajectory.setdefault(traj_id, []).append(batch_i)
+
+    for traj_id, batch_ids in sorted(batches_by_trajectory.items()):
+        (output_dir / arm / str(traj_id)).mkdir(parents=True, exist_ok=True)
 
         dataloader = DataLoader(
             dataset=dataset,
-            batch_size=batch_size,
-            shuffle=False,
+            batch_sampler=[
+                list(range(b * batch_size, min((b + 1) * batch_size, len(dataset))))
+                for b in batch_ids
+            ],
             num_workers=num_workers,
             collate_fn=collator,
         )
 
-        for batch_i, batch in tqdm(
-            enumerate(dataloader),
-            desc=f"[{arm}] trajectory {traj_id + 1}/{num_trajectories}",
+        for batch_i, batch in zip(
+            batch_ids,
+            tqdm(dataloader, desc=f"[{arm}] trajectory {traj_id + 1}/{num_trajectories}"),
         ):
-            out_path = traj_dir / f"batch_{batch_i:05d}.parquet"
-            if out_path.exists():
-                continue
-
             df_out = generate_trajectories_for_batch(
                 batch=batch,
                 cehrgpt_tokenizer=cehrgpt_tokenizer,
@@ -490,7 +568,93 @@ def run_generation(
                 max_length=max_length,
                 forbidden_token_ids=forbidden_token_ids,
             )
-            df_out.write_parquet(out_path)
+            write_parquet_atomically(df_out, batch_output_path(output_dir, arm, traj_id, batch_i))
+
+
+def run_on_multiple_gpus(args: argparse.Namespace, gpu_ids: List[str]) -> int:
+    """
+    Deal the pending batches out to one worker process per GPU.
+
+    A task is one batch of one trajectory of one arm.  Every worker re-runs this module with
+    ``CUDA_VISIBLE_DEVICES`` pinned to its GPU and a ``--task_file`` listing its tasks, loads its
+    own copy of the model, and writes the batches into the usual ``<arm>/<trajectory_id>``
+    folders.  The pending tasks are recomputed from the parquet files that exist, so rerunning
+    the command resumes an interrupted run.
+    """
+    arm_map = _resolve_arm_map(args)
+    output_dir = Path(args.output_dir)
+    all_tasks: List[Tuple[str, int, int]] = []
+    for arm, context_parquet in arm_map.items():
+        num_rows = context_num_rows(str(context_parquet))
+        all_tasks += [
+            (arm, traj_id, batch_i)
+            for traj_id, batch_i in pending_tasks(
+                arm, num_rows, args.batch_size, args.num_trajectories, output_dir
+            )
+        ]
+    if not all_tasks:
+        print("There is nothing left to generate.")
+        return 0
+
+    num_workers = min(len(gpu_ids), len(all_tasks))
+    task_root = output_dir / "temp" / "tasks"
+    log_folder = output_dir / "worker_logs"
+    shutil.rmtree(task_root, ignore_errors=True)
+    task_root.mkdir(parents=True)
+    log_folder.mkdir(parents=True, exist_ok=True)
+    print(
+        f"Splitting {len(all_tasks):,} batches across {num_workers} GPUs: {gpu_ids[:num_workers]}"
+    )
+
+    worker_argv = strip_cli_option(sys.argv[1:], "--gpu_ids")
+    processes: List[subprocess.Popen] = []
+    log_paths: List[Path] = []
+    # Make sure the workers don't outlive us when we are asked to stop
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    try:
+        for worker_index in range(num_workers):
+            worker_tasks: Dict[str, List[List[int]]] = {}
+            for arm, traj_id, batch_i in all_tasks[worker_index::num_workers]:
+                worker_tasks.setdefault(arm, []).append([traj_id, batch_i])
+            task_file = task_root / f"worker_{worker_index}.json"
+            task_file.write_text(json.dumps(worker_tasks))
+            log_path = log_folder / f"worker_{worker_index}_gpu_{gpu_ids[worker_index]}.log"
+            log_paths.append(log_path)
+            with open(log_path, "w") as log_file:
+                processes.append(
+                    subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-m",
+                            "cehrgpt.analysis.counterfactual.generate_counterfactual_sequences",
+                            *worker_argv,
+                            "--task_file",
+                            str(task_file),
+                        ],
+                        env={**os.environ, "CUDA_VISIBLE_DEVICES": gpu_ids[worker_index]},
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
+                    )
+                )
+            print(f"Started worker {worker_index} on GPU {gpu_ids[worker_index]}, log: {log_path}")
+        exit_codes = [process.wait() for process in processes]
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+
+    failed = [i for i, code in enumerate(exit_codes) if code != 0]
+    if failed:
+        for i in failed:
+            print(f"Worker {i} exited with code {exit_codes[i]}, see {log_paths[i]}")
+        return 1
+    shutil.rmtree(task_root, ignore_errors=True)
+    try:
+        task_root.parent.rmdir()
+    except OSError:
+        pass
+    print(f"All {num_workers} workers finished")
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +767,22 @@ Examples
         help="Number of DataLoader worker processes (default: 0)",
     )
 
+    parser.add_argument(
+        "--gpu_ids",
+        default=None,
+        help=(
+            "Generate on several GPUs: 'all' or comma-separated indices of the visible GPUs, "
+            "e.g. 0,1,3 (relative to CUDA_VISIBLE_DEVICES when it is set). One worker process "
+            "per GPU, each with its own copy of the model, takes a share of the batches. "
+            "Rerunning continues where an interrupted run stopped. Default: one process."
+        ),
+    )
+    parser.add_argument(
+        "--task_file",
+        default=None,
+        help="Internal, set by --gpu_ids: the batches this worker generates.",
+    )
+
     # --- concept suppression (optional) ------------------------------------
     parser.add_argument(
         "--vocab_path",
@@ -685,6 +865,24 @@ def _resolve_arm_map(args: argparse.Namespace) -> Dict[str, Path]:
 def main() -> None:
     args = _parse_args()
 
+    if args.gpu_ids and not args.task_file:
+        gpu_ids = resolve_gpu_ids(args.gpu_ids)
+        if len(gpu_ids) > 1:
+            exit_code = run_on_multiple_gpus(args, gpu_ids)
+            if exit_code:
+                sys.exit(exit_code)
+            return
+        # CUDA has not been initialized yet, so this pins the single requested GPU
+        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_ids[0]
+
+    worker_tasks: Optional[Dict[str, List[Tuple[int, int]]]] = None
+    if args.task_file:
+        with open(args.task_file) as task_file:
+            worker_tasks = {
+                arm: [(int(t), int(b)) for t, b in tasks]
+                for arm, tasks in json.load(task_file).items()
+            }
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -733,6 +931,8 @@ def main() -> None:
             )
 
     for arm, context_parquet in arm_map.items():
+        if worker_tasks is not None and arm not in worker_tasks:
+            continue
         run_generation(
             context_parquet=str(context_parquet),
             arm=arm,
@@ -747,6 +947,7 @@ def main() -> None:
             include_values=include_values,
             num_workers=args.num_workers,
             forbidden_token_ids=forbidden_map[arm],
+            tasks=worker_tasks[arm] if worker_tasks is not None else None,
         )
 
     print("\nAll generation complete.")
