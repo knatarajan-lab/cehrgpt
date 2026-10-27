@@ -195,6 +195,20 @@ class StudyScriptTest(unittest.TestCase):
         for swap in swaps:
             self.assertIn("--drop_unknown_comparators", swap)
 
+    def test_the_preference_plot_follows_the_design(self):
+        _, commands = self.run_script(DESIGN="symmetric")
+        plot = self.calls(commands, "overlap_plot.py")[0]
+        self.assertIn("--target_scores", plot)
+        self.assertIn("--comparator_scores", plot)
+        self.assertIn("--trim 0.05", plot)
+        self.assertIn("preference_score_overlap.png", plot)
+        self.log.unlink()
+        _, commands = self.run_script(DESIGN="target_initiators")
+        self.assertNotIn("--comparator_scores", self.calls(commands, "overlap_plot.py")[0])
+        self.log.unlink()
+        _, commands = self.run_script(PREFERENCE_SCORE_TRIM="")
+        self.assertEqual(self.calls(commands, "overlap_plot.py"), [])
+
     def test_the_outcomes_of_the_study_are_resolved_in_step_zero(self):
         _, commands = self.run_script()
         outcomes = self.calls(commands, "outcome_definitions.py")[0]

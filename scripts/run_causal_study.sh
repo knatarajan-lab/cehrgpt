@@ -217,7 +217,7 @@ done
 # preference score P(comparator class) / (P(source class) + P(comparator class)) at the
 # index position lies in [trim, 1 - trim].  A patient that fails is dropped from every
 # arm and from the observed analysis.  Set to "" to turn the check off.
-PREFERENCE_SCORE_TRIM="${PREFERENCE_SCORE_TRIM:-0.05}"
+PREFERENCE_SCORE_TRIM="${PREFERENCE_SCORE_TRIM-0.05}"
 
 # The swap puts a drug of the other exposure into each history, so the model has to know that drug.
 # By default the run stops when the tokenizer does not know one of the ingredients.  Set to "true" to
@@ -270,6 +270,7 @@ EXTRACT_SCRIPT="src/cehrgpt/analysis/counterfactual/extract_drug_initiation_sequ
 SWAP_SCRIPT="src/cehrgpt/analysis/counterfactual/create_drug_swap_context.py"
 GENERATE_SCRIPT="src/cehrgpt/analysis/counterfactual/generate_counterfactual_sequences.py"
 HR_SCRIPT="src/cehrgpt/analysis/counterfactual/hazard_ratio_estimation.py"
+PLOT_SCRIPT="src/cehrgpt/analysis/counterfactual/overlap_plot.py"
 
 # =============================================================================
 # HELPERS
@@ -588,6 +589,19 @@ for label, key in [("Target arm", "ARM_A"), ("Comparator arm", "ARM_B")]:
     print(f"  {label} ({arm}): {n:,} patients  → {f}")
 PYEOF
 
+    # The overlap of the preference scores of the two groups of patients, before any GPU time is spent
+    if [ -n "${PREFERENCE_SCORE_TRIM}" ]; then
+        mkdir -p "${RESULTS_DIR}"
+        _PLOT_ARGS=(--target_scores "${TARGET_OVERLAP_SCORES}")
+        if [ "${DESIGN}" = "symmetric" ]; then
+            _PLOT_ARGS+=(--comparator_scores "${COMPARATOR_OVERLAP_SCORES}")
+        fi
+        python "${PLOT_SCRIPT}" "${_PLOT_ARGS[@]}" \
+            --trim "${PREFERENCE_SCORE_TRIM}" \
+            --target_name "${TARGET_NAME}" --comparator_name "${COMPARATOR_NAME}" \
+            --output "${RESULTS_DIR}/preference_score_overlap.png"
+    fi
+
     echo "Step 2 complete."
     echo ""
 fi
@@ -798,6 +812,7 @@ echo "Key files:"
 echo "  ${RESULTS_DIR}/hazard_ratio_summary.csv           (generated ${TARGET_NAME} vs generated ${COMPARATOR_NAME})"
 echo "  ${RESULTS_DIR}/observed_hazard_ratio_summary.csv  (observed ${TARGET_NAME} vs observed ${COMPARATOR_NAME})"
 echo "  ${RESULTS_DIR}/control_outcome_summary.csv        (negative / positive controls, when given)"
+echo "  ${RESULTS_DIR}/preference_score_overlap.png       (overlap of the two groups of patients; _summary.csv beside it)"
 echo "  ${RESULTS_DIR}/km_<concept_id>.csv"
 echo ""
 # reference results of the study for this pair, when it has any
