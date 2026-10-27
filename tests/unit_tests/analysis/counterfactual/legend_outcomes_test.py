@@ -336,7 +336,7 @@ class ExtractionWithDefinitionsTest(unittest.TestCase):
     def test_defined_outcomes_are_extracted_with_their_visit_restriction(self):
         self.run_process()
         observed = self.observed()
-        self.assertEqual(observed.columns, ["person_id", "drug_epoch_time", "mi", "rash"])
+        self.assertEqual(observed.columns, ["person_id", "drug_epoch_time", "mi", "rash", "prior__mi", "prior__rash"])
         # the outpatient record on day 10 does not count, the inpatient one on day 20 does
         self.assertEqual(observed["mi"].to_list(), [START + 20 * DAY, None])
         self.assertEqual(observed["rash"].to_list(), [START + 30 * DAY, None])

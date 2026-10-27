@@ -41,6 +41,9 @@ from scipy.stats import chi2
 
 from cehrgpt.analysis.counterfactual.legend_outcomes import load_outcome_definitions
 
+# Column prefix of the extraction's flags for outcomes before the index date
+PRIOR_PREFIX = "prior__"
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -277,6 +280,7 @@ def compute_tte(
     era_gap_days: float = 30.0,
     inpatient_only: bool = False,
     expanded_outcome_set: Optional[Set[str]] = None,
+    min_days_at_risk: float = 0.0,
 ) -> pl.DataFrame:
     """
     For each (subject_id, trajectory_id) compute:
@@ -319,6 +323,8 @@ def compute_tte(
         When provided this is used instead of ``outcome_concept_ids`` for code
         matching, so that all descendant codes count toward the ancestor
         outcome.  Build with :func:`expand_to_descendants`.
+    min_days_at_risk
+        Trajectories with less time at risk are left out (LEGEND's ``minDaysAtRisk``, 1).
 
     Returns
     -------
@@ -406,6 +412,7 @@ def compute_tte(
             pl.col("time_days").fill_null(pl.col("effective_follow_up_days")),
         )
         .select(["subject_id", "trajectory_id", "event", "time_days"])
+        .filter(pl.col("time_days") >= min_days_at_risk)
         .collect()
     )
     return tte
@@ -618,7 +625,11 @@ def kaplan_meier(
 # ---------------------------------------------------------------------------
 
 def observed_tte(
-    observed: pl.DataFrame, outcome_concept_id: str, follow_up_days: float
+    observed: pl.DataFrame,
+    outcome_concept_id: str,
+    follow_up_days: float,
+    min_days_at_risk: float = 0.0,
+    use_era_end: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     (time_days, event) of one outcome for patients from ``observed_outcomes``.
@@ -629,6 +640,8 @@ def observed_tte(
     Follow-up is censored at the earliest of *follow_up_days*, the end of the
     drug era (discontinuation or switch) and the last observation of the record,
     the same rules as for generated trajectories (:func:`compute_follow_up`).
+    Patients with less than *min_days_at_risk* of follow-up are left out, and
+    *use_era_end* False (intent to treat) ignores the end of the drug era.
     """
     for column in ("era_end_epoch_time", "last_observed_epoch_time"):
         if column not in observed.columns:
@@ -640,7 +653,9 @@ def observed_tte(
     frame = observed.select(
         pl.min_horizontal(
             pl.lit(float(follow_up_days)),
-            days("era_end_epoch_time").clip(lower_bound=0.0),
+            days("era_end_epoch_time").clip(lower_bound=0.0)
+            if use_era_end
+            else pl.lit(float(follow_up_days)),
             days("last_observed_epoch_time").clip(lower_bound=0.0),
         ).alias("censor_days"),
         days(outcome_concept_id).alias("outcome_days"),
@@ -651,8 +666,29 @@ def observed_tte(
     )
     time_days = frame.select(
         pl.when(pl.col("event")).then(pl.col("outcome_days")).otherwise(pl.col("censor_days"))
-    ).to_series()
-    return time_days.to_numpy().astype(float), frame["event"].to_numpy().astype(int)
+    ).to_series().to_numpy().astype(float)
+    event = frame["event"].to_numpy().astype(int)
+    at_risk = time_days >= min_days_at_risk
+    return time_days[at_risk], event[at_risk]
+
+
+def read_prior_outcome_persons(paths: List[str]) -> Dict[str, Set[int]]:
+    """
+    ``{outcome label: person_ids that had the outcome before the index date}`` from the
+    ``prior__<label>`` columns the extraction writes to ``observed_outcomes``.
+    """
+    frames = [
+        pl.read_parquet(os.path.join(path, "*.parquet") if os.path.isdir(path) else path)
+        for path in paths
+    ]
+    observed = pl.concat(frames, how="diagonal_relaxed")
+    return {
+        column[len(PRIOR_PREFIX):]: set(
+            observed.filter(pl.col(column).fill_null(False))["person_id"].to_list()
+        )
+        for column in observed.columns
+        if column.startswith(PRIOR_PREFIX)
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -816,6 +852,9 @@ def analyse_observed_outcomes(
     excluded_person_ids: Optional[Set[int]] = None,
     outcome_types: Optional[Dict[str, str]] = None,
     expected_hr: Optional[Dict[str, float]] = None,
+    prior_outcome_persons: Optional[Dict[str, Set[int]]] = None,
+    min_days_at_risk: float = 0.0,
+    use_era_end: bool = True,
 ) -> None:
     """
     Compute hazard ratios from observed (real) patient outcomes extracted
@@ -846,6 +885,11 @@ def analyse_observed_outcomes(
     outcome_types / expected_hr
         Role of each outcome (primary, negative or positive control) and the
         expected HR of the controls; see ``parse_outcome_specs``.
+    prior_outcome_persons
+        Per outcome, the patients that had it before the index date; they are left out of
+        that outcome's analysis (LEGEND's ``removeSubjectsWithPriorOutcome``).
+    min_days_at_risk / use_era_end
+        See :func:`observed_tte`.
     """
     print("\n" + "=" * 60)
     print("Observed baseline HR (real patient outcomes)")
@@ -890,8 +934,15 @@ def analyse_observed_outcomes(
 
         print(f"\n  Outcome: {oc_id}")
 
-        time_a, event_a = observed_tte(source_df, oc_id, follow_up_days)
-        time_b, event_b = observed_tte(comparator_df, oc_id, follow_up_days)
+        source_oc, comparator_oc = source_df, comparator_df
+        prior = (prior_outcome_persons or {}).get(oc_id)
+        if prior:
+            source_oc = source_df.filter(~pl.col("person_id").is_in(list(prior)))
+            comparator_oc = comparator_df.filter(~pl.col("person_id").is_in(list(prior)))
+            print(f"    Prior outcome: left out {len(source_df) - len(source_oc):,} + "
+                  f"{len(comparator_df) - len(comparator_oc):,} patients")
+        time_a, event_a = observed_tte(source_oc, oc_id, follow_up_days, min_days_at_risk, use_era_end)
+        time_b, event_b = observed_tte(comparator_oc, oc_id, follow_up_days, min_days_at_risk, use_era_end)
 
         n_ev_a = int(event_a.sum())
         n_ev_b = int(event_b.sum())
@@ -972,6 +1023,8 @@ def analyse_outcome(
     era_gap_days: float = 30.0,
     inpatient_only: bool = False,
     expanded_outcome_set: Optional[Set[str]] = None,
+    excluded_person_ids: Optional[Set[int]] = None,
+    min_days_at_risk: float = 0.0,
 ) -> Dict:
     """
     Run full HR analysis for a single outcome concept.
@@ -994,6 +1047,10 @@ def analyse_outcome(
     expanded_outcome_set
         Descendant-expanded concept_ids for the outcome; see
         :func:`expand_to_descendants`.
+    excluded_person_ids
+        Patients that had the outcome before the index date; they are left out.
+    min_days_at_risk
+        Trajectories with less time at risk are left out (LEGEND: 1).
     """
     print(f"\n  Outcome: {outcome_concept_id}")
 
@@ -1004,6 +1061,7 @@ def analyse_outcome(
         era_gap_days=era_gap_days,
         inpatient_only=inpatient_only,
         expanded_outcome_set=expanded_outcome_set,
+        min_days_at_risk=min_days_at_risk,
     )
     tte_b = compute_tte(
         traj_arm_b, drug_info, [outcome_concept_id], follow_up_days,
@@ -1012,7 +1070,12 @@ def analyse_outcome(
         era_gap_days=era_gap_days,
         inpatient_only=inpatient_only,
         expanded_outcome_set=expanded_outcome_set,
+        min_days_at_risk=min_days_at_risk,
     )
+    if excluded_person_ids:
+        excluded = list(excluded_person_ids)
+        tte_a = tte_a.filter(~pl.col("subject_id").is_in(excluded))
+        tte_b = tte_b.filter(~pl.col("subject_id").is_in(excluded))
 
     # Use each (subject_id, trajectory_id) as a separate observation in the
     # Cox model.  This preserves trajectory-level variance and avoids ad-hoc
@@ -1290,6 +1353,25 @@ def main() -> None:
         dropped_person_ids = read_dropped_person_ids(args.overlap_scores_path)
         print(f"Overlap check: {len(dropped_person_ids):,} patients dropped from every analysis")
 
+    # LEGEND leaves, outcome by outcome, the patients that had the outcome before the index
+    # date out of the analysis (removeSubjectsWithPriorOutcome).
+    prior_outcome_persons: Dict[str, Set[int]] = {}
+    prior_sources = args.prior_outcome_path or (
+        [args.observed_outcomes_path] if args.observed_outcomes_path else []
+    )
+    if prior_sources:
+        prior_outcome_persons = read_prior_outcome_persons(prior_sources)
+        missing = [o for o in outcome_ids if o not in prior_outcome_persons]
+        if missing:
+            print(f"Warning: no prior-outcome flags for {len(missing)} outcome(s), e.g. {missing[:3]}; "
+                  "extract again to record them.")
+    else:
+        print("Warning: no --prior_outcome_path or --observed_outcomes_path, so patients with a "
+              "prior outcome are kept.")
+    intent_to_treat = args.time_at_risk == "intent_to_treat"
+    if intent_to_treat:
+        print("Time at risk: intent to treat (until the end of observation or the follow-up horizon)")
+
     # ------------------------------------------------------------------
     # Observed baseline HR (runs when --observed_outcomes_path is given)
     # ------------------------------------------------------------------
@@ -1305,6 +1387,9 @@ def main() -> None:
             excluded_person_ids=dropped_person_ids,
             outcome_types=outcome_types,
             expected_hr=expected_hr,
+            prior_outcome_persons=prior_outcome_persons,
+            min_days_at_risk=args.min_days_at_risk,
+            use_era_end=not intent_to_treat,
         )
 
     # ------------------------------------------------------------------
@@ -1340,8 +1425,9 @@ def main() -> None:
     # contains a switch event; trajectories are NOT removed — only their
     # follow-up is shortened.
     if arm_a_concepts or arm_b_concepts or exclusion_concepts:
-        competing_for_arm_a = (arm_b_concepts | exclusion_concepts) or None
-        competing_for_arm_b = (arm_a_concepts | exclusion_concepts) or None
+        if args.censor_at_switch:
+            competing_for_arm_a = (arm_b_concepts | exclusion_concepts) or None
+            competing_for_arm_b = (arm_a_concepts | exclusion_concepts) or None
 
     print(f"Loading {args.arm_a} trajectories …")
     traj_a = load_trajectories(args.trajectories_dir, args.arm_a)
@@ -1373,13 +1459,13 @@ def main() -> None:
     print("=" * 60)
     _print_generated_era_duration_stats(
         traj_a, drug_info, args.follow_up_days, args.arm_a,
-        target_concept_ids=arm_a_concepts or None,
+        target_concept_ids=None if intent_to_treat else (arm_a_concepts or None),
         competing_concept_ids=competing_for_arm_a,
         era_gap_days=args.era_gap_days,
     )
     _print_generated_era_duration_stats(
         traj_b, drug_info, args.follow_up_days, args.arm_b,
-        target_concept_ids=arm_b_concepts or None,
+        target_concept_ids=None if intent_to_treat else (arm_b_concepts or None),
         competing_concept_ids=competing_for_arm_b,
         era_gap_days=args.era_gap_days,
     )
@@ -1403,13 +1489,15 @@ def main() -> None:
             arm_a_label=args.arm_a,
             arm_b_label=args.arm_b,
             output_dir=output_dir,
-            target_concept_ids_a=arm_a_concepts or None,
-            target_concept_ids_b=arm_b_concepts or None,
+            target_concept_ids_a=None if intent_to_treat else (arm_a_concepts or None),
+            target_concept_ids_b=None if intent_to_treat else (arm_b_concepts or None),
             competing_concept_ids_a=competing_for_arm_a,
             competing_concept_ids_b=competing_for_arm_b,
             era_gap_days=args.era_gap_days,
             inpatient_only=(outcome_id in inpatient_outcome_ids),
             expanded_outcome_set=outcome_expanded[outcome_id],
+            excluded_person_ids=prior_outcome_persons.get(outcome_id),
+            min_days_at_risk=args.min_days_at_risk,
         )
         if result is not None:
             results.append(result)
@@ -1537,6 +1625,35 @@ def _parse_args() -> argparse.Namespace:
         help="Comma-separated ingredient concept_ids for excluded antihypertensives "
              "(ARBs, dCCBs, ndCCBs, 2nd-line agents). When a generated trajectory "
              "contains one of these codes, follow-up is censored at that event.",
+    )
+    parser.add_argument(
+        "--time_at_risk",
+        choices=["on_treatment", "intent_to_treat"],
+        default="on_treatment",
+        help="LEGEND's two designs. on_treatment: the risk window ends when the continuous "
+             "exposure to the patient's own class ends (gap > --era_gap_days). intent_to_treat: "
+             "it ends with the observation of the patient (or --follow_up_days). Default: on_treatment.",
+    )
+    parser.add_argument(
+        "--min_days_at_risk",
+        type=float,
+        default=1.0,
+        help="Leave out patients with less time at risk (LEGEND: 1 day). Default: 1.",
+    )
+    parser.add_argument(
+        "--censor_at_switch",
+        action="store_true",
+        help="Also end the follow-up of a generated trajectory at the first drug of the other arm "
+             "or of the exclusion list (needs --arm_*_concept_ids and --vocab_path). LEGEND does "
+             "not; use the same setting as the extraction.",
+    )
+    parser.add_argument(
+        "--prior_outcome_path",
+        nargs="+",
+        default=None,
+        help="observed_outcomes directories of the extraction(s) whose prior__<outcome> flags "
+             "say who had the outcome before the index date; those patients are left out of "
+             "that outcome. Default: --observed_outcomes_path when given.",
     )
     parser.add_argument(
         "--era_gap_days",

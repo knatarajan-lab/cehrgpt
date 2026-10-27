@@ -113,12 +113,31 @@ ERA_GAP_DAYS="${ERA_GAP_DAYS:-30}"
 # New-user washout: days of observed history required before the index drug.
 MIN_PRIOR_OBSERVATION_DAYS="${MIN_PRIOR_OBSERVATION_DAYS:-365}"
 
-# Set to "true" to suppress competing drug concepts during generation.
-SUPPRESS_CONCEPTS="${SUPPRESS_CONCEPTS:-true}"
+# LEGEND's cohort and time-at-risk rules (CreateExposureCohortsHypertension.sql and the
+# cmAnalysisList of the study):
+#   * monotherapy: exactly one antihypertensive ingredient may start in the first
+#     MONOTHERAPY_WINDOW_DAYS days from the index date (set "" for the older same-visit checks);
+#   * the hypertension diagnosis has to be recorded in the POPULATION_WINDOW_DAYS days up to the
+#     index date;
+#   * patients with the outcome before the index date are left out of that outcome;
+#   * time at risk starts the day after the index date and needs MIN_DAYS_AT_RISK days; the
+#     on-treatment design ends it when the continuous exposure to the patient's own class ends
+#     (a gap above ERA_GAP_DAYS), the intent-to-treat design with the observation of the patient.
+#     Starting another drug does not end it (CENSOR_AT_SWITCH=true does).
+MONOTHERAPY_WINDOW_DAYS="${MONOTHERAPY_WINDOW_DAYS:-7}"
+POPULATION_WINDOW_DAYS="${POPULATION_WINDOW_DAYS:-365}"
+TIME_AT_RISK="${TIME_AT_RISK:-on_treatment}"      # or intent_to_treat
+MIN_DAYS_AT_RISK="${MIN_DAYS_AT_RISK:-1}"
+CENSOR_AT_SWITCH="${CENSOR_AT_SWITCH:-false}"
 
-# Optional: comma-separated OMOP concept_ids restricting the eligible population.
-# Leave empty ("") to apply no population filter.
-POPULATION_CONCEPT_IDS=""
+# Set to "true" to suppress the other arm's drugs and the exclusion drugs during generation.
+# LEGEND does not (patients may add drugs), so the default is false.
+SUPPRESS_CONCEPTS="${SUPPRESS_CONCEPTS:-false}"
+
+# Comma-separated OMOP concept_ids restricting the eligible population: one of them (with
+# descendants) has to be recorded within POPULATION_WINDOW_DAYS up to the index date.
+# 316866 = Hypertensive disorder, as in LEGEND.  Leave empty ("") for no filter.
+POPULATION_CONCEPT_IDS="316866"
 
 # Exclusion concept IDs — "new users" eligibility criterion.
 # Patients who have ANY of these drugs in their pre-index history are excluded.
@@ -313,6 +332,15 @@ else
         _EXTRACT_EXTRA_ARGS+=(--exclusion_concept_ids "${EXCLUSION_CONCEPT_IDS}")
     fi
     _EXTRACT_EXTRA_ARGS+=(--min_prior_observation_days "${MIN_PRIOR_OBSERVATION_DAYS}")
+    if [ -n "${MONOTHERAPY_WINDOW_DAYS}" ]; then
+        _EXTRACT_EXTRA_ARGS+=(--monotherapy_window_days "${MONOTHERAPY_WINDOW_DAYS}")
+    fi
+    if [ -n "${POPULATION_CONCEPT_IDS}" ] && [ -n "${POPULATION_WINDOW_DAYS}" ]; then
+        _EXTRACT_EXTRA_ARGS+=(--population_window_days "${POPULATION_WINDOW_DAYS}")
+    fi
+    if [ "${CENSOR_AT_SWITCH}" = "true" ]; then
+        _EXTRACT_EXTRA_ARGS+=(--censor_at_switch)
+    fi
 
     # --- Step 1a: ACEi patients ---
     echo "============================================================"
@@ -649,6 +677,11 @@ else
 
     _step_start
     _HR_EXTRA_ARGS=()
+    _HR_EXTRA_ARGS+=(--prior_outcome_path "${ACEI_CONTEXT_DIR}/observed_outcomes" "${THIAZIDE_CONTEXT_DIR}/observed_outcomes")
+    _HR_EXTRA_ARGS+=(--time_at_risk "${TIME_AT_RISK}" --min_days_at_risk "${MIN_DAYS_AT_RISK}")
+    if [ "${CENSOR_AT_SWITCH}" = "true" ]; then
+        _HR_EXTRA_ARGS+=(--censor_at_switch)
+    fi
     if [ -n "${NEGATIVE_CONTROL_OUTCOME_IDS}" ]; then
         _HR_EXTRA_ARGS+=(--negative_control_outcome_ids "${NEGATIVE_CONTROL_OUTCOME_IDS}")
     fi

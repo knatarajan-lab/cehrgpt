@@ -94,8 +94,15 @@ class ExtractionProcessTest(unittest.TestCase):
         self.write_patients(
             [patient(1, [(0, [str(SOURCE)]), (10, [str(EXCLUDED)]), (20, [str(SOURCE)])])]
         )
-        self.run_process(exclusion_concept_ids=[EXCLUDED])
+        self.run_process(exclusion_concept_ids=[EXCLUDED], censor_at_switch=True)
         self.assertEqual(self.drug_info()["era_end_epoch_time"][0], START + 10 * DAY)
+
+    def test_an_exclusion_drug_does_not_censor_unless_asked_to(self):
+        self.write_patients(
+            [patient(1, [(0, [str(SOURCE)]), (10, [str(EXCLUDED)]), (20, [str(SOURCE)])])]
+        )
+        self.run_process(exclusion_concept_ids=[EXCLUDED])
+        self.assertIsNone(self.drug_info()["era_end_epoch_time"][0])
 
     def test_without_an_exclusion_list_the_drug_does_not_censor(self):
         self.write_patients(

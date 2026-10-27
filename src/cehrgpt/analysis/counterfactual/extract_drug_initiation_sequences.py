@@ -64,6 +64,8 @@ from cehrgpt.models.tokenization_hf_cehrgpt import NONE_BIN, UNKNOWN_BIN, CehrGp
 
 VISIT_START_TOKEN = "[VS]"
 VISIT_END_TOKEN = "[VE]"
+# Column of observed_outcomes that says whether the outcome occurred before the index date
+PRIOR_PREFIX = "prior__"
 END_TOKEN = "[END]"
 DEATH_TOKEN = "[DEATH]"
 INPATIENT_ER_VISIT_CONCEPTS: Set[str] = {"9201", "9203", "262"}
@@ -167,6 +169,7 @@ def find_outcomes_after_drug(
     outcome_concept_groups: Dict[str, Set[str]],
     inpatient_outcome_labels: Optional[Set[str]] = None,
     labels_by_token: Optional[Dict[str, List[str]]] = None,
+    before_time: Optional[float] = None,
 ) -> Dict[str, Optional[float]]:
     """
     Scan *concept_ids[start_pos:]* for the first occurrence of each outcome
@@ -182,6 +185,9 @@ def find_outcomes_after_drug(
     labels_by_token
         ``build_labels_by_token(outcome_concept_groups)``; pass it when scanning many
         patients, with many outcomes it saves a pass over every outcome for every token.
+    before_time
+        Stop at the first token with a time of at least *before_time*.  With
+        ``start_pos=0`` this finds the outcomes that occurred before an index date.
 
     Returns
     -------
@@ -196,6 +202,8 @@ def find_outcomes_after_drug(
 
     for i in range(start_pos, len(concept_ids)):
         if not remaining:
+            break
+        if before_time is not None and epoch_times[i] >= before_time:
             break
         token = concept_ids[i]
 
@@ -228,6 +236,76 @@ def find_outcomes_after_drug(
             remaining.discard(label)
 
     return result
+
+
+DAY_SECONDS = 86_400
+
+
+def has_record_in_window(
+    concept_ids: List[str],
+    epoch_times: List[float],
+    concepts: Set[str],
+    start_time: float,
+    end_time: float,
+    stop_pos: int,
+) -> bool:
+    """A token of *concepts* before position *stop_pos* with a time in [start_time, end_time]."""
+    for i in range(min(stop_pos, len(concept_ids), len(epoch_times))):
+        if concept_ids[i] in concepts and start_time <= epoch_times[i] <= end_time:
+            return True
+    return False
+
+
+def has_prior_exposure(
+    concept_ids: List[str],
+    epoch_times: List[float],
+    exclusion_concepts: Set[str],
+    index_time: float,
+    drug_pos: int,
+) -> bool:
+    """
+    A token of *exclusion_concepts* on a date before the index date.  Records on the index date
+    belong to the concurrent therapy, which the monotherapy rule judges.
+    """
+    return any(
+        concept_ids[i] in exclusion_concepts and epoch_times[i] < index_time
+        for i in range(min(drug_pos, len(epoch_times)))
+    )
+
+
+def distinct_ingredients(
+    concept_ids: List[str],
+    epoch_times: List[float],
+    ingredients_of: Dict[str, Set[str]],
+    start_pos: int,
+    start_time: float,
+    end_time: float,
+) -> Set[str]:
+    """
+    The ingredients of the drugs recorded from *start_pos* until *end_time*.  A combination
+    product counts for each of its ingredients, as in LEGEND.
+    """
+    found: Set[str] = set()
+    for i in range(start_pos, min(len(concept_ids), len(epoch_times))):
+        if epoch_times[i] > end_time:
+            break
+        if epoch_times[i] >= start_time:
+            found |= ingredients_of.get(concept_ids[i], set())
+    return found
+
+
+def load_ingredient_map(vocab_path: str, ingredient_ids: List[int]) -> Dict[str, Set[str]]:
+    """``{drug concept: {ingredients it contains}}`` for the descendants of *ingredient_ids*."""
+    frame = (
+        pl.scan_parquet(os.path.join(vocab_path, "concept_ancestor", "*.parquet"))
+        .filter(pl.col("ancestor_concept_id").is_in(sorted(set(ingredient_ids))))
+        .select("ancestor_concept_id", "descendant_concept_id")
+        .collect()
+    )
+    mapping: Dict[str, Set[str]] = {str(i): {str(i)} for i in ingredient_ids}
+    for ancestor, descendant in frame.iter_rows():
+        mapping.setdefault(str(descendant), set()).add(str(ancestor))
+    return mapping
 
 
 def _is_att_token(token: str) -> bool:
@@ -550,6 +628,10 @@ def _process_shard(
     era_gap_days: int = 30,
     inpatient_outcome_labels: Optional[Set[str]] = None,
     min_prior_observation_days: float = 0.0,
+    ingredients_of: Optional[Dict[str, Set[str]]] = None,
+    monotherapy_window_days: float = 7.0,
+    population_window_days: Optional[float] = None,
+    censor_at_switch: bool = False,
 ) -> Tuple[int, int]:
     """
     Process one shard of patient rows and write chunked parquet files.
@@ -632,6 +714,7 @@ def _process_shard(
                 "person_id": pl.Int64,
                 "drug_epoch_time": pl.Float64,
                 **{k: pl.Float64 for k in outcome_concept_groups},
+                **{f"{PRIOR_PREFIX}{k}": pl.Boolean for k in outcome_concept_groups},
             }
             _write_atomic(
                 pl.DataFrame(observed_outcomes_chunk, schema=oc_schema),
@@ -649,8 +732,10 @@ def _process_shard(
     # exclusion drug.
     _excl: Set[str] = exclusion_concepts or set()
     labels_by_token = build_labels_by_token(outcome_concept_groups)
-    competing_for_source: Set[str]     = comparator_concepts | _excl
-    competing_for_comparator: Set[str] = source_concepts | _excl
+    # LEGEND ends the on-treatment window only when the exposure to the patient's own class
+    # ends; starting another drug is not a censoring event unless asked for.
+    competing_for_source: Set[str]     = (comparator_concepts | _excl) if censor_at_switch else set()
+    competing_for_comparator: Set[str] = (source_concepts | _excl) if censor_at_switch else set()
 
     for row in tqdm(
         df_shard.iter_rows(named=True),
@@ -670,10 +755,26 @@ def _process_shard(
             n_skipped += 1
             continue
 
-        # ---- Population filter (e.g. require HTN diagnosis in pre-drug history) ----
+        epoch_times = _to_list(row.get("epoch_times", []))
+        if drug_pos >= len(epoch_times):
+            n_skipped += 1
+            continue
+        index_time = float(epoch_times[drug_pos])
+        visit_end = ve_pos if ve_pos is not None else len(concept_ids)
+
+        # ---- Population filter (e.g. require a HTN diagnosis) ----
+        # With a window, as in LEGEND, the diagnosis has to be recorded in the window days up
+        # to and including the index date; without one, anywhere in the pre-drug history.
         if population_concepts:
-            pre_drug_set = set(concept_ids[:drug_pos])
-            if not (pre_drug_set & population_concepts):
+            if population_window_days is None:
+                found = bool(set(concept_ids[:drug_pos]) & population_concepts)
+            else:
+                found = has_record_in_window(
+                    concept_ids, epoch_times, population_concepts,
+                    index_time - population_window_days * DAY_SECONDS, index_time,
+                    visit_end + 1,
+                )
+            if not found:
                 n_skipped += 1
                 continue
 
@@ -681,44 +782,61 @@ def _process_shard(
         # Without it a patient who simply entered the data on the day of the first
         # recorded prescription looks like a new user.  The history starts at the
         # first visit of the record (the leading demographic tokens carry no time).
-        epoch_times = _to_list(row.get("epoch_times", []))
         if min_prior_observation_days > 0:
             first_visit_pos = concept_ids.index(VISIT_START_TOKEN)
-            if drug_pos >= len(epoch_times) or first_visit_pos >= len(epoch_times):
+            if first_visit_pos >= len(epoch_times):
                 n_skipped += 1
                 continue
-            prior_days = (float(epoch_times[drug_pos]) - float(epoch_times[first_visit_pos])) / 86_400
+            prior_days = (index_time - float(epoch_times[first_visit_pos])) / DAY_SECONDS
             if prior_days < min_prior_observation_days:
                 n_skipped += 1
                 continue
 
-        # ---- Exclusion drug check (prior exposure to other antihypertensives) ----
-        # Patients with any exclusion drug in their pre-index history, or in the
-        # rest of the index visit, are dropped to enforce the "new users"
-        # eligibility criterion.  An exclusion drug prescribed at the index visit
-        # is concurrent therapy and cannot be told apart from prior exposure.
-        visit_end = ve_pos if ve_pos is not None else len(concept_ids)
-        if exclusion_concepts:
-            index_exposure_set = set(concept_ids[:drug_pos]) | set(
-                concept_ids[drug_pos + 1:visit_end + 1]
-            )
-            if index_exposure_set & exclusion_concepts:
+        if ingredients_of is not None:
+            # ---- First line: no exposure to any antihypertensive before the index date ----
+            if exclusion_concepts and has_prior_exposure(
+                concept_ids, epoch_times, exclusion_concepts, index_time, drug_pos
+            ):
                 n_skipped += 1
                 continue
+            # ---- Monotherapy: one ingredient in the days after initiation ----
+            # LEGEND counts the distinct ingredients that start in the window from the index
+            # date; a second ingredient (same class or not) or a combination product leaves
+            # the cohort.
+            started = distinct_ingredients(
+                concept_ids, epoch_times, ingredients_of,
+                vs_pos, index_time, index_time + monotherapy_window_days * DAY_SECONDS,
+            )
+            if len(started) != 1:
+                n_skipped += 1
+                continue
+        else:
+            # ---- Exclusion drug check (prior exposure to other antihypertensives) ----
+            # Patients with any exclusion drug in their pre-index history, or in the
+            # rest of the index visit, are dropped to enforce the "new users"
+            # eligibility criterion.  An exclusion drug prescribed at the index visit
+            # is concurrent therapy and cannot be told apart from prior exposure.
+            if exclusion_concepts:
+                index_exposure_set = set(concept_ids[:drug_pos]) | set(
+                    concept_ids[drug_pos + 1:visit_end + 1]
+                )
+                if index_exposure_set & exclusion_concepts:
+                    n_skipped += 1
+                    continue
 
-        # ---- Same-visit co-prescription check ----
-        # Patients whose INDEX VISIT contains both source and comparator drugs
-        # (concurrent prescription) cannot be cleanly assigned to one arm — exclude.
-        # Post-initiation crossovers are NOT excluded here; compute_drug_era_end_time
-        # detects them and stores the switch time as era_end_epoch_time, which is
-        # used downstream to censor follow-up at the moment of the switch.
-        # Note: pre-index contamination by the opposite arm is structurally impossible
-        # here — find_first_drug_initiation returns the FIRST drug event, so if the
-        # opposite arm had appeared earlier it would have been the index event instead.
-        index_visit_tokens = set(concept_ids[vs_pos:visit_end + 1])
-        if index_visit_tokens & source_concepts and index_visit_tokens & comparator_concepts:
-            n_skipped += 1
-            continue
+            # ---- Same-visit co-prescription check ----
+            # Patients whose INDEX VISIT contains both source and comparator drugs
+            # (concurrent prescription) cannot be cleanly assigned to one arm — exclude.
+            # Post-initiation crossovers are NOT excluded here; compute_drug_era_end_time
+            # detects them and stores the switch time as era_end_epoch_time, which is
+            # used downstream to censor follow-up at the moment of the switch.
+            # Note: pre-index contamination by the opposite arm is structurally impossible
+            # here — find_first_drug_initiation returns the FIRST drug event, so if the
+            # opposite arm had appeared earlier it would have been the index event instead.
+            index_visit_tokens = set(concept_ids[vs_pos:visit_end + 1])
+            if index_visit_tokens & source_concepts and index_visit_tokens & comparator_concepts:
+                n_skipped += 1
+                continue
 
         # ---- Build truncated context rows ----
         non_treated_row = build_non_treated_context(row, vs_pos, available_array_cols)
@@ -797,8 +915,21 @@ def _process_shard(
                 inpatient_outcome_labels=inpatient_outcome_labels,
                 labels_by_token=labels_by_token,
             )
+            # LEGEND removes, outcome by outcome, the patients that had the outcome before
+            # the index date; the flags let the analysis do the same.
+            earlier = find_outcomes_after_drug(
+                concept_ids, epoch_times, 0, outcome_concept_groups,
+                inpatient_outcome_labels=inpatient_outcome_labels,
+                labels_by_token=labels_by_token,
+                before_time=index_time,
+            )
             observed_outcomes_chunk.append(
-                {"person_id": person_id, "drug_epoch_time": drug_epoch_time, **oc_times}
+                {
+                    "person_id": person_id,
+                    "drug_epoch_time": drug_epoch_time,
+                    **oc_times,
+                    **{f"{PRIOR_PREFIX}{k}": t is not None for k, t in earlier.items()},
+                }
             )
 
         n_found += 1
@@ -831,6 +962,9 @@ def process(
     inpatient_outcome_concept_ids: Optional[List[int]] = None,
     outcome_definitions_path: Optional[str] = None,
     min_prior_observation_days: float = 0.0,
+    monotherapy_window_days: Optional[float] = None,
+    population_window_days: Optional[float] = None,
+    censor_at_switch: bool = False,
     era_gap_days: int = 30,
     min_context_length: int = 4,
     overwrite: bool = False,
@@ -888,6 +1022,19 @@ def process(
         Washout: patients need at least this many days between the start of
         their first visit and the index drug to count as new users (default 0,
         no requirement).  LEGEND-style new-user designs use 365.
+    monotherapy_window_days
+        LEGEND's monotherapy rule: exactly one ingredient may start in the days from the index
+        date (LEGEND uses 7); a second ingredient or a combination product leaves the cohort.
+        The ingredients are the source, comparator and exclusion drugs.  Prior exposure is
+        then judged on dates strictly before the index date.  Default: the older same-visit
+        checks.
+    population_window_days
+        Window, ending on the index date, in which a ``population_concept_ids`` diagnosis has
+        to be recorded (LEGEND: 365 for hypertension).  Default: anywhere in the history.
+    censor_at_switch
+        End the follow-up when the patient starts the other arm's drug or an exclusion drug.
+        LEGEND does not: its on-treatment window ends with the continuous exposure to the
+        patient's own class.
     era_gap_days
         Persistence window in days for drug era computation (default: 30).
         Consecutive drug events separated by more than this many days belong
@@ -934,6 +1081,9 @@ def process(
             definitions_fingerprint(outcome_definitions_path) if outcome_definitions_path else None
         ),
         "min_prior_observation_days": min_prior_observation_days,
+        "monotherapy_window_days": monotherapy_window_days,
+        "population_window_days": population_window_days,
+        "censor_at_switch": censor_at_switch,
         "era_gap_days": era_gap_days,
         "min_context_length": min_context_length,
     }
@@ -1097,6 +1247,15 @@ def process(
     # Only read the columns we actually need — skip unrelated columns
     needed_cols = list(dict.fromkeys(available_array_cols + scalar_cols))
 
+    ingredients_of: Optional[Dict[str, Set[str]]] = None
+    if monotherapy_window_days is not None:
+        ingredients_of = load_ingredient_map(
+            vocab_path,
+            list(source_ingredient_ids) + list(comparator_ingredient_ids) + list(exclusion_concept_ids or []),
+        )
+        print(f"Monotherapy within {monotherapy_window_days:g} days: {len(ingredients_of):,} drug concepts of "
+              f"{len({i for v in ingredients_of.values() for i in v}):,} ingredients")
+
     shard_args = [
         (
             shard_id,
@@ -1120,6 +1279,10 @@ def process(
             era_gap_days,
             inpatient_outcome_labels,
             min_prior_observation_days,
+            ingredients_of,
+            monotherapy_window_days if monotherapy_window_days is not None else 7.0,
+            population_window_days,
+            censor_at_switch,
         )
         for shard_id in range(effective_workers)
     ]
@@ -1225,6 +1388,30 @@ def _parse_args() -> argparse.Namespace:
              "Default: no filter.",
     )
     parser.add_argument(
+        "--monotherapy_window_days",
+        type=float,
+        default=None,
+        help="LEGEND's monotherapy rule: exactly one ingredient (of the source, comparator and "
+             "exclusion drugs) may start within this many days from the index date, e.g. 7. A "
+             "second ingredient or a combination product leaves the cohort. Prior exposure is "
+             "then judged on dates before the index date. Default: off (same-visit checks).",
+    )
+    parser.add_argument(
+        "--population_window_days",
+        type=float,
+        default=None,
+        help="A --population_concept_ids diagnosis has to be recorded in this many days up to "
+             "and including the index date (LEGEND hypertension: 365). Default: anywhere in the "
+             "history before the index drug.",
+    )
+    parser.add_argument(
+        "--censor_at_switch",
+        action="store_true",
+        help="End follow-up when the patient starts the other arm's drug or an exclusion drug. "
+             "LEGEND does not (its on-treatment window ends with the exposure to the patient's "
+             "own class), so this is off by default.",
+    )
+    parser.add_argument(
         "--min_prior_observation_days",
         type=float,
         default=0.0,
@@ -1304,6 +1491,9 @@ def main() -> None:
         inpatient_outcome_concept_ids=inpatient_outcome_concept_ids,
         outcome_definitions_path=args.outcome_definitions_path,
         min_prior_observation_days=args.min_prior_observation_days,
+        monotherapy_window_days=args.monotherapy_window_days,
+        population_window_days=args.population_window_days,
+        censor_at_switch=args.censor_at_switch,
         era_gap_days=args.era_gap_days,
         min_context_length=args.min_context_length,
         overwrite=args.overwrite,
