@@ -16,16 +16,17 @@ probes of the model, see cehrgpt.open_vocab.question_encoder. There is no option
 Questions: --questions "text" ..., --questions_file (one per line), or --concepts ids with --embeddings_dir, the
 folder of question_embeddings, which holds the name of each concept id (question_texts.parquet).
 
-With --evaluate, the probability of each question in the window is compared with the label of that question:
-AUROC, AUPRC, Brier score, per question. The label of a question is a column of the features, given with
---question_label_columns "question=column" (one per question); a single question may use --label_column instead.
-The questions are scored one by one; they are not combined.
+The evaluation is automatic: the probability of each question in the window is compared with the label column of the
+features (--label_column, default boolean_value; the questions are usually names for the outcome of that cohort), and
+the AUROC, AUPRC and Brier score of every question are in metrics.json and the log. A question with an outcome of its
+own takes it from --question_label_columns "question=column". The label is written next to each probability in
+predictions.parquet. Without the label column the predictions are still written and a warning names the columns of the
+features. The questions are scored one by one; they are not combined.
 
 Example:
     python -m cehrgpt.tools.zero_shot_qa_predictions --model_path MODEL \
         --features_folder FEATURES/test_features --output_dir OUT \
-        --questions "Type 2 diabetes mellitus" "Heart failure" --evaluate \
-        --question_label_columns "Type 2 diabetes mellitus=label_t2dm" "Heart failure=label_hf"
+        --questions "Coronary Artery Bypass Graft" "cabg"
 """
 
 import argparse
@@ -77,7 +78,7 @@ def read_questions(args: argparse.Namespace) -> List[str]:
 def question_label_columns(args: argparse.Namespace, questions: List[str]) -> Dict[str, Optional[str]]:
     """
     The feature column that holds the label of each question: --question_label_columns, and for a
-    single question without one, --label_column. A question without a column has no label.
+    question without one, --label_column (the label of the cohort of the features, shared by the questions).
     """
     columns: Dict[str, Optional[str]] = {q: None for q in questions}
     for entry in getattr(args, "question_label_columns", None) or []:
@@ -88,9 +89,32 @@ def question_label_columns(args: argparse.Namespace, questions: List[str]) -> Di
         if question not in columns:
             raise ValueError(f"--question_label_columns names {question!r}, which is not one of the questions: {questions}")
         columns[question] = column
-    if len(questions) == 1 and columns[questions[0]] is None:
-        columns[questions[0]] = args.label_column
-    return columns
+    return {q: column or args.label_column for q, column in columns.items()}
+
+
+def format_table(metrics: Dict[str, Dict[str, Optional[float]]]) -> str:
+    """One line per question: n, positives, prevalence, AUROC, AUPRC, Brier score."""
+
+    def cell(value: Optional[float], digits: int = 3) -> str:
+        return "-" if value is None else f"{value:.{digits}f}"
+
+    lines = [f"{'question':<40} {'n':>9} {'positives':>9} {'prevalence':>10} {'auroc':>7} {'auprc':>7} {'brier':>7}"]
+    for question, m in metrics.items():
+        lines.append(
+            f"{question[:40]:<40} {m['n']:>9} {m['positives']:>9} {cell(m['prevalence'], 4):>10} "
+            f"{cell(m['auroc']):>7} {cell(m['auprc']):>7} {cell(m['brier_score']):>7}"
+        )
+    return "\n".join(lines)
+
+
+def feature_columns(folder: str) -> List[str]:
+    """The columns of the first features file, except the features themselves (to name the label columns)."""
+    import glob
+
+    files = sorted(glob.glob(os.path.join(os.path.expanduser(folder), "**", "*.parquet"), recursive=True))
+    if not files:
+        return []
+    return [c for c in pq.ParquetFile(files[0]).schema_arrow.names if c != "features"]
 
 
 def run(args: argparse.Namespace, encoder=None) -> Dict[str, object]:
@@ -106,17 +130,10 @@ def run(args: argparse.Namespace, encoder=None) -> Dict[str, object]:
     os.makedirs(args.output_dir, exist_ok=True)
     n_questions = len(questions)
     label_columns = question_label_columns(args, questions)
-    if args.evaluate:
-        unlabelled = [q for q, column in label_columns.items() if column is None]
-        if unlabelled:
-            raise ValueError(
-                f'--evaluate needs the label column of every question, give --question_label_columns "question=column" '
-                f"for: {unlabelled}"
-            )
     extra = sorted({c for c in label_columns.values() if c}) + ([args.gap_days_column] if args.gap_days_column else [])
     writer = None
-    scored: List[np.ndarray] = []
-    labels_seen: List[np.ndarray] = []
+    scored: Dict[str, List[np.ndarray]] = {q: [] for q in questions}
+    labels_seen: Dict[str, List[np.ndarray]] = {q: [] for q in questions}
     total = 0
     question_names = np.array(questions, dtype=object)
     for batch in iter_feature_batches(args.features_folder, args.batch_size, extra):
@@ -144,12 +161,10 @@ def run(args: argparse.Namespace, encoder=None) -> Dict[str, object]:
             writer = pq.ParquetWriter(os.path.join(args.output_dir, "predictions.parquet"), table.schema)
         writer.write_table(table)
         total += rows
-        if args.evaluate:
-            if labels is None:
-                missing = sorted({c for c in label_columns.values() if c and c not in batch})
-                raise ValueError(f"--evaluate needs the label column(s) {missing} in the features")
-            scored.append(probabilities)
-            labels_seen.append(labels)
+        for i, column in enumerate(columns_of_labels):
+            if column is not None:
+                scored[questions[i]].append(probabilities[:, i])
+                labels_seen[questions[i]].append(np.asarray(column))
     if writer is not None:
         writer.close()
     metrics: Dict[str, object] = {
@@ -163,15 +178,20 @@ def run(args: argparse.Namespace, encoder=None) -> Dict[str, object]:
             **{k: v for k, v in config_embedder.items() if k != "probes"},
         },
     }
-    if args.evaluate:
-        probabilities_of_outcome = np.concatenate(scored)
-        labels_of_outcome = np.concatenate(labels_seen)
-        metrics["outcome"] = {
-            "per_question": {
-                q: evaluate_predictions(labels_of_outcome[:, i], probabilities_of_outcome[:, i])
-                for i, q in enumerate(questions)
-            },
-        }
+    per_question = {
+        q: evaluate_predictions(np.concatenate(labels_seen[q]), np.concatenate(scored[q])) for q in questions if scored[q]
+    }
+    if per_question:
+        metrics["outcome"] = {"per_question": per_question}
+        LOG.info("Per question, against its label column:\n%s", format_table(per_question))
+    skipped = [q for q in questions if q not in per_question]
+    if skipped:
+        LOG.warning(
+            "Not evaluated, the label column is not in the features for: %s. The columns of the features are %s; "
+            "name the label column with --label_column (all questions) or --question_label_columns (one question)",
+            skipped,
+            feature_columns(args.features_folder),
+        )
     with open(os.path.join(args.output_dir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
     LOG.info("%s", json.dumps(metrics, indent=2))
@@ -190,9 +210,8 @@ def create_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--window", default="365", help='Days after the prediction time: "365" (default) is the first year, "30-90" is days 30 to 90')
     parser.add_argument("--gap_days", type=float, default=0.0, help="Days between the last event and the prediction time, for every patient")
     parser.add_argument("--gap_days_column", default=None, help="A column with the gap per patient (overrides --gap_days)")
-    parser.add_argument("--label_column", default="boolean_value", help="The label column when there is a single question and no --question_label_columns for it")
-    parser.add_argument("--question_label_columns", nargs="+", default=None, metavar="QUESTION=COLUMN", help='The feature column with the observed outcome of each question, e.g. "Heart failure=label_hf"; written next to the predictions')
-    parser.add_argument("--evaluate", action="store_true", help="Compare the probability of each question with its label column (AUROC, AUPRC, Brier score per question)")
+    parser.add_argument("--label_column", default="boolean_value", help="The feature column with the observed outcome, the label of every question that has no --question_label_columns; the predictions are scored per question against it")
+    parser.add_argument("--question_label_columns", nargs="+", default=None, metavar="QUESTION=COLUMN", help='The feature column with the observed outcome of one question when it differs from --label_column, e.g. "Heart failure=label_hf"')
     parser.add_argument("--probe_similarity", type=float, default=0.999, help="The lowest cosine similarity between a probe and its stored vector for the encoder to be accepted")
     parser.add_argument("--fp16", action="store_true", help="Run the question encoder in half precision on a GPU (still has to reproduce the probes)")
     parser.add_argument("--batch_size", type=int, default=4096)
