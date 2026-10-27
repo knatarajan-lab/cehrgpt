@@ -34,25 +34,26 @@ class DrugSwapTest(unittest.TestCase):
         (root / "vocab" / "concept_ancestor").mkdir(parents=True)
         pl.DataFrame(
             {
-                "ancestor_concept_id": [SOURCE, COMPARATOR_A, COMPARATOR_B],
-                "descendant_concept_id": [SOURCE, COMPARATOR_A, COMPARATOR_B],
+                # 101 is a drug of the source class that the tokenizer does not know
+                "ancestor_concept_id": [SOURCE, COMPARATOR_A, COMPARATOR_B, SOURCE],
+                "descendant_concept_id": [SOURCE, COMPARATOR_A, COMPARATOR_B, 101],
             }
         ).write_parquet(root / "vocab" / "concept_ancestor" / "part.parquet")
         pl.DataFrame(
             {
-                "person_id": [1, 2, 3],
-                "drug_concept_id": ["100", "100", "200"],
-                "drug_epoch_time": [0.0, 0.0, 0.0],
-                "era_end_epoch_time": [None, None, None],
-                "arm": ["source", "source", "comparator"],
+                "person_id": [1, 2, 3, 4, 5],
+                "drug_concept_id": ["100", "100", "200", "300", "101"],
+                "drug_epoch_time": [0.0] * 5,
+                "era_end_epoch_time": [None] * 5,
+                "arm": ["source", "source", "comparator", "comparator", "source"],
             },
             schema_overrides={"era_end_epoch_time": pl.Float64},
         ).write_parquet(root / "drug_info.parquet")
         pl.DataFrame(
             {
-                "person_id": [1, 2],
-                "concept_ids": [["9202", "100", "x"], ["9202", "100", "x"]],
-                "input_ids": [[5, 10, 7], [5, 10, 7]],
+                "person_id": [1, 2, 5],
+                "concept_ids": [["9202", "100", "x"], ["9202", "100", "x"], ["9202", "101", "x"]],
+                "input_ids": [[5, 10, 7], [5, 10, 7], [5, 1, 7]],
             }
         ).write_parquet(root / "treated.parquet")
         self.root = root
@@ -87,6 +88,27 @@ class DrugSwapTest(unittest.TestCase):
     def test_every_missing_comparator_is_listed(self):
         with self.assertRaisesRegex(ValueError, "2 comparator.*200, 300"):
             self.run_swap([COMPARATOR_A, COMPARATOR_B], vocab={"[OOV]": 1})
+
+    def test_a_patient_whose_own_drug_is_unknown_to_the_tokenizer_is_left_out(self):
+        swapped = self.run_swap([COMPARATOR_A, COMPARATOR_B])
+        self.assertEqual(sorted(swapped["person_id"].to_list()), [1, 2])
+
+    def test_unknown_comparators_are_left_out_on_request_and_the_rest_are_sampled(self):
+        vocab = {k: v for k, v in VOCAB.items() if k != "300"}
+        swapped = self.run_swap([COMPARATOR_A, COMPARATOR_B], vocab=vocab, drop_unknown_comparators=True)
+        self.assertEqual(len(swapped), 2)
+        self.assertEqual(set(swapped["drug_concept_id"].to_list()), {"200"})
+        for row in swapped.iter_rows(named=True):
+            self.assertEqual(row["input_ids"], [5, 20, 7])
+
+    def test_nothing_is_left_when_no_comparator_is_known(self):
+        with self.assertRaisesRegex(ValueError, "none of the comparator ingredients"):
+            self.run_swap([COMPARATOR_A, COMPARATOR_B], vocab={"[OOV]": 1, "100": 10}, drop_unknown_comparators=True)
+
+    def test_the_strict_error_names_the_option(self):
+        vocab = {k: v for k, v in VOCAB.items() if k != "300"}
+        with self.assertRaisesRegex(ValueError, "--drop_unknown_comparators"):
+            self.run_swap([COMPARATOR_A, COMPARATOR_B], vocab=vocab)
 
     def test_the_check_happens_before_any_data_is_read(self):
         with stub_from_pretrained({"[OOV]": 1}):

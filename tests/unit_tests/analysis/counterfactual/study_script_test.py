@@ -184,6 +184,17 @@ class StudyScriptTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_unknown_comparator_drugs_are_only_dropped_on_request(self):
+        _, commands = self.run_script()
+        for swap in self.calls(commands, "create_drug_swap_context.py"):
+            self.assertNotIn("--drop_unknown_comparators", swap)
+        self.log.unlink()
+        _, commands = self.run_script(DROP_UNKNOWN_COMPARATORS="true")
+        swaps = self.calls(commands, "create_drug_swap_context.py")
+        self.assertEqual(len(swaps), 2)
+        for swap in swaps:
+            self.assertIn("--drop_unknown_comparators", swap)
+
     def test_the_outcomes_of_the_study_are_resolved_in_step_zero(self):
         _, commands = self.run_script()
         outcomes = self.calls(commands, "outcome_definitions.py")[0]

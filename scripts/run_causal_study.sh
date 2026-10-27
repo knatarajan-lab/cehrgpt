@@ -219,6 +219,13 @@ done
 # arm and from the observed analysis.  Set to "" to turn the check off.
 PREFERENCE_SCORE_TRIM="${PREFERENCE_SCORE_TRIM:-0.05}"
 
+# The swap puts a drug of the other exposure into each history, so the model has to know that drug.
+# By default the run stops when the tokenizer does not know one of the ingredients.  Set to "true" to
+# leave those ingredients out (the others are sampled by their relative frequency; the share of the
+# real prescriptions that is left out is printed).  Patients whose own drug the tokenizer does not
+# know are always left out.
+DROP_UNKNOWN_COMPARATORS="${DROP_UNKNOWN_COMPARATORS:-false}"
+
 # =============================================================================
 # DERIVED PATHS
 # =============================================================================
@@ -467,6 +474,10 @@ else
             --batch_size "${BATCH_SIZE}"
         )
     fi
+    _DROP_UNKNOWN_ARG=()
+    if [ "${DROP_UNKNOWN_COMPARATORS}" = "true" ]; then
+        _DROP_UNKNOWN_ARG=(--drop_unknown_comparators)
+    fi
     _MAX_TARGET_ARG=()
     if [ -n "${MAX_TARGET_PATIENTS:-}" ]; then
         _MAX_TARGET_ARG=(--max_source_patients "${MAX_TARGET_PATIENTS}")
@@ -482,6 +493,7 @@ else
         --also_write_treated_path "${TARGET_PTS_TARGET_CTX}" \
         --seed                   "${RANDOM_SEED}" \
         "${_OVERLAP_TARGET_ARGS[@]}" \
+        "${_DROP_UNKNOWN_ARG[@]}" \
         "${_MAX_TARGET_ARG[@]}"
 
     if [ "${DESIGN}" = "symmetric" ]; then
@@ -512,6 +524,7 @@ else
             --also_write_treated_path "${COMPARATOR_PTS_COMPARATOR_CTX}" \
             --seed                   "${RANDOM_SEED}" \
             "${_OVERLAP_COMPARATOR_ARGS[@]}" \
+            "${_DROP_UNKNOWN_ARG[@]}" \
             "${_MAX_COMPARATOR_ARG[@]}"
 
         # --- Concat arm contexts and drug_info ---

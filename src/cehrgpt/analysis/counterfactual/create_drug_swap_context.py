@@ -126,8 +126,15 @@ def get_descendants_for_concepts(vocab_path: str, concept_ids: List[int]) -> Set
     return result
 
 
+def load_vocab(tokenizer_path: str) -> Dict[str, int]:
+    return CehrGptTokenizer.from_pretrained(tokenizer_path).get_vocab()
+
+
 def resolve_comparator_token_ids(
-    tokenizer_path: str, comparator_concept_ids: List[int]
+    tokenizer_path: str,
+    comparator_concept_ids: List[int],
+    drop_unknown: bool = False,
+    vocab: Optional[Dict[str, int]] = None,
 ) -> Dict[str, int]:
     """
     Map each comparator ingredient to its token id in the CEHR-GPT vocabulary.
@@ -135,17 +142,30 @@ def resolve_comparator_token_ids(
     The comparator ingredient replaces the source drug token in the context, so
     the model can only be conditioned on it if the tokenizer knows it.  A
     missing ingredient would map to ``[OOV]``, which silently runs the
-    "comparator" arm on an unknown drug, so it is an error.
+    "comparator" arm on an unknown drug, so it is an error.  With *drop_unknown* the
+    ingredients the tokenizer does not know are left out instead (and reported), as long as
+    one is left.
     """
-    vocab = CehrGptTokenizer.from_pretrained(tokenizer_path).get_vocab()
+    vocab = vocab if vocab is not None else load_vocab(tokenizer_path)
     missing = [str(c) for c in comparator_concept_ids if str(c) not in vocab]
-    if missing:
+    if missing and not drop_unknown:
         raise ValueError(
             f"{len(missing)} comparator ingredient concept_id(s) are not in the vocabulary of "
             f"the tokenizer at {tokenizer_path}: {', '.join(missing)}. Remove them from "
-            f"--comparator_concept_ids or use a tokenizer that was trained on them."
+            f"--comparator_concept_ids, use a tokenizer that was trained on them, or leave them out "
+            f"with --drop_unknown_comparators."
         )
-    return {str(c): int(vocab[str(c)]) for c in comparator_concept_ids}
+    known = {str(c): int(vocab[str(c)]) for c in comparator_concept_ids if str(c) in vocab}
+    if not known:
+        raise ValueError(
+            f"none of the comparator ingredients is in the vocabulary of the tokenizer at {tokenizer_path}"
+        )
+    if missing:
+        print(
+            f"  Warning: {len(missing)} comparator ingredient(s) are not in the vocabulary of the "
+            f"tokenizer and are left out: {', '.join(missing)}"
+        )
+    return known
 
 
 def compute_ingredient_sampling_weights(
@@ -299,6 +319,7 @@ def create_comparator_context(
     overlap_scores_path: Optional[Path] = None,
     context_length: int = 1024,
     batch_size: int = 8,
+    drop_unknown_comparators: bool = False,
 ) -> None:
     """
     Filter *treated_context_path* to patients in the SOURCE drug class, then
@@ -348,6 +369,10 @@ def create_comparator_context(
         ``hazard_ratio_estimation.py`` so the observed analysis drops the same patients.
     context_length, batch_size
         Input length and batch size of the overlap check; use the generation values.
+    drop_unknown_comparators
+        Leave out the comparator ingredients that the tokenizer does not know instead of
+        stopping.  The ingredients are then sampled by their frequency among the known ones, and
+        the share of the real comparator prescriptions that is left out is printed.
     """
     if preference_score_trim is not None:
         if model_path is None or overlap_scores_path is None:
@@ -358,7 +383,10 @@ def create_comparator_context(
             raise ValueError(
                 f"preference_score_trim must be in (0, 0.5), got {preference_score_trim}"
             )
-    comparator_token_ids = resolve_comparator_token_ids(tokenizer_path, comparator_concept_ids)
+    vocab = load_vocab(tokenizer_path)
+    comparator_token_ids = resolve_comparator_token_ids(
+        tokenizer_path, comparator_concept_ids, drop_unknown_comparators, vocab
+    )
 
     random.seed(seed)
     output_path = Path(output_path)
@@ -379,6 +407,19 @@ def create_comparator_context(
     )
     print(f"             → {len(source_patients):,} source-class patients")
 
+    # The model can only be run on a patient whose own drug is in its vocabulary
+    unknown_drug_patients: Set[int] = set(
+        drug_info
+        .filter(pl.col("person_id").is_in(list(source_patients)))
+        .filter(~pl.col("drug_concept_id").cast(pl.String).is_in(list(vocab)))
+        ["person_id"]
+        .to_list()
+    )
+    if unknown_drug_patients:
+        source_patients -= unknown_drug_patients
+        print(f"             → left out {len(unknown_drug_patients):,} patients whose own drug is not "
+              f"in the vocabulary of the tokenizer; {len(source_patients):,} remain")
+
     # 2. Expand comparator ingredients and identify comparator patients
     print(f"[comparator] Expanding {len(comparator_concept_ids)} ingredient(s) via concept_ancestor …")
     comparator_concepts = get_descendants_for_concepts(vocab_path, comparator_concept_ids)
@@ -397,6 +438,16 @@ def create_comparator_context(
         comparator_ingredient_ids=comparator_concept_ids,
         vocab_path=vocab_path,
     )
+    unknown_weight = sum(w for c, w in weights.items() if c not in comparator_token_ids)
+    if unknown_weight:
+        known_total = sum(w for c, w in weights.items() if c in comparator_token_ids)
+        if known_total <= 0:
+            raise ValueError(
+                "none of the real comparator prescriptions is for an ingredient the tokenizer knows"
+            )
+        print(f"  Left out {unknown_weight:.1%} of the real comparator prescriptions (ingredients the "
+              f"tokenizer does not know); the rest are sampled by their relative frequency")
+        weights = {c: w / known_total for c, w in weights.items() if c in comparator_token_ids}
     weight_concepts = list(weights.keys())
     weight_values   = [weights[c] for c in weight_concepts]
 
@@ -580,6 +631,15 @@ def _parse_args() -> argparse.Namespace:
         help="Batch size of the overlap check (default: 8)",
     )
     parser.add_argument(
+        "--drop_unknown_comparators",
+        action="store_true",
+        help=(
+            "Leave out the comparator ingredients that the tokenizer does not know instead of "
+            "stopping. They are sampled by their frequency among the known ingredients, and the "
+            "share of the real comparator prescriptions that is left out is printed."
+        ),
+    )
+    parser.add_argument(
         "--list_concepts",
         action="store_true",
         help="Print the built-in ACEi and thiazide concept_id lists then exit",
@@ -622,6 +682,7 @@ def main() -> None:
         ),
         context_length=args.context_length,
         batch_size=args.batch_size,
+        drop_unknown_comparators=args.drop_unknown_comparators,
     )
 
 
