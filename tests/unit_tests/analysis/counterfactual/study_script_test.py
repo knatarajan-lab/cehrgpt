@@ -128,6 +128,20 @@ class StudyScriptTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(commands, [])
 
+    def test_the_inputs_are_set_from_the_command_line_and_the_tokenizer_defaults_to_the_model(self):
+        _, commands = self.run_script(
+            PATIENT_SEQUENCE_PATH="/my/patient_sequence", VOCAB_PATH="/my/vocab", MODEL_PATH="/my/model"
+        )
+        extraction = self.calls(commands, "extract_drug_initiation_sequences.py")[0]
+        self.assertIn("--patient_sequence_path /my/patient_sequence", extraction)
+        self.assertIn("--vocab_path /my/vocab", extraction)
+        self.assertIn("--tokenizer_path /my/model", extraction)
+        generation = self.calls(commands, "generate_counterfactual_sequences.py")[0]
+        self.assertIn("--model_name_or_path /my/model", generation)
+        self.log.unlink()
+        _, commands = self.run_script(MODEL_PATH="/my/model", TOKENIZER_PATH="/my/tokenizer")
+        self.assertIn("--tokenizer_path /my/tokenizer", self.calls(commands, "extract_drug_initiation_sequences.py")[0])
+
     def test_the_outcomes_of_the_study_are_resolved_in_step_zero(self):
         _, commands = self.run_script()
         outcomes = self.calls(commands, "outcome_definitions.py")[0]

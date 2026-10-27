@@ -95,10 +95,15 @@ case "${DESIGN}" in
     *) echo "ERROR: DESIGN must be symmetric or target_initiators, got '${DESIGN}'" >&2; exit 1 ;;
 esac
 
-PATIENT_SEQUENCE_PATH="/data/patient_sequence"
-VOCAB_PATH="/data/omop_vocab"
-MODEL_PATH="/models/cehrgpt"
-TOKENIZER_PATH="/models/tokenizer"
+# Inputs: set them here or on the command line (PATIENT_SEQUENCE_PATH=... bash scripts/run_causal_study.sh).
+#   PATIENT_SEQUENCE_PATH : the patient sequences (a parquet file or a folder of parquet files)
+#   VOCAB_PATH            : the OMOP vocabulary, a folder that contains concept_ancestor/
+#   MODEL_PATH            : the CEHR-GPT model
+#   TOKENIZER_PATH        : its tokenizer; CEHR-GPT saves it next to the model, so that is the default
+PATIENT_SEQUENCE_PATH="${PATIENT_SEQUENCE_PATH:-/data/patient_sequence}"
+VOCAB_PATH="${VOCAB_PATH:-/data/omop_vocab}"
+MODEL_PATH="${MODEL_PATH:-/models/cehrgpt}"
+TOKENIZER_PATH="${TOKENIZER_PATH:-${MODEL_PATH}}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/data/${STUDY_LABEL}_${TARGET_LABEL}_vs_${COMPARATOR_LABEL}_${DESIGN}}"
 
 # Number of stochastic trajectories per patient per arm
