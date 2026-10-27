@@ -33,6 +33,16 @@ class StudyScriptTest(unittest.TestCase):
             "exit 0\n"
         )
         shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
+        # the inputs exist (the script checks them before it starts)
+        self.inputs = {}
+        for name, relative in (
+            ("PATIENT_SEQUENCE_PATH", "patients"),
+            ("VOCAB_PATH", "vocab"),
+            ("MODEL_PATH", "model"),
+        ):
+            (self.root / relative).mkdir()
+            self.inputs[name] = str(self.root / relative)
+        (self.root / "vocab" / "concept_ancestor").mkdir()
 
     def run_script(self, **env):
         environment = {
@@ -43,6 +53,7 @@ class StudyScriptTest(unittest.TestCase):
             "OUTPUT_ROOT": str(self.root / "out"),
             # the stand-in finishes at once, so the arms never run on a GPU
             "SUPPRESS_CONCEPTS": "true",
+            **self.inputs,
             **env,
         }
         result = subprocess.run(
@@ -129,18 +140,49 @@ class StudyScriptTest(unittest.TestCase):
             self.assertEqual(commands, [])
 
     def test_the_inputs_are_set_from_the_command_line_and_the_tokenizer_defaults_to_the_model(self):
+        for name in ("patient_sequence", "vocab/concept_ancestor", "model", "tokenizer"):
+            (self.root / "my" / name).mkdir(parents=True)
+        mine = str(self.root / "my")
         _, commands = self.run_script(
-            PATIENT_SEQUENCE_PATH="/my/patient_sequence", VOCAB_PATH="/my/vocab", MODEL_PATH="/my/model"
+            PATIENT_SEQUENCE_PATH=mine + "/patient_sequence", VOCAB_PATH=mine + "/vocab", MODEL_PATH=mine + "/model"
         )
         extraction = self.calls(commands, "extract_drug_initiation_sequences.py")[0]
-        self.assertIn("--patient_sequence_path /my/patient_sequence", extraction)
-        self.assertIn("--vocab_path /my/vocab", extraction)
-        self.assertIn("--tokenizer_path /my/model", extraction)
+        self.assertIn("--patient_sequence_path " + mine + "/patient_sequence", extraction)
+        self.assertIn("--vocab_path " + mine + "/vocab", extraction)
+        self.assertIn("--tokenizer_path " + mine + "/model", extraction)
         generation = self.calls(commands, "generate_counterfactual_sequences.py")[0]
-        self.assertIn("--model_name_or_path /my/model", generation)
+        self.assertIn("--model_name_or_path " + mine + "/model", generation)
         self.log.unlink()
-        _, commands = self.run_script(MODEL_PATH="/my/model", TOKENIZER_PATH="/my/tokenizer")
-        self.assertIn("--tokenizer_path /my/tokenizer", self.calls(commands, "extract_drug_initiation_sequences.py")[0])
+        _, commands = self.run_script(MODEL_PATH=mine + "/model", TOKENIZER_PATH=mine + "/tokenizer")
+        self.assertIn("--tokenizer_path " + mine + "/tokenizer", self.calls(commands, "extract_drug_initiation_sequences.py")[0])
+
+    def test_a_missing_input_is_reported_before_anything_runs(self):
+        for name, expected in (
+            ("PATIENT_SEQUENCE_PATH", "PATIENT_SEQUENCE_PATH does not exist"),
+            ("VOCAB_PATH", "VOCAB_PATH does not exist"),
+            ("MODEL_PATH", "MODEL_PATH does not exist"),
+            ("TOKENIZER_PATH", "TOKENIZER_PATH does not exist"),
+        ):
+            self.log.unlink(missing_ok=True)
+            result, commands = self.run_script(**{name: str(self.root / "missing")})
+            self.assertNotEqual(result.returncode, 0, name)
+            self.assertIn(expected, result.stderr)
+            self.assertEqual(commands, [], name)
+
+    def test_an_output_folder_that_cannot_be_created_is_reported(self):
+        blocker = self.root / "blocker"
+        blocker.write_text("a file, not a folder")
+        result, commands = self.run_script(OUTPUT_ROOT=str(blocker / "out"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot create OUTPUT_ROOT", result.stderr)
+        self.assertEqual(commands, [])
+
+    def test_the_inputs_of_skipped_steps_are_not_needed(self):
+        result, _ = self.run_script(
+            SKIP_STEP1="true", SKIP_STEP2="true", SKIP_STEP3="true", PATIENT_SEQUENCE_PATH=str(self.root / "missing"),
+            MODEL_PATH=str(self.root / "missing"),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_the_outcomes_of_the_study_are_resolved_in_step_zero(self):
         _, commands = self.run_script()

@@ -104,33 +104,38 @@ PATIENT_SEQUENCE_PATH="${PATIENT_SEQUENCE_PATH:-/data/patient_sequence}"
 VOCAB_PATH="${VOCAB_PATH:-/data/omop_vocab}"
 MODEL_PATH="${MODEL_PATH:-/models/cehrgpt}"
 TOKENIZER_PATH="${TOKENIZER_PATH:-${MODEL_PATH}}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/data/${STUDY_LABEL}_${TARGET_LABEL}_vs_${COMPARATOR_LABEL}_${DESIGN}}"
+# Everything is written here; the default is a folder in the current directory.
+OUTPUT_ROOT="${OUTPUT_ROOT:-$(pwd)/output/${STUDY_LABEL}_${TARGET_LABEL}_vs_${COMPARATOR_LABEL}_${DESIGN}}"
+
+# Settings like the ones below can be given on the command line too, e.g.
+#   NUM_TRAJECTORIES=10 BATCH_SIZE=16 bash scripts/run_causal_study.sh
 
 # Number of stochastic trajectories per patient per arm
-NUM_TRAJECTORIES=5
+NUM_TRAJECTORIES="${NUM_TRAJECTORIES:-5}"
 
 # Maximum patients to draw (random sample) from the target patients and, in the symmetric
-# design, from the comparator patients before combining.  Set to "" to use all patients.
-MAX_TARGET_PATIENTS=500
-MAX_COMPARATOR_PATIENTS=500
+# design, from the comparator patients before combining.  Set to "" to use all patients
+# (MAX_TARGET_PATIENTS="" bash scripts/run_causal_study.sh).
+MAX_TARGET_PATIENTS="${MAX_TARGET_PATIENTS-500}"
+MAX_COMPARATOR_PATIENTS="${MAX_COMPARATOR_PATIENTS-500}"
 
-BATCH_SIZE=8
-GENERATION_INPUT_LENGTH=2048
-GENERATION_MAX_NEW_TOKENS=1024
-FOLLOW_UP_DAYS=365
-NUM_WORKERS=4
+BATCH_SIZE="${BATCH_SIZE:-8}"
+GENERATION_INPUT_LENGTH="${GENERATION_INPUT_LENGTH:-2048}"
+GENERATION_MAX_NEW_TOKENS="${GENERATION_MAX_NEW_TOKENS:-1024}"
+FOLLOW_UP_DAYS="${FOLLOW_UP_DAYS:-365}"
+NUM_WORKERS="${NUM_WORKERS:-4}"
 
 # Number of parallel workers for Step 1 sequence extraction
-EXTRACTION_NUM_WORKERS=10
+EXTRACTION_NUM_WORKERS="${EXTRACTION_NUM_WORKERS:-10}"
 
 # Minimum number of tokens required in the pre-drug context (Step 1)
-MIN_CONTEXT_LENGTH=4
+MIN_CONTEXT_LENGTH="${MIN_CONTEXT_LENGTH:-4}"
 
 # Random seed for frequency-based drug sampling in Step 2
-RANDOM_SEED=42
+RANDOM_SEED="${RANDOM_SEED:-42}"
 
 # Set to "true" to re-run Step 1 even when output files already exist
-OVERWRITE=false
+OVERWRITE="${OVERWRITE:-false}"
 
 # ERA_GAP_DAYS (two drug events within this many days belong to the same era; the era end is
 # stored in drug_info/ and bounds the follow-up in Step 4) and MIN_PRIOR_OBSERVATION_DAYS (washout:
@@ -158,9 +163,9 @@ SUPPRESS_CONCEPTS="${SUPPRESS_CONCEPTS:-false}"
 # GPU device IDs for the target arm (GPU_TARGET) and the comparator arm (GPU_COMPARATOR).
 # Set SINGLE_GPU=true to run both arms sequentially on GPU_TARGET (e.g. when only
 # one GPU is available or for debugging).
-GPU_TARGET=0
-GPU_COMPARATOR=1
-SINGLE_GPU=false
+GPU_TARGET="${GPU_TARGET:-0}"
+GPU_COMPARATOR="${GPU_COMPARATOR:-1}"
+SINGLE_GPU="${SINGLE_GPU:-false}"
 
 # Several GPUs for the generation step: "all" or a list such as "0,1,2,3".  One worker per GPU
 # generates a share of the batches of both arms, so every GPU stays busy; an interrupted run
@@ -171,10 +176,10 @@ GPU_IDS="${GPU_IDS:-}"
 # -----------------------------------------------------------------------------
 # Skip flags — set to "true" to skip steps already completed
 # -----------------------------------------------------------------------------
-SKIP_STEP1=false
-SKIP_STEP2=false
-SKIP_STEP3=false
-SKIP_STEP4=false
+SKIP_STEP1="${SKIP_STEP1:-false}"
+SKIP_STEP2="${SKIP_STEP2:-false}"
+SKIP_STEP3="${SKIP_STEP3:-false}"
+SKIP_STEP4="${SKIP_STEP4:-false}"
 
 # =============================================================================
 # ARM NAMES — used as sub-directory names under TRAJ_DIR and as arm labels
@@ -188,17 +193,17 @@ ARM_B="${COMPARATOR_LABEL}"
 # left out.
 
 # Further outcomes by concept_id (descendants included), optional
-OUTCOME_CONCEPT_IDS=""
+OUTCOME_CONCEPT_IDS="${OUTCOME_CONCEPT_IDS-}"
 # ... of which these must occur inside an inpatient or ER visit (9201/9203/262)
-INPATIENT_OUTCOME_CONCEPT_IDS=""
+INPATIENT_OUTCOME_CONCEPT_IDS="${INPATIENT_OUTCOME_CONCEPT_IDS-}"
 
 # Optional control outcomes (leave empty for none).  A negative control is an outcome
 # neither drug is expected to affect (expected HR = 1); a positive control has a known
 # effect, given as concept_id or concept_id:expected_hr (e.g. "4329847:1.5").  They are
 # extracted together with the primary outcomes and analysed in the same way; the HR
 # summary labels them and control_outcome_summary.csv reports the systematic bias.
-NEGATIVE_CONTROL_OUTCOME_IDS=""
-POSITIVE_CONTROL_OUTCOME_IDS=""
+NEGATIVE_CONTROL_OUTCOME_IDS="${NEGATIVE_CONTROL_OUTCOME_IDS-}"
+POSITIVE_CONTROL_OUTCOME_IDS="${POSITIVE_CONTROL_OUTCOME_IDS-}"
 
 # Everything the extraction step has to record (the :expected_hr suffixes are removed).
 EXTRACT_OUTCOME_CONCEPT_IDS="${OUTCOME_CONCEPT_IDS}"
@@ -273,6 +278,24 @@ _step_end() {
     local elapsed=$(( $(date +%s) - _STEP_T0 ))
     echo "Elapsed: $(( elapsed / 60 ))m $(( elapsed % 60 ))s"
 }
+
+# Check the inputs and the output folder before anything runs, so a wrong path is reported at once.
+_fail() {
+    echo "ERROR: $1" >&2
+    exit 1
+}
+_require_path() {   # name, path, what it should be
+    [ -e "$2" ] || _fail "$1 does not exist: $2 ($3). Set $1=... on the command line."
+}
+mkdir -p "${OUTPUT_ROOT}" 2>/dev/null || _fail "cannot create OUTPUT_ROOT=${OUTPUT_ROOT}. Set OUTPUT_ROOT=... to a folder you can write to."
+_require_path VOCAB_PATH "${VOCAB_PATH}/concept_ancestor" "the OMOP vocabulary, a folder with concept_ancestor/"
+if [ "${SKIP_STEP1}" != "true" ]; then
+    _require_path PATIENT_SEQUENCE_PATH "${PATIENT_SEQUENCE_PATH}" "the patient sequences"
+fi
+if [ "${SKIP_STEP1}" != "true" ] || [ "${SKIP_STEP2}" != "true" ] || [ "${SKIP_STEP3}" != "true" ]; then
+    _require_path MODEL_PATH "${MODEL_PATH}" "the CEHR-GPT model"
+    _require_path TOKENIZER_PATH "${TOKENIZER_PATH}" "the tokenizer, saved next to the model by default"
+fi
 
 echo "Study: ${STUDY_NAME}   Design: ${DESIGN}   ${TARGET_NAME} vs ${COMPARATOR_NAME}   output: ${OUTPUT_ROOT}"
 echo ""
