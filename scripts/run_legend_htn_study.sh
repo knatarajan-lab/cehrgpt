@@ -1,52 +1,44 @@
 #!/usr/bin/env bash
 # =============================================================================
-# LEGEND-HTN replication of one pair of drug classes (symmetric combined-population design)
+# LEGEND-HTN replication of one pair of drug classes
 # =============================================================================
 #
 # The two classes (TARGET_CLASS and COMPARATOR_CLASS, by default ACE inhibitors vs thiazide or
 # thiazide-like diuretics), the ingredients of each, the exclusion list and the rules of the cohorts
 # are the LEGEND-HTN definitions bundled with the package (legend_study.py), and the outcomes are
-# the LEGEND outcomes (legend_outcomes.py).
+# the LEGEND outcomes (legend_outcomes.py).  Cohort rules: new users (no antihypertensive before
+# the index date, one ingredient in the first week), a hypertension diagnosis in the year before,
+# a year of history.
 #
-# Study design
-# ------------
-#   Population  : ALL patients who initiated a drug of either class (new users: no
-#                 antihypertensive before the index date, one ingredient in the first week,
-#                 a hypertension diagnosis in the year before, a year of history).
-#   Arm A (target): Each patient's drug initiation is stripped from their
-#                 context and replaced by a frequency-sampled target concept.
-#                 Model generates the future conditional on target.
-#   Arm B (comparator): Same stripped context, but the drug slot is filled
-#                 with a frequency-sampled comparator concept instead.
-#                 Model generates the future conditional on comparator.
+# Design (DESIGN)
+# ---------------
+#   symmetric (default)
+#     The patients of BOTH classes are pooled.  Each patient's history is run once with the
+#     target drug and once with the comparator (a frequency-sampled ingredient of the class) in
+#     place of the actual drug, so both arms cover the same combined population and the
+#     population-composition asymmetry of the other design is gone.
+#       Arm A (target)     = target patients as they are + comparator patients swapped to target
+#       Arm B (comparator) = target patients swapped to comparator + comparator patients as they are
 #
-# Why this is symmetric
-# ---------------------
-#   In the original (asymmetric) design the study population is exclusively
-#   target initiators.  Their pre-index history forms the context; the target
-#   initiation is kept or swapped.  This means the model is always
-#   conditioning on target patient characteristics.
+#   target_initiators
+#     Only the patients who initiated the target class.
+#       Arm A (target)     = their histories with the target drug they received
+#       Arm B (comparator) = the same histories with the drug swapped to a comparator ingredient
+#                            (sampled by the frequency among the real comparator patients)
+#     The comparator patients are extracted too: they give the ingredient frequencies and the
+#     observed comparator cohort.
 #
-#   Here we pool BOTH drug-class patients, strip the actual drug from
-#   every patient's context, and inject the arm-assigned drug.  The same
-#   set of pre-index histories is exposed to both treatments, eliminating
-#   the population-composition asymmetry.
+#   In both designs each patient produces N trajectories per arm, the swap step checks overlap
+#   (a patient the model finds implausible for the other drug is dropped from every arm), and the
+#   observed hazard ratio of the real target and comparator cohorts is computed for reference.
 #
-# Pipeline overview
-# -----------------
-#   Step 1a : Extract drug initiation sequences — target as source,
-#             comparator as comparator (to learn comparator ingredient frequencies).
-#   Step 1b : Extract drug initiation sequences — comparator as source,
-#             target as comparator (to learn target ingredient frequencies).
-#   Step 2  : Run create_drug_swap_context.py twice — once with target as
-#             source (producing target_pts_target + target_pts_comparator contexts)
-#             and once with comparator as source (comparator_pts_comparator +
-#             comparator_pts_target).  Then concat into:
-#               Arm A (target)     = target_pts_target + comparator_pts_target
-#               Arm B (comparator) = target_pts_comparator + comparator_pts_comparator
-#             Also merges both drug_info tables into one.
-#   Step 3  : Generate N trajectories per patient per arm.
-#   Step 4  : Estimate hazard ratios from generated trajectories.
+# Pipeline
+# --------
+#   Step 0  : the LEGEND outcome definitions, resolved for the vocabulary
+#   Step 1  : extract drug initiation sequences (symmetric: once per class as the source)
+#   Step 2  : build the arm contexts by swapping the drug (symmetric: in both directions)
+#   Step 3  : generate N trajectories per patient per arm
+#   Step 4  : estimate hazard ratios from the generated trajectories, and the observed ones
 #
 # Outcomes
 # --------
@@ -68,19 +60,22 @@
 # Usage
 # -----
 #   Edit the CONFIGURATION section, then:
-#     bash run_legend_htn_acei_vs_thiazide_symmetric.sh
+#     bash scripts/run_legend_htn_study.sh
 #
-#   To skip steps already completed:
-#     SKIP_STEP1=true SKIP_STEP2=true bash run_legend_htn_acei_vs_thiazide_symmetric.sh
-#
-#   To run both arms on a single GPU sequentially:
-#     SINGLE_GPU=true bash run_legend_htn_acei_vs_thiazide_symmetric.sh
-#
+#   The other design:
+#     DESIGN=target_initiators bash scripts/run_legend_htn_study.sh
 #
 #   Another pair of classes (see legend_study.py --list):
 #     TARGET_CLASS="Angiotensin receptor blockers (ARBs)" \
 #     COMPARATOR_CLASS="Dihydropyridine calcium channel blockers (dCCB)" \
-#       bash run_legend_htn_acei_vs_thiazide_symmetric.sh
+#       bash scripts/run_legend_htn_study.sh
+#
+#   To skip steps already completed (e.g. after a failure in step 3):
+#     SKIP_STEP1=true SKIP_STEP2=true bash scripts/run_legend_htn_study.sh
+#
+#   To run both arms on a single GPU sequentially:
+#     SINGLE_GPU=true bash scripts/run_legend_htn_study.sh
+#
 # =============================================================================
 set -euo pipefail
 
@@ -103,17 +98,24 @@ eval "${_STUDY_ENV}"
 # CONFIGURATION — edit these paths before running
 # =============================================================================
 
+# symmetric or target_initiators (see the header)
+DESIGN="${DESIGN:-symmetric}"
+case "${DESIGN}" in
+    symmetric|target_initiators) ;;
+    *) echo "ERROR: DESIGN must be symmetric or target_initiators, got '${DESIGN}'" >&2; exit 1 ;;
+esac
+
 PATIENT_SEQUENCE_PATH="/data/patient_sequence"
 VOCAB_PATH="/data/omop_vocab"
 MODEL_PATH="/models/cehrgpt"
 TOKENIZER_PATH="/models/tokenizer"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/data/legend_htn_${TARGET_LABEL}_vs_${COMPARATOR_LABEL}}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/data/legend_htn_${TARGET_LABEL}_vs_${COMPARATOR_LABEL}_${DESIGN}}"
 
 # Number of stochastic trajectories per patient per arm
 NUM_TRAJECTORIES=5
 
-# Maximum patients to draw from each drug class before combining.
-# Set to "" to use all patients from each class.
+# Maximum patients to draw (random sample) from the target patients and, in the symmetric
+# design, from the comparator patients before combining.  Set to "" to use all patients.
 MAX_TARGET_PATIENTS=500
 MAX_COMPARATOR_PATIENTS=500
 
@@ -160,6 +162,9 @@ SUPPRESS_CONCEPTS="${SUPPRESS_CONCEPTS:-false}"
 # -----------------------------------------------------------------------------
 # GPU configuration
 # -----------------------------------------------------------------------------
+# GPU device IDs for the target arm (GPU_TARGET) and the comparator arm (GPU_COMPARATOR).
+# Set SINGLE_GPU=true to run both arms sequentially on GPU_TARGET (e.g. when only
+# one GPU is available or for debugging).
 GPU_TARGET=0
 GPU_COMPARATOR=1
 SINGLE_GPU=false
@@ -179,7 +184,7 @@ SKIP_STEP3=false
 SKIP_STEP4=false
 
 # =============================================================================
-# ARM NAMES
+# ARM NAMES — used as sub-directory names under TRAJ_DIR and as arm labels
 # =============================================================================
 ARM_A="${TARGET_LABEL}"
 ARM_B="${COMPARATOR_LABEL}"
@@ -221,17 +226,35 @@ PREFERENCE_SCORE_TRIM="${PREFERENCE_SCORE_TRIM:-0.05}"
 # DERIVED PATHS
 # =============================================================================
 
-# Separate extraction output directories per drug class
+# Extraction output with the target class as the source (Step 1a); the symmetric design adds one
+# with the comparator class as the source (Step 1b).
 TARGET_CONTEXT_DIR="${OUTPUT_ROOT}/target_contexts"
 COMPARATOR_CONTEXT_DIR="${OUTPUT_ROOT}/comparator_contexts"
 
-# Combined / symmetric contexts produced in Step 2
-SYMMETRIC_DIR="${OUTPUT_ROOT}/symmetric_contexts"
-TARGET_OVERLAP_SCORES="${SYMMETRIC_DIR}/target_pts_overlap_scores.parquet"
-COMPARATOR_OVERLAP_SCORES="${SYMMETRIC_DIR}/comparator_pts_overlap_scores.parquet"
-ARM_A_CTX="${SYMMETRIC_DIR}/${ARM_A}_arm_ctx.parquet"
-ARM_B_CTX="${SYMMETRIC_DIR}/${ARM_B}_arm_ctx.parquet"
-COMBINED_DRUG_INFO="${SYMMETRIC_DIR}/drug_info"
+SWAP_DIR="${OUTPUT_ROOT}/swap_contexts"
+TARGET_OVERLAP_SCORES="${SWAP_DIR}/target_pts_overlap_scores.parquet"
+COMPARATOR_OVERLAP_SCORES="${SWAP_DIR}/comparator_pts_overlap_scores.parquet"
+
+# What Step 2 writes for the target patients (2a) and, symmetric, for the comparator patients (2b)
+TARGET_PTS_TARGET_CTX="${SWAP_DIR}/target_pts_target_ctx.parquet"
+TARGET_PTS_COMPARATOR_CTX="${SWAP_DIR}/target_pts_comparator_ctx.parquet"
+COMPARATOR_PTS_COMPARATOR_CTX="${SWAP_DIR}/comparator_pts_comparator_ctx.parquet"
+COMPARATOR_PTS_TARGET_CTX="${SWAP_DIR}/comparator_pts_target_ctx.parquet"
+
+# The contexts of the two arms, and what Step 4 reads about the patients
+if [ "${DESIGN}" = "symmetric" ]; then
+    ARM_A_CTX="${SWAP_DIR}/${ARM_A}_arm_ctx.parquet"
+    ARM_B_CTX="${SWAP_DIR}/${ARM_B}_arm_ctx.parquet"
+    DRUG_INFO="${SWAP_DIR}/drug_info"
+    PRIOR_OUTCOME_PATHS=("${TARGET_CONTEXT_DIR}/observed_outcomes" "${COMPARATOR_CONTEXT_DIR}/observed_outcomes")
+    OVERLAP_SCORE_PATHS=("${TARGET_OVERLAP_SCORES}" "${COMPARATOR_OVERLAP_SCORES}")
+else
+    ARM_A_CTX="${TARGET_PTS_TARGET_CTX}"
+    ARM_B_CTX="${TARGET_PTS_COMPARATOR_CTX}"
+    DRUG_INFO="${TARGET_CONTEXT_DIR}/drug_info"
+    PRIOR_OUTCOME_PATHS=("${TARGET_CONTEXT_DIR}/observed_outcomes")
+    OVERLAP_SCORE_PATHS=("${TARGET_OVERLAP_SCORES}")
+fi
 
 TRAJ_DIR="${OUTPUT_ROOT}/trajectories"
 RESULTS_DIR="${OUTPUT_ROOT}/results"
@@ -259,6 +282,9 @@ _step_end() {
     echo "Elapsed: $(( elapsed / 60 ))m $(( elapsed % 60 ))s"
 }
 
+echo "Design: ${DESIGN}   ${TARGET_NAME} vs ${COMPARATOR_NAME}   output: ${OUTPUT_ROOT}"
+echo ""
+
 # =============================================================================
 # STEP 0 — Outcome definitions of the LEGEND study (bundled with the package)
 #
@@ -270,23 +296,21 @@ echo "STEP 0: LEGEND outcome definitions  [$(date '+%H:%M:%S')]"
 echo "============================================================"
 mkdir -p "${OUTCOME_DEFS_DIR}"
 python "${OUTCOME_SCRIPT}" \
-    --indication  Hypertension \
     --vocab_path  "${VOCAB_PATH}" \
     --output_dir  "${OUTCOME_DEFS_DIR}"
 echo ""
 
 # =============================================================================
-# STEP 1 — Extract drug initiation sequences for both drug classes
+# STEP 1 — Extract drug initiation sequences
 #
 #   1a: target as source, comparator as comparator.
-#       Produces target patients' treated_context and drug_info.
-#       comparator patients in drug_info provide empirical comparator
-#       ingredient frequencies needed for frequency-weighted sampling in Step 2.
+#       Produces the target patients' treated_context and drug_info.  The comparator patients
+#       in drug_info give the empirical frequency of each comparator ingredient (for the
+#       frequency-weighted swap in Step 2) and the observed comparator cohort.
 #
-#   1b: comparator as source, target as comparator.
-#       Produces comparator patients' treated_context and drug_info.
-#       target patients in drug_info provide empirical target ingredient
-#       frequencies needed for frequency-weighted sampling in Step 2.
+#   1b (symmetric only): comparator as source, target as comparator.
+#       Produces the comparator patients' treated_context and drug_info.  The target patients
+#       in drug_info give the empirical frequency of each target ingredient.
 # =============================================================================
 if [ "${SKIP_STEP1}" = "true" ]; then
     echo "Skipping Step 1 (SKIP_STEP1=true)"
@@ -317,6 +341,14 @@ else
     echo "STEP 1a: Extract ${TARGET_NAME} patient sequences  [$(date '+%H:%M:%S')]"
     echo "  Source     : ${TARGET_NAME} (${TARGET_CONCEPT_IDS})"
     echo "  Comparator : ${COMPARATOR_NAME} (for frequency estimation)"
+    if [ -n "${POPULATION_CONCEPT_IDS}" ]; then
+        echo "  Population filter: ${POPULATION_CONCEPT_IDS} (within ${POPULATION_WINDOW_DAYS:-any} days)"
+    fi
+    if [ -n "${EXCLUSION_CONCEPT_IDS}" ]; then
+        echo "  Exclusion (new-user filter): enabled ($(echo "${EXCLUSION_CONCEPT_IDS}" | tr ',' '\n' | wc -l | tr -d ' ') ingredients)"
+    fi
+    echo "  Min context length: ${MIN_CONTEXT_LENGTH}"
+    echo "  Overwrite: ${OVERWRITE}"
     echo "============================================================"
 
     mkdir -p "${TARGET_CONTEXT_DIR}"
@@ -339,72 +371,72 @@ else
     echo "Step 1a complete."
     echo ""
 
-    # --- Step 1b: comparator patients ---
-    echo "============================================================"
-    echo "STEP 1b: Extract ${COMPARATOR_NAME} patient sequences  [$(date '+%H:%M:%S')]"
-    echo "  Source     : ${COMPARATOR_NAME} (${COMPARATOR_CONCEPT_IDS})"
-    echo "  Comparator : ${TARGET_NAME} (for frequency estimation)"
-    echo "============================================================"
+    if [ "${DESIGN}" = "symmetric" ]; then
+        # --- Step 1b: comparator patients ---
+        echo "============================================================"
+        echo "STEP 1b: Extract ${COMPARATOR_NAME} patient sequences  [$(date '+%H:%M:%S')]"
+        echo "  Source     : ${COMPARATOR_NAME} (${COMPARATOR_CONCEPT_IDS})"
+        echo "  Comparator : ${TARGET_NAME} (for frequency estimation)"
+        echo "============================================================"
 
-    mkdir -p "${COMPARATOR_CONTEXT_DIR}"
-    _step_start
-    python "${EXTRACT_SCRIPT}" \
-        --patient_sequence_path   "${PATIENT_SEQUENCE_PATH}" \
-        --vocab_path              "${VOCAB_PATH}" \
-        --source_concept_ids      "${COMPARATOR_CONCEPT_IDS}" \
-        --comparator_concept_ids  "${TARGET_CONCEPT_IDS}" \
-        --output_dir              "${COMPARATOR_CONTEXT_DIR}" \
-        --tokenizer_path          "${TOKENIZER_PATH}" \
-        --outcome_concept_ids     "${EXTRACT_OUTCOME_CONCEPT_IDS}" \
-        --inpatient_outcome_concept_ids "${INPATIENT_OUTCOME_CONCEPT_IDS}" \
-        --outcome_definitions_path "${OUTCOME_DEFINITIONS}" \
-        --era_gap_days            "${ERA_GAP_DAYS}" \
-        --min_context_length      "${MIN_CONTEXT_LENGTH}" \
-        --num_workers             "${EXTRACTION_NUM_WORKERS}" \
-        "${_EXTRACT_EXTRA_ARGS[@]}"
-    _step_end
-    echo "Step 1b complete."
-    echo ""
+        mkdir -p "${COMPARATOR_CONTEXT_DIR}"
+        _step_start
+        python "${EXTRACT_SCRIPT}" \
+            --patient_sequence_path   "${PATIENT_SEQUENCE_PATH}" \
+            --vocab_path              "${VOCAB_PATH}" \
+            --source_concept_ids      "${COMPARATOR_CONCEPT_IDS}" \
+            --comparator_concept_ids  "${TARGET_CONCEPT_IDS}" \
+            --output_dir              "${COMPARATOR_CONTEXT_DIR}" \
+            --tokenizer_path          "${TOKENIZER_PATH}" \
+            --outcome_concept_ids     "${EXTRACT_OUTCOME_CONCEPT_IDS}" \
+            --inpatient_outcome_concept_ids "${INPATIENT_OUTCOME_CONCEPT_IDS}" \
+            --outcome_definitions_path "${OUTCOME_DEFINITIONS}" \
+            --era_gap_days            "${ERA_GAP_DAYS}" \
+            --min_context_length      "${MIN_CONTEXT_LENGTH}" \
+            --num_workers             "${EXTRACTION_NUM_WORKERS}" \
+            "${_EXTRACT_EXTRA_ARGS[@]}"
+        _step_end
+        echo "Step 1b complete."
+        echo ""
+    fi
 fi
 
 # =============================================================================
-# STEP 2 — Create symmetric arm contexts by running create_drug_swap_context.py
-#           twice (once per drug class as the source), then concatenating.
+# STEP 2 — Create the arm contexts by running create_drug_swap_context.py
 #
-#   Run 2a — target as source:
-#     • target_pts_target_ctx.parquet   : target patients, their actual target drug
-#                                     (treated path, written as-is)
-#     • target_pts_comparator_ctx.parquet: target patients, comparator frequency-swapped
+#   2a — target as source:
+#     • target_pts_target_ctx.parquet         : target patients, their actual target drug
+#     • target_pts_comparator_ctx.parquet     : target patients, comparator frequency-swapped
 #
-#   Run 2b — comparator as source:
-#     • comparator_pts_comparator_ctx.parquet : comparator patients, actual comparator
-#     • comparator_pts_target_ctx.parquet     : comparator patients, target freq-swapped
+#   2b (symmetric only) — comparator as source:
+#     • comparator_pts_comparator_ctx.parquet : comparator patients, their actual drug
+#     • comparator_pts_target_ctx.parquet     : comparator patients, target frequency-swapped
 #
-#   Arm A (target)      = concat(target_pts_target_ctx,     comparator_pts_target_ctx)
-#   Arm B (comparator)  = concat(target_pts_comparator_ctx, comparator_pts_comparator_ctx)
-#   drug_info         = concat(target_drug_info,         comparator_drug_info)
+#   target_initiators:
+#     Arm A (target)     = target_pts_target_ctx
+#     Arm B (comparator) = target_pts_comparator_ctx
+#   symmetric:
+#     Arm A (target)     = concat(target_pts_target_ctx,     comparator_pts_target_ctx)
+#     Arm B (comparator) = concat(target_pts_comparator_ctx, comparator_pts_comparator_ctx)
+#     drug_info          = concat(target drug_info, comparator drug_info)
+#     Both arms cover the same combined patient pool.
 #
-#   Both arms cover the same combined patient pool → symmetric comparison.
+#   A patient that fails the overlap check (PREFERENCE_SCORE_TRIM) is dropped from both arms.
 # =============================================================================
 if [ "${SKIP_STEP2}" = "true" ]; then
     echo "Skipping Step 2 (SKIP_STEP2=true)"
 else
     echo "============================================================"
-    echo "STEP 2: Create symmetric arm contexts  [$(date '+%H:%M:%S')]"
-    echo "  ${TARGET_NAME} patient contexts    : ${TARGET_CONTEXT_DIR}/treated_context"
-    echo "  ${COMPARATOR_NAME} patient contexts: ${COMPARATOR_CONTEXT_DIR}/treated_context"
-    echo "  Combined drug info       : ${COMBINED_DRUG_INFO}"
-    echo "  Random seed              : ${RANDOM_SEED}"
+    echo "STEP 2: Create the arm contexts (${DESIGN})  [$(date '+%H:%M:%S')]"
+    echo "  ${TARGET_NAME} patient contexts: ${TARGET_CONTEXT_DIR}/treated_context"
+    if [ "${DESIGN}" = "symmetric" ]; then
+        echo "  ${COMPARATOR_NAME} patient contexts: ${COMPARATOR_CONTEXT_DIR}/treated_context"
+        echo "  Combined drug info: ${DRUG_INFO}"
+    fi
+    echo "  Random seed: ${RANDOM_SEED}"
     echo "============================================================"
 
-    mkdir -p "${SYMMETRIC_DIR}"
-
-    # Intermediate per-run output files
-    _TARGET_PTS_TARGET_CTX="${SYMMETRIC_DIR}/target_pts_target_ctx.parquet"
-    _TARGET_PTS_COMPARATOR_CTX="${SYMMETRIC_DIR}/target_pts_comparator_ctx.parquet"
-    _COMPARATOR_PTS_COMPARATOR_CTX="${SYMMETRIC_DIR}/comparator_pts_comparator_ctx.parquet"
-    _COMPARATOR_PTS_TARGET_CTX="${SYMMETRIC_DIR}/comparator_pts_target_ctx.parquet"
-
+    mkdir -p "${SWAP_DIR}"
     _step_start
 
     # --- 2a: target patients → both arm contexts ---
@@ -430,52 +462,53 @@ else
         --tokenizer_path         "${TOKENIZER_PATH}" \
         --source_concept_ids     "${TARGET_CONCEPT_IDS}" \
         --comparator_concept_ids "${COMPARATOR_CONCEPT_IDS}" \
-        --output_path            "${_TARGET_PTS_COMPARATOR_CTX}" \
-        --also_write_treated_path "${_TARGET_PTS_TARGET_CTX}" \
+        --output_path            "${TARGET_PTS_COMPARATOR_CTX}" \
+        --also_write_treated_path "${TARGET_PTS_TARGET_CTX}" \
         --seed                   "${RANDOM_SEED}" \
         "${_OVERLAP_TARGET_ARGS[@]}" \
         "${_MAX_TARGET_ARG[@]}"
 
-    # --- 2b: comparator patients → both arm contexts ---
-    echo "  Step 2b: ${COMPARATOR_NAME} patients (source=${COMPARATOR_NAME}, comparator=${TARGET_NAME}) …"
-    _OVERLAP_COMPARATOR_ARGS=()
-    if [ -n "${PREFERENCE_SCORE_TRIM}" ]; then
-        _OVERLAP_COMPARATOR_ARGS=(
-            --model_path "${MODEL_PATH}"
-            --preference_score_trim "${PREFERENCE_SCORE_TRIM}"
-            --overlap_scores_path "${COMPARATOR_OVERLAP_SCORES}"
-            --context_length "${GENERATION_INPUT_LENGTH}"
-            --batch_size "${BATCH_SIZE}"
-        )
-    fi
-    _MAX_COMPARATOR_ARG=()
-    if [ -n "${MAX_COMPARATOR_PATIENTS:-}" ]; then
-        _MAX_COMPARATOR_ARG=(--max_source_patients "${MAX_COMPARATOR_PATIENTS}")
-    fi
-    python "${SWAP_SCRIPT}" \
-        --treated_context_path   "${COMPARATOR_CONTEXT_DIR}/treated_context" \
-        --drug_info_path         "${COMPARATOR_CONTEXT_DIR}/drug_info" \
-        --vocab_path             "${VOCAB_PATH}" \
-        --tokenizer_path         "${TOKENIZER_PATH}" \
-        --source_concept_ids     "${COMPARATOR_CONCEPT_IDS}" \
-        --comparator_concept_ids "${TARGET_CONCEPT_IDS}" \
-        --output_path            "${_COMPARATOR_PTS_TARGET_CTX}" \
-        --also_write_treated_path "${_COMPARATOR_PTS_COMPARATOR_CTX}" \
-        --seed                   "${RANDOM_SEED}" \
-        "${_OVERLAP_COMPARATOR_ARGS[@]}" \
-        "${_MAX_COMPARATOR_ARG[@]}"
+    if [ "${DESIGN}" = "symmetric" ]; then
+        # --- 2b: comparator patients → both arm contexts ---
+        echo "  Step 2b: ${COMPARATOR_NAME} patients (source=${COMPARATOR_NAME}, comparator=${TARGET_NAME}) …"
+        _OVERLAP_COMPARATOR_ARGS=()
+        if [ -n "${PREFERENCE_SCORE_TRIM}" ]; then
+            _OVERLAP_COMPARATOR_ARGS=(
+                --model_path "${MODEL_PATH}"
+                --preference_score_trim "${PREFERENCE_SCORE_TRIM}"
+                --overlap_scores_path "${COMPARATOR_OVERLAP_SCORES}"
+                --context_length "${GENERATION_INPUT_LENGTH}"
+                --batch_size "${BATCH_SIZE}"
+            )
+        fi
+        _MAX_COMPARATOR_ARG=()
+        if [ -n "${MAX_COMPARATOR_PATIENTS:-}" ]; then
+            _MAX_COMPARATOR_ARG=(--max_source_patients "${MAX_COMPARATOR_PATIENTS}")
+        fi
+        python "${SWAP_SCRIPT}" \
+            --treated_context_path   "${COMPARATOR_CONTEXT_DIR}/treated_context" \
+            --drug_info_path         "${COMPARATOR_CONTEXT_DIR}/drug_info" \
+            --vocab_path             "${VOCAB_PATH}" \
+            --tokenizer_path         "${TOKENIZER_PATH}" \
+            --source_concept_ids     "${COMPARATOR_CONCEPT_IDS}" \
+            --comparator_concept_ids "${TARGET_CONCEPT_IDS}" \
+            --output_path            "${COMPARATOR_PTS_TARGET_CTX}" \
+            --also_write_treated_path "${COMPARATOR_PTS_COMPARATOR_CTX}" \
+            --seed                   "${RANDOM_SEED}" \
+            "${_OVERLAP_COMPARATOR_ARGS[@]}" \
+            "${_MAX_COMPARATOR_ARG[@]}"
 
-    # --- Concat arm contexts and drug_info ---
-    echo "  Combining arm contexts and drug_info …"
-    _TARGET_PTS_TARGET_CTX="${_TARGET_PTS_TARGET_CTX}" \
-    _TARGET_PTS_COMPARATOR_CTX="${_TARGET_PTS_COMPARATOR_CTX}" \
-    _COMPARATOR_PTS_COMPARATOR_CTX="${_COMPARATOR_PTS_COMPARATOR_CTX}" \
-    _COMPARATOR_PTS_TARGET_CTX="${_COMPARATOR_PTS_TARGET_CTX}" \
-    ARM_A_CTX="${ARM_A_CTX}" ARM_B_CTX="${ARM_B_CTX}" \
-    COMBINED_DRUG_INFO="${COMBINED_DRUG_INFO}" \
-    TARGET_CONTEXT_DIR="${TARGET_CONTEXT_DIR}" \
-    COMPARATOR_CONTEXT_DIR="${COMPARATOR_CONTEXT_DIR}" \
-    python - <<'PYEOF'
+        # --- Concat arm contexts and drug_info ---
+        echo "  Combining arm contexts and drug_info …"
+        TARGET_PTS_TARGET_CTX="${TARGET_PTS_TARGET_CTX}" \
+        TARGET_PTS_COMPARATOR_CTX="${TARGET_PTS_COMPARATOR_CTX}" \
+        COMPARATOR_PTS_COMPARATOR_CTX="${COMPARATOR_PTS_COMPARATOR_CTX}" \
+        COMPARATOR_PTS_TARGET_CTX="${COMPARATOR_PTS_TARGET_CTX}" \
+        ARM_A_CTX="${ARM_A_CTX}" ARM_B_CTX="${ARM_B_CTX}" \
+        COMBINED_DRUG_INFO="${DRUG_INFO}" \
+        TARGET_CONTEXT_DIR="${TARGET_CONTEXT_DIR}" \
+        COMPARATOR_CONTEXT_DIR="${COMPARATOR_CONTEXT_DIR}" \
+        python - <<'PYEOF'
 import polars as pl, os
 from pathlib import Path
 
@@ -487,19 +520,17 @@ def read_dir_or_file(path):
 
 # Arm A (target): target patients with target + comparator patients with target swap
 arm_a = pl.concat([
-    pl.read_parquet(os.environ["_TARGET_PTS_TARGET_CTX"]),
-    pl.read_parquet(os.environ["_COMPARATOR_PTS_TARGET_CTX"]),
+    pl.read_parquet(os.environ["TARGET_PTS_TARGET_CTX"]),
+    pl.read_parquet(os.environ["COMPARATOR_PTS_TARGET_CTX"]),
 ])
 arm_a.write_parquet(os.environ["ARM_A_CTX"])
-print(f"  Arm A (target):     {len(arm_a):,} patients  → {os.environ['ARM_A_CTX']}")
 
 # Arm B (comparator): target patients with comparator swap + comparator patients with comparator
 arm_b = pl.concat([
-    pl.read_parquet(os.environ["_TARGET_PTS_COMPARATOR_CTX"]),
-    pl.read_parquet(os.environ["_COMPARATOR_PTS_COMPARATOR_CTX"]),
+    pl.read_parquet(os.environ["TARGET_PTS_COMPARATOR_CTX"]),
+    pl.read_parquet(os.environ["COMPARATOR_PTS_COMPARATOR_CTX"]),
 ])
 arm_b.write_parquet(os.environ["ARM_B_CTX"])
-print(f"  Arm B (comparator): {len(arm_b):,} patients  → {os.environ['ARM_B_CTX']}")
 
 # Combined drug_info
 drug_info = pl.concat([
@@ -511,14 +542,32 @@ Path(di_out).mkdir(parents=True, exist_ok=True)
 drug_info.write_parquet(os.path.join(di_out, "drug_info.parquet"))
 print(f"  Combined drug_info: {len(drug_info):,} rows  → {di_out}/drug_info.parquet")
 PYEOF
-
+    fi
     _step_end
+
+    echo ""
+    echo "Arm sizes:"
+    ARM_A_CTX="${ARM_A_CTX}" ARM_B_CTX="${ARM_B_CTX}" \
+    ARM_A="${ARM_A}" ARM_B="${ARM_B}" \
+    python - <<'PYEOF'
+import polars as pl, os
+for label, key in [("Target arm", "ARM_A"), ("Comparator arm", "ARM_B")]:
+    f = os.environ[f"{key}_CTX"]
+    arm = os.environ[key]
+    n = len(pl.read_parquet(f))
+    print(f"  {label} ({arm}): {n:,} patients  → {f}")
+PYEOF
+
     echo "Step 2 complete."
     echo ""
 fi
 
 # =============================================================================
 # STEP 3 — Generate trajectories for both arms
+#
+#   Default: the target arm on GPU_TARGET and the comparator arm on GPU_COMPARATOR, at the
+#   same time.  SINGLE_GPU=true runs them one after the other on GPU_TARGET; GPU_IDS splits
+#   the batches of both arms over several GPUs.
 # =============================================================================
 if [ "${SKIP_STEP3}" = "true" ]; then
     echo "Skipping Step 3 (SKIP_STEP3=true)"
@@ -539,6 +588,9 @@ else
 
     mkdir -p "${TRAJ_DIR}"
 
+    # Concepts to suppress per arm:
+    #   arm_a (target) suppresses the comparator drugs + all excluded antihypertensives
+    #   arm_b (comparator) suppresses the target drugs + all excluded antihypertensives
     _SUPPRESS_ARGS_A=()
     _SUPPRESS_ARGS_B=()
     if [ "${SUPPRESS_CONCEPTS}" = "true" ]; then
@@ -631,6 +683,12 @@ fi
 
 # =============================================================================
 # STEP 4 — Estimate Hazard Ratios (target vs comparator)
+#
+#   (a) generated trajectories: arm A vs arm B, written to hazard_ratio_summary.csv;
+#   (b) the observed cohorts: the real target and comparator patients of Step 1a, written to
+#       observed_hazard_ratio_summary.csv, as a reference for (a).
+#   Both leave out the patients that had an outcome before the index date (for that outcome)
+#   and the patients dropped by the overlap check of Step 2.
 # =============================================================================
 if [ "${SKIP_STEP4}" = "true" ]; then
     echo "Skipping Step 4 (SKIP_STEP4=true)"
@@ -639,7 +697,7 @@ else
     echo "STEP 4: Hazard ratio estimation  (${FOLLOW_UP_DAYS}-day follow-up)  [$(date '+%H:%M:%S')]"
     echo "  Arm A (treated)    : ${ARM_A}"
     echo "  Arm B (comparator) : ${ARM_B}"
-    echo "  Drug info          : ${COMBINED_DRUG_INFO}"
+    echo "  Drug info          : ${DRUG_INFO}"
     echo "  Outcomes: ${OUTCOME_DEFINITIONS}"
     echo "============================================================"
 
@@ -647,7 +705,7 @@ else
 
     _step_start
     _HR_EXTRA_ARGS=()
-    _HR_EXTRA_ARGS+=(--prior_outcome_path "${TARGET_CONTEXT_DIR}/observed_outcomes" "${COMPARATOR_CONTEXT_DIR}/observed_outcomes")
+    _HR_EXTRA_ARGS+=(--prior_outcome_path "${PRIOR_OUTCOME_PATHS[@]}")
     _HR_EXTRA_ARGS+=(--time_at_risk "${TIME_AT_RISK}" --min_days_at_risk "${MIN_DAYS_AT_RISK}")
     if [ "${CENSOR_AT_SWITCH}" = "true" ]; then
         _HR_EXTRA_ARGS+=(--censor_at_switch)
@@ -659,11 +717,13 @@ else
         _HR_EXTRA_ARGS+=(--positive_control_outcome_ids "${POSITIVE_CONTROL_OUTCOME_IDS}")
     fi
     if [ -n "${PREFERENCE_SCORE_TRIM}" ]; then
-        _HR_EXTRA_ARGS+=(--overlap_scores_path "${TARGET_OVERLAP_SCORES}" "${COMPARATOR_OVERLAP_SCORES}")
+        _HR_EXTRA_ARGS+=(--overlap_scores_path "${OVERLAP_SCORE_PATHS[@]}")
     fi
+
+    # (a) generated trajectories
     python "${HR_SCRIPT}" \
         --trajectories_dir        "${TRAJ_DIR}" \
-        --drug_info_path          "${COMBINED_DRUG_INFO}" \
+        --drug_info_path          "${DRUG_INFO}" \
         --outcome_concept_ids     "${OUTCOME_CONCEPT_IDS}" \
         --inpatient_outcome_concept_ids "${INPATIENT_OUTCOME_CONCEPT_IDS}" \
         --outcome_definitions_path "${OUTCOME_DEFINITIONS}" \
@@ -675,6 +735,21 @@ else
         --arm_a_concept_ids       "${TARGET_CONCEPT_IDS}" \
         --arm_b_concept_ids       "${COMPARATOR_CONCEPT_IDS}" \
         --exclusion_concept_ids   "${EXCLUSION_CONCEPT_IDS}" \
+        --era_gap_days            "${ERA_GAP_DAYS}" \
+        "${_HR_EXTRA_ARGS[@]}"
+
+    # (b) observed cohorts: Step 1a extracted both the real target and the real comparator patients
+    python "${HR_SCRIPT}" \
+        --drug_info_path          "${TARGET_CONTEXT_DIR}/drug_info" \
+        --observed_outcomes_path  "${TARGET_CONTEXT_DIR}/observed_outcomes" \
+        --outcome_concept_ids     "${OUTCOME_CONCEPT_IDS}" \
+        --inpatient_outcome_concept_ids "${INPATIENT_OUTCOME_CONCEPT_IDS}" \
+        --outcome_definitions_path "${OUTCOME_DEFINITIONS}" \
+        --follow_up_days          "${FOLLOW_UP_DAYS}" \
+        --arm_a                   "${ARM_A}" \
+        --arm_b                   "${ARM_B}" \
+        --output_dir              "${RESULTS_DIR}" \
+        --vocab_path              "${VOCAB_PATH}" \
         --era_gap_days            "${ERA_GAP_DAYS}" \
         "${_HR_EXTRA_ARGS[@]}"
     _step_end
@@ -690,8 +765,9 @@ echo "============================================================"
 echo "Done.  Output directory: ${OUTPUT_ROOT}"
 echo ""
 echo "Key files:"
-echo "  ${RESULTS_DIR}/hazard_ratio_summary.csv   (generated ${TARGET_NAME} vs generated ${COMPARATOR_NAME})"
-echo "  ${RESULTS_DIR}/control_outcome_summary.csv   (negative / positive controls, when given)"
+echo "  ${RESULTS_DIR}/hazard_ratio_summary.csv           (generated ${TARGET_NAME} vs generated ${COMPARATOR_NAME})"
+echo "  ${RESULTS_DIR}/observed_hazard_ratio_summary.csv  (observed ${TARGET_NAME} vs observed ${COMPARATOR_NAME})"
+echo "  ${RESULTS_DIR}/control_outcome_summary.csv        (negative / positive controls, when given)"
 echo "  ${RESULTS_DIR}/km_<concept_id>.csv"
 echo ""
 if [ "${TARGET_CLASS}" = "ACE inhibitors" ] && [ "${COMPARATOR_CLASS}" = "Thiazide or thiazide-like diuretics" ]; then
