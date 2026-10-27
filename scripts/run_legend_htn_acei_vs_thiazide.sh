@@ -27,8 +27,8 @@
 #
 # Outcomes
 # --------
-#   Step 0 reads the LEGEND-HTN outcomes and negative controls from the SQL of the LEGEND
-#   study (LEGEND_DIR) and writes outcome_definitions.json.  The 15 outcomes that the study
+#   Step 0 reads the LEGEND-HTN outcomes and negative controls, taken from the SQL of the LEGEND
+#   study (bundled with the package) and writes outcome_definitions.json.  The 15 outcomes that the study
 #   links to an inpatient or ER visit (acute myocardial infarction, acute pancreatitis, acute
 #   renal failure, anaphylactoid reaction, angioedema, cardiovascular disease,
 #   gastrointestinal bleeding, hemorrhagic stroke, hospitalization with heart failure,
@@ -203,11 +203,11 @@ THIAZIDE_CONCEPT_IDS="1395058,974166,978555,907013"
 # 978555   Indapamide
 # 907013   Metolazone
 
-# Outcomes: the LEGEND-HTN outcomes and negative controls, read from the SQL of the LEGEND study
-# (https://github.com/OHDSI/Legend).  The concepts of every outcome (descendants, exclusions) and
-# the inpatient / ER visit restriction of the outcomes that need one come from there; outcomes the
-# token sequences cannot represent are listed in Step 0 and left out.
-LEGEND_DIR="${LEGEND_DIR:-/data/Legend}"
+# Outcomes: the LEGEND-HTN outcomes and negative controls (https://github.com/OHDSI/Legend),
+# bundled with the package in cehrgpt/analysis/counterfactual/legend_hypertension (see source.json
+# there for the LEGEND version).  Step 0 resolves their concepts (descendants, exclusions) with
+# VOCAB_PATH and keeps the inpatient / ER visit restriction of the outcomes that need one;
+# outcomes the token sequences cannot represent are listed in Step 0 and left out.
 
 # Further outcomes by concept_id (descendants included), optional
 OUTCOME_CONCEPT_IDS=""
@@ -277,7 +277,7 @@ _step_end() {
 }
 
 # =============================================================================
-# STEP 0 — Outcome definitions from the SQL of the LEGEND study
+# STEP 0 — Outcome definitions of the LEGEND study (bundled with the package)
 #
 #   Writes outcome_definitions.json (the concepts of every outcome, with descendants and
 #   exclusions resolved, and its inpatient / ER restriction) and the raw concept sets.
@@ -287,7 +287,6 @@ echo "STEP 0: LEGEND outcome definitions  [$(date '+%H:%M:%S')]"
 echo "============================================================"
 mkdir -p "${OUTCOME_DEFS_DIR}"
 python "${OUTCOME_SCRIPT}" \
-    --legend_dir  "${LEGEND_DIR}" \
     --indication  Hypertension \
     --vocab_path  "${VOCAB_PATH}" \
     --output_dir  "${OUTCOME_DEFS_DIR}"

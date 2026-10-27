@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-Read the outcome definitions of the LEGEND study from its generated SQL.
+The outcome definitions of the LEGEND study, bundled with this package.
 
 Every outcome of the OHDSI LEGEND study (https://github.com/OHDSI/Legend) is a cohort
 definition that the SQL files in ``inst/sql/sql_server`` spell out.  This module parses
 those files, so the concepts of an outcome come from the study itself rather than from a
-hand-typed list:
+hand-typed list.  The result for the hypertension study is bundled in
+``legend_hypertension/`` (see ``source.json`` there for the version of LEGEND it comes from),
+so the analysis does not need a checkout of LEGEND; ``--legend_dir`` is only for refreshing the
+bundled files (``--update_bundled``) or checking them against the source.  What is extracted:
 
 * the concept sets (``#Codesets``): the concepts that are included as they are, the ones
   included with all their descendants, and the excluded ones;
@@ -28,10 +31,11 @@ kept and the dropped one is recorded in the ``approximation`` of the definition.
 
 Usage
 -----
-python legend_outcomes.py \\
-    --legend_dir  /path/to/Legend \\
-    --indication  Hypertension \\
-    --output_dir  /path/to/outcome_definitions
+# the outcome definitions for a vocabulary (what the pipeline uses)
+python legend_outcomes.py --vocab_path /path/to/omop_vocab --output_dir /path/to/outcome_definitions
+
+# refresh the bundled files from a checkout of LEGEND (maintainers)
+python legend_outcomes.py --legend_dir /path/to/Legend --update_bundled --output_dir /tmp/out
 """
 
 import argparse
@@ -44,6 +48,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+BUNDLED_DIR = Path(__file__).resolve().parent / "legend_hypertension"
+BUNDLED_INDICATION = "Hypertension"
+LEGEND_REPOSITORY = "https://github.com/OHDSI/Legend"
 SQL_FOLDER = Path("inst") / "sql" / "sql_server"
 SETTINGS_FOLDER = Path("inst") / "settings"
 
@@ -162,8 +169,46 @@ def parse_outcome(name: str, sql: str) -> OutcomeDefinition:
     )
 
 
-def read_outcomes(legend_dir: Path, indication: str = "Hypertension") -> List[OutcomeDefinition]:
-    """The outcomes of *indication*, with the ids of ``OutcomesOfInterest.csv``."""
+def outcome_to_dict(outcome: OutcomeDefinition) -> Dict:
+    return {
+        "name": outcome.name,
+        "cohort_id": outcome.cohort_id,
+        "atlas_id": outcome.atlas_id,
+        "codesets": {str(i): asdict(cs) for i, cs in outcome.codesets.items()},
+        "primary": [asdict(c) for c in outcome.primary],
+        "correlated": [asdict(c) for c in outcome.correlated],
+    }
+
+
+def outcome_from_dict(entry: Dict) -> OutcomeDefinition:
+    return OutcomeDefinition(
+        name=entry["name"],
+        codesets={int(i): Codeset(**cs) for i, cs in entry["codesets"].items()},
+        primary=[Criterion(**c) for c in entry["primary"]],
+        correlated=[Criterion(**c) for c in entry["correlated"]],
+        cohort_id=entry["cohort_id"],
+        atlas_id=entry["atlas_id"],
+    )
+
+
+def _check_bundled(indication: str) -> None:
+    if indication != BUNDLED_INDICATION:
+        raise ValueError(
+            f"only the {BUNDLED_INDICATION} outcomes are bundled; give legend_dir for {indication}"
+        )
+
+
+def read_outcomes(
+    legend_dir: Optional[Path] = None, indication: str = BUNDLED_INDICATION
+) -> List[OutcomeDefinition]:
+    """
+    The outcomes of *indication*, with the ids of ``OutcomesOfInterest.csv``: the bundled
+    ones, or parsed from a checkout of LEGEND when *legend_dir* is given.
+    """
+    if legend_dir is None:
+        _check_bundled(indication)
+        entries = json.loads((BUNDLED_DIR / "outcomes.json").read_text())
+        return [outcome_from_dict(entry) for entry in entries]
     legend_dir = Path(legend_dir)
     with open(legend_dir / SETTINGS_FOLDER / "OutcomesOfInterest.csv") as f:
         rows = [r for r in csv.DictReader(f) if r["indicationId"] == indication]
@@ -177,14 +222,74 @@ def read_outcomes(legend_dir: Path, indication: str = "Hypertension") -> List[Ou
     return outcomes
 
 
-def negative_controls(legend_dir: Path, indication: str = "Hypertension") -> List[Tuple[int, int, str]]:
-    """``(concept_id, cohort_id, name)`` of the negative control outcomes of *indication*."""
+def negative_controls(
+    legend_dir: Optional[Path] = None, indication: str = BUNDLED_INDICATION
+) -> List[Tuple[int, int, str]]:
+    """
+    ``(concept_id, cohort_id, name)`` of the negative control outcomes of *indication*, from
+    the bundled file or from a checkout of LEGEND.
+    """
+    if legend_dir is None:
+        _check_bundled(indication)
+        with open(BUNDLED_DIR / "negative_controls.csv") as f:
+            return [
+                (int(r["concept_id"]), int(r["cohort_id"]), r["name"]) for r in csv.DictReader(f)
+            ]
     with open(Path(legend_dir) / SETTINGS_FOLDER / "NegativeControls.csv") as f:
         return [
             (int(r["conceptId"]), int(r["cohortId"]), r["name"])
             for r in csv.DictReader(f)
             if r["indicationId"] == indication
         ]
+
+
+def write_bundled(
+    outcomes: List[OutcomeDefinition],
+    controls: List[Tuple[int, int, str]],
+    legend_dir: Path,
+    indication: str = BUNDLED_INDICATION,
+) -> None:
+    """Refresh ``legend_hypertension/`` from a checkout of LEGEND and record which version it was."""
+    import subprocess
+
+    BUNDLED_DIR.mkdir(parents=True, exist_ok=True)
+    (BUNDLED_DIR / "outcomes.json").write_text(
+        json.dumps([outcome_to_dict(o) for o in outcomes], indent=1) + "\n"
+    )
+    with open(BUNDLED_DIR / "negative_controls.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["cohort_id", "concept_id", "name"])
+        for concept_id, cohort_id, name in controls:
+            writer.writerow([cohort_id, concept_id, name])
+
+    def git(*args: str) -> Optional[str]:
+        try:
+            return subprocess.run(
+                ["git", "-C", str(legend_dir), *args], capture_output=True, text=True, check=True
+            ).stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            return None
+
+    (BUNDLED_DIR / "source.json").write_text(
+        json.dumps(
+            {
+                "repository": LEGEND_REPOSITORY,
+                "commit": git("rev-parse", "HEAD"),
+                "commit_date": git("log", "-1", "--format=%cI"),
+                "indication": indication,
+                "files": [
+                    "inst/sql/sql_server/<outcome>.sql",
+                    "inst/settings/OutcomesOfInterest.csv",
+                    "inst/settings/NegativeControls.csv",
+                ],
+                "n_outcomes": len(outcomes),
+                "n_negative_controls": len(controls),
+                "generated_by": "python -m cehrgpt.analysis.counterfactual.legend_outcomes --update_bundled",
+            },
+            indent=1,
+        )
+        + "\n"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -414,27 +519,23 @@ def write_definitions(outcomes: List[OutcomeDefinition], controls, output_dir: P
         for concept_id, cohort_id, name in controls:
             writer.writerow([cohort_id, concept_id, name])
     with open(output_dir / "outcomes.json", "w") as f:
-        json.dump(
-            [
-                {
-                    "name": o.name,
-                    "cohort_id": o.cohort_id,
-                    "atlas_id": o.atlas_id,
-                    "codesets": {str(i): cs.__dict__ for i, cs in o.codesets.items()},
-                    "primary": [c.__dict__ for c in o.primary],
-                    "correlated": [c.__dict__ for c in o.correlated],
-                }
-                for o in outcomes
-            ],
-            f,
-            indent=1,
-        )
+        json.dump([outcome_to_dict(o) for o in outcomes], f, indent=1)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Extract the LEGEND outcome concepts from its SQL")
-    parser.add_argument("--legend_dir", required=True, help="Checkout of OHDSI/Legend")
-    parser.add_argument("--indication", default="Hypertension")
+    parser = argparse.ArgumentParser(description="The LEGEND outcome concepts, resolved for a vocabulary")
+    parser.add_argument(
+        "--legend_dir",
+        default=None,
+        help="Checkout of OHDSI/Legend to parse instead of the bundled definitions "
+             "(to refresh or check them)",
+    )
+    parser.add_argument("--indication", default=BUNDLED_INDICATION)
+    parser.add_argument(
+        "--update_bundled",
+        action="store_true",
+        help="With --legend_dir: rewrite the bundled definitions from that checkout",
+    )
     parser.add_argument("--output_dir", required=True)
     parser.add_argument(
         "--vocab_path",
@@ -442,8 +543,14 @@ def main() -> None:
         help="OMOP vocabulary root with concept_ancestor/: also writes outcome_definitions.json",
     )
     args = parser.parse_args()
-    outcomes = read_outcomes(Path(args.legend_dir), args.indication)
-    controls = negative_controls(Path(args.legend_dir), args.indication)
+    legend_dir = Path(args.legend_dir) if args.legend_dir else None
+    if args.update_bundled and legend_dir is None:
+        parser.error("--update_bundled needs --legend_dir")
+    outcomes = read_outcomes(legend_dir, args.indication)
+    controls = negative_controls(legend_dir, args.indication)
+    if args.update_bundled:
+        write_bundled(outcomes, controls, legend_dir, args.indication)
+        print(f"Bundled definitions refreshed in {BUNDLED_DIR}")
     write_definitions(outcomes, controls, Path(args.output_dir))
     print(f"{len(outcomes)} outcomes, {len(controls)} negative controls → {args.output_dir}")
     if args.vocab_path:

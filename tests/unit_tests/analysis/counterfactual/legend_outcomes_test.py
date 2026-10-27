@@ -228,6 +228,63 @@ class LegendFilesTest(unittest.TestCase):
         self.assertEqual(codeset.include_descendants, [])
 
 
+class BundledDefinitionsTest(unittest.TestCase):
+    """The pipeline reads the bundled definitions, so it does not need a checkout of LEGEND."""
+
+    def test_the_hypertension_outcomes_and_controls_are_bundled(self):
+        outcomes = lo.read_outcomes()
+        controls = lo.negative_controls()
+        self.assertEqual((len(outcomes), len(controls)), (58, 76))
+        by_name = {o.name: o for o in outcomes}
+        mi = by_name["Acute myocardial infarction"]
+        self.assertEqual(mi.codesets[3].include_descendants, [4329847])
+        self.assertEqual(mi.codesets[3].exclude_descendants, [314666])
+        self.assertEqual(mi.visit_codeset_ids, [2])
+
+    def test_the_bundled_files_say_which_version_of_legend_they_come_from(self):
+        source = json.loads((lo.BUNDLED_DIR / "source.json").read_text())
+        self.assertEqual(source["repository"], lo.LEGEND_REPOSITORY)
+        self.assertRegex(source["commit"], r"^[0-9a-f]{40}$")
+        self.assertEqual((source["n_outcomes"], source["n_negative_controls"]), (58, 76))
+
+    def test_other_indications_need_a_checkout(self):
+        with self.assertRaisesRegex(ValueError, "Depression"):
+            lo.read_outcomes(indication="Depression")
+
+    def test_the_command_line_resolves_the_bundled_definitions_for_a_vocabulary(self):
+        outcomes = lo.read_outcomes()
+        ids = lo.codeset_concept_ids([cs for o in outcomes for cs in o.codesets.values()])
+        ids = sorted(set(ids) | {c for c, _, _ in lo.negative_controls()})
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "vocab" / "concept_ancestor").mkdir(parents=True)
+            pl.DataFrame({"ancestor_concept_id": ids, "descendant_concept_id": ids}).write_parquet(
+                root / "vocab" / "concept_ancestor" / "part.parquet"
+            )
+            argv = ["prog", "--vocab_path", str(root / "vocab"), "--output_dir", str(root / "out")]
+            with mock.patch("sys.argv", argv):
+                lo.main()
+            entries = json.loads((root / "out" / "outcome_definitions.json").read_text())
+        by_name = {e["name"]: e for e in entries}
+        self.assertEqual(len(entries), 134)
+        self.assertTrue(by_name["Acute myocardial infarction"]["inpatient_only"])
+        self.assertEqual(by_name["All-cause mortality"]["concepts"], [lo.DEATH_TOKEN])
+        self.assertEqual(sum(e["role"] == lo.NEGATIVE_CONTROL for e in entries), 76)
+
+    def test_the_command_line_needs_a_checkout_to_update_the_bundled_files(self):
+        with mock.patch("sys.argv", ["prog", "--update_bundled", "--output_dir", "x"]):
+            with self.assertRaises(SystemExit):
+                lo.main()
+
+    @unittest.skipUnless(LEGEND.is_dir(), "the LEGEND checkout is not available")
+    def test_the_bundled_definitions_equal_what_the_legend_source_gives(self):
+        parsed = lo.read_outcomes(LEGEND)
+        self.assertEqual(
+            [lo.outcome_to_dict(o) for o in lo.read_outcomes()], [lo.outcome_to_dict(o) for o in parsed]
+        )
+        self.assertEqual(lo.negative_controls(), lo.negative_controls(LEGEND))
+
+
 class FindOutcomesTest(unittest.TestCase):
     TOKENS = ["x", "[VS]", "9201", "a", "[VE]", "[VS]", "9202", "a", "b", "[VE]"]
     TIMES = [float(i) for i in range(10)]
