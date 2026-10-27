@@ -147,10 +147,12 @@ OVERWRITE="${OVERWRITE:-false}"
 #   * the indication has to be recorded in the POPULATION_WINDOW_DAYS days up to the index date;
 #   * patients with the outcome before the index date are left out of that outcome;
 #   * time at risk starts the day after the index date and needs MIN_DAYS_AT_RISK days; the
-#     on-treatment design ends it when the continuous exposure to the patient's own exposure ends
-#     (a gap above ERA_GAP_DAYS), the intent-to-treat design with the observation of the patient.
+#     intent-to-treat design (default) ends it with the observation of the patient, so a patient
+#     who switches to another drug, or stops the drug, is not censored; the on-treatment design
+#     ends it when the continuous exposure to the patient's own class ends (a gap above
+#     ERA_GAP_DAYS), which censors switchers about ERA_GAP_DAYS after their last refill.
 #     Starting another drug does not end it (CENSOR_AT_SWITCH=true does).
-TIME_AT_RISK="${TIME_AT_RISK:-on_treatment}"      # or intent_to_treat
+TIME_AT_RISK="${TIME_AT_RISK:-intent_to_treat}"   # or on_treatment
 CENSOR_AT_SWITCH="${CENSOR_AT_SWITCH:-false}"
 
 # Set to "true" to suppress the other arm's drugs and the exclusion drugs during generation.

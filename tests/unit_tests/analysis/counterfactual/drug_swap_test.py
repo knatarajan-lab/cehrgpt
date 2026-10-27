@@ -54,6 +54,7 @@ class DrugSwapTest(unittest.TestCase):
                 "person_id": [1, 2, 5],
                 "concept_ids": [["9202", "100", "x"], ["9202", "100", "x"], ["9202", "101", "x"]],
                 "input_ids": [[5, 10, 7], [5, 10, 7], [5, 1, 7]],
+                "epoch_times": [[1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [1.0, 2.0, 3.0]],
             }
         ).write_parquet(root / "treated.parquet")
         self.root = root
@@ -78,7 +79,29 @@ class DrugSwapTest(unittest.TestCase):
         for row in swapped.iter_rows(named=True):
             drug = row["drug_concept_id"]
             self.assertEqual(row["concept_ids"][1], drug)
-            self.assertEqual(row["input_ids"], [5, VOCAB[drug], 7])
+            self.assertEqual(row["input_ids"], [5, VOCAB[drug]])
+
+    def test_the_swapped_context_ends_with_the_comparator_drug(self):
+        swapped = self.run_swap([COMPARATOR_A, COMPARATOR_B])
+        for row in swapped.iter_rows(named=True):
+            self.assertEqual(row["concept_ids"], ["9202", row["drug_concept_id"]])
+            self.assertEqual(row["epoch_times"], [1.0, 2.0])
+
+    def test_the_actual_context_ends_with_the_original_drug(self):
+        self.run_swap([COMPARATOR_A, COMPARATOR_B], also_write_treated_path=self.root / "actual.parquet")
+        actual = pl.read_parquet(self.root / "actual.parquet")
+        self.assertEqual(sorted(actual["person_id"].to_list()), [1, 2])
+        for row in actual.iter_rows(named=True):
+            self.assertEqual(row["concept_ids"], ["9202", "100"])
+            self.assertEqual(row["input_ids"], [5, 10])
+            self.assertEqual(row["epoch_times"], [1.0, 2.0])
+
+    def test_cut_after_position_only_cuts_sequence_columns(self):
+        row = {"person_id": 1, "concept_ids": ["a", "b", "c"], "ages": [1, 2, 3], "static": [9]}
+        self.assertEqual(
+            swap.cut_after_position(row, 1),
+            {"person_id": 1, "concept_ids": ["a", "b"], "ages": [1, 2], "static": [9]},
+        )
 
     def test_a_comparator_missing_from_the_vocabulary_raises(self):
         vocab = {k: v for k, v in VOCAB.items() if k != "300"}
@@ -99,7 +122,7 @@ class DrugSwapTest(unittest.TestCase):
         self.assertEqual(len(swapped), 2)
         self.assertEqual(set(swapped["drug_concept_id"].to_list()), {"200"})
         for row in swapped.iter_rows(named=True):
-            self.assertEqual(row["input_ids"], [5, 20, 7])
+            self.assertEqual(row["input_ids"], [5, 20])
 
     def test_nothing_is_left_when_no_comparator_is_known(self):
         with self.assertRaisesRegex(ValueError, "none of the comparator ingredients"):

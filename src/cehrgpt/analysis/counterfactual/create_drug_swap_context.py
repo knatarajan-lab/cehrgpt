@@ -3,6 +3,11 @@
 LEGEND-HTN support: create an active-comparator context by swapping the drug
 concept in a treated_context.parquet with a frequency-sampled comparator drug.
 
+Both arms stop right after the index drug token: the context is the history before the drug plus
+the drug itself (the original one in the actual arm, the comparator in the swapped arm).  Whatever
+follows the drug in the index visit is left to the model, so it is generated given the drug of the
+arm and not copied from the record.
+
 The comparator drug concept is NOT fixed — it is sampled proportional to the
 empirical frequency of each comparator ingredient among patients who actually
 received the comparator class.  This preserves the real-world distribution of
@@ -256,6 +261,26 @@ def swap_drug_in_concept_ids(
     return None
 
 
+def cut_after_position(row: Dict, position: int) -> Dict:
+    """
+    End the context of *row* with the token at *position*: every sequence column (a list as long
+    as ``concept_ids``) keeps its first ``position + 1`` entries, the other columns are unchanged.
+    """
+    length = len(row["concept_ids"])
+    cut = dict(row)
+    for column, values in row.items():
+        if values is not None and not isinstance(values, (str, bytes)) and hasattr(values, "__len__") \
+                and len(values) == length:
+            cut[column] = list(values)[: position + 1]
+    return cut
+
+
+def cut_after_index_drug(row: Dict, source_concepts: Set[str]) -> Optional[Dict]:
+    """The context of *row* up to and including its first source drug, None without one."""
+    position = next((i for i, c in enumerate(row["concept_ids"]) if c in source_concepts), None)
+    return None if position is None else cut_after_position(row, position)
+
+
 # ---------------------------------------------------------------------------
 # Overlap check
 # ---------------------------------------------------------------------------
@@ -473,10 +498,15 @@ def create_comparator_context(
             batch_size=batch_size,
         )
 
+    # Both arms end with the index drug: the context stops right after the drug token, and the
+    # model writes the rest of the index visit and everything after it.
     if also_write_treated_path is not None:
         Path(also_write_treated_path).parent.mkdir(parents=True, exist_ok=True)
-        df_source.write_parquet(str(also_write_treated_path))
-        print(f"Actual treated contexts → {also_write_treated_path}")
+        actual = [cut_after_index_drug(row, source_concepts) for row in df_source.iter_rows(named=True)]
+        pl.DataFrame([r for r in actual if r is not None], schema=df_source.schema).write_parquet(
+            str(also_write_treated_path)
+        )
+        print(f"Actual treated contexts (up to the index drug) → {also_write_treated_path}")
 
     # 5. Swap each patient's drug concept with a frequency-sampled comparator
     swapped_records = []
@@ -502,7 +532,7 @@ def create_comparator_context(
             input_ids = list(row["input_ids"])
             input_ids[swap_pos] = comparator_token_ids[comparator_str]
             row["input_ids"] = input_ids
-        swapped_records.append(row)
+        swapped_records.append(cut_after_position(row, swap_pos))
         n_swapped += 1
 
     print(f"Swapped {n_swapped:,} | failed {n_failed:,} (source drug not found in context)")

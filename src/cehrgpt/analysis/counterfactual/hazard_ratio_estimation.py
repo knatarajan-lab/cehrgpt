@@ -1663,10 +1663,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--time_at_risk",
         choices=["on_treatment", "intent_to_treat"],
-        default="on_treatment",
+        default="intent_to_treat",
         help="LEGEND's two designs. on_treatment: the risk window ends when the continuous "
              "exposure to the patient's own class ends (gap > --era_gap_days). intent_to_treat: "
-             "it ends with the observation of the patient (or --follow_up_days). Default: on_treatment.",
+             "it ends with the observation of the patient (or --follow_up_days), so switching "
+             "drugs does not censor. Default: intent_to_treat.",
     )
     parser.add_argument(
         "--min_days_at_risk",
