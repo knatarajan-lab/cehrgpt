@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # =============================================================================
-# LEGEND-HTN replication of one pair of drug classes
+# Causal analysis of one pair of exposures, driven by a study definition
 # =============================================================================
 #
-# The two classes (TARGET_CLASS and COMPARATOR_CLASS, by default ACE inhibitors vs thiazide or
-# thiazide-like diuretics), the ingredients of each, the exclusion list and the rules of the cohorts
-# are the LEGEND-HTN definitions bundled with the package (legend_study.py), and the outcomes are
-# the LEGEND outcomes (legend_outcomes.py).  Cohort rules: new users (no antihypertensive before
-# the index date, one ingredient in the first week), a hypertension diagnosis in the year before,
-# a year of history.
+# The script knows no study.  A study definition (STUDY: the name of a bundled study such as
+# legend_hypertension, or a folder; format in src/cehrgpt/analysis/counterfactual/studies/README.md)
+# gives the exposures and the pair to compare, the cohort rules (indication, washout, exposure gap,
+# monotherapy window, minimum time at risk), the exclusion list (every other drug of the study) and the
+# outcomes with their negative controls.  TARGET and COMPARATOR pick two of its exposures by name; by
+# default the pair of the study.  The cohorts are new users of the target or the comparator.
 #
 # Design (DESIGN)
 # ---------------
@@ -34,64 +34,54 @@
 #
 # Pipeline
 # --------
-#   Step 0  : the LEGEND outcome definitions, resolved for the vocabulary
-#   Step 1  : extract drug initiation sequences (symmetric: once per class as the source)
+#   Step 0  : the outcomes of the study, resolved for the vocabulary
+#   Step 1  : extract drug initiation sequences (symmetric: once per exposure as the source)
 #   Step 2  : build the arm contexts by swapping the drug (symmetric: in both directions)
 #   Step 3  : generate N trajectories per patient per arm
 #   Step 4  : estimate hazard ratios from the generated trajectories, and the observed ones
 #
-# Outcomes
-# --------
-#   Step 0 reads the LEGEND-HTN outcomes and negative controls, taken from the SQL of the LEGEND
-#   study (bundled with the package) and writes outcome_definitions.json.  The 15 outcomes that the study
-#   links to an inpatient or ER visit (acute myocardial infarction, acute pancreatitis, acute
-#   renal failure, anaphylactoid reaction, angioedema, cardiovascular disease,
-#   gastrointestinal bleeding, hemorrhagic stroke, hospitalization with heart failure,
-#   ischemic stroke, rhabdomyolysis, stroke, sudden cardiac death, transient ischemic attack
-#   and unstable angina) only count inside such a visit, as does coronary heart disease in
-#   the SQL.
-#
-# Published LEGEND-HTN results for ACE inhibitors vs thiazides, to compare with when those are the
-# two classes (target hazard ratio, 95% CI):
-#   AMI           : 0.99  (0.87–1.13)
-#   Heart failure : 1.18  (1.07–1.30)
-#   Stroke        : 1.09  (0.99–1.20)
-#
 # Usage
 # -----
 #   Edit the CONFIGURATION section, then:
-#     bash scripts/run_legend_htn_study.sh
+#     bash scripts/run_causal_study.sh
 #
 #   The other design:
-#     DESIGN=target_initiators bash scripts/run_legend_htn_study.sh
+#     DESIGN=target_initiators bash scripts/run_causal_study.sh
 #
-#   Another pair of classes (see legend_study.py --list):
-#     TARGET_CLASS="Angiotensin receptor blockers (ARBs)" \
-#     COMPARATOR_CLASS="Dihydropyridine calcium channel blockers (dCCB)" \
-#       bash scripts/run_legend_htn_study.sh
+#   Another pair of exposures of the study (python .../study_definition.py --list shows them):
+#     TARGET="Angiotensin receptor blockers (ARBs)" \
+#     COMPARATOR="Dihydropyridine calcium channel blockers (dCCB)" \
+#       bash scripts/run_causal_study.sh
+#
+#   Another study:
+#     STUDY=/path/to/my_study bash scripts/run_causal_study.sh
 #
 #   To skip steps already completed (e.g. after a failure in step 3):
-#     SKIP_STEP1=true SKIP_STEP2=true bash scripts/run_legend_htn_study.sh
+#     SKIP_STEP1=true SKIP_STEP2=true bash scripts/run_causal_study.sh
 #
 #   To run both arms on a single GPU sequentially:
-#     SINGLE_GPU=true bash scripts/run_legend_htn_study.sh
+#     SINGLE_GPU=true bash scripts/run_causal_study.sh
 #
 # =============================================================================
 set -euo pipefail
 
 # =============================================================================
-# STUDY — the two drug classes to compare
+# STUDY — the study definition and the two exposures to compare
 #
-#   The classes, their ingredients, the exclusion list (every other antihypertensive ingredient)
-#   and the rules of the cohorts (indication, washout, exposure gap, monotherapy window, minimum
-#   time at risk) are the LEGEND-HTN definitions bundled with the package; see
-#   `python src/cehrgpt/analysis/counterfactual/legend_study.py --list` for the classes.
-#   Export a variable of the same name before running to change one of the rules.
+#   Everything about the drugs, the cohorts and the outcomes comes from the study definition.
+#   Export a variable of the same name before running to change one of its rules (the windows,
+#   the washout, the labels of the arms).
 # =============================================================================
-TARGET_CLASS="${TARGET_CLASS:-ACE inhibitors}"
-COMPARATOR_CLASS="${COMPARATOR_CLASS:-Thiazide or thiazide-like diuretics}"
-STUDY_SCRIPT="src/cehrgpt/analysis/counterfactual/legend_study.py"
-_STUDY_ENV="$(python "${STUDY_SCRIPT}" --target "${TARGET_CLASS}" --comparator "${COMPARATOR_CLASS}")"
+STUDY="${STUDY:-legend_hypertension}"
+TARGET="${TARGET:-}"                  # empty: the target of the default pair of the study
+COMPARATOR="${COMPARATOR:-}"          # empty: the comparator of the default pair
+EXPOSURE_LEVEL="${EXPOSURE_LEVEL:-}"  # e.g. "Drug class"; empty: the default level of the study
+STUDY_SCRIPT="src/cehrgpt/analysis/counterfactual/study_definition.py"
+_STUDY_ARGS=(--study "${STUDY}")
+if [ -n "${TARGET}" ]; then _STUDY_ARGS+=(--target "${TARGET}"); fi
+if [ -n "${COMPARATOR}" ]; then _STUDY_ARGS+=(--comparator "${COMPARATOR}"); fi
+if [ -n "${EXPOSURE_LEVEL}" ]; then _STUDY_ARGS+=(--level "${EXPOSURE_LEVEL}"); fi
+_STUDY_ENV="$(python "${STUDY_SCRIPT}" "${_STUDY_ARGS[@]}")"
 eval "${_STUDY_ENV}"
 
 # =============================================================================
@@ -109,7 +99,7 @@ PATIENT_SEQUENCE_PATH="/data/patient_sequence"
 VOCAB_PATH="/data/omop_vocab"
 MODEL_PATH="/models/cehrgpt"
 TOKENIZER_PATH="/models/tokenizer"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/data/legend_htn_${TARGET_LABEL}_vs_${COMPARATOR_LABEL}_${DESIGN}}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/data/${STUDY_LABEL}_${TARGET_LABEL}_vs_${COMPARATOR_LABEL}_${DESIGN}}"
 
 # Number of stochastic trajectories per patient per arm
 NUM_TRAJECTORIES=5
@@ -141,22 +131,20 @@ OVERWRITE=false
 # stored in drug_info/ and bounds the follow-up in Step 4) and MIN_PRIOR_OBSERVATION_DAYS (washout:
 # days of observed history before the index drug) come from the study definition above.
 
-# LEGEND's cohort and time-at-risk rules (CreateExposureCohortsHypertension.sql and the
-# cmAnalysisList of the study):
-#   * monotherapy: exactly one antihypertensive ingredient may start in the first
-#     MONOTHERAPY_WINDOW_DAYS days from the index date (set "" for the older same-visit checks);
-#   * the hypertension diagnosis has to be recorded in the POPULATION_WINDOW_DAYS days up to the
-#     index date;
+# The cohort and time-at-risk rules come from the study definition:
+#   * monotherapy: exactly one drug of the study may start in the first MONOTHERAPY_WINDOW_DAYS
+#     days from the index date (empty: the older same-visit checks);
+#   * the indication has to be recorded in the POPULATION_WINDOW_DAYS days up to the index date;
 #   * patients with the outcome before the index date are left out of that outcome;
 #   * time at risk starts the day after the index date and needs MIN_DAYS_AT_RISK days; the
-#     on-treatment design ends it when the continuous exposure to the patient's own class ends
+#     on-treatment design ends it when the continuous exposure to the patient's own exposure ends
 #     (a gap above ERA_GAP_DAYS), the intent-to-treat design with the observation of the patient.
 #     Starting another drug does not end it (CENSOR_AT_SWITCH=true does).
 TIME_AT_RISK="${TIME_AT_RISK:-on_treatment}"      # or intent_to_treat
 CENSOR_AT_SWITCH="${CENSOR_AT_SWITCH:-false}"
 
 # Set to "true" to suppress the other arm's drugs and the exclusion drugs during generation.
-# LEGEND does not (patients may add drugs), so the default is false.
+# Patients may add drugs in practice, so the default is false.
 SUPPRESS_CONCEPTS="${SUPPRESS_CONCEPTS:-false}"
 
 # -----------------------------------------------------------------------------
@@ -189,11 +177,10 @@ SKIP_STEP4=false
 ARM_A="${TARGET_LABEL}"
 ARM_B="${COMPARATOR_LABEL}"
 
-# Outcomes: the LEGEND-HTN outcomes and negative controls (https://github.com/OHDSI/Legend),
-# bundled with the package in cehrgpt/analysis/counterfactual/legend_hypertension (see source.json
-# there for the LEGEND version).  Step 0 resolves their concepts (descendants, exclusions) with
-# VOCAB_PATH and keeps the inpatient / ER visit restriction of the outcomes that need one;
-# outcomes the token sequences cannot represent are listed in Step 0 and left out.
+# Outcomes: the outcomes and negative controls of the study.  Step 0 resolves their concepts
+# (descendants, exclusions) with VOCAB_PATH and keeps the inpatient / ER visit restriction of the
+# outcomes that need one; outcomes the token sequences cannot represent are listed in Step 0 and
+# left out.
 
 # Further outcomes by concept_id (descendants included), optional
 OUTCOME_CONCEPT_IDS=""
@@ -260,7 +247,7 @@ TRAJ_DIR="${OUTPUT_ROOT}/trajectories"
 RESULTS_DIR="${OUTPUT_ROOT}/results"
 OUTCOME_DEFS_DIR="${OUTPUT_ROOT}/outcome_definitions"
 OUTCOME_DEFINITIONS="${OUTCOME_DEFS_DIR}/outcome_definitions.json"
-OUTCOME_SCRIPT="src/cehrgpt/analysis/counterfactual/legend_outcomes.py"
+OUTCOME_SCRIPT="src/cehrgpt/analysis/counterfactual/outcome_definitions.py"
 
 EXTRACT_SCRIPT="src/cehrgpt/analysis/counterfactual/extract_drug_initiation_sequences.py"
 SWAP_SCRIPT="src/cehrgpt/analysis/counterfactual/create_drug_swap_context.py"
@@ -282,20 +269,21 @@ _step_end() {
     echo "Elapsed: $(( elapsed / 60 ))m $(( elapsed % 60 ))s"
 }
 
-echo "Design: ${DESIGN}   ${TARGET_NAME} vs ${COMPARATOR_NAME}   output: ${OUTPUT_ROOT}"
+echo "Study: ${STUDY_NAME}   Design: ${DESIGN}   ${TARGET_NAME} vs ${COMPARATOR_NAME}   output: ${OUTPUT_ROOT}"
 echo ""
 
 # =============================================================================
-# STEP 0 — Outcome definitions of the LEGEND study (bundled with the package)
+# STEP 0 — The outcomes of the study
 #
 #   Writes outcome_definitions.json (the concepts of every outcome, with descendants and
 #   exclusions resolved, and its inpatient / ER restriction) and the raw concept sets.
 # =============================================================================
 echo "============================================================"
-echo "STEP 0: LEGEND outcome definitions  [$(date '+%H:%M:%S')]"
+echo "STEP 0: outcome definitions of ${STUDY_NAME}  [$(date '+%H:%M:%S')]"
 echo "============================================================"
 mkdir -p "${OUTCOME_DEFS_DIR}"
 python "${OUTCOME_SCRIPT}" \
+    --study       "${STUDY_DIR}" \
     --vocab_path  "${VOCAB_PATH}" \
     --output_dir  "${OUTCOME_DEFS_DIR}"
 echo ""
@@ -589,8 +577,8 @@ else
     mkdir -p "${TRAJ_DIR}"
 
     # Concepts to suppress per arm:
-    #   arm_a (target) suppresses the comparator drugs + all excluded antihypertensives
-    #   arm_b (comparator) suppresses the target drugs + all excluded antihypertensives
+    #   arm_a (target) suppresses the comparator drugs + all other drugs of the study
+    #   arm_b (comparator) suppresses the target drugs + all other drugs of the study
     _SUPPRESS_ARGS_A=()
     _SUPPRESS_ARGS_B=()
     if [ "${SUPPRESS_CONCEPTS}" = "true" ]; then
@@ -770,10 +758,6 @@ echo "  ${RESULTS_DIR}/observed_hazard_ratio_summary.csv  (observed ${TARGET_NAM
 echo "  ${RESULTS_DIR}/control_outcome_summary.csv        (negative / positive controls, when given)"
 echo "  ${RESULTS_DIR}/km_<concept_id>.csv"
 echo ""
-if [ "${TARGET_CLASS}" = "ACE inhibitors" ] && [ "${COMPARATOR_CLASS}" = "Thiazide or thiazide-like diuretics" ]; then
-    echo "Published LEGEND-HTN reference HRs (ACE inhibitors vs thiazides):"
-    echo "  AMI           : 0.99  (95% CI 0.87–1.13)"
-    echo "  Heart failure : 1.18  (95% CI 1.07–1.30)"
-    echo "  Stroke        : 1.09  (95% CI 0.99–1.20)"
-fi
+# reference results of the study for this pair, when it has any
+python "${STUDY_SCRIPT}" "${_STUDY_ARGS[@]}" --reference
 echo "============================================================"

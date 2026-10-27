@@ -8,7 +8,8 @@ from unittest import mock
 import polars as pl
 
 from cehrgpt.analysis.counterfactual import hazard_ratio_estimation as hr
-from cehrgpt.analysis.counterfactual import legend_outcomes as lo
+from cehrgpt.analysis.counterfactual import outcome_definitions as lo
+from cehrgpt.analysis.counterfactual.study_definition import study_dir
 from cehrgpt.analysis.counterfactual.extract_drug_initiation_sequences import (
     find_outcomes_after_drug,
     process,
@@ -18,13 +19,14 @@ def codeset(codeset_id, include=(), descendants=(), exclude=(), exclude_descenda
     return lo.Codeset(codeset_id, list(include), list(descendants), list(exclude), list(exclude_descendants))
 
 
-def outcome(name, codesets, primary, correlated=()):
+def outcome(name, codesets, primary, correlated=(), partial=None):
     """primary / correlated: (domain, codeset id or None) pairs."""
     return lo.OutcomeDefinition(
         name=name,
         codesets={c.codeset_id: c for c in codesets},
         primary=[lo.Criterion(d, [] if i is None else [i]) for d, i in primary],
         correlated=[lo.Criterion(d, [] if i is None else [i]) for d, i in correlated],
+        partial=partial,
     )
 
 
@@ -113,6 +115,20 @@ class ResolveTest(unittest.TestCase):
         self.assertIn("Measurement", measured.unsupported_reason)
         self.assertFalse(measured.supported)
 
+    def test_a_partial_definition_keeps_the_named_concept_sets_and_says_what_is_left_out(self):
+        resolved = self.resolve(
+            outcome(
+                "Two branches",
+                [codeset(1, descendants=[4]), codeset(2, descendants=[5])],
+                primary=[("Condition Occurrence", 1), ("Condition Occurrence", 2)],
+                correlated=[("Measurement", 3)],
+                partial={"kept_codeset_ids": [1], "left_out": "the branch with a measured value"},
+            )
+        )
+        self.assertTrue(resolved.supported)
+        self.assertEqual(resolved.concepts, ["4", "41", "42"])
+        self.assertEqual(resolved.approximation, "left out: the branch with a measured value")
+
     def test_a_negative_control_is_the_concept_and_its_descendants(self):
         resolved = lo.resolve_negative_control(7, 1001, "Rash", lo.descendants_of(self.vocab, [7]))
         self.assertEqual((resolved.label, resolved.role), ("7", lo.NEGATIVE_CONTROL))
@@ -144,8 +160,8 @@ class BundledDefinitionsTest(unittest.TestCase):
         self.assertEqual(len({o.cohort_id for o in self.outcomes.values()}), 58)
 
     def test_the_bundled_files_say_which_version_of_legend_they_come_from(self):
-        source = json.loads((lo.BUNDLED_DIR / "source.json").read_text())
-        self.assertEqual(source["repository"], lo.LEGEND_REPOSITORY)
+        source = json.loads((study_dir() / "source.json").read_text())
+        self.assertEqual(source["repository"], "https://github.com/OHDSI/Legend")
         self.assertRegex(source["commit"], r"^[0-9a-f]{40}$")
         self.assertEqual((source["n_outcomes"], source["n_negative_controls"]), (58, 76))
 
@@ -194,6 +210,18 @@ class BundledDefinitionsTest(unittest.TestCase):
             self.assertTrue(resolved[name].inpatient_only, name)
         self.assertIn("creatine kinase", resolved["Rhabdomyolysis"].approximation)
         self.assertFalse(resolved["Hyperkalemia"].inpatient_only)
+
+    def test_the_two_outcomes_with_a_measured_branch_are_partial_in_the_data(self):
+        partial = {name: o.partial for name, o in self.outcomes.items() if o.partial}
+        self.assertEqual(sorted(partial), ["Hyperkalemia", "Rhabdomyolysis"])
+        self.assertEqual(partial["Rhabdomyolysis"]["kept_codeset_ids"], [10])
+
+    def test_a_study_is_read_from_a_folder_too(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for name in ("study.json", "exposures.csv", "outcomes.json"):
+                (Path(folder) / name).write_text((study_dir() / name).read_text())
+            self.assertEqual(len(lo.read_outcomes(folder)), 58)
+            self.assertEqual(lo.negative_controls(folder), [])  # no negative_controls.csv there
 
     def test_the_numbers_of_supported_and_unsupported_outcomes(self):
         resolved = self.resolve_all()

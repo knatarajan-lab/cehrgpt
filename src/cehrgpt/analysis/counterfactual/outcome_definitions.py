@@ -1,33 +1,32 @@
 #!/usr/bin/env python3
 """
-The outcome definitions of the LEGEND study, bundled with this package.
+The outcomes of a study: concept sets and criteria, and how they are turned into events in the token
+sequences of CEHR-GPT.
 
-Every outcome of the OHDSI LEGEND study (https://github.com/OHDSI/Legend) is a cohort definition
-that the SQL files in ``inst/sql/sql_server`` spell out.  The hypertension outcomes and negative
-controls are bundled as data in ``legend_hypertension/`` (``outcomes.json`` and
-``negative_controls.csv``; ``source.json`` names the LEGEND version).  How they were read from the
-LEGEND repository, and how to read them again, is written down in
-``legend_hypertension/README.md``; there is no code that parses LEGEND.
+A study (``study_definition.py``) holds its outcomes as data: ``outcomes.json`` and, optionally,
+``negative_controls.csv`` (format in ``studies/README.md``).  An outcome is an ATLAS-style cohort
+definition reduced to what the pipeline can use: its concept sets (the concepts that count as they
+are, those that count with all their descendants, and the excluded ones) and the criteria that
+select the events (the domain and concept sets of the primary criteria, such as condition, death or
+visit, and of the correlated criteria, such as "during an inpatient or ER visit").  How the outcomes
+of the bundled LEGEND study were read from its repository is written down in
+``studies/legend_hypertension/README.md``; there is no code that parses a study source.
 
-What this module does with the bundled data:
-
-* ``read_outcomes`` and ``negative_controls`` load them: the concept sets of each outcome (the
-  concepts that count as they are, those that count with all their descendants, and the excluded
-  ones), the domain and concept sets of the criteria that select the events (condition, death,
-  visit, ...) and the correlated criteria (for example "during an inpatient or ER visit").
+* ``read_outcomes`` and ``negative_controls`` load them.
 * ``resolve_outcomes`` turns the concept sets into the concepts that mark an event in the token
-  sequences of CEHR-GPT (descendants expanded with the vocabulary, exclusions removed) and says which
-  outcomes can be evaluated that way.  The result, ``outcome_definitions.json``, is what the
-  extraction and hazard ratio steps read with ``--outcome_definitions_path``.  An outcome is
-  supported when its events are records of a concept set (condition, observation, procedure),
-  optionally during an inpatient or ER visit, or the death record; outcomes that need a confirming
-  second record, a drug or a measured value are listed with the reason and left out.  Two outcomes
-  (see ``PARTIAL_DEFINITIONS``) have one branch that depends on a measured value; the other branch
-  is kept and the dropped one is recorded in the ``approximation`` of the definition.
+  sequences (descendants expanded with the vocabulary, exclusions removed) and says which outcomes
+  can be evaluated that way.  The result, ``outcome_definitions.json``, is what the extraction and
+  hazard ratio steps read with ``--outcome_definitions_path``.  An outcome is supported when its
+  events are records of a concept set (condition, observation, procedure), optionally during an
+  inpatient or ER visit, or the death record; outcomes that need a confirming second record, a drug
+  or a measured value are listed with the reason and left out.  An outcome may name the concept
+  sets of its ``partial`` definition: one branch of it depends on a measured value, the other
+  branches are kept and the dropped one is recorded in the ``approximation``.
 
 Usage
 -----
-python legend_outcomes.py --vocab_path /path/to/omop_vocab --output_dir /path/to/outcome_definitions
+python outcome_definitions.py --study legend_hypertension --vocab_path /path/to/omop_vocab \\
+    --output_dir /path/to/outcome_definitions
 """
 
 import argparse
@@ -35,14 +34,12 @@ import csv
 import hashlib
 import json
 import os
-import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-BUNDLED_DIR = Path(__file__).resolve().parent / "legend_hypertension"
-BUNDLED_INDICATION = "Hypertension"
-LEGEND_REPOSITORY = "https://github.com/OHDSI/Legend"
+from cehrgpt.analysis.counterfactual.study_definition import DEFAULT_STUDY, label_of, study_dir
+
 _VISIT_DOMAIN = "Visit Occurrence"
 
 
@@ -75,6 +72,8 @@ class OutcomeDefinition:
     correlated: List[Criterion]
     cohort_id: Optional[int] = None
     atlas_id: Optional[int] = None
+    # {"kept_codeset_ids": [...], "left_out": "..."}: only these concept sets are used
+    partial: Optional[Dict] = None
 
     @property
     def visit_codeset_ids(self) -> List[int]:
@@ -101,20 +100,24 @@ def outcome_from_dict(entry: Dict) -> OutcomeDefinition:
         codesets={int(i): Codeset(**cs) for i, cs in entry["codesets"].items()},
         primary=[Criterion(**c) for c in entry["primary"]],
         correlated=[Criterion(**c) for c in entry["correlated"]],
-        cohort_id=entry["cohort_id"],
-        atlas_id=entry["atlas_id"],
+        cohort_id=entry.get("cohort_id"),
+        atlas_id=entry.get("atlas_id"),
+        partial=entry.get("partial"),
     )
 
 
-def read_outcomes() -> List[OutcomeDefinition]:
-    """The bundled hypertension outcomes, with the ids of LEGEND's ``OutcomesOfInterest.csv``."""
-    entries = json.loads((BUNDLED_DIR / "outcomes.json").read_text())
+def read_outcomes(study: str = DEFAULT_STUDY) -> List[OutcomeDefinition]:
+    """The outcomes of a study (the name of a bundled study, or a study folder)."""
+    entries = json.loads((study_dir(study) / "outcomes.json").read_text())
     return [outcome_from_dict(entry) for entry in entries]
 
 
-def negative_controls() -> List[Tuple[int, int, str]]:
-    """``(concept_id, cohort_id, name)`` of the bundled negative control outcomes."""
-    with open(BUNDLED_DIR / "negative_controls.csv") as f:
+def negative_controls(study: str = DEFAULT_STUDY) -> List[Tuple[int, int, str]]:
+    """``(concept_id, cohort_id, name)`` of the negative control outcomes of a study, if it has any."""
+    path = study_dir(study) / "negative_controls.csv"
+    if not path.is_file():
+        return []
+    with open(path) as f:
         return [(int(r["concept_id"]), int(r["cohort_id"]), r["name"]) for r in csv.DictReader(f)]
 
 
@@ -126,24 +129,8 @@ def negative_controls() -> List[Tuple[int, int, str]]:
 TOKEN_DOMAINS = {"Condition Occurrence", "Observation", "Procedure Occurrence"}
 DEATH_TOKEN = "[DEATH]"
 
-# Outcomes with a branch that needs a measured value, which the sequences do not carry: the
-# concept sets of the branches that are kept, and what is left out.
-PARTIAL_DEFINITIONS: Dict[str, Tuple[List[int], str]] = {
-    "Rhabdomyolysis": (
-        [10],
-        "left out: muscle disorder records with a creatine kinase above 5 x the upper limit of normal",
-    ),
-    "Hyperkalemia": (
-        [0],
-        "left out: potassium measurements above 5.6 mmol/L",
-    ),
-}
 PRIMARY = "primary"
 NEGATIVE_CONTROL = "negative_control"
-
-
-def label_of(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
 def descendants_of(vocab_path: str, concept_ids) -> Dict[int, Set[int]]:
@@ -222,10 +209,12 @@ def resolve_outcome(outcome: OutcomeDefinition, descendants: Dict[int, Set[int]]
             approximation=approximation,
         )
 
-    if outcome.name in PARTIAL_DEFINITIONS:
-        kept_ids, left_out = PARTIAL_DEFINITIONS[outcome.name]
+    if outcome.partial:
+        # one branch depends on a measured value, which the sequences do not carry: keep the others
         return result(
-            union(kept_ids), inpatient_only=bool(outcome.visit_codeset_ids), approximation=left_out
+            union(outcome.partial["kept_codeset_ids"]),
+            inpatient_only=bool(outcome.visit_codeset_ids),
+            approximation=f"left out: {outcome.partial['left_out']}",
         )
 
     primary_domains = {c.domain for c in outcome.primary}
@@ -316,7 +305,8 @@ def definitions_fingerprint(path: str) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="The LEGEND outcome concepts, resolved for a vocabulary")
+    parser = argparse.ArgumentParser(description="The outcomes of a study, resolved for a vocabulary")
+    parser.add_argument("--study", default=DEFAULT_STUDY, help="Name of a bundled study, or a study folder")
     parser.add_argument(
         "--vocab_path",
         required=True,
@@ -324,8 +314,8 @@ def main() -> None:
     )
     parser.add_argument("--output_dir", required=True, help="Where outcome_definitions.json is written")
     args = parser.parse_args()
-    outcomes = read_outcomes()
-    controls = negative_controls()
+    outcomes = read_outcomes(args.study)
+    controls = negative_controls(args.study)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     resolved = resolve_outcomes(outcomes, controls, args.vocab_path)

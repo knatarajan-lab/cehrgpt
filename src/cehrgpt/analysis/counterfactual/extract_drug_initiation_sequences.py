@@ -52,7 +52,7 @@ import numpy as np
 import polars as pl
 from tqdm import tqdm
 
-from cehrgpt.analysis.counterfactual.legend_outcomes import (
+from cehrgpt.analysis.counterfactual.outcome_definitions import (
     definitions_fingerprint,
     load_outcome_definitions,
 )
@@ -1014,7 +1014,7 @@ def process(
         counted.  Typical use: heart failure, AMI, stroke hospitalisations.
         Each id is expanded to descendants before matching.
     outcome_definitions_path
-        ``outcome_definitions.json`` written by ``legend_outcomes.py``: outcomes defined by a
+        ``outcome_definitions.json`` written by ``outcome_definitions.py``: outcomes defined by a
         concept set (descendants and exclusions already resolved) and whether they must occur
         in an inpatient or ER visit.  They are extracted next to *outcome_concept_ids*, each
         under its label.
@@ -1364,7 +1364,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--outcome_definitions_path",
         default=None,
-        help="outcome_definitions.json from legend_outcomes.py: outcomes defined by concept "
+        help="outcome_definitions.json from outcome_definitions.py: outcomes defined by concept "
              "sets (exclusions, no-descendant members, inpatient/ER restriction), extracted "
              "next to --outcome_concept_ids. Pass the same file to hazard_ratio_estimation.py.",
     )

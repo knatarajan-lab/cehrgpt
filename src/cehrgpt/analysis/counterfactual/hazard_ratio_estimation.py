@@ -39,7 +39,7 @@ import polars as pl
 from scipy.optimize import minimize_scalar
 from scipy.stats import chi2
 
-from cehrgpt.analysis.counterfactual.legend_outcomes import load_outcome_definitions
+from cehrgpt.analysis.counterfactual.outcome_definitions import load_outcome_definitions
 
 # Column prefix of the extraction's flags for outcomes before the index date
 PRIOR_PREFIX = "prior__"
@@ -1556,7 +1556,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--outcome_definitions_path",
         default=None,
-        help="outcome_definitions.json from legend_outcomes.py: outcomes (and negative "
+        help="outcome_definitions.json from outcome_definitions.py: outcomes (and negative "
              "controls) defined by concept sets, with their inpatient/ER restriction. "
              "Analysed next to the outcomes given here; use the file of the extraction step.",
     )

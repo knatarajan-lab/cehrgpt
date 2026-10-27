@@ -1,7 +1,7 @@
 # LEGEND-HTN study definition: how it was read from the LEGEND repository
 
 This folder holds the definition of the OHDSI LEGEND hypertension study
-(<https://github.com/OHDSI/Legend>) as data. **No code parses the LEGEND repository.** When the
+(<https://github.com/OHDSI/Legend>) as data, in the format described in `../README.md`. **No code parses the LEGEND repository.** When the
 definition has to be read again (a new LEGEND version, another indication, a file that looks wrong),
 an agent does it by following this document, then checks the result with the list at the end.
 
@@ -13,14 +13,14 @@ outcome section. It was removed on purpose. If a reference is useful, it is in t
 
 | File | Content | Read by |
 |---|---|---|
-| `outcomes.json` | The 58 hypertension outcomes: concept sets and the criteria that select the events | `legend_outcomes.read_outcomes` |
-| `negative_controls.csv` | The 76 negative control outcomes | `legend_outcomes.negative_controls` |
-| `exposures.csv` | The 58 ingredients, 15 drug classes and 7 major classes of the study | `legend_study.load_exposures` |
-| `study.json` | Indication, washout, exposure gap, monotherapy window, time at risk | `legend_study.load_study` |
+| `outcomes.json` | The 58 hypertension outcomes: concept sets and the criteria that select the events | `outcome_definitions.read_outcomes` |
+| `negative_controls.csv` | The 76 negative control outcomes | `outcome_definitions.negative_controls` |
+| `exposures.csv` | The 58 ingredients, 15 drug classes and 7 major classes of the study | `study_definition.load_exposures` |
+| `study.json` | Indication, washout, exposure gap, monotherapy window, time at risk | `study_definition.load_study` |
 | `source.json` | Which LEGEND commit all of the above comes from | tests, provenance |
 
-The code turns these into what the pipeline uses (`legend_outcomes.resolve_outcomes` expands the
-concept sets with the OMOP vocabulary; `legend_study.environment` gives the shell variables of the
+The code turns these into what the pipeline uses (`outcome_definitions.resolve_outcomes` expands the
+concept sets with the OMOP vocabulary; `study_definition.environment` gives the shell variables of the
 scripts). Do not edit the data files by hand; read them again from LEGEND as described below.
 
 ## 2. Source and version
@@ -127,7 +127,7 @@ indent of 1 and a final newline. The keys of `codesets` are the codeset ids as s
 ### 3.4 What is deliberately not recorded
 
 The domain and concept sets are all that the pipeline can use. The following exist in the SQL and are
-left out, which is why the code (`resolve_outcome`) marks an outcome as not supported when its
+left out, which is why the code (`outcome_definitions.resolve_outcome`) marks an outcome as not supported when its
 meaning depends on them:
 
 * counts such as `HAVING COUNT(...) >= 2` ("followed by another record in the following year");
@@ -135,6 +135,26 @@ meaning depends on them:
 * time windows between records, the gap that merges records into episodes, date offsets.
 
 Do not try to encode them in `outcomes.json`.
+
+### 3.5 Outcomes with a branch that needs a measured value (`partial`)
+
+Two outcomes have a branch that cannot be evaluated on the token sequences because it depends on a
+measured value, next to a branch that can. Add a `partial` entry to them in `outcomes.json`:
+
+```json
+"partial": {"kept_codeset_ids": [10], "left_out": "muscle disorder records with a creatine kinase above 5 x the upper limit of normal"}
+```
+
+| Outcome | Kept concept sets | Left out |
+|---|---|---|
+| Rhabdomyolysis | `[10]` (rhabdomyolysis records) | muscle disorder records with a creatine kinase above 5 x the upper limit of normal (concept set 11 with the measurement 12) |
+| Hyperkalemia | `[0]` (hyperkalemia records) | potassium measurements above 5.6 mmol/L (the measurement criterion with concept set 1) |
+
+This is a judgement, not something that can be read off mechanically: it applies when a primary
+criterion of the measurement domain, or a correlated measurement, belongs to one branch of a `UNION ALL`
+of primary criteria, and the other branch is a plain record of a concept set. Look for it when the
+checks in section 7 report an unsupported outcome with a `Measurement` criterion, and tell the user
+which outcomes got a `partial` entry and why.
 
 ## 4. Negative controls (`negative_controls.csv`)
 
@@ -163,6 +183,10 @@ Each value is a number that appears once in a file of LEGEND; read it from there
 | Field | Where | What to look for |
 |---|---|---|
 | `name` | | `LEGEND-<indication>` |
+| `description` | | one sentence, free text |
+| `exposures` | `exposures.csv` | `levels`: the values of `type` in the order `Drug class`, `Drug major class`, `Drug`; `default_level`: `Drug class`; `drug_level`: `Drug` |
+| `default_pair` | the previous analysis script | `ACE inhibitors` vs `Thiazide or thiazide-like diuretics` (exact names from `exposures.csv`) |
+| `reference_results` | the previous analysis script | the three results that script listed for that pair: AMI 0.99 (0.87–1.13), Heart failure 1.18 (1.07–1.30), Stroke 1.09 (0.99–1.20); they are copied, not read from LEGEND, so say where they came from if the user asks |
 | `indication.name` | | the indication, `Hypertension` |
 | `indication.concept_ids` | `inst/sql/sql_server/CreateExposureCohortsHypertension.sql`, last block | `WHERE condition_concept_id IN (SELECT descendant_concept_id ... WHERE ancestor_concept_id IN (316866))`: the ids in the `IN (...)` (descendants count too) |
 | `indication.window_days` | same block | `condition_start_date >= DATEADD(DAY, -365, new_user.cohort_start_date)` together with `condition_start_date <= new_user.cohort_start_date`: 365 days up to and including the index date |
@@ -201,14 +225,14 @@ Run these, and say so in the answer if any differs from what is written here (an
    descendants.
 4. "Hospitalization with heart failure": two primary `Visit Occurrence` entries, and a correlated
    `Condition Occurrence`.
-5. "All-cause mortality": primary `Death` with no concept set.
+5. "All-cause mortality": primary `Death` with no concept set. "Rhabdomyolysis" and "Hyperkalemia" carry a `partial` entry (section 3.5).
 6. The ACE inhibitor class has the ten ingredients `1335471, 1340128, 1341927, 1363749, 1308216,
    1310756, 1373225, 1331235, 1334456, 1342439`, the class of thiazide or thiazide-like diuretics
    `1395058, 974166, 978555, 907013`, and the other 44 ingredients make up the exclusion list (ARBs,
    dihydropyridine and non-dihydropyridine calcium channel blockers, second-line agents).
 7. `study.json` has 316866, 365, 365, 30, 7, 1, 1.
-8. The tests pass: `pytest tests/unit_tests/analysis/counterfactual/legend_outcomes_test.py
-   tests/unit_tests/analysis/counterfactual/legend_study_test.py`. They check the points above, that
+8. The tests pass: `pytest tests/unit_tests/analysis/counterfactual/outcome_definitions_test.py
+   tests/unit_tests/analysis/counterfactual/study_definition_test.py`. They check the points above, that
    15 outcomes of the paper (Supplementary Table of the LEGEND-HTN paper, the outcomes "during an
    inpatient or ER visit") come out restricted to inpatient and ER visits, and that 121 of the 134
    outcomes and controls can be evaluated on the token sequences.

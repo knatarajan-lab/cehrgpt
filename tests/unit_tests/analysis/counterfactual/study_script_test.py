@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
-SCRIPT = ROOT / "scripts" / "run_legend_htn_study.sh"
+SCRIPT = ROOT / "scripts" / "run_causal_study.sh"
 
 
 @unittest.skipUnless(shutil.which("bash"), "bash is not available")
@@ -27,7 +27,7 @@ class StudyScriptTest(unittest.TestCase):
         shim.parent.mkdir()
         shim.write_text(
             "#!/usr/bin/env bash\n"
-            f'if [[ "$1" == *legend_study.py ]]; then exec "{sys.executable}" "$@"; fi\n'
+            f'if [[ "$1" == *study_definition.py ]]; then exec "{sys.executable}" "$@"; fi\n'
             'echo "$*" >> "$SHIM_LOG"\n'
             'if [[ "$1" == "-" ]]; then cat > /dev/null; fi\n'
             "exit 0\n"
@@ -58,7 +58,7 @@ class StudyScriptTest(unittest.TestCase):
     def test_the_symmetric_design_extracts_and_swaps_in_both_directions(self):
         result, commands = self.run_script(DESIGN="symmetric")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(len(self.calls(commands, "legend_outcomes.py")), 1)
+        self.assertEqual(len(self.calls(commands, "outcome_definitions.py")), 1)
         extractions = self.calls(commands, "extract_drug_initiation_sequences.py")
         swaps = self.calls(commands, "create_drug_swap_context.py")
         self.assertEqual((len(extractions), len(swaps)), (2, 2))
@@ -113,8 +113,8 @@ class StudyScriptTest(unittest.TestCase):
 
     def test_another_pair_of_classes_changes_the_ingredients(self):
         result, commands = self.run_script(
-            TARGET_CLASS="Angiotensin receptor blockers (ARBs)",
-            COMPARATOR_CLASS="Dihydropyridine calcium channel blockers (dCCB)",
+            TARGET="Angiotensin receptor blockers (ARBs)",
+            COMPARATOR="Dihydropyridine calcium channel blockers (dCCB)",
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         extraction = self.calls(commands, "extract_drug_initiation_sequences.py")[0]
@@ -122,11 +122,53 @@ class StudyScriptTest(unittest.TestCase):
         self.assertIn("angiotensin_receptor_blockers_arbs", " ".join(commands))
 
     def test_an_unknown_design_or_class_stops_the_script_before_any_step(self):
-        for env in ({"DESIGN": "both"}, {"TARGET_CLASS": "statins"}):
+        for env in ({"DESIGN": "both"}, {"TARGET": "statins"}, {"STUDY": "no_such_study"}):
             self.log.unlink(missing_ok=True)
             result, commands = self.run_script(**env)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(commands, [])
+
+    def test_the_outcomes_of_the_study_are_resolved_in_step_zero(self):
+        _, commands = self.run_script()
+        outcomes = self.calls(commands, "outcome_definitions.py")[0]
+        self.assertIn("--study " + str(ROOT / "src/cehrgpt/analysis/counterfactual/studies/legend_hypertension"), outcomes)
+
+    def test_another_study_drives_the_whole_run(self):
+        study = self.root / "mini_study"
+        study.mkdir()
+        (study / "exposures.csv").write_text(
+            "type,name,cohort_id,concept_id,included_concept_ids\n"
+            + "".join(f"Drug,Drug {i},{i},{i},\n" for i in range(1, 7))
+            + "Group,Class A,101,,1;2\nGroup,Class B,102,,3\n"
+        )
+        (study / "study.json").write_text(
+            '{"name": "Mini Study", "exposures": {"levels": ["Group", "Drug"], "default_level": "Group", '
+            '"drug_level": "Drug"}, "default_pair": {"target": "Class A", "comparator": "Class B"}, '
+            '"indication": {"name": "Condition", "concept_ids": [777], "window_days": 90}, '
+            '"washout_days": 180, "era_gap_days": 45, "monotherapy_window_days": null, '
+            '"time_at_risk": {"min_days_at_risk": 2}}'
+        )
+        (study / "outcomes.json").write_text("[]")
+        result, commands = self.run_script(STUDY=str(study), OUTPUT_ROOT=str(self.root / "mini_out"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        joined = "\n".join(commands)
+        extraction = self.calls(commands, "extract_drug_initiation_sequences.py")[0]
+        self.assertIn("--source_concept_ids 1,2", extraction)
+        self.assertIn("--comparator_concept_ids 3", extraction)
+        self.assertIn("--exclusion_concept_ids 4,5,6", extraction)
+        self.assertIn("--population_concept_ids 777", extraction)
+        self.assertIn("--population_window_days 90", extraction)
+        self.assertIn("--min_prior_observation_days 180", extraction)
+        self.assertIn("--era_gap_days 45", extraction)
+        self.assertNotIn("--monotherapy_window_days", extraction)  # the study has none
+        self.assertIn("--min_days_at_risk 2", self.calls(commands, "hazard_ratio_estimation.py")[0])
+        self.assertIn("--study " + str(study), self.calls(commands, "outcome_definitions.py")[0])
+        # nothing of the other study is left in the run
+        for leftover in ("316866", "1335471", "1395058", "ace_inhibitors"):
+            self.assertNotIn(leftover, joined)
+        # the arms are named after the exposures of that study
+        self.assertIn("class_a:", joined)
+        self.assertIn("class_b:", joined)
 
 
 if __name__ == "__main__":

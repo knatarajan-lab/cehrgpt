@@ -1686,7 +1686,13 @@
     ]
    }
   ],
-  "correlated": []
+  "correlated": [],
+  "partial": {
+   "kept_codeset_ids": [
+    0
+   ],
+   "left_out": "potassium measurements above 5.6 mmol/L"
+  }
  },
  {
   "name": "Hypokalemia",
@@ -2424,7 +2430,13 @@
      2
     ]
    }
-  ]
+  ],
+  "partial": {
+   "kept_codeset_ids": [
+    10
+   ],
+   "left_out": "muscle disorder records with a creatine kinase above 5 x the upper limit of normal"
+  }
  },
  {
   "name": "Stroke",
