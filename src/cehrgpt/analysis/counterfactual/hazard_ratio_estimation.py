@@ -653,6 +653,156 @@ def observed_tte(
     return time_days.to_numpy().astype(float), frame["event"].to_numpy().astype(int)
 
 
+# ---------------------------------------------------------------------------
+# Outcome types: primary outcomes and negative / positive controls
+# ---------------------------------------------------------------------------
+
+PRIMARY = "primary"
+NEGATIVE_CONTROL = "negative_control"
+POSITIVE_CONTROL = "positive_control"
+
+
+def parse_outcome_specs(
+    primary: str,
+    negative_controls: Optional[str] = None,
+    positive_controls: Optional[str] = None,
+) -> Tuple[List[str], Dict[str, str], Dict[str, float]]:
+    """
+    Parse the outcome options.
+
+    *primary* and *negative_controls* are comma-separated concept_ids.  A negative
+    control has no effect of the drug by construction, so its expected HR is 1.
+    *positive_controls* entries are ``concept_id`` or ``concept_id:expected_hr``;
+    the expected HR is the known effect and may be left out when only the
+    direction is known.
+
+    Returns ``(all_outcome_ids, type_by_outcome, expected_hr_by_outcome)``.  An
+    outcome can have only one role.
+    """
+    types: Dict[str, str] = {}
+    expected: Dict[str, float] = {}
+
+    def add(outcome_id: str, outcome_type: str, expected_hr: Optional[float] = None) -> None:
+        if outcome_id in types:
+            raise ValueError(
+                f"outcome {outcome_id} is listed as both {types[outcome_id]} and {outcome_type}"
+            )
+        types[outcome_id] = outcome_type
+        if expected_hr is not None:
+            expected[outcome_id] = expected_hr
+
+    for token in primary.split(","):
+        if token.strip():
+            add(token.strip(), PRIMARY)
+    for token in (negative_controls or "").split(","):
+        if token.strip():
+            add(token.strip(), NEGATIVE_CONTROL, 1.0)
+    for token in (positive_controls or "").split(","):
+        if not token.strip():
+            continue
+        outcome_id, _, hr = token.partition(":")
+        if hr.strip() and float(hr) <= 0:
+            raise ValueError(f"expected HR of positive control {outcome_id} must be > 0, got {hr}")
+        add(outcome_id.strip(), POSITIVE_CONTROL, float(hr) if hr.strip() else None)
+    return list(types), types, expected
+
+
+def label_outcomes(
+    summary: pl.DataFrame, types: Dict[str, str], expected_hr: Dict[str, float]
+) -> pl.DataFrame:
+    """
+    Add ``outcome_type``, ``expected_hr`` and ``ci_covers_expected`` (does the
+    95% CI contain the expected HR) after ``outcome_concept_id``.
+    """
+    if summary.is_empty():
+        return summary
+    labels = pl.DataFrame(
+        {
+            "outcome_concept_id": list(types),
+            "outcome_type": [types[o] for o in types],
+            "expected_hr": [expected_hr.get(o) for o in types],
+        },
+        schema={
+            "outcome_concept_id": pl.String,
+            "outcome_type": pl.String,
+            "expected_hr": pl.Float64,
+        },
+    )
+    labelled = summary.with_columns(pl.col("outcome_concept_id").cast(pl.String)).join(
+        labels, on="outcome_concept_id", how="left"
+    )
+    labelled = labelled.with_columns(
+        (
+            (pl.col("hr_lower_95") <= pl.col("expected_hr"))
+            & (pl.col("expected_hr") <= pl.col("hr_upper_95"))
+        ).alias("ci_covers_expected")
+    )
+    front = ["outcome_concept_id", "outcome_type", "expected_hr", "ci_covers_expected"]
+    return labelled.select(front + [c for c in labelled.columns if c not in front])
+
+
+def summarize_controls(labelled: pl.DataFrame) -> pl.DataFrame:
+    """
+    One row per control type: how many controls, how many have a 95% CI that
+    contains the expected HR, and the mean and spread of log(HR / expected HR).
+    For negative controls the mean is the systematic bias of the analysis and a
+    coverage well below 95% means the intervals are too narrow.
+    """
+    controls = labelled.filter(pl.col("outcome_type") != PRIMARY)
+    if controls.is_empty():
+        return controls
+    return (
+        controls.with_columns(
+            (pl.col("hr") / pl.col("expected_hr")).log().alias("log_hr_ratio")
+        )
+        .group_by("outcome_type", maintain_order=True)
+        .agg(
+            pl.len().alias("n_controls"),
+            pl.col("ci_covers_expected").drop_nulls().len().alias("n_with_expected_hr"),
+            pl.col("ci_covers_expected").sum().alias("n_ci_covers_expected"),
+            pl.col("log_hr_ratio").mean().alias("mean_log_hr_ratio"),
+            pl.col("log_hr_ratio").std().alias("sd_log_hr_ratio"),
+        )
+    )
+
+
+def write_labelled_summary(
+    results: List[Dict],
+    summary_path: Path,
+    control_summary_path: Path,
+    types: Optional[Dict[str, str]],
+    expected_hr: Optional[Dict[str, float]],
+) -> pl.DataFrame:
+    """Write the per-outcome summary (labelled by outcome type) and the control summary."""
+    summary = pl.DataFrame(results)
+    if types:
+        summary = label_outcomes(summary, types, expected_hr or {})
+    summary.write_csv(str(summary_path))
+    if types and not summary.is_empty():
+        controls = summarize_controls(summary)
+        if not controls.is_empty():
+            controls.write_csv(str(control_summary_path))
+            print(f"\nControl outcomes ({control_summary_path.name}):")
+            print(controls)
+    return summary
+
+
+def read_dropped_person_ids(overlap_scores_paths: List[str]) -> Set[int]:
+    """
+    person_ids that ``create_drug_swap_context.py`` dropped because their
+    preference score fell outside the trimming band.
+
+    Each path is a scores parquet (or a directory of them) written by the swap
+    step; a patient that is absent from every file was never scored and is kept.
+    """
+    frames = [
+        pl.read_parquet(os.path.join(path, "*.parquet") if os.path.isdir(path) else path)
+        for path in overlap_scores_paths
+    ]
+    scores = pl.concat(frames, how="vertical_relaxed")
+    return set(scores.filter(~pl.col("retained"))["person_id"].to_list())
+
+
 def analyse_observed_outcomes(
     observed_outcomes_path: str,
     drug_info_path: str,
@@ -661,6 +811,9 @@ def analyse_observed_outcomes(
     output_dir: Path,
     source_arm_label: str = "acei",
     comparator_arm_label: str = "thiazide",
+    excluded_person_ids: Optional[Set[int]] = None,
+    outcome_types: Optional[Dict[str, str]] = None,
+    expected_hr: Optional[Dict[str, float]] = None,
 ) -> None:
     """
     Compute hazard ratios from observed (real) patient outcomes extracted
@@ -684,6 +837,13 @@ def analyse_observed_outcomes(
         Directory for output CSVs.
     source_arm_label / comparator_arm_label
         Labels used in output files (default: acei / thiazide).
+    excluded_person_ids
+        Patients dropped by the overlap (preference score) check; they are
+        removed from the observed baseline as well so both analyses use the
+        same patients.
+    outcome_types / expected_hr
+        Role of each outcome (primary, negative or positive control) and the
+        expected HR of the controls; see ``parse_outcome_specs``.
     """
     print("\n" + "=" * 60)
     print("Observed baseline HR (real patient outcomes)")
@@ -696,6 +856,11 @@ def analyse_observed_outcomes(
         )
 
     obs  = _read(observed_outcomes_path)
+    if excluded_person_ids:
+        excluded = list(excluded_person_ids)
+        n_before = len(obs)
+        obs = obs.filter(~pl.col("person_id").is_in(excluded))
+        print(f"  Overlap check: dropped {n_before - len(obs):,} observed patients")
     # drug_epoch_time is already in obs; only pull arm and era_end from drug_info
     # to avoid duplicate-column conflicts on join.
     _info_raw = _read(drug_info_path)
@@ -775,141 +940,14 @@ def analyse_observed_outcomes(
 
     if results:
         out_path = output_dir / "observed_hazard_ratio_summary.csv"
-        pl.DataFrame(results).write_csv(str(out_path))
+        write_labelled_summary(
+            results,
+            out_path,
+            output_dir / "observed_control_outcome_summary.csv",
+            outcome_types,
+            expected_hr,
+        )
         print(f"\nObserved HR summary written to {out_path}")
-
-
-# ---------------------------------------------------------------------------
-# Faithfulness check
-# ---------------------------------------------------------------------------
-
-def faithfulness_check_outcome(
-    outcome_concept_id: str,
-    traj_source: pl.DataFrame,
-    observed_outcomes: pl.DataFrame,
-    drug_info: pl.DataFrame,
-    follow_up_days: float,
-    source_label: str,
-    output_dir: Path,
-    target_concept_ids: Optional[Set[str]] = None,
-    competing_concept_ids: Optional[Set[str]] = None,
-    era_gap_days: float = 30.0,
-    inpatient_only: bool = False,
-    expanded_outcome_set: Optional[Set[str]] = None,
-) -> Optional[Dict]:
-    """
-    Compare generated source-arm trajectories against the same patients'
-    observed outcomes.  HR should be ≈ 1.0 if the model faithfully
-    reproduces what actually happened to the source (e.g. ACEi) patients.
-
-    Parameters
-    ----------
-    traj_source
-        Generated trajectories for the source arm (e.g. acei/).
-    observed_outcomes
-        Observed outcomes from Step 1, filtered to source patients only.
-        Columns: person_id, drug_epoch_time, <outcome_concept_id>, …
-    drug_info
-        drug_info parquet (anchors drug_epoch_time for generated TTE).
-    target_concept_ids
-        OMOP concept_ids for the source arm's drug class (for era-gap
-        censoring in generated trajectories).
-    competing_concept_ids
-        Concepts for which a generated event censors the source-arm follow-up
-        (opposite-arm drugs plus exclusion antihypertensives).
-    era_gap_days
-        Persistence window in days (default 30).
-    """
-    print(f"\n  [Faithfulness] Outcome: {outcome_concept_id}")
-
-    # --- Generated source-arm TTE ---
-    tte_gen = compute_tte(
-        traj_source, drug_info, [outcome_concept_id], follow_up_days,
-        target_concept_ids=target_concept_ids,
-        competing_concept_ids=competing_concept_ids,
-        era_gap_days=era_gap_days,
-        inpatient_only=inpatient_only,
-        expanded_outcome_set=expanded_outcome_set,
-    )
-    # --- Observed source-arm TTE (drug_epoch_time already in observed_outcomes) ---
-    if outcome_concept_id not in observed_outcomes.columns:
-        print(f"    Outcome column {outcome_concept_id} not in observed_outcomes — skipping.")
-        return None
-
-    censoring_info = drug_info.select(
-        [
-            "person_id",
-            *[
-                c
-                for c in ("era_end_epoch_time", "last_observed_epoch_time")
-                if c in drug_info.columns
-            ],
-        ]
-    ).unique("person_id")
-    observed = observed_outcomes.join(censoring_info, on="person_id", how="left")
-    if "last_observed_epoch_time" not in observed.columns:
-        print("    Warning: drug_info has no last_observed_epoch_time; re-run the extraction.")
-    time_obs, event_obs = observed_tte(observed, outcome_concept_id, follow_up_days)
-
-    # Use each (subject_id, trajectory_id) as a separate observation (same as
-    # the main HR analysis).  Observed outcomes are one row per patient.
-    time_gen  = tte_gen["time_days"].to_numpy()
-    event_gen = tte_gen["event"].to_numpy().astype(int)
-
-    n_ev_gen = int(event_gen.sum())
-    n_ev_obs = int(event_obs.sum())
-    print(f"    Generated {source_label}: {tte_gen['subject_id'].n_unique():,} patients / {len(time_gen):,} trajectories, {n_ev_gen:,} events")
-    print(f"    Observed  {source_label}: {len(time_obs):,} patients, {n_ev_obs:,} events")
-
-    if n_ev_gen + n_ev_obs == 0:
-        print("    Skipping: no events in either group.")
-        return None
-
-    # HR: generated=1, observed=0  (expect ≈ 1.0)
-    time_all      = np.concatenate([time_gen, time_obs])
-    event_all     = np.concatenate([event_gen, event_obs])
-    treatment_all = np.concatenate([np.ones(len(time_gen)), np.zeros(len(time_obs))])
-
-    # The generated trajectories and the observed record of a patient are the
-    # same person, so they form one cluster.
-    clusters = np.concatenate([tte_gen["subject_id"].to_numpy(), observed["person_id"].to_numpy()])
-
-    cox = fit_cox_details(time_all, event_all, treatment_all, clusters=clusters)
-    hr, hr_lower, hr_upper, cox_p = cox["hr"], cox["hr_lower_95"], cox["hr_upper_95"], cox["p_value"]
-    lr_stat, lr_p = log_rank_test(time_gen, event_gen, time_obs, event_obs)
-
-    print(f"    HR (generated vs observed {source_label}) = {hr:.3f}  "
-          f"(95% CI: {hr_lower:.3f}–{hr_upper:.3f})  Cox p={cox_p:.4f}  "
-          f"[robust, {cox['n_clusters']:,} clusters; expect ≈ 1.0]")
-    print(f"    Log-rank stat={lr_stat:.3f}  p={lr_p:.4f}")
-
-    # KM curves
-    km_t_g, km_s_g = kaplan_meier(time_gen, event_gen)
-    km_t_o, km_s_o = kaplan_meier(time_obs, event_obs)
-    km_df = pl.concat([
-        pl.DataFrame({"time_days": km_t_g, "survival": km_s_g,
-                      "arm": f"generated_{source_label}"}),
-        pl.DataFrame({"time_days": km_t_o, "survival": km_s_o,
-                      "arm": f"observed_{source_label}"}),
-    ])
-    km_df.write_csv(str(output_dir / f"faithfulness_km_{outcome_concept_id}.csv"))
-
-    return {
-        "outcome_concept_id": outcome_concept_id,
-        f"n_patients_generated_{source_label}": tte_gen["subject_id"].n_unique(),
-        f"n_trajectories_generated_{source_label}": len(time_gen),
-        f"n_observed_{source_label}": len(time_obs),
-        f"n_events_generated_{source_label}": n_ev_gen,
-        f"n_events_observed_{source_label}": n_ev_obs,
-        "hr_generated_vs_observed": hr,
-        "hr_lower_95": hr_lower,
-        "hr_upper_95": hr_upper,
-        "cox_p_value": cox_p,
-        "n_clusters": cox["n_clusters"],
-        "log_rank_stat": lr_stat,
-        "log_rank_p_value": lr_p,
-        "note": f"HR should be ≈ 1.0 if model faithfully reproduces {source_label} outcomes",
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -1195,7 +1233,15 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    outcome_ids = [x.strip() for x in args.outcome_concept_ids.split(",")]
+    outcome_ids, outcome_types, expected_hr = parse_outcome_specs(
+        args.outcome_concept_ids,
+        args.negative_control_outcome_ids,
+        args.positive_control_outcome_ids,
+    )
+    for outcome_type in (PRIMARY, NEGATIVE_CONTROL, POSITIVE_CONTROL):
+        members = [o for o in outcome_ids if outcome_types[o] == outcome_type]
+        if members:
+            print(f"{outcome_type} outcomes: {members}")
 
     inpatient_outcome_ids: Set[str] = set()
     if args.inpatient_outcome_concept_ids:
@@ -1216,6 +1262,11 @@ def main() -> None:
         for oid in outcome_ids:
             outcome_expanded[oid] = {oid}
 
+    dropped_person_ids: Set[int] = set()
+    if args.overlap_scores_path:
+        dropped_person_ids = read_dropped_person_ids(args.overlap_scores_path)
+        print(f"Overlap check: {len(dropped_person_ids):,} patients dropped from every analysis")
+
     # ------------------------------------------------------------------
     # Observed baseline HR (runs when --observed_outcomes_path is given)
     # ------------------------------------------------------------------
@@ -1228,6 +1279,9 @@ def main() -> None:
             output_dir=output_dir,
             source_arm_label=args.arm_a,
             comparator_arm_label=args.arm_b,
+            excluded_person_ids=dropped_person_ids,
+            outcome_types=outcome_types,
+            expected_hr=expected_hr,
         )
 
     # ------------------------------------------------------------------
@@ -1274,6 +1328,12 @@ def main() -> None:
     traj_b = load_trajectories(args.trajectories_dir, args.arm_b)
     print(f"  {len(traj_b):,} events")
 
+    if dropped_person_ids:
+        # Generation may predate the overlap check; keep only retained patients.
+        dropped = list(dropped_person_ids)
+        traj_a = traj_a.filter(~pl.col("subject_id").is_in(dropped))
+        traj_b = traj_b.filter(~pl.col("subject_id").is_in(dropped))
+
     def _read_parquet(path: str) -> pl.DataFrame:
         return pl.read_parquet(
             os.path.join(path, "*.parquet") if os.path.isdir(path) else path
@@ -1281,6 +1341,8 @@ def main() -> None:
 
     print("Loading drug info …")
     drug_info = _read_parquet(args.drug_info_path)
+    if dropped_person_ids:
+        drug_info = drug_info.filter(~pl.col("person_id").is_in(list(dropped_person_ids)))
     _print_era_duration_stats(drug_info, args.follow_up_days, args.arm_a, args.arm_b)
 
     print("\n" + "=" * 60)
@@ -1299,45 +1361,6 @@ def main() -> None:
         era_gap_days=args.era_gap_days,
     )
     print("=" * 60)
-
-    # ------------------------------------------------------------------
-    # Faithfulness check: generated comparator vs observed comparator
-    # HR ≈ 1.0 means the model faithfully reproduces arm_b outcomes.
-    # ------------------------------------------------------------------
-    if args.observed_outcomes_path:
-        print("\n" + "=" * 60)
-        print(f"Faithfulness check: generated {args.arm_a} vs observed {args.arm_a}")
-        print("(Same patients, same drug — HR should be ≈ 1.0 if the model is faithful)")
-        print("=" * 60)
-
-        observed_outcomes = _read_parquet(args.observed_outcomes_path)
-        # Keep only observed source patients (e.g. ACEi initiators)
-        source_person_ids = drug_info.filter(pl.col("arm") == "source").select("person_id")
-        obs_source = observed_outcomes.join(source_person_ids, on="person_id", how="inner")
-
-        faithfulness_results = []
-        for outcome_id in outcome_ids:
-            res = faithfulness_check_outcome(
-                outcome_concept_id=outcome_id,
-                traj_source=traj_a,           # generated ACEi trajectories
-                observed_outcomes=obs_source,  # same ACEi patients' real outcomes
-                drug_info=drug_info,
-                follow_up_days=args.follow_up_days,
-                source_label=args.arm_a,
-                output_dir=output_dir,
-                target_concept_ids=arm_a_concepts or None,
-                competing_concept_ids=competing_for_arm_a,
-                era_gap_days=args.era_gap_days,
-                inpatient_only=(outcome_id in inpatient_outcome_ids),
-                expanded_outcome_set=outcome_expanded[outcome_id],
-            )
-            if res is not None:
-                faithfulness_results.append(res)
-
-        if faithfulness_results:
-            faith_path = output_dir / "faithfulness_summary.csv"
-            pl.DataFrame(faithfulness_results).write_csv(str(faith_path))
-            print(f"\nFaithfulness summary written to {faith_path}")
 
     # ------------------------------------------------------------------
     # Main HR: generated arm_a vs generated arm_b (counterfactual HR)
@@ -1368,9 +1391,14 @@ def main() -> None:
         if result is not None:
             results.append(result)
 
-    summary = pl.DataFrame(results)
     summary_path = output_dir / "hazard_ratio_summary.csv"
-    summary.write_csv(str(summary_path))
+    summary = write_labelled_summary(
+        results,
+        summary_path,
+        output_dir / "control_outcome_summary.csv",
+        outcome_types,
+        expected_hr,
+    )
 
     print(f"\nSummary written to {summary_path}")
     print(summary)
@@ -1394,6 +1422,15 @@ def _parse_args() -> argparse.Namespace:
              "HR from real patient data before the generated-trajectory HR.",
     )
     parser.add_argument(
+        "--overlap_scores_path",
+        nargs="+",
+        default=None,
+        help="Scores parquet(s) written by create_drug_swap_context.py "
+             "(--overlap_scores_path there), one per swap direction. Patients the "
+             "overlap check dropped are removed from the observed baseline, the "
+             "trajectories and drug_info, so every analysis uses the same patients.",
+    )
+    parser.add_argument(
         "--drug_info_path",
         required=True,
         help="drug_info.parquet from extract_drug_initiation_sequences.py",
@@ -1401,7 +1438,25 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--outcome_concept_ids",
         required=True,
-        help="Comma-separated OMOP concept_ids for outcomes, e.g. 4329847,316139,4110192,376713",
+        help="Comma-separated OMOP concept_ids of the primary outcomes, "
+             "e.g. 4329847,316139,4110192,376713",
+    )
+    parser.add_argument(
+        "--negative_control_outcome_ids",
+        default=None,
+        help="Optional comma-separated concept_ids of negative control outcomes: "
+             "outcomes the drugs are not expected to affect (expected HR = 1). Analysed "
+             "like the primary outcomes and reported with outcome_type, ci_covers_expected "
+             "and a summary of the systematic bias in control_outcome_summary.csv. "
+             "They must also be extracted (pass them to the extraction step too).",
+    )
+    parser.add_argument(
+        "--positive_control_outcome_ids",
+        default=None,
+        help="Optional comma-separated positive control outcomes with a known effect, "
+             "each as concept_id or concept_id:expected_hr (e.g. 4329847:1.5). Reported "
+             "like the negative controls; the expected HR is used when given. "
+             "They must also be extracted.",
     )
     parser.add_argument(
         "--follow_up_days",

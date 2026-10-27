@@ -198,6 +198,28 @@ OUTCOME_CONCEPT_IDS="312327,316139,4310996,376713,3655355,437833,434610"
 
 INPATIENT_OUTCOME_CONCEPT_IDS="312327,316139,4310996,376713"
 
+# Optional control outcomes (leave empty for none).  A negative control is an outcome
+# neither drug is expected to affect (expected HR = 1); a positive control has a known
+# effect, given as concept_id or concept_id:expected_hr (e.g. "4329847:1.5").  They are
+# extracted together with the primary outcomes and analysed in the same way; the HR
+# summary labels them and control_outcome_summary.csv reports the systematic bias.
+NEGATIVE_CONTROL_OUTCOME_IDS=""
+POSITIVE_CONTROL_OUTCOME_IDS=""
+
+# Everything the extraction step has to record (the :expected_hr suffixes are removed).
+EXTRACT_OUTCOME_CONCEPT_IDS="${OUTCOME_CONCEPT_IDS}"
+for _control_ids in "${NEGATIVE_CONTROL_OUTCOME_IDS}" "${POSITIVE_CONTROL_OUTCOME_IDS}"; do
+    if [ -n "${_control_ids}" ]; then
+        EXTRACT_OUTCOME_CONCEPT_IDS="${EXTRACT_OUTCOME_CONCEPT_IDS},$(echo "${_control_ids}" | sed 's/:[^,]*//g')"
+    fi
+done
+
+# Overlap (positivity) check in the swap step: a patient is kept only when the model's
+# preference score P(comparator class) / (P(source class) + P(comparator class)) at the
+# index position lies in [trim, 1 - trim].  A patient that fails is dropped from every
+# arm and from the observed analysis.  Set to "" to turn the check off.
+PREFERENCE_SCORE_TRIM="${PREFERENCE_SCORE_TRIM:-0.05}"
+
 # =============================================================================
 # DERIVED PATHS
 # =============================================================================
@@ -208,6 +230,8 @@ THIAZIDE_CONTEXT_DIR="${OUTPUT_ROOT}/thiazide_contexts"
 
 # Combined / symmetric contexts produced in Step 2
 SYMMETRIC_DIR="${OUTPUT_ROOT}/symmetric_contexts"
+ACEI_OVERLAP_SCORES="${SYMMETRIC_DIR}/acei_pts_overlap_scores.parquet"
+THIAZIDE_OVERLAP_SCORES="${SYMMETRIC_DIR}/thiazide_pts_overlap_scores.parquet"
 ARM_A_CTX="${SYMMETRIC_DIR}/${ARM_A}_arm_ctx.parquet"
 ARM_B_CTX="${SYMMETRIC_DIR}/${ARM_B}_arm_ctx.parquet"
 COMBINED_DRUG_INFO="${SYMMETRIC_DIR}/drug_info"
@@ -279,7 +303,7 @@ else
         --comparator_concept_ids  "${THIAZIDE_CONCEPT_IDS}" \
         --output_dir              "${ACEI_CONTEXT_DIR}" \
         --tokenizer_path          "${TOKENIZER_PATH}" \
-        --outcome_concept_ids     "${OUTCOME_CONCEPT_IDS}" \
+        --outcome_concept_ids     "${EXTRACT_OUTCOME_CONCEPT_IDS}" \
         --inpatient_outcome_concept_ids "${INPATIENT_OUTCOME_CONCEPT_IDS}" \
         --era_gap_days            "${ERA_GAP_DAYS}" \
         --min_context_length      "${MIN_CONTEXT_LENGTH}" \
@@ -305,7 +329,7 @@ else
         --comparator_concept_ids  "${ACEI_CONCEPT_IDS}" \
         --output_dir              "${THIAZIDE_CONTEXT_DIR}" \
         --tokenizer_path          "${TOKENIZER_PATH}" \
-        --outcome_concept_ids     "${OUTCOME_CONCEPT_IDS}" \
+        --outcome_concept_ids     "${EXTRACT_OUTCOME_CONCEPT_IDS}" \
         --inpatient_outcome_concept_ids "${INPATIENT_OUTCOME_CONCEPT_IDS}" \
         --era_gap_days            "${ERA_GAP_DAYS}" \
         --min_context_length      "${MIN_CONTEXT_LENGTH}" \
@@ -358,6 +382,16 @@ else
 
     # --- 2a: ACEi patients → both arm contexts ---
     echo "  Step 2a: ACEi patients (source=ACEi, comparator=thiazide) …"
+    _OVERLAP_ACEI_ARGS=()
+    if [ -n "${PREFERENCE_SCORE_TRIM}" ]; then
+        _OVERLAP_ACEI_ARGS=(
+            --model_path "${MODEL_PATH}"
+            --preference_score_trim "${PREFERENCE_SCORE_TRIM}"
+            --overlap_scores_path "${ACEI_OVERLAP_SCORES}"
+            --context_length "${GENERATION_INPUT_LENGTH}"
+            --batch_size "${BATCH_SIZE}"
+        )
+    fi
     _MAX_ACEI_ARG=()
     if [ -n "${MAX_ACEI_PATIENTS:-}" ]; then
         _MAX_ACEI_ARG=(--max_source_patients "${MAX_ACEI_PATIENTS}")
@@ -372,10 +406,21 @@ else
         --output_path            "${_ACEI_PTS_THIAZIDE_CTX}" \
         --also_write_treated_path "${_ACEI_PTS_ACEI_CTX}" \
         --seed                   "${RANDOM_SEED}" \
+        "${_OVERLAP_ACEI_ARGS[@]}" \
         "${_MAX_ACEI_ARG[@]}"
 
     # --- 2b: Thiazide patients → both arm contexts ---
     echo "  Step 2b: Thiazide patients (source=thiazide, comparator=ACEi) …"
+    _OVERLAP_THIAZIDE_ARGS=()
+    if [ -n "${PREFERENCE_SCORE_TRIM}" ]; then
+        _OVERLAP_THIAZIDE_ARGS=(
+            --model_path "${MODEL_PATH}"
+            --preference_score_trim "${PREFERENCE_SCORE_TRIM}"
+            --overlap_scores_path "${THIAZIDE_OVERLAP_SCORES}"
+            --context_length "${GENERATION_INPUT_LENGTH}"
+            --batch_size "${BATCH_SIZE}"
+        )
+    fi
     _MAX_THIAZIDE_ARG=()
     if [ -n "${MAX_THIAZIDE_PATIENTS:-}" ]; then
         _MAX_THIAZIDE_ARG=(--max_source_patients "${MAX_THIAZIDE_PATIENTS}")
@@ -390,6 +435,7 @@ else
         --output_path            "${_THIAZIDE_PTS_ACEI_CTX}" \
         --also_write_treated_path "${_THIAZIDE_PTS_THIAZIDE_CTX}" \
         --seed                   "${RANDOM_SEED}" \
+        "${_OVERLAP_THIAZIDE_ARGS[@]}" \
         "${_MAX_THIAZIDE_ARG[@]}"
 
     # --- Concat arm contexts and drug_info ---
@@ -562,6 +608,16 @@ else
     mkdir -p "${RESULTS_DIR}"
 
     _step_start
+    _HR_EXTRA_ARGS=()
+    if [ -n "${NEGATIVE_CONTROL_OUTCOME_IDS}" ]; then
+        _HR_EXTRA_ARGS+=(--negative_control_outcome_ids "${NEGATIVE_CONTROL_OUTCOME_IDS}")
+    fi
+    if [ -n "${POSITIVE_CONTROL_OUTCOME_IDS}" ]; then
+        _HR_EXTRA_ARGS+=(--positive_control_outcome_ids "${POSITIVE_CONTROL_OUTCOME_IDS}")
+    fi
+    if [ -n "${PREFERENCE_SCORE_TRIM}" ]; then
+        _HR_EXTRA_ARGS+=(--overlap_scores_path "${ACEI_OVERLAP_SCORES}" "${THIAZIDE_OVERLAP_SCORES}")
+    fi
     python "${HR_SCRIPT}" \
         --trajectories_dir        "${TRAJ_DIR}" \
         --drug_info_path          "${COMBINED_DRUG_INFO}" \
@@ -575,7 +631,8 @@ else
         --arm_a_concept_ids       "${ACEI_CONCEPT_IDS}" \
         --arm_b_concept_ids       "${THIAZIDE_CONCEPT_IDS}" \
         --exclusion_concept_ids   "${EXCLUSION_CONCEPT_IDS}" \
-        --era_gap_days            "${ERA_GAP_DAYS}"
+        --era_gap_days            "${ERA_GAP_DAYS}" \
+        "${_HR_EXTRA_ARGS[@]}"
     _step_end
 
     echo "Step 4 complete."
@@ -590,6 +647,7 @@ echo "Done.  Output directory: ${OUTPUT_ROOT}"
 echo ""
 echo "Key files:"
 echo "  ${RESULTS_DIR}/hazard_ratio_summary.csv   (generated ACEi vs generated Thiazide)"
+echo "  ${RESULTS_DIR}/control_outcome_summary.csv   (negative / positive controls, when given)"
 echo "  ${RESULTS_DIR}/km_<concept_id>.csv"
 echo ""
 echo "Published LEGEND-HTN reference HRs (ACEi vs Thiazide):"

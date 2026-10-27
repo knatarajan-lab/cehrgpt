@@ -38,7 +38,10 @@ python create_drug_swap_context.py \\
     --source_concept_ids    1308216,1334456,1341927,1335471,1331235,1340128,1363749,1310756,1373225,1342439 \\
     --comparator_concept_ids 1395058,974166,978555,907013 \\
     --output_path           /data/swap/acei_pts_thiazide_ctx.parquet \\
-    --also_write_treated_path /data/swap/acei_pts_acei_ctx.parquet
+    --also_write_treated_path /data/swap/acei_pts_acei_ctx.parquet \\
+    --model_path            /models/cehrgpt \\
+    --preference_score_trim 0.05 \\
+    --overlap_scores_path   /data/swap/acei_pts_overlap_scores.parquet
 
 # Thiazide patients → frequency-sampled ACEi counterfactual
 python create_drug_swap_context.py \\
@@ -49,7 +52,18 @@ python create_drug_swap_context.py \\
     --source_concept_ids    1395058,974166,978555,907013 \\
     --comparator_concept_ids 1308216,1334456,1341927,1335471,1331235,1340128,1363749,1310756,1373225,1342439 \\
     --output_path           /data/swap/thiazide_pts_acei_ctx.parquet \\
-    --also_write_treated_path /data/swap/thiazide_pts_thiazide_ctx.parquet
+    --also_write_treated_path /data/swap/thiazide_pts_thiazide_ctx.parquet \\
+    --model_path            /models/cehrgpt \\
+    --preference_score_trim 0.05 \\
+    --overlap_scores_path   /data/swap/thiazide_pts_overlap_scores.parquet
+
+Overlap check
+-------------
+With --preference_score_trim, each patient's preference score
+P(comparator class) / (P(source class) + P(comparator class)) is read from the
+model at the index position.  Patients outside [trim, 1 - trim] are dropped from
+both arms.  Run both directions with the same trim, and pass both scores files to
+hazard_ratio_estimation.py --overlap_scores_path.
 """
 
 import argparse
@@ -223,6 +237,49 @@ def swap_drug_in_concept_ids(
 
 
 # ---------------------------------------------------------------------------
+# Overlap check
+# ---------------------------------------------------------------------------
+
+def _apply_overlap_check(
+    df_source: pl.DataFrame,
+    source_concepts: Set[str],
+    comparator_concepts: Set[str],
+    model_path: str,
+    tokenizer_path: str,
+    trim: float,
+    scores_path: Path,
+    context_length: int,
+    batch_size: int,
+) -> pl.DataFrame:
+    """Score every source patient, write the scores, and keep the retained ones."""
+    import torch
+
+    from cehrgpt.analysis.counterfactual import overlap
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_path)
+    model = overlap.load_scoring_model(model_path, tokenizer, device)
+    probabilities = overlap.score_patients(
+        df_source, source_concepts, comparator_concepts, tokenizer, model, device,
+        context_length, batch_size,
+    )
+    del model
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+    scores = overlap.trim_by_preference_score(
+        df_source["person_id"].to_list(), probabilities, trim
+    )
+    scores_path.parent.mkdir(parents=True, exist_ok=True)
+    scores.write_parquet(str(scores_path))
+    overlap.print_overlap_summary(scores, trim)
+    print(f"Overlap scores → {scores_path}")
+
+    retained = scores.filter(pl.col("retained"))["person_id"].to_list()
+    return df_source.filter(pl.col("person_id").is_in(retained))
+
+
+# ---------------------------------------------------------------------------
 # Main function
 # ---------------------------------------------------------------------------
 
@@ -237,6 +294,11 @@ def create_comparator_context(
     also_write_treated_path: Optional[Path] = None,
     max_source_patients: Optional[int] = None,
     seed: int = 42,
+    model_path: Optional[str] = None,
+    preference_score_trim: Optional[float] = None,
+    overlap_scores_path: Optional[Path] = None,
+    context_length: int = 1024,
+    batch_size: int = 8,
 ) -> None:
     """
     Filter *treated_context_path* to patients in the SOURCE drug class, then
@@ -273,7 +335,29 @@ def create_comparator_context(
     seed
         Random seed for reproducible frequency-based sampling and patient
         sub-sampling.
+    model_path
+        CEHR-GPT model used for the overlap check (see ``overlap.py``).
+    preference_score_trim
+        Overlap check: keep only patients whose preference score,
+        P(comparator class) / (P(source class) + P(comparator class)) at the index
+        position, lies in ``[trim, 1 - trim]``.  Dropped patients are removed
+        from both arms.  None disables the check.
+    overlap_scores_path
+        Where to write each patient's probabilities, preference score and
+        retained flag.  Required with *preference_score_trim*; pass it to
+        ``hazard_ratio_estimation.py`` so the observed analysis drops the same patients.
+    context_length, batch_size
+        Input length and batch size of the overlap check; use the generation values.
     """
+    if preference_score_trim is not None:
+        if model_path is None or overlap_scores_path is None:
+            raise ValueError(
+                "preference_score_trim needs model_path and overlap_scores_path"
+            )
+        if not 0.0 < preference_score_trim < 0.5:
+            raise ValueError(
+                f"preference_score_trim must be in (0, 0.5), got {preference_score_trim}"
+            )
     comparator_token_ids = resolve_comparator_token_ids(tokenizer_path, comparator_concept_ids)
 
     random.seed(seed)
@@ -324,6 +408,19 @@ def create_comparator_context(
     if max_source_patients is not None and len(df_source) > max_source_patients:
         df_source = df_source.sample(n=max_source_patients, seed=seed, shuffle=True)
         print(f"Randomly sampled {max_source_patients:,} source patients (seed={seed})")
+
+    if preference_score_trim is not None:
+        df_source = _apply_overlap_check(
+            df_source=df_source,
+            source_concepts=source_concepts,
+            comparator_concepts=comparator_concepts,
+            model_path=model_path,
+            tokenizer_path=tokenizer_path,
+            trim=preference_score_trim,
+            scores_path=Path(overlap_scores_path),
+            context_length=context_length,
+            batch_size=batch_size,
+        )
 
     if also_write_treated_path is not None:
         Path(also_write_treated_path).parent.mkdir(parents=True, exist_ok=True)
@@ -446,6 +543,43 @@ def _parse_args() -> argparse.Namespace:
         help="Random seed for reproducible frequency-based sampling (default: 42)",
     )
     parser.add_argument(
+        "--model_path",
+        default=None,
+        help="CEHR-GPT model for the overlap check (required with --preference_score_trim)",
+    )
+    parser.add_argument(
+        "--preference_score_trim",
+        type=float,
+        default=None,
+        help=(
+            "Overlap check: keep only patients whose preference score "
+            "P(comparator class) / (P(source class) + P(comparator class)), read from the "
+            "model at the index position, lies in [trim, 1 - trim] (e.g. 0.05). "
+            "Dropped patients are removed from both arms. Default: no check."
+        ),
+    )
+    parser.add_argument(
+        "--overlap_scores_path",
+        default=None,
+        help=(
+            "Where to write the per-patient probabilities, preference score and retained "
+            "flag (required with --preference_score_trim). Pass it to "
+            "hazard_ratio_estimation.py --overlap_scores_path."
+        ),
+    )
+    parser.add_argument(
+        "--context_length",
+        type=int,
+        default=1024,
+        help="Input length of the overlap check; use the generation input length (default: 1024)",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=8,
+        help="Batch size of the overlap check (default: 8)",
+    )
+    parser.add_argument(
         "--list_concepts",
         action="store_true",
         help="Print the built-in ACEi and thiazide concept_id lists then exit",
@@ -481,6 +615,13 @@ def main() -> None:
         ),
         max_source_patients=args.max_source_patients,
         seed=args.seed,
+        model_path=args.model_path,
+        preference_score_trim=args.preference_score_trim,
+        overlap_scores_path=(
+            Path(args.overlap_scores_path) if args.overlap_scores_path else None
+        ),
+        context_length=args.context_length,
+        batch_size=args.batch_size,
     )
 
 
