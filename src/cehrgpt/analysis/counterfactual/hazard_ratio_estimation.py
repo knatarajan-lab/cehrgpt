@@ -1259,23 +1259,12 @@ def main() -> None:
         exclusion_concepts = expand_to_descendants(args.vocab_path, excl_ids)
         print(f"  Exclusion concepts (other antihypertensives): {len(exclusion_concepts):,}")
 
-    extra_competing_concepts: Set[str] = set()
-    if args.vocab_path and args.competing_concept_ids:
-        competing_ids = [int(x.strip()) for x in args.competing_concept_ids.split(",")]
-        print("Expanding competing concepts for treatment-switch censoring …")
-        extra_competing_concepts = expand_to_descendants(args.vocab_path, competing_ids)
-        print(f"  Competing concepts: {len(extra_competing_concepts):,}")
-    elif args.competing_concept_ids:
-        print("Warning: --competing_concept_ids needs --vocab_path; ignoring it.")
-
-    # Build per-arm competing sets (union of opposite-arm + exclusion + extra
-    # competing drugs).  These censor follow-up when a generated trajectory
+    # Build per-arm competing sets (union of opposite-arm + exclusion drugs).  These censor follow-up when a generated trajectory
     # contains a switch event; trajectories are NOT removed — only their
     # follow-up is shortened.
-    other_censoring = exclusion_concepts | extra_competing_concepts
-    if arm_a_concepts or arm_b_concepts or other_censoring:
-        competing_for_arm_a = (arm_b_concepts | other_censoring) or None
-        competing_for_arm_b = (arm_a_concepts | other_censoring) or None
+    if arm_a_concepts or arm_b_concepts or exclusion_concepts:
+        competing_for_arm_a = (arm_b_concepts | exclusion_concepts) or None
+        competing_for_arm_b = (arm_a_concepts | exclusion_concepts) or None
 
     print(f"Loading {args.arm_a} trajectories …")
     traj_a = load_trajectories(args.trajectories_dir, args.arm_a)
@@ -1441,8 +1430,8 @@ def _parse_args() -> argparse.Namespace:
         "--vocab_path",
         default=None,
         help="OMOP vocabulary root (concept_ancestor/ parquets). Required to expand "
-             "--arm_a_concept_ids, --arm_b_concept_ids, --exclusion_concept_ids, "
-             "--competing_concept_ids and the outcome concepts to their descendants.",
+             "--arm_a_concept_ids, --arm_b_concept_ids, --exclusion_concept_ids "
+             "and the outcome concepts to their descendants.",
     )
     parser.add_argument(
         "--arm_a_concept_ids",
@@ -1462,14 +1451,6 @@ def _parse_args() -> argparse.Namespace:
         help="Comma-separated ingredient concept_ids for excluded antihypertensives "
              "(ARBs, dCCBs, ndCCBs, 2nd-line agents). When a generated trajectory "
              "contains one of these codes, follow-up is censored at that event.",
-    )
-    parser.add_argument(
-        "--competing_concept_ids",
-        default=None,
-        help="Comma-separated concept_ids of further drugs that censor follow-up of both "
-             "arms at their first appearance in a generated trajectory (treatment switch), "
-             "in addition to the opposite arm and --exclusion_concept_ids. Each is "
-             "expanded to descendants. Should match the extraction step.",
     )
     parser.add_argument(
         "--era_gap_days",

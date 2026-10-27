@@ -530,7 +530,6 @@ def _process_shard(
     exclusion_concepts: Optional[Set[str]] = None,
     era_gap_days: int = 30,
     inpatient_outcome_labels: Optional[Set[str]] = None,
-    competing_concepts: Optional[Set[str]] = None,
     min_prior_observation_days: float = 0.0,
 ) -> Tuple[int, int]:
     """
@@ -626,10 +625,10 @@ def _process_shard(
         chunk_idx += 1
 
     # Precompute era-end competing-concept sets (constant across all patients).
-    # Source patients' era ends if they encounter a comparator, exclusion or
-    # extra competing drug.  Comparator patients' era ends if they encounter a
-    # source, exclusion or extra competing drug.
-    _excl: Set[str] = (exclusion_concepts or set()) | (competing_concepts or set())
+    # Source patients' era ends if they encounter a comparator or exclusion
+    # drug.  Comparator patients' era ends if they encounter a source or
+    # exclusion drug.
+    _excl: Set[str] = exclusion_concepts or set()
     competing_for_source: Set[str]     = comparator_concepts | _excl
     competing_for_comparator: Set[str] = source_concepts | _excl
 
@@ -809,7 +808,6 @@ def process(
     population_concept_ids: Optional[List[int]] = None,
     exclusion_concept_ids: Optional[List[int]] = None,
     inpatient_outcome_concept_ids: Optional[List[int]] = None,
-    competing_concept_ids: Optional[List[int]] = None,
     min_prior_observation_days: float = 0.0,
     era_gap_days: int = 30,
     min_context_length: int = 4,
@@ -859,11 +857,6 @@ def process(
         inpatient or ER visit (visit concept in {9201, 9203, 262}) to be
         counted.  Typical use: heart failure, AMI, stroke hospitalisations.
         Each id is expanded to descendants before matching.
-    competing_concept_ids
-        Optional list of OMOP concept_ids (expanded to descendants) of drugs
-        that censor follow-up when they appear after initiation, in addition
-        to the opposite arm and the exclusion drugs.  Unlike the exclusion
-        list they do not remove patients with prior exposure.
     min_prior_observation_days
         Washout: patients need at least this many days between the start of
         their first visit and the index drug to count as new users (default 0,
@@ -910,7 +903,6 @@ def process(
         "population_concept_ids": sorted(population_concept_ids or []),
         "exclusion_concept_ids": sorted(exclusion_concept_ids or []),
         "inpatient_outcome_concept_ids": sorted(inpatient_outcome_concept_ids or []),
-        "competing_concept_ids": sorted(competing_concept_ids or []),
         "min_prior_observation_days": min_prior_observation_days,
         "era_gap_days": era_gap_days,
         "min_context_length": min_context_length,
@@ -999,15 +991,6 @@ def process(
         print(f"  → {len(exclusion_concepts):,} exclusion concepts (patients with ≥1 in pre-drug history are dropped)")
 
     # ------------------------------------------------------------------ #
-    # 2c'. Expand extra competing concept IDs (post-index censoring only) #
-    # ------------------------------------------------------------------ #
-    competing_concepts: Optional[Set[str]] = None
-    if competing_concept_ids:
-        print(f"Expanding {len(competing_concept_ids)} competing concept(s) to descendants …")
-        competing_concepts = load_drug_descendant_concepts(vocab_path, competing_concept_ids)
-        print(f"  → {len(competing_concepts):,} competing concepts (a post-index event censors follow-up)")
-
-    # ------------------------------------------------------------------ #
     # 2d. Build inpatient-only outcome label set                         #
     # ------------------------------------------------------------------ #
     inpatient_outcome_labels: Optional[Set[str]] = None
@@ -1087,7 +1070,6 @@ def process(
             exclusion_concepts,
             era_gap_days,
             inpatient_outcome_labels,
-            competing_concepts,
             min_prior_observation_days,
         )
         for shard_id in range(effective_workers)
@@ -1182,15 +1164,9 @@ def _parse_args() -> argparse.Namespace:
              "a patient from the 'new users' cohort. Each is expanded to all descendants "
              "via concept_ancestor. Patients whose pre-drug history contains any of these "
              "concepts are excluded. Use to enforce treatment-naive eligibility (e.g. list "
-             "all other first-line antihypertensive classes for LEGEND-HTN). Default: no filter.",
-    )
-    parser.add_argument(
-        "--competing_concept_ids",
-        default=None,
-        help="Comma-separated OMOP concept_ids of drugs that censor follow-up when they "
-             "appear after initiation (treatment switch), in addition to the opposite arm "
-             "and --exclusion_concept_ids. Each is expanded to descendants. Unlike the "
-             "exclusion list they do not remove patients with prior exposure. Default: none.",
+             "all other first-line antihypertensive classes for LEGEND-HTN). A later "
+             "occurrence also censors follow-up, like a switch to the opposite arm. "
+             "Default: no filter.",
     )
     parser.add_argument(
         "--min_prior_observation_days",
@@ -1259,10 +1235,6 @@ def main() -> None:
         [int(x.strip()) for x in args.inpatient_outcome_concept_ids.split(",")]
         if args.inpatient_outcome_concept_ids else None
     )
-    competing_concept_ids = (
-        [int(x.strip()) for x in args.competing_concept_ids.split(",")]
-        if args.competing_concept_ids else None
-    )
     process(
         patient_sequence_path=args.patient_sequence_path,
         vocab_path=args.vocab_path,
@@ -1274,7 +1246,6 @@ def main() -> None:
         population_concept_ids=population_concept_ids,
         exclusion_concept_ids=exclusion_concept_ids,
         inpatient_outcome_concept_ids=inpatient_outcome_concept_ids,
-        competing_concept_ids=competing_concept_ids,
         min_prior_observation_days=args.min_prior_observation_days,
         era_gap_days=args.era_gap_days,
         min_context_length=args.min_context_length,

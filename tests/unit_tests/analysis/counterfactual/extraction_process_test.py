@@ -8,7 +8,7 @@ from cehrgpt.analysis.counterfactual.extract_drug_initiation_sequences import pr
 
 DAY = 86_400
 START = 1_600_000_000.0
-SOURCE, COMPARATOR, EXCLUDED, COMPETING = 100, 200, 500, 600
+SOURCE, COMPARATOR, EXCLUDED = 100, 200, 500
 
 
 def patient(person_id, visits):
@@ -37,7 +37,7 @@ class ExtractionProcessTest(unittest.TestCase):
         self.addCleanup(self.folder.cleanup)
         self.root = Path(self.folder.name)
         (self.root / "vocab" / "concept_ancestor").mkdir(parents=True)
-        ids = [SOURCE, COMPARATOR, EXCLUDED, COMPETING]
+        ids = [SOURCE, COMPARATOR, EXCLUDED]
         pl.DataFrame({"ancestor_concept_id": ids, "descendant_concept_id": ids}).write_parquet(
             self.root / "vocab" / "concept_ancestor" / "part.parquet"
         )
@@ -90,22 +90,16 @@ class ExtractionProcessTest(unittest.TestCase):
         # patient 2 starts the excluded drug only after the index visit, which censors them
         self.assertEqual(self.drug_info()["person_id"].to_list(), [2])
 
-    def test_a_competing_drug_censors_follow_up_without_excluding_the_patient(self):
+    def test_an_exclusion_drug_after_the_index_visit_censors_follow_up(self):
         self.write_patients(
-            [
-                patient(1, [(0, [str(SOURCE)]), (10, [str(COMPETING)]), (20, [str(SOURCE)])]),
-                patient(2, [(-30, [str(COMPETING)]), (0, [str(SOURCE)]), (20, [str(SOURCE)])]),
-            ]
+            [patient(1, [(0, [str(SOURCE)]), (10, [str(EXCLUDED)]), (20, [str(SOURCE)])])]
         )
-        self.run_process(competing_concept_ids=[COMPETING])
-        info = self.drug_info()
-        self.assertEqual(info["person_id"].to_list(), [1, 2])
-        self.assertEqual(info["era_end_epoch_time"][0], START + 10 * DAY)
-        self.assertIsNone(info["era_end_epoch_time"][1])
+        self.run_process(exclusion_concept_ids=[EXCLUDED])
+        self.assertEqual(self.drug_info()["era_end_epoch_time"][0], START + 10 * DAY)
 
-    def test_without_the_competing_option_the_drug_does_not_censor(self):
+    def test_without_an_exclusion_list_the_drug_does_not_censor(self):
         self.write_patients(
-            [patient(1, [(0, [str(SOURCE)]), (10, [str(COMPETING)]), (20, [str(SOURCE)])])]
+            [patient(1, [(0, [str(SOURCE)]), (10, [str(EXCLUDED)]), (20, [str(SOURCE)])])]
         )
         self.run_process()
         self.assertIsNone(self.drug_info()["era_end_epoch_time"][0])

@@ -144,12 +144,6 @@ POPULATION_CONCEPT_IDS=""
 #     904542  Triamterene
 EXCLUSION_CONCEPT_IDS="40235485,1351557,1346686,1347384,1367500,40226742,1317640,1308842,1332418,1353776,1326012,1318137,1318853,1319880,1328165,1307863,1319998,1317967,991382,1314002,1322081,1338005,932745,1346823,1398937,1363053,1309799,956874,1344965,1373928,1386957,1305447,1307046,1309068,1313200,1314577,1327978,1345858,1350489,1353766,970250,1341238,942350,904542"
 
-# Optional: further drug concept_ids (comma-separated ingredients) that censor follow-up
-# when they appear after initiation (treatment switch), in addition to the opposite
-# arm and the exclusion drugs.  Unlike the exclusion list they do not remove patients
-# with prior exposure.  Used by both extraction (observed data) and HR estimation.
-COMPETING_CONCEPT_IDS=""
-
 # -----------------------------------------------------------------------------
 # GPU configuration
 # -----------------------------------------------------------------------------
@@ -266,9 +260,6 @@ else
     fi
     if [ -n "${EXCLUSION_CONCEPT_IDS}" ]; then
         _EXTRACT_EXTRA_ARGS+=(--exclusion_concept_ids "${EXCLUSION_CONCEPT_IDS}")
-    fi
-    if [ -n "${COMPETING_CONCEPT_IDS}" ]; then
-        _EXTRACT_EXTRA_ARGS+=(--competing_concept_ids "${COMPETING_CONCEPT_IDS}")
     fi
     _EXTRACT_EXTRA_ARGS+=(--min_prior_observation_days "${MIN_PRIOR_OBSERVATION_DAYS}")
 
@@ -571,10 +562,6 @@ else
     mkdir -p "${RESULTS_DIR}"
 
     _step_start
-    _HR_EXTRA_ARGS=()
-    if [ -n "${COMPETING_CONCEPT_IDS}" ]; then
-        _HR_EXTRA_ARGS+=(--competing_concept_ids "${COMPETING_CONCEPT_IDS}")
-    fi
     python "${HR_SCRIPT}" \
         --trajectories_dir        "${TRAJ_DIR}" \
         --drug_info_path          "${COMBINED_DRUG_INFO}" \
@@ -588,8 +575,7 @@ else
         --arm_a_concept_ids       "${ACEI_CONCEPT_IDS}" \
         --arm_b_concept_ids       "${THIAZIDE_CONCEPT_IDS}" \
         --exclusion_concept_ids   "${EXCLUSION_CONCEPT_IDS}" \
-        --era_gap_days            "${ERA_GAP_DAYS}" \
-        "${_HR_EXTRA_ARGS[@]}"
+        --era_gap_days            "${ERA_GAP_DAYS}"
     _step_end
 
     echo "Step 4 complete."
