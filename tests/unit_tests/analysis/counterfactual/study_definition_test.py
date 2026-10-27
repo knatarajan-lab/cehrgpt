@@ -73,7 +73,8 @@ class BundledStudyTest(unittest.TestCase):
 
     def test_the_default_pair_is_the_one_of_the_study(self):
         pair = study.resolve_pair()
-        self.assertEqual((pair["target"].name, pair["comparator"].name), ("ACE inhibitors", "Thiazide or thiazide-like diuretics"))
+        # as in LEGEND, where the thiazides come first (order 1) and the ACE inhibitors second (order 2)
+        self.assertEqual((pair["target"].name, pair["comparator"].name), ("Thiazide or thiazide-like diuretics", "ACE inhibitors"))
 
     def test_a_name_may_be_a_part_of_one_name_and_is_not_case_sensitive(self):
         self.assertEqual(study.find_exposure("ace inhibitors").name, "ACE inhibitors")
@@ -97,7 +98,9 @@ class BundledStudyTest(unittest.TestCase):
         pair = study.resolve_pair()
         lines = study.reference_lines(pair)
         self.assertIn("AMI", lines[1])
-        self.assertIn("0.99", lines[1])
+        self.assertIn("1.01", lines[1])  # thiazides vs ACE inhibitors: the inverse of 0.99
+        reverse = study.reference_lines(study.resolve_pair("ACE inhibitors", "Thiazide or thiazide-like diuretics"))
+        self.assertIn("0.99", reverse[1])
         other = study.resolve_pair("Angiotensin receptor blockers (ARBs)", "Loop diuretics")
         self.assertEqual(study.reference_lines(other), [])
 
@@ -173,8 +176,8 @@ class CommandLineTest(unittest.TestCase):
 
     def test_the_assignments_define_what_the_scripts_use(self):
         label, other, target_ids, population, window, mono, gap = self.evaluate(self.run_tool())
-        self.assertEqual((label, other), ("ace_inhibitors", "thiazide_or_thiazide_like_diuretics"))
-        self.assertEqual(set(target_ids.split(",")), {str(i) for i in ACE_INHIBITORS})
+        self.assertEqual((label, other), ("thiazide_or_thiazide_like_diuretics", "ace_inhibitors"))
+        self.assertEqual(set(target_ids.split(",")), {str(i) for i in THIAZIDES})
         self.assertEqual((population, window, mono, gap), ("316866", "365", "7", "30"))
 
     def test_a_value_that_is_set_beforehand_wins(self):

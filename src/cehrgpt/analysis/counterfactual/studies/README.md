@@ -30,7 +30,7 @@ checks that the folder can be read and shows its exposures.
  "description": "free text",
  "exposures": {"levels": ["Drug class", "Drug major class", "Drug"],
                "default_level": "Drug class", "drug_level": "Drug"},
- "default_pair": {"target": "ACE inhibitors", "comparator": "Thiazide or thiazide-like diuretics"},
+ "default_pair": {"target": "Thiazide or thiazide-like diuretics", "comparator": "ACE inhibitors"},
  "indication": {"name": "Hypertension", "concept_ids": [316866], "window_days": 365},
  "washout_days": 365,
  "era_gap_days": 30,

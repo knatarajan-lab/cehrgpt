@@ -186,8 +186,8 @@ Each value is a number that appears once in a file of LEGEND; read it from there
 | `name` | | `LEGEND-<indication>` |
 | `description` | | one sentence, free text |
 | `exposures` | `exposures.csv` | `levels`: the values of `type` in the order `Drug class`, `Drug major class`, `Drug`; `default_level`: `Drug class`; `drug_level`: `Drug` |
-| `default_pair` | the previous analysis script | `ACE inhibitors` vs `Thiazide or thiazide-like diuretics` (exact names from `exposures.csv`) |
-| `reference_results` | the previous analysis script | the three results that script listed for that pair: AMI 0.99 (0.87–1.13), Heart failure 1.18 (1.07–1.30), Stroke 1.09 (0.99–1.20); they are copied, not read from LEGEND, so say where they came from if the user asks |
+| `default_pair` | `inst/settings/ExposuresOfInterest.csv`, column `order` | `Thiazide or thiazide-like diuretics` (`order` 1) as target against `ACE inhibitors` (`order` 2) as comparator, the same way round as LEGEND (exact names from `exposures.csv`) |
+| `reference_results` | the previous analysis script | the three results that script listed for ACE inhibitors vs thiazides: AMI 0.99 (0.87–1.13), Heart failure 1.18 (1.07–1.30), Stroke 1.09 (0.99–1.20); they are copied, not read from LEGEND, so say where they came from if the user asks. The same three for the default pair (thiazides vs ACE inhibitors) are their inverses: 1/hr, with the interval inverted and swapped (1.01, 0.85, 0.92) |
 | `indication.name` | | the indication, `Hypertension` |
 | `indication.concept_ids` | `inst/sql/sql_server/CreateExposureCohortsHypertension.sql`, last block | `WHERE condition_concept_id IN (SELECT descendant_concept_id ... WHERE ancestor_concept_id IN (316866))`: the ids in the `IN (...)` (descendants count too) |
 | `indication.window_days` | same block | `condition_start_date >= DATEADD(DAY, -365, new_user.cohort_start_date)` together with `condition_start_date <= new_user.cohort_start_date`: 365 days up to and including the index date |

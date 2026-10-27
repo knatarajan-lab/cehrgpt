@@ -73,10 +73,10 @@ class StudyScriptTest(unittest.TestCase):
         extractions = self.calls(commands, "extract_drug_initiation_sequences.py")
         swaps = self.calls(commands, "create_drug_swap_context.py")
         self.assertEqual((len(extractions), len(swaps)), (2, 2))
-        # the second extraction has the comparator class as the source
-        self.assertIn("--source_concept_ids 1395058,974166,978555,907013", extractions[1])
+        # the second extraction has the comparator class (the ACE inhibitors) as the source
+        self.assertIn("--source_concept_ids 1335471,1340128,1341927,1363749,1308216,1310756,1373225,1331235,1334456,1342439", extractions[1])
         # the arms are the combination of the two directions, both overlap scores are used
-        self.assertIn("swap_contexts/ace_inhibitors_arm_ctx.parquet", " ".join(commands))
+        self.assertIn("swap_contexts/thiazide_or_thiazide_like_diuretics_arm_ctx.parquet", " ".join(commands))
         generated = self.calls(commands, "hazard_ratio_estimation.py")[0]
         self.assertIn("--drug_info_path " + str(self.root / "out" / "swap_contexts" / "drug_info"), generated)
         self.assertIn("target_pts_overlap_scores.parquet", generated)
@@ -89,11 +89,11 @@ class StudyScriptTest(unittest.TestCase):
         self.assertEqual(len(self.calls(commands, "extract_drug_initiation_sequences.py")), 1)
         self.assertEqual(len(self.calls(commands, "create_drug_swap_context.py")), 1)
         arms = " ".join(self.calls(commands, "generate_counterfactual_sequences.py"))
-        self.assertIn("ace_inhibitors:" + str(self.root / "out" / "swap_contexts" / "target_pts_target_ctx.parquet"), arms)
         self.assertIn(
-            "thiazide_or_thiazide_like_diuretics:" + str(self.root / "out" / "swap_contexts" / "target_pts_comparator_ctx.parquet"),
+            "thiazide_or_thiazide_like_diuretics:" + str(self.root / "out" / "swap_contexts" / "target_pts_target_ctx.parquet"),
             arms,
         )
+        self.assertIn("ace_inhibitors:" + str(self.root / "out" / "swap_contexts" / "target_pts_comparator_ctx.parquet"), arms)
         generated = self.calls(commands, "hazard_ratio_estimation.py")[0]
         self.assertIn("--drug_info_path " + str(self.root / "out" / "target_contexts" / "drug_info"), generated)
         self.assertNotIn("comparator_pts_overlap_scores", generated)
