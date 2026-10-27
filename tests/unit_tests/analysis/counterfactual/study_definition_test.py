@@ -34,7 +34,7 @@ def write_study(folder: Path, default_pair=True, indication=True):
     if indication:
         definition["indication"] = {"name": "Condition", "concept_ids": [777], "window_days": 90}
     (folder / "study.json").write_text(json.dumps(definition))
-    (folder / "outcomes.json").write_text("[]")
+    (folder / "outcomes.csv").write_text("name,concept_ids\n")
 
 
 class BundledStudyTest(unittest.TestCase):
@@ -151,8 +151,8 @@ class CustomStudyTest(unittest.TestCase):
     def test_a_folder_that_is_not_a_study_is_refused(self):
         with self.assertRaisesRegex(ValueError, "no study"):
             study.study_dir(str(self.path / "missing"))
-        (self.path / "outcomes.json").unlink()
-        with self.assertRaisesRegex(ValueError, "lacks outcomes.json"):
+        (self.path / "outcomes.csv").unlink()
+        with self.assertRaisesRegex(ValueError, "lacks outcomes.csv"):
             study.study_dir(str(self.path))
 
 

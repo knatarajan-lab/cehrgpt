@@ -10,7 +10,7 @@ else on disk:
   indication, the washout, the exposure gap, the monotherapy window and the time at risk, and
   optionally reference results to compare with;
 * ``exposures.csv``: the drugs and the classes of drugs of the study;
-* ``outcomes.json`` and ``negative_controls.csv``: the outcomes (see ``outcome_definitions.py``).
+* ``outcomes.csv``: the outcomes and negative controls (see ``outcome_definitions.py``).
 
 This module resolves two exposures of the study by name into everything a run needs: their
 ingredients, the exclusion list (every other drug of the study; a patient that took one of them
@@ -37,7 +37,7 @@ from typing import Dict, List, Optional
 
 STUDIES_DIR = Path(__file__).resolve().parent / "studies"
 DEFAULT_STUDY = "legend_hypertension"
-REQUIRED_FILES = ("study.json", "exposures.csv", "outcomes.json")
+REQUIRED_FILES = ("study.json", "exposures.csv", "outcomes.csv")
 
 
 def label_of(name: str) -> str:

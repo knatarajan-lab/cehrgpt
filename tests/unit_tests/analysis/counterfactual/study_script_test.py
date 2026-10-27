@@ -229,7 +229,7 @@ class StudyScriptTest(unittest.TestCase):
             '"washout_days": 180, "era_gap_days": 45, "monotherapy_window_days": null, '
             '"time_at_risk": {"min_days_at_risk": 2}}'
         )
-        (study / "outcomes.json").write_text("[]")
+        (study / "outcomes.csv").write_text("name,concept_ids\n")
         result, commands = self.run_script(STUDY=str(study), OUTPUT_ROOT=str(self.root / "mini_out"))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         joined = "\n".join(commands)

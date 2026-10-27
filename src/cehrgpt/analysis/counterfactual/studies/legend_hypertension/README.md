@@ -5,16 +5,15 @@ This folder holds the definition of the OHDSI LEGEND hypertension study
 definition has to be read again (a new LEGEND version, another indication, a file that looks wrong),
 an agent does it by following this document, then checks the result with the list at the end.
 
-An earlier version of this repository had regular-expression code that did steps 2 and 3 of the
-outcome section. It was removed on purpose. If a reference is useful, it is in the history:
+An earlier version of this repository had regular-expression code that read the outcome SQL. It was
+removed on purpose. If a reference is useful, it is in the history:
 `git show 97bd43c:src/cehrgpt/analysis/counterfactual/legend_outcomes.py`.
 
 ## 1. What is in this folder
 
 | File | Content | Read by |
 |---|---|---|
-| `outcomes.json` | The 58 hypertension outcomes: concept sets and the criteria that select the events | `outcome_definitions.read_outcomes` |
-| `negative_controls.csv` | The 76 negative control outcomes | `outcome_definitions.negative_controls` |
+| `outcomes.csv` | 45 of the 58 hypertension outcomes and the 76 negative controls: concept sets, and whether the event has to happen during an inpatient or ER visit | `outcome_definitions.read_outcomes` |
 | `exposures.csv` | The 58 ingredients, 15 drug classes and 7 major classes of the study | `study_definition.load_exposures` |
 | `study.json` | Indication, washout, exposure gap, monotherapy window, time at risk | `study_definition.load_study` |
 | `source.json` | Which LEGEND commit all of the above comes from | tests, provenance |
@@ -30,22 +29,24 @@ Work in a checkout of `https://github.com/OHDSI/Legend`. Record the version in `
 * `commit`: output of `git rev-parse HEAD`
 * `commit_date`: output of `git log -1 --format=%cI`
 * `repository`, `indication` (`Hypertension`), `files` (the LEGEND files listed in sections 3 to 6),
-  `n_outcomes`, `n_negative_controls`
+  `n_outcomes`, `n_outcomes_left_out`, `n_negative_controls`
 * `generated_by`: a short note that the files were read by an agent following this document
 
 The files used are all under `inst/settings`, `inst/sql/sql_server` and `R` of the checkout.
 
-## 3. Outcomes (`outcomes.json`)
+## 3. Outcomes (`outcomes.csv`)
 
-### 3.1 Which outcomes, and their ids
+The pipeline needs two things per outcome: the concepts that mark an event, and whether the event
+only counts during an inpatient or ER visit. `outcomes.csv` holds exactly that (format in
+`../README.md`). Everything else in the ATLAS definitions is read only to decide those two things.
+
+### 3.1 Which outcomes
 
 Open `inst/settings/OutcomesOfInterest.csv`. Keep the rows with `indicationId == Hypertension`
-(58 rows), in the order of the file. For each row:
-
-* `name` is the name of the outcome **and** the name of its SQL file,
-  `inst/sql/sql_server/<name>.sql`. Use the name exactly as written: one name,
-  `Venous thromboembolic events `, ends in a space, and so does its file name.
-* `cohortId` becomes `cohort_id` and `atlasId` becomes `atlas_id` (integers).
+(58 rows), in the order of the file. `name` is the name of the outcome **and** the name of its SQL file,
+`inst/sql/sql_server/<name>.sql`. Use the name exactly as written: one name,
+`Venous thromboembolic events `, ends in a space, and so does its file name (the space is dropped in
+`outcomes.csv`).
 
 ### 3.2 The concept sets of an outcome
 
@@ -81,89 +82,89 @@ nothing is excluded. In each part:
 * the second `select` (after `UNION`), `ancestor_concept_id in (D)`, lists the concepts that count
   **with all their descendants**.
 
-So `include_descendants = D` and `include = L minus D`. Do the same for the excluded part
-(`exclude_descendants`, `exclude`). Lists are sorted, without duplicates, as integers.
-(`invalid_reason is null` only drops invalid vocabulary concepts and needs no record.) The
-example above gives
-`{"include": [], "include_descendants": [4329847], "exclude": [], "exclude_descendants": [314666]}`.
+The concept ids of the set are `D` (column `concept_ids`) and `L minus D` (column `exact_concept_ids`).
+Do the same for the excluded part (`exclude_concept_ids` and `exclude_exact_concept_ids`). Lists are
+sorted, without duplicates, separated by `;`. (`invalid_reason is null` only drops invalid vocabulary
+concepts and needs no record.) The example above gives `concept_ids` `4329847` and `exclude_concept_ids`
+`314666`.
 
 Check that no file contains `concept_relationship`: LEGEND uses no "mapped" concepts. If one does,
 stop and tell the user, the format has no place for it.
 
-### 3.3 The criteria that select the events
+### 3.3 Which concept sets make the event, and the visit constraint
 
 After the concept sets the file has `with primary_events ... as ( -- Begin Primary Events ...
--- End Primary Events )`.
+-- End Primary Events )`. List the criteria:
 
-* **`primary`**: inside `-- Begin Primary Events` ... `-- End Primary Events`, list every domain
-  block `-- Begin <Domain> Criteria` ... `-- End <Domain> Criteria`, in order, that is **not** inside a
+* **primary**: inside `-- Begin Primary Events` ... `-- End Primary Events`, every domain block
+  `-- Begin <Domain> Criteria` ... `-- End <Domain> Criteria` that is **not** inside a
   `-- Begin Correlated Criteria` block. `<Domain>` is `Condition Occurrence`, `Observation`,
-  `Procedure Occurrence`, `Drug Exposure`, `Measurement`, `Visit Occurrence` or `Death`. Its
-  `codeset_ids` are the numbers in `codesets.codeset_id = N` inside the block, in order of
-  appearance without repeats (`[]` for `Death`, which has no concept set).
-  Several blocks joined by `UNION ALL` are several entries.
-* **`correlated`**: every `-- Begin Correlated Criteria` ... `-- End Correlated Criteria` block in
-  the **whole file** (after the primary events for most outcomes, inside them for the
-  "Hospitalization with ..." outcomes). List the domain blocks inside it, including nested ones, as
-  for `primary`. Drop an entry that repeats an earlier one exactly.
+  `Procedure Occurrence`, `Drug Exposure`, `Measurement`, `Visit Occurrence` or `Death`. Its concept
+  sets are the numbers in `codesets.codeset_id = N` inside the block. Several blocks joined by
+  `UNION ALL` are several criteria.
+* **correlated**: every `-- Begin Correlated Criteria` ... `-- End Correlated Criteria` block in the
+  **whole file** (after the primary events for most outcomes, inside them for the "Hospitalization
+  with ..." outcomes). List the domain blocks inside it, including nested ones, as for primary.
 
-Example, "Acute myocardial infarction": a condition (concept set 3) during a visit of concept set 2.
+Then write the rows of the outcome:
 
-```json
-{
- "name": "Acute myocardial infarction", "cohort_id": 2, "atlas_id": 7364,
- "codesets": {
-  "2": {"codeset_id": 2, "include": [], "include_descendants": [262, 9201, 9203], "exclude": [], "exclude_descendants": []},
-  "3": {"codeset_id": 3, "include": [], "include_descendants": [4329847], "exclude": [], "exclude_descendants": [314666]}
- },
- "primary": [{"domain": "Condition Occurrence", "codeset_ids": [3]}],
- "correlated": [{"domain": "Visit Occurrence", "codeset_ids": [2]}]
-}
-```
+| The outcome is | Rows | `inpatient_or_er` |
+|---|---|---|
+| `Death` with no concept set and no correlated criteria | one row, `concept_ids` `[DEATH]` | `false` |
+| primary criteria of `Condition Occurrence`, `Observation` and `Procedure Occurrence` only, with correlated `Visit Occurrence` criteria or none | one row per primary concept set | `true` if there is a correlated `Visit Occurrence` criterion (its concept set is 262, 9201, 9203: inpatient, ER and ER-and-inpatient visits), else `false` |
+| primary criteria of `Visit Occurrence` only, with correlated condition, observation or procedure criteria ("Hospitalization with ...") | one row per concept set of those correlated criteria | `true` |
+| anything else | the outcome is **left out** (section 3.6) | |
 
-The file is a JSON list of such objects, in the order of `OutcomesOfInterest.csv`, written with an
-indent of 1 and a final newline. The keys of `codesets` are the codeset ids as strings.
+The rows of one outcome have the same `name`; each row is a concept set with its own exclusions.
 
 ### 3.4 What is deliberately not recorded
 
-The domain and concept sets are all that the pipeline can use. The following exist in the SQL and are
-left out, which is why the code (`outcome_definitions.resolve_outcome`) marks an outcome as not supported when its
-meaning depends on them:
+The following exist in the SQL and cannot be matched on the token sequences, which is why an outcome
+whose meaning depends on them is left out (or reduced, section 3.5):
 
 * counts such as `HAVING COUNT(...) >= 2` ("followed by another record in the following year");
 * value ranges of measurements (`value_as_number`, `range_high`);
 * time windows between records, the gap that merges records into episodes, date offsets.
 
-Do not try to encode them in `outcomes.json`.
+### 3.5 Outcomes with a branch that needs a measured value
 
-### 3.5 Outcomes with a branch that needs a measured value (`partial`)
+Two outcomes have a branch that depends on a measured value, next to a branch that is a plain record
+of a concept set. Write the rows of the plain branch, and say what was left out in `note`:
 
-Two outcomes have a branch that cannot be evaluated on the token sequences because it depends on a
-measured value, next to a branch that can. Add a `partial` entry to them in `outcomes.json`:
-
-```json
-"partial": {"kept_codeset_ids": [10], "left_out": "muscle disorder records with a creatine kinase above 5 x the upper limit of normal"}
-```
-
-| Outcome | Kept concept sets | Left out |
+| Outcome | Kept concept set | `note` |
 |---|---|---|
-| Rhabdomyolysis | `[10]` (rhabdomyolysis records) | muscle disorder records with a creatine kinase above 5 x the upper limit of normal (concept set 11 with the measurement 12) |
-| Hyperkalemia | `[0]` (hyperkalemia records) | potassium measurements above 5.6 mmol/L (the measurement criterion with concept set 1) |
+| Rhabdomyolysis | `10` (rhabdomyolysis records) | `left out: muscle disorder records with a creatine kinase above 5 x the upper limit of normal` |
+| Hyperkalemia | `0` (hyperkalemia records) | `left out: potassium measurements above 5.6 mmol/L` |
 
 This is a judgement, not something that can be read off mechanically: it applies when a primary
 criterion of the measurement domain, or a correlated measurement, belongs to one branch of a `UNION ALL`
-of primary criteria, and the other branch is a plain record of a concept set. Look for it when the
-checks in section 7 report an unsupported outcome with a `Measurement` criterion, and tell the user
-which outcomes got a `partial` entry and why.
+of primary criteria, and the other branch is a plain record of a concept set. Tell the user which
+outcomes got a `note` and why.
 
-## 4. Negative controls (`negative_controls.csv`)
+### 3.6 Outcomes that are left out (13)
+
+These are not in `outcomes.csv` because the token sequences cannot show what they need. `source.json`
+records the number (`n_outcomes_left_out`). Tell the user if a new reading leaves out other ones.
+
+| Outcome | Why |
+|---|---|
+| Anxiety, Bradycardia, Cardiac arrhythmia, Kidney disease, Depression, End stage renal disease, Heart failure, Malignant neoplasm, Type 2 diabetes mellitus, Vasculitis, Chronic kidney disease | the event needs a confirming second record (a condition, drug, observation, procedure or measurement) |
+| Measured renal dysfunction | the primary criterion is a measurement |
+| Cardiovascular-related mortality | a death with a cause; the cause is not part of the death record |
+
+To use one of them anyway, add rows for the concept set you consider the event (for example
+"Heart failure" as the first record of its condition concept set), and say so in `note`.
+
+## 4. Negative controls
 
 Open `inst/settings/NegativeControls.csv` (columns `indicationId,conceptId,cohortId,name`). Keep the
-rows with `indicationId == Hypertension` (76) and write `cohort_id,concept_id,name` (header in that
-order), in file order, from `cohortId`, `conceptId` and `name`.
+rows with `indicationId == Hypertension` (76) and add one row per control to `outcomes.csv`, after the
+outcomes and in file order: `name` from `name`, `kind` `negative_control`, `concept_ids` from
+`conceptId`, the other columns empty.
 
 `inst/sql/sql_server/NegativeControls.sql` defines every negative control the same way: the first
-condition record of the concept or any descendant. There is no SQL per control.
+condition record of the concept or any descendant. There is no SQL per control, and the pipeline
+needs none.
 
 ## 5. Exposures (`exposures.csv`)
 
@@ -215,27 +216,26 @@ implements them in `extract_drug_initiation_sequences.py`):
 
 Run these, and say so in the answer if any differs from what is written here (and why):
 
-1. `outcomes.json` has 58 outcomes with 58 different `cohort_id`; `negative_controls.csv` has 76 rows;
-   `exposures.csv` has 58 `Drug`, 15 `Drug class` and 7 `Drug major class` rows; `source.json` agrees
-   with the counts.
-2. "Acute myocardial infarction": concept set 3 is `include_descendants [4329847]` with
-   `exclude_descendants [314666]`; concept set 2 is `include_descendants [262, 9201, 9203]`; one
-   primary `Condition Occurrence [3]`; one correlated `Visit Occurrence [2]`.
-3. "Hemorrhagic stroke": concept set 4 is `include [376713, 432923, 439847]` and has **no**
-   descendants.
-4. "Hospitalization with heart failure": two primary `Visit Occurrence` entries, and a correlated
-   `Condition Occurrence`.
-5. "All-cause mortality": primary `Death` with no concept set. "Rhabdomyolysis" and "Hyperkalemia" carry a `partial` entry (section 3.5).
+1. `outcomes.csv` has 45 outcomes (primary) and 76 negative controls; the 13 left out are the ones of
+   section 3.6; `exposures.csv` has 58 `Drug`, 15 `Drug class` and 7 `Drug major class` rows;
+   `source.json` agrees with the counts (`n_outcomes` 58 = 45 + `n_outcomes_left_out` 13).
+2. "Acute myocardial infarction": one row, `concept_ids` `4329847`, `exclude_concept_ids` `314666`,
+   `inpatient_or_er` `true`.
+3. "Hemorrhagic stroke": `exact_concept_ids` `376713;432923;439847` and **no** `concept_ids`.
+4. "Hospitalization with heart failure": `inpatient_or_er` `true`, the concept sets of the correlated
+   condition criterion.
+5. "All-cause mortality": `concept_ids` `[DEATH]`. "Rhabdomyolysis" and "Hyperkalemia" carry a `note`
+   (section 3.5).
 6. The ACE inhibitor class has the ten ingredients `1335471, 1340128, 1341927, 1363749, 1308216,
    1310756, 1373225, 1331235, 1334456, 1342439`, the class of thiazide or thiazide-like diuretics
    `1395058, 974166, 978555, 907013`, and the other 44 ingredients make up the exclusion list (ARBs,
    dihydropyridine and non-dihydropyridine calcium channel blockers, second-line agents).
 7. `study.json` has 316866, 365, 365, 30, 7, 1, 1.
 8. The tests pass: `pytest tests/unit_tests/analysis/counterfactual/outcome_definitions_test.py
-   tests/unit_tests/analysis/counterfactual/study_definition_test.py`. They check the points above, that
-   15 outcomes of the paper (Supplementary Table of the LEGEND-HTN paper, the outcomes "during an
-   inpatient or ER visit") come out restricted to inpatient and ER visits, and that 121 of the 134
-   outcomes and controls can be evaluated on the token sequences.
+   tests/unit_tests/analysis/counterfactual/study_definition_test.py`. They check the points above and that
+   the 15 outcomes of the paper (Supplementary Table of the LEGEND-HTN paper, the outcomes "during an
+   inpatient or ER visit") are restricted to inpatient and ER visits, together with "Coronary heart
+   disease", whose SQL has the same visit criterion (16 in all).
 
 If the new counts or concept sets differ from the old files, show the user a diff of the data files
 before replacing them: a changed outcome changes every result downstream.

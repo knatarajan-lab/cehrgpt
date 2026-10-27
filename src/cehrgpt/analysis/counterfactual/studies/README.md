@@ -7,7 +7,7 @@ sub-folders of this folder; any other folder works the same way (`STUDY=/path/to
 
 | Bundled study | Content |
 |---|---|
-| `legend_hypertension/` | The hypertension study of OHDSI LEGEND: 80 exposures (58 drugs, 15 drug classes, 7 major classes), 58 outcomes, 76 negative controls. Its `README.md` says how it was read from the LEGEND repository. |
+| `legend_hypertension/` | The hypertension study of OHDSI LEGEND: 80 exposures (58 drugs, 15 drug classes, 7 major classes), 45 outcomes (13 of its 58 cannot be shown in token sequences), 76 negative controls. Its `README.md` says how it was read from the LEGEND repository. |
 
 ## Files of a study folder
 
@@ -15,8 +15,7 @@ sub-folders of this folder; any other folder works the same way (`STUDY=/path/to
 |---|---|---|
 | `study.json` | yes | name, exposure levels, default pair, indication, cohort rules, time at risk, reference results |
 | `exposures.csv` | yes | the drugs and the groups of drugs |
-| `outcomes.json` | yes | the outcomes |
-| `negative_controls.csv` | no | negative control outcomes (outcomes the exposures are not expected to affect) |
+| `outcomes.csv` | yes | the outcomes and the negative controls (outcomes the exposures are not expected to affect) |
 | `source.json` | no | where the study comes from (repository, commit, files), for provenance only |
 | `README.md` | no | how the files were produced |
 
@@ -71,45 +70,39 @@ Columns `type,name,cohort_id,concept_id,included_concept_ids`, one row per expos
 * `included_concept_ids`: for a group the concept ids of its drugs, separated by `;`; empty for a drug.
   Every id has to be a drug of `exposures.drug_level` if the group is to be used as target or comparator.
 
-### `outcomes.json`
+### `outcomes.csv`
 
-A list; each entry is an outcome reduced to what the pipeline can use:
+One row is a concept set of an outcome. Columns:
 
-```json
-{
- "name": "Acute myocardial infarction", "cohort_id": 2, "atlas_id": 7364,
- "codesets": {"3": {"codeset_id": 3, "include": [], "include_descendants": [4329847],
-                    "exclude": [], "exclude_descendants": [314666]},
-              "2": {"codeset_id": 2, "include": [], "include_descendants": [262, 9201, 9203],
-                    "exclude": [], "exclude_descendants": []}},
- "primary":    [{"domain": "Condition Occurrence", "codeset_ids": [3]}],
- "correlated": [{"domain": "Visit Occurrence", "codeset_ids": [2]}],
- "partial": {"kept_codeset_ids": [10], "left_out": "what the dropped branch needs"}
-}
+```
+name,kind,concept_ids,exact_concept_ids,exclude_concept_ids,exclude_exact_concept_ids,inpatient_or_er,note
+Heart failure,primary,316139,,,,true,
+Acute myocardial infarction,primary,4329847,,314666,,true,
+Hemorrhagic stroke,primary,,376713;432923;439847,,,true,
+All-cause mortality,primary,[DEATH],,,,false,
+Rash,negative_control,140648,,,,,
 ```
 
-* `codesets`: concept sets by id. `include`: concepts that count as they are; `include_descendants`:
-  concepts that count with all their descendants; `exclude` / `exclude_descendants` likewise for the
-  concepts that are taken out again (descendants are looked up in the OMOP vocabulary at run time).
-* `primary`: the criteria that select the events; `domain` is `Condition Occurrence`,
-  `Observation`, `Procedure Occurrence`, `Drug Exposure`, `Measurement`, `Visit Occurrence` or `Death`
-  (`Death` has no concept set).
-* `correlated`: criteria that have to hold around the event. A `Visit Occurrence` entry (typically
-  inpatient and ER visits) means the event only counts inside such a visit.
-* `partial` (optional): only the listed concept sets are used because the other branch of the
-  definition needs something the token sequences do not carry (a measured value). `left_out` says what
-  was dropped and is recorded with the outcome.
-* `cohort_id`, `atlas_id`: ids of the source study, not used by the analysis.
+| Column | Meaning |
+|---|---|
+| `name` | The outcome; the label in the results is its lower-case form with underscores. Rows with the same name are one outcome |
+| `kind` | `primary` (default) or `negative_control`: an outcome the exposures are not expected to affect, so its hazard ratio should be 1; it is analysed like the others and `control_outcome_summary.csv` reports the bias |
+| `concept_ids` | Concepts that count **with all their descendants** (looked up in the OMOP vocabulary at run time); several ids are separated by `;`. `[DEATH]` is the death of the patient |
+| `exact_concept_ids` | Concepts that count only as themselves |
+| `exclude_concept_ids` | Concepts taken out again, with their descendants |
+| `exclude_exact_concept_ids` | Concepts taken out again, only as themselves |
+| `inpatient_or_er` | `true` if the event only counts during an inpatient or ER visit (the visits with the concepts 262, 9201 or 9203); empty or `false` otherwise |
+| `note` | Free text, for example what part of a source definition was left out. Not used by the analysis |
 
-`outcome_definitions.py` decides what can be evaluated on the token sequences: records of a concept
-set (condition, observation, procedure), optionally inside an inpatient or ER visit, and the death
-record are supported; outcomes that need a confirming second record, a drug, a measured value or the
-cause of a death are listed in Step 0 with the reason and left out.
+An event of an outcome is the first record, after the index date, of any concept of any of its rows. Each row
+has its own exclusions, so an outcome of several rows is the union of its concept sets. The rows of an
+outcome have the same `kind` and `inpatient_or_er`. Only `name` and `concept_ids` are needed; the other
+columns may be left out of the file.
 
-### `negative_controls.csv`
-
-Columns `cohort_id,concept_id,name`. A negative control is the first condition record of the concept
-or any of its descendants.
+The token sequences hold a record as the token of its concept, whatever the domain (condition,
+observation, procedure), so no domain is given. An outcome that depends on something they do not carry
+(a measured value, a drug, a second confirming record, the cause of a death) has no row; if you still
+want it, give the concept set you accept as its event and say so in `note`.
 
 ## What the pipeline derives from a study
 
@@ -125,6 +118,6 @@ are options of the script.
    be produced again (see `legend_hypertension/README.md`).
 2. Check it: `study_definition.py --study <folder> --list`, then
    `outcome_definitions.py --study <folder> --vocab_path <omop vocabulary> --output_dir <dir>`, which
-   lists the outcomes that cannot be evaluated.
+   reads `outcomes.csv`, lists the outcomes that need an inpatient or ER visit and reports mistakes in the file.
 3. Run `STUDY=<folder> bash scripts/run_causal_study.sh`.
 4. To bundle it, put the folder here and add it to the table above.

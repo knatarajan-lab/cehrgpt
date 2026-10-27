@@ -187,10 +187,9 @@ SKIP_STEP4="${SKIP_STEP4:-false}"
 ARM_A="${TARGET_LABEL}"
 ARM_B="${COMPARATOR_LABEL}"
 
-# Outcomes: the outcomes and negative controls of the study.  Step 0 resolves their concepts
-# (descendants, exclusions) with VOCAB_PATH and keeps the inpatient / ER visit restriction of the
-# outcomes that need one; outcomes the token sequences cannot represent are listed in Step 0 and
-# left out.
+# Outcomes: the outcomes and negative controls of the study (outcomes.csv).  Step 0 resolves their
+# concepts (descendants, exclusions) with VOCAB_PATH and keeps the inpatient / ER visit restriction of
+# the outcomes that need one.
 
 # Further outcomes by concept_id (descendants included), optional
 OUTCOME_CONCEPT_IDS="${OUTCOME_CONCEPT_IDS-}"

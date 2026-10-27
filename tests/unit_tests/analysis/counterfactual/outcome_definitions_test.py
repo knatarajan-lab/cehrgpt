@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 import tempfile
 import unittest
@@ -15,19 +17,79 @@ from cehrgpt.analysis.counterfactual.extract_drug_initiation_sequences import (
     process,
 )
 
-def codeset(codeset_id, include=(), descendants=(), exclude=(), exclude_descendants=()):
-    return lo.Codeset(codeset_id, list(include), list(descendants), list(exclude), list(exclude_descendants))
+COLUMNS = [
+    "name", "kind", "concept_ids", "exact_concept_ids", "exclude_concept_ids",
+    "exclude_exact_concept_ids", "inpatient_or_er", "note",
+]  # fmt: skip
 
 
-def outcome(name, codesets, primary, correlated=(), partial=None):
-    """primary / correlated: (domain, codeset id or None) pairs."""
-    return lo.OutcomeDefinition(
-        name=name,
-        codesets={c.codeset_id: c for c in codesets},
-        primary=[lo.Criterion(d, [] if i is None else [i]) for d, i in primary],
-        correlated=[lo.Criterion(d, [] if i is None else [i]) for d, i in correlated],
-        partial=partial,
-    )
+def rows_of(*rows):
+    """Rows of outcomes.csv from dicts that leave out the empty columns."""
+    return [{c: row.get(c, "") for c in COLUMNS} for row in rows]
+
+
+def write_vocab(root: Path, pairs):
+    (root / "vocab" / "concept_ancestor").mkdir(parents=True)
+    pl.DataFrame(
+        {"ancestor_concept_id": [a for a, _ in pairs], "descendant_concept_id": [d for _, d in pairs]}
+    ).write_parquet(root / "vocab" / "concept_ancestor" / "part.parquet")
+    return str(root / "vocab")
+
+
+class ReadTest(unittest.TestCase):
+    def parse(self, *rows):
+        return lo.parse_outcomes(rows_of(*rows))
+
+    def test_a_row_is_an_outcome_with_a_concept_set(self):
+        (outcome,) = self.parse(
+            {"name": "Heart failure", "concept_ids": "316139;4", "exact_concept_ids": "9",
+             "exclude_concept_ids": "42", "exclude_exact_concept_ids": "43", "inpatient_or_er": "True", "note": "n"}
+        )  # fmt: skip
+        self.assertEqual((outcome.name, outcome.kind, outcome.inpatient_or_er, outcome.note), ("Heart failure", "primary", True, "n"))
+        (concept_set,) = outcome.concept_sets
+        self.assertEqual(concept_set.include_descendants, [316139, 4])
+        self.assertEqual((concept_set.include, concept_set.exclude_descendants, concept_set.exclude), ([9], [42], [43]))
+
+    def test_the_kind_and_the_visit_constraint_default_to_primary_and_false(self):
+        (outcome,) = lo.parse_outcomes([{"name": "A", "concept_ids": "1"}])
+        self.assertEqual((outcome.kind, outcome.inpatient_or_er), ("primary", False))
+
+    def test_rows_of_one_name_are_the_concept_sets_of_one_outcome(self):
+        outcomes = self.parse(
+            {"name": "A", "concept_ids": "4", "exclude_concept_ids": "41"},
+            {"name": "B", "concept_ids": "5"},
+            {"name": "A", "concept_ids": "6"},
+        )
+        self.assertEqual([o.name for o in outcomes], ["A", "B"])
+        self.assertEqual(len(outcomes[0].concept_sets), 2)
+
+    def test_death_is_a_concept_id_of_its_own(self):
+        (outcome,) = self.parse({"name": "All-cause mortality", "concept_ids": "[DEATH]"})
+        self.assertTrue(outcome.death)
+        self.assertEqual(outcome.concept_sets, [])
+
+    def test_mistakes_are_reported_with_the_row(self):
+        cases = {
+            "name is empty": [{"name": "", "concept_ids": "1"}],
+            "kind has to be": [{"name": "A", "concept_ids": "1", "kind": "secondary"}],
+            "has no concept ids": [{"name": "A", "concept_ids": ""}],
+            "concept ids, got 'x'": [{"name": "A", "concept_ids": "x"}],
+            "true or false": [{"name": "A", "concept_ids": "1", "inpatient_or_er": "maybe"}],
+            "differ in kind": [{"name": "A", "concept_ids": "1"}, {"name": "A", "concept_ids": "2", "inpatient_or_er": "true"}],
+            "takes no other column": [{"name": "A", "concept_ids": "[DEATH]", "inpatient_or_er": "true"}],
+            "same label": [{"name": "A b", "concept_ids": "1"}, {"name": "A-b", "concept_ids": "2"}],
+        }  # fmt: skip
+        for message, rows in cases.items():
+            with self.assertRaisesRegex(ValueError, message):
+                self.parse(*rows)
+
+    def test_a_file_without_the_name_column_is_refused(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for name in ("study.json", "exposures.csv"):
+                (Path(folder) / name).write_text((study_dir() / name).read_text())
+            (Path(folder) / "outcomes.csv").write_text("label,concept_ids\nA,1\n")
+            with self.assertRaisesRegex(ValueError, "lacks the column"):
+                lo.read_outcomes(folder)
 
 
 class ResolveTest(unittest.TestCase):
@@ -35,117 +97,70 @@ class ResolveTest(unittest.TestCase):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
         self.root = Path(self.folder.name)
-        (self.root / "vocab" / "concept_ancestor").mkdir(parents=True)
-        # 4 has the descendants 41 and 42, 5 has the descendant 51, 262 has 8717
-        pairs = [(4, 4), (4, 41), (4, 42), (5, 5), (5, 51), (262, 262), (262, 8717), (7, 7), (7, 71)]
-        pl.DataFrame(
-            {"ancestor_concept_id": [a for a, _ in pairs], "descendant_concept_id": [d for _, d in pairs]}
-        ).write_parquet(self.root / "vocab" / "concept_ancestor" / "part.parquet")
-        self.vocab = str(self.root / "vocab")
+        # 4 has the descendants 41 and 42, 5 has the descendant 51, 7 has 71
+        self.vocab = write_vocab(
+            self.root, [(4, 4), (4, 41), (4, 42), (5, 5), (5, 51), (7, 7), (7, 71)]
+        )
 
-    def resolve(self, definition):
-        ids = lo.codeset_concept_ids(list(definition.codesets.values()))
-        return lo.resolve_outcome(definition, lo.descendants_of(self.vocab, ids))
+    def resolve(self, *rows):
+        (resolved,) = lo.resolve_outcomes(lo.parse_outcomes(rows_of(*rows)), self.vocab)
+        return resolved
 
     def test_descendants_are_expanded_and_exclusions_removed(self):
-        resolved = self.resolve(
-            outcome(
-                "Outcome",
-                [codeset(1, include=[9], descendants=[4], exclude=[42])],
-                primary=[("Condition Occurrence", 1)],
-            )
-        )
-        self.assertTrue(resolved.supported)
+        resolved = self.resolve({"name": "Outcome", "concept_ids": "4", "exact_concept_ids": "9", "exclude_concept_ids": "42"})
         self.assertEqual(resolved.concepts, ["4", "41", "9"])
         self.assertFalse(resolved.inpatient_only)
-        self.assertEqual(resolved.label, "outcome")
+        self.assertEqual((resolved.label, resolved.role), ("outcome", "primary"))
+
+    def test_an_exact_concept_does_not_bring_its_descendants(self):
+        resolved = self.resolve({"name": "Outcome", "exact_concept_ids": "4"})
+        self.assertEqual(resolved.concepts, ["4"])
 
     def test_an_excluded_ancestor_removes_its_descendants_too(self):
+        resolved = self.resolve({"name": "Outcome", "concept_ids": "4;5", "exclude_concept_ids": "5"})
+        self.assertEqual(resolved.concepts, ["4", "41", "42"])
+
+    def test_an_exact_exclusion_removes_only_that_concept(self):
+        resolved = self.resolve({"name": "Outcome", "concept_ids": "4", "exclude_exact_concept_ids": "4"})
+        self.assertEqual(resolved.concepts, ["41", "42"])
+
+    def test_every_concept_set_has_its_own_exclusions(self):
         resolved = self.resolve(
-            outcome(
-                "Outcome",
-                [codeset(1, descendants=[4, 5], exclude_descendants=[5])],
-                primary=[("Condition Occurrence", 1)],
-            )
+            {"name": "Outcome", "concept_ids": "4", "exclude_concept_ids": "41"},
+            {"name": "Outcome", "exact_concept_ids": "41"},
         )
         self.assertEqual(resolved.concepts, ["4", "41", "42"])
 
-    def test_a_visit_criterion_makes_the_outcome_inpatient_only(self):
-        resolved = self.resolve(
-            outcome(
-                "Outcome",
-                [codeset(2, descendants=[262]), codeset(3, descendants=[4])],
-                primary=[("Condition Occurrence", 3)],
-                correlated=[("Visit Occurrence", 2)],
-            )
-        )
+    def test_the_visit_constraint_is_kept(self):
+        resolved = self.resolve({"name": "Outcome", "concept_ids": "5", "inpatient_or_er": "true"})
         self.assertTrue(resolved.inpatient_only)
-        self.assertEqual(resolved.concepts, ["4", "41", "42"])
-
-    def test_a_hospitalization_is_the_condition_during_an_inpatient_visit(self):
-        resolved = self.resolve(
-            outcome(
-                "Hospitalization",
-                [codeset(0, descendants=[262]), codeset(1, descendants=[5])],
-                primary=[("Visit Occurrence", 0)],
-                correlated=[("Visit Occurrence", 0), ("Condition Occurrence", 1)],
-            )
-        )
-        self.assertTrue(resolved.supported and resolved.inpatient_only)
-        self.assertEqual(resolved.concepts, ["5", "51"])
 
     def test_death_is_the_death_token(self):
-        resolved = self.resolve(outcome("All-cause mortality", [], primary=[("Death", None)]))
-        self.assertTrue(resolved.supported)
+        resolved = self.resolve({"name": "All-cause mortality", "concept_ids": "[DEATH]"})
         self.assertEqual(resolved.concepts, [lo.DEATH_TOKEN])
 
-    def test_outcomes_that_cannot_be_matched_on_tokens_say_why(self):
-        confirmed = self.resolve(
-            outcome(
-                "Confirmed",
-                [codeset(1, descendants=[4])],
-                primary=[("Condition Occurrence", 1)],
-                correlated=[("Condition Occurrence", 1)],
-            )
-        )
-        measured = self.resolve(
-            outcome("Measured", [codeset(1, descendants=[4])], primary=[("Measurement", 1)])
-        )
-        self.assertIn("confirming record", confirmed.unsupported_reason)
-        self.assertIn("Measurement", measured.unsupported_reason)
-        self.assertFalse(measured.supported)
-
-    def test_a_partial_definition_keeps_the_named_concept_sets_and_says_what_is_left_out(self):
-        resolved = self.resolve(
-            outcome(
-                "Two branches",
-                [codeset(1, descendants=[4]), codeset(2, descendants=[5])],
-                primary=[("Condition Occurrence", 1), ("Condition Occurrence", 2)],
-                correlated=[("Measurement", 3)],
-                partial={"kept_codeset_ids": [1], "left_out": "the branch with a measured value"},
-            )
-        )
-        self.assertTrue(resolved.supported)
-        self.assertEqual(resolved.concepts, ["4", "41", "42"])
-        self.assertEqual(resolved.approximation, "left out: the branch with a measured value")
-
     def test_a_negative_control_is_the_concept_and_its_descendants(self):
-        resolved = lo.resolve_negative_control(7, 1001, "Rash", lo.descendants_of(self.vocab, [7]))
-        self.assertEqual((resolved.label, resolved.role), ("7", lo.NEGATIVE_CONTROL))
+        resolved = self.resolve({"name": "Rash", "kind": "negative_control", "concept_ids": "7"})
+        self.assertEqual((resolved.label, resolved.role), ("rash", lo.NEGATIVE_CONTROL))
         self.assertEqual(resolved.concepts, ["7", "71"])
 
-    def test_the_definitions_round_trip_and_unsupported_outcomes_are_left_out(self):
-        supported = self.resolve(
-            outcome("A b", [codeset(1, descendants=[4])], primary=[("Condition Occurrence", 1)])
-        )
-        measured = self.resolve(
-            outcome("C", [codeset(1, descendants=[4])], primary=[("Measurement", 1)])
-        )
+    def test_exclusions_that_leave_nothing_are_refused(self):
+        with self.assertRaisesRegex(ValueError, "leave no concept"):
+            self.resolve({"name": "Outcome", "concept_ids": "5", "exclude_concept_ids": "5"})
+
+    def test_the_definitions_round_trip(self):
+        resolved = self.resolve({"name": "A b", "concept_ids": "4"})
         path = self.root / "definitions.json"
-        lo.write_resolved([supported, measured], path)
-        loaded = lo.load_outcome_definitions(str(path))
-        self.assertEqual([e["label"] for e in loaded], ["a_b"])
+        lo.write_resolved([resolved], path)
+        self.assertEqual([e["label"] for e in lo.load_outcome_definitions(str(path))], ["a_b"])
         self.assertEqual(lo.definitions_fingerprint(str(path)), lo.definitions_fingerprint(str(path)))
+
+    def test_duplicate_labels_in_the_definitions_are_refused(self):
+        resolved = self.resolve({"name": "A", "concept_ids": "4"})
+        path = self.root / "definitions.json"
+        lo.write_resolved([resolved, resolved], path)
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            lo.load_outcome_definitions(str(path))
 
 
 class BundledDefinitionsTest(unittest.TestCase):
@@ -155,47 +170,34 @@ class BundledDefinitionsTest(unittest.TestCase):
     def setUpClass(cls):
         cls.outcomes = {o.name: o for o in lo.read_outcomes()}
 
+    def of_kind(self, kind):
+        return [o for o in self.outcomes.values() if o.kind == kind]
+
     def test_the_hypertension_outcomes_and_controls_are_bundled(self):
-        self.assertEqual((len(self.outcomes), len(lo.negative_controls())), (58, 76))
-        self.assertEqual(len({o.cohort_id for o in self.outcomes.values()}), 58)
+        self.assertEqual((len(self.of_kind("primary")), len(self.of_kind("negative_control"))), (45, 76))
 
     def test_the_bundled_files_say_which_version_of_legend_they_come_from(self):
         source = json.loads((study_dir() / "source.json").read_text())
         self.assertEqual(source["repository"], "https://github.com/OHDSI/Legend")
         self.assertRegex(source["commit"], r"^[0-9a-f]{40}$")
         self.assertEqual((source["n_outcomes"], source["n_negative_controls"]), (58, 76))
+        self.assertEqual(source["n_outcomes"], len(self.of_kind("primary")) + source["n_outcomes_left_out"])
 
     def test_acute_myocardial_infarction_keeps_its_exclusion_and_visit_restriction(self):
         mi = self.outcomes["Acute myocardial infarction"]
-        self.assertEqual(mi.codesets[3].include_descendants, [4329847])
-        self.assertEqual(mi.codesets[3].exclude_descendants, [314666])
-        self.assertEqual(mi.visit_codeset_ids, [2])
-        self.assertEqual(mi.codesets[2].include_descendants, [262, 9201, 9203])
+        (concept_set,) = mi.concept_sets
+        self.assertEqual((concept_set.include_descendants, concept_set.exclude_descendants), ([4329847], [314666]))
+        self.assertTrue(mi.inpatient_or_er)
 
     def test_hemorrhagic_stroke_members_do_not_include_descendants(self):
-        codeset_4 = self.outcomes["Hemorrhagic stroke"].codesets[4]
-        self.assertEqual(codeset_4.include, [376713, 432923, 439847])
-        self.assertEqual(codeset_4.include_descendants, [])
+        stroke = self.outcomes["Hemorrhagic stroke"]
+        self.assertEqual([c.include for c in stroke.concept_sets], [[376713, 432923, 439847]])
+        self.assertEqual([c.include_descendants for c in stroke.concept_sets], [[]])
 
-    def test_a_hospitalization_is_a_visit_with_a_condition_inside(self):
-        hospitalization = self.outcomes["Hospitalization with heart failure"]
-        self.assertEqual([c.domain for c in hospitalization.primary], ["Visit Occurrence"] * 2)
-        self.assertIn("Condition Occurrence", [c.domain for c in hospitalization.correlated])
+    def test_cardiovascular_disease_has_a_concept_set_per_branch(self):
+        self.assertGreater(len(self.outcomes["Cardiovascular disease"].concept_sets), 1)
 
-    def resolve_all(self):
-        outcomes = lo.read_outcomes()
-        ids = lo.codeset_concept_ids([cs for o in outcomes for cs in o.codesets.values()])
-        ids = sorted(set(ids) | {c for c, _, _ in lo.negative_controls()})
-        folder = tempfile.TemporaryDirectory()
-        self.addCleanup(folder.cleanup)
-        root = Path(folder.name)
-        (root / "vocab" / "concept_ancestor").mkdir(parents=True)
-        pl.DataFrame({"ancestor_concept_id": ids, "descendant_concept_id": ids}).write_parquet(
-            root / "vocab" / "concept_ancestor" / "part.parquet"
-        )
-        return {r.name: r for r in lo.resolve_outcomes(outcomes, lo.negative_controls(), str(root / "vocab"))}
-
-    def test_the_outcomes_of_the_paper_that_need_an_inpatient_or_er_visit_have_the_constraint(self):
+    def test_the_outcomes_that_need_an_inpatient_or_er_visit_have_the_constraint(self):
         needs_visit = [
             "Acute myocardial infarction", "Acute pancreatitis", "Acute renal failure",
             "Anaphylactoid reaction", "Angioedema", "Cardiovascular disease",
@@ -203,49 +205,42 @@ class BundledDefinitionsTest(unittest.TestCase):
             "Ischemic stroke", "Rhabdomyolysis", "Stroke", "Sudden cardiac death",
             "Transient ischemic attack", "Hospitalization with preinfarction syndrome",
         ]  # fmt: skip
-        resolved = self.resolve_all()
-        self.assertEqual(len(needs_visit), 15)
-        for name in needs_visit:
-            self.assertTrue(resolved[name].supported, name)
-            self.assertTrue(resolved[name].inpatient_only, name)
-        self.assertIn("creatine kinase", resolved["Rhabdomyolysis"].approximation)
-        self.assertFalse(resolved["Hyperkalemia"].inpatient_only)
+        self.assertEqual(len(needs_visit), 15)  # the 15 of the paper
+        # the SQL of "Coronary heart disease" restricts it to inpatient and ER visits as well
+        needs_visit.append("Coronary heart disease")
+        self.assertEqual(sorted(o.name for o in self.outcomes.values() if o.inpatient_or_er), sorted(needs_visit))
+        self.assertIn("creatine kinase", self.outcomes["Rhabdomyolysis"].note)
+        self.assertIn("potassium", self.outcomes["Hyperkalemia"].note)
 
-    def test_the_two_outcomes_with_a_measured_branch_are_partial_in_the_data(self):
-        partial = {name: o.partial for name, o in self.outcomes.items() if o.partial}
-        self.assertEqual(sorted(partial), ["Hyperkalemia", "Rhabdomyolysis"])
-        self.assertEqual(partial["Rhabdomyolysis"]["kept_codeset_ids"], [10])
+    def test_the_outcomes_that_cannot_be_matched_on_tokens_are_not_in_the_file(self):
+        for name in ("Heart failure", "Measured renal dysfunction", "Cardiovascular-related mortality"):
+            self.assertNotIn(name, self.outcomes)
+
+    def test_all_cause_mortality_is_the_death_record(self):
+        self.assertTrue(self.outcomes["All-cause mortality"].death)
 
     def test_a_study_is_read_from_a_folder_too(self):
         with tempfile.TemporaryDirectory() as folder:
-            for name in ("study.json", "exposures.csv", "outcomes.json"):
+            for name in ("study.json", "exposures.csv", "outcomes.csv"):
                 (Path(folder) / name).write_text((study_dir() / name).read_text())
-            self.assertEqual(len(lo.read_outcomes(folder)), 58)
-            self.assertEqual(lo.negative_controls(folder), [])  # no negative_controls.csv there
+            self.assertEqual(len(lo.read_outcomes(folder)), 121)
 
-    def test_the_numbers_of_supported_and_unsupported_outcomes(self):
-        resolved = self.resolve_all()
-        self.assertEqual(len(resolved), 134)
-        self.assertEqual(sum(r.supported for r in resolved.values()), 121)
-        self.assertEqual(resolved["All-cause mortality"].concepts, [lo.DEATH_TOKEN])
-        self.assertFalse(resolved["Heart failure"].supported)
+    def vocabulary(self, root):
+        ids = sorted({c for o in self.outcomes.values() for s in o.concept_sets for c in s.concept_ids()})
+        return write_vocab(root, [(i, i) for i in ids])
 
     def test_the_command_line_resolves_the_bundled_definitions_for_a_vocabulary(self):
-        outcomes = lo.read_outcomes()
-        ids = lo.codeset_concept_ids([cs for o in outcomes for cs in o.codesets.values()])
-        ids = sorted(set(ids) | {c for c, _, _ in lo.negative_controls()})
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            (root / "vocab" / "concept_ancestor").mkdir(parents=True)
-            pl.DataFrame({"ancestor_concept_id": ids, "descendant_concept_id": ids}).write_parquet(
-                root / "vocab" / "concept_ancestor" / "part.parquet"
-            )
-            argv = ["prog", "--vocab_path", str(root / "vocab"), "--output_dir", str(root / "out")]
+            argv = ["prog", "--vocab_path", self.vocabulary(root), "--output_dir", str(root / "out")]
             with mock.patch("sys.argv", argv):
                 lo.main()
             entries = json.loads((root / "out" / "outcome_definitions.json").read_text())
-        self.assertEqual(len(entries), 134)
+        self.assertEqual(len(entries), 121)
         self.assertEqual(sum(e["role"] == lo.NEGATIVE_CONTROL for e in entries), 76)
+        self.assertEqual(sum(e["inpatient_only"] for e in entries), 16)
+        by_name = {e["name"]: e for e in entries}
+        self.assertEqual(by_name["All-cause mortality"]["concepts"], [lo.DEATH_TOKEN])
 
 
 class FindOutcomesTest(unittest.TestCase):
@@ -313,7 +308,6 @@ class ExtractionWithDefinitionsTest(unittest.TestCase):
             [
                 {"label": "mi", "concepts": ["600", "601"], "inpatient_only": True},
                 {"label": "rash", "concepts": ["700"], "inpatient_only": False},
-                {"label": "unclear", "concepts": ["800"], "inpatient_only": False, "supported": False},
             ]
         )
         pl.DataFrame(
@@ -329,8 +323,6 @@ class ExtractionWithDefinitionsTest(unittest.TestCase):
             {
                 "name": e["label"],
                 "role": "primary",
-                "supported": True,
-                "unsupported_reason": "needs a second record",
                 "cohort_id": None,
                 **e,
             }
@@ -416,7 +408,7 @@ class HazardRatioWithDefinitionsTest(unittest.TestCase):
                 ).write_parquet(folder_arm / "batch_00000.parquet")
             definitions = [
                 {"label": "mi", "name": "MI", "role": "primary", "concepts": ["600"], "inpatient_only": False, "supported": True},
-                {"label": "7", "name": "Rash", "role": "negative_control", "concepts": ["7", "71"], "inpatient_only": False, "supported": True},
+                {"label": "rash", "name": "Rash", "role": "negative_control", "concepts": ["7", "71"], "inpatient_only": False},
             ]
             (root / "definitions.json").write_text(json.dumps(definitions))
             argv = [
@@ -427,7 +419,7 @@ class HazardRatioWithDefinitionsTest(unittest.TestCase):
             with mock.patch("sys.argv", argv):
                 hr.main()
             summary = pl.read_csv(root / "out" / "hazard_ratio_summary.csv")
-            self.assertEqual(summary["outcome_concept_id"].cast(pl.String).to_list(), ["mi", "7"])
+            self.assertEqual(summary["outcome_concept_id"].cast(pl.String).to_list(), ["mi", "rash"])
             self.assertEqual(summary["outcome_type"].to_list(), ["primary", "negative_control"])
             self.assertEqual(summary["expected_hr"].to_list(), [None, 1.0])
             self.assertTrue((root / "out" / "control_outcome_summary.csv").exists())

@@ -14,5 +14,6 @@
  ],
  "n_outcomes": 58,
  "n_negative_controls": 76,
- "generated_by": "read from the LEGEND repository by an agent following README.md in this folder (there is no parsing code)"
+ "generated_by": "read from the LEGEND repository by an agent following README.md in this folder (there is no parsing code)",
+ "n_outcomes_left_out": 13
 }
