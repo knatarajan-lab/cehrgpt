@@ -34,7 +34,8 @@ python create_drug_swap_context.py \\
     --treated_context_path  /data/contexts/treated_context.parquet \\
     --drug_info_path        /data/contexts/drug_info.parquet \\
     --vocab_path            /data/omop_vocab \\
-    --source_concept_ids    1308216,1346654,1332418,135376,1395058,1310756,1363749,1328956,1373355,1307046 \\
+    --tokenizer_path        /models/tokenizer \\
+    --source_concept_ids    1308216,1334456,1341927,1335471,1331235,1340128,1363749,1310756,1373225,1342439 \\
     --comparator_concept_ids 1395058,974166,978555,907013 \\
     --output_path           /data/swap/acei_pts_thiazide_ctx.parquet \\
     --also_write_treated_path /data/swap/acei_pts_acei_ctx.parquet
@@ -44,8 +45,9 @@ python create_drug_swap_context.py \\
     --treated_context_path  /data/contexts/treated_context.parquet \\
     --drug_info_path        /data/contexts/drug_info.parquet \\
     --vocab_path            /data/omop_vocab \\
+    --tokenizer_path        /models/tokenizer \\
     --source_concept_ids    1395058,974166,978555,907013 \\
-    --comparator_concept_ids 1308216,1346654,1332418,135376,1395058,1310756,1363749,1328956,1373355,1307046 \\
+    --comparator_concept_ids 1308216,1334456,1341927,1335471,1331235,1340128,1363749,1310756,1373225,1342439 \\
     --output_path           /data/swap/thiazide_pts_acei_ctx.parquet \\
     --also_write_treated_path /data/swap/thiazide_pts_thiazide_ctx.parquet
 """
@@ -58,29 +60,29 @@ from typing import Dict, List, Optional, Set
 
 import polars as pl
 
+from cehrgpt.tokenization.tokenization_cehrgpt import CehrGptTokenizer
+
 # ---------------------------------------------------------------------------
 # LEGEND-HTN ACEi vs Thiazide ingredient concept_ids
 # ---------------------------------------------------------------------------
 
-# ACE inhibitor ingredient concept_ids (user-supplied)
-# NOTE: 1395058 appears in both this list (Quinapril) and the thiazide list
-#       (Chlorthalidone) — verify in your OMOP vocabulary before running.
+# ACE inhibitor ingredient concept_ids (RxNorm ingredients in the OMOP vocabulary)
 ACEI_INGREDIENT_CONCEPT_IDS: List[int] = [
     1308216,   # Lisinopril
-    1346654,   # Ramipril
-    1332418,   # Enalapril
-    135376,    # Benazepril   ← verify: typical OMOP IDs are 7 digits
-    1395058,   # Quinapril    ← verify: same ID given for Chlorthalidone below
-    1310756,   # Captopril
+    1334456,   # Ramipril
+    1341927,   # Enalapril
+    1335471,   # Benazepril
+    1331235,   # Quinapril
+    1340128,   # Captopril
     1363749,   # Fosinopril
-    1328956,   # Moexipril
-    1373355,   # Perindopril
-    1307046,   # Trandolapril
+    1310756,   # Moexipril
+    1373225,   # Perindopril
+    1342439,   # Trandolapril
 ]
 
-# Thiazide / thiazide-like diuretic ingredient concept_ids (user-supplied)
+# Thiazide / thiazide-like diuretic ingredient concept_ids
 THIAZIDE_INGREDIENT_CONCEPT_IDS: List[int] = [
-    1395058,   # Chlorthalidone  ← verify: same ID given for Quinapril above
+    1395058,   # Chlorthalidone
     974166,    # Hydrochlorothiazide (HCTZ)
     978555,    # Indapamide
     907013,    # Metolazone
@@ -108,6 +110,28 @@ def get_descendants_for_concepts(vocab_path: str, concept_ids: List[int]) -> Set
     result = set(descendants)
     result.update(str(c) for c in concept_ids)
     return result
+
+
+def resolve_comparator_token_ids(
+    tokenizer_path: str, comparator_concept_ids: List[int]
+) -> Dict[str, int]:
+    """
+    Map each comparator ingredient to its token id in the CEHR-GPT vocabulary.
+
+    The comparator ingredient replaces the source drug token in the context, so
+    the model can only be conditioned on it if the tokenizer knows it.  A
+    missing ingredient would map to ``[OOV]``, which silently runs the
+    "comparator" arm on an unknown drug, so it is an error.
+    """
+    vocab = CehrGptTokenizer.from_pretrained(tokenizer_path).get_vocab()
+    missing = [str(c) for c in comparator_concept_ids if str(c) not in vocab]
+    if missing:
+        raise ValueError(
+            f"{len(missing)} comparator ingredient concept_id(s) are not in the vocabulary of "
+            f"the tokenizer at {tokenizer_path}: {', '.join(missing)}. Remove them from "
+            f"--comparator_concept_ids or use a tokenizer that was trained on them."
+        )
+    return {str(c): int(vocab[str(c)]) for c in comparator_concept_ids}
 
 
 def compute_ingredient_sampling_weights(
@@ -206,6 +230,7 @@ def create_comparator_context(
     treated_context_path: str,
     drug_info_path: str,
     vocab_path: str,
+    tokenizer_path: str,
     source_concept_ids: List[int],
     comparator_concept_ids: List[int],
     output_path: Path,
@@ -226,6 +251,9 @@ def create_comparator_context(
         drug_info.parquet from the same extraction run.
     vocab_path
         OMOP vocabulary root (must contain concept_ancestor/ parquets).
+    tokenizer_path
+        CEHR-GPT tokenizer.  Every comparator ingredient must be in its
+        vocabulary, otherwise a ``ValueError`` is raised before any data is read.
     source_concept_ids
         OMOP ingredient concept_ids for the SOURCE drug class.  All clinical-
         drug descendants are expanded via concept_ancestor.
@@ -246,6 +274,8 @@ def create_comparator_context(
         Random seed for reproducible frequency-based sampling and patient
         sub-sampling.
     """
+    comparator_token_ids = resolve_comparator_token_ids(tokenizer_path, comparator_concept_ids)
+
     random.seed(seed)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -300,19 +330,7 @@ def create_comparator_context(
         df_source.write_parquet(str(also_write_treated_path))
         print(f"Actual treated contexts → {also_write_treated_path}")
 
-    # 5. Build concept_str → token_id mapping from the dataset so we can
-    #    update input_ids at the swap position (concept_ids and input_ids
-    #    are parallel arrays; the collator uses input_ids directly).
-    vocab_map: Dict[str, int] = {}
-    if "input_ids" in df_source.columns:
-        for concepts, token_ids in zip(
-            df_source["concept_ids"].to_list(),
-            df_source["input_ids"].to_list(),
-        ):
-            for c, t in zip(concepts, token_ids):
-                vocab_map.setdefault(str(c), int(t))
-
-    # 6. Swap each patient's drug concept with a frequency-sampled comparator
+    # 5. Swap each patient's drug concept with a frequency-sampled comparator
     swapped_records = []
     n_swapped = 0
     n_failed = 0
@@ -332,9 +350,9 @@ def create_comparator_context(
         row["drug_concept_id"] = comparator_str
         # Keep input_ids in sync: update the token at the swap position so
         # the model is conditioned on the comparator drug, not the source drug.
-        if "input_ids" in row and comparator_str in vocab_map:
+        if "input_ids" in row:
             input_ids = list(row["input_ids"])
-            input_ids[swap_pos] = vocab_map[comparator_str]
+            input_ids[swap_pos] = comparator_token_ids[comparator_str]
             row["input_ids"] = input_ids
         swapped_records.append(row)
         n_swapped += 1
@@ -373,11 +391,19 @@ def _parse_args() -> argparse.Namespace:
         help="OMOP vocabulary root directory (must contain concept_ancestor/ parquets)",
     )
     parser.add_argument(
+        "--tokenizer_path",
+        required=True,
+        help=(
+            "CEHR-GPT tokenizer directory.  Every comparator ingredient must be in its "
+            "vocabulary, otherwise the script stops before reading any data."
+        ),
+    )
+    parser.add_argument(
         "--source_concept_ids",
         required=True,
         help=(
             "Comma-separated OMOP ingredient concept_ids for the SOURCE drug class. "
-            "ACEi: 1308216,1346654,1332418,135376,1395058,1310756,1363749,1328956,1373355,1307046  "
+            "ACEi: 1308216,1334456,1341927,1335471,1331235,1340128,1363749,1310756,1373225,1342439  "
             "Thiazide: 1395058,974166,978555,907013"
         ),
     )
@@ -446,6 +472,7 @@ def main() -> None:
         treated_context_path=args.treated_context_path,
         drug_info_path=args.drug_info_path,
         vocab_path=args.vocab_path,
+        tokenizer_path=args.tokenizer_path,
         source_concept_ids=source_concept_ids,
         comparator_concept_ids=comparator_concept_ids,
         output_path=Path(args.output_path),

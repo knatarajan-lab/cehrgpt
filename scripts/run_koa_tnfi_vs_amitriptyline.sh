@@ -69,6 +69,9 @@ BATCH_SIZE=8
 GENERATION_INPUT_LENGTH=2048
 GENERATION_MAX_NEW_TOKENS=1024
 FOLLOW_UP_DAYS=730
+
+# New-user washout: days of observed history required before the index drug.
+MIN_PRIOR_OBSERVATION_DAYS="${MIN_PRIOR_OBSERVATION_DAYS:-365}"
 NUM_WORKERS=4
 
 # Number of parallel workers for Step 1 sequence extraction
@@ -156,6 +159,7 @@ python "${EXTRACT_SCRIPT}" \
     --tokenizer_path          "${TOKENIZER_PATH}" \
     --outcome_concept_ids     "${TKR_CONCEPT_IDS}" \
     --min_context_length      4 \
+    --min_prior_observation_days "${MIN_PRIOR_OBSERVATION_DAYS}" \
     --num_workers             "${EXTRACTION_NUM_WORKERS}"
 
 echo "Step 1 complete."
@@ -188,6 +192,7 @@ python "${SWAP_SCRIPT}" \
     --treated_context_path    "${TREATED_CTX}" \
     --drug_info_path          "${DRUG_INFO}" \
     --vocab_path              "${VOCAB_PATH}" \
+    --tokenizer_path          "${TOKENIZER_PATH}" \
     --source_concept_ids      "${TNFI_CONCEPT_IDS}" \
     --comparator_concept_ids  "${AMITRIPTYLINE_CONCEPT_IDS}" \
     --output_path             "${AMITRIPTYLINE_ARM_CTX}" \
