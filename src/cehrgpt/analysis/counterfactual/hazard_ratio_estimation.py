@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -101,22 +102,139 @@ def expand_to_descendants(vocab_path: str, concept_ids: List[int]) -> Set[str]:
 # Time-to-event computation
 # ---------------------------------------------------------------------------
 
-def _find_era_gap_end(target_days: List[float], era_gap_days: float) -> Optional[float]:
-    """
-    Given a **sorted** list of target drug event times (days since drug start),
-    return the time at which the drug era ends due to a gap > *era_gap_days*.
+_KEYS = ["subject_id", "trajectory_id"]
 
-    Mirrors the gap-detection logic of ``compute_drug_era_end_time`` in
-    ``extract_drug_initiation_sequences.py``: the era ends at
-    ``last_target_time + era_gap_days`` when consecutive target events are
-    separated by more than *era_gap_days* days.
 
-    Returns ``None`` when no such gap is found (era is still active).
+def _with_days_since_drug(trajectories: pl.DataFrame, drug_info: pl.DataFrame) -> pl.LazyFrame:
+    """Attach ``days_since_drug`` (relative to ``drug_epoch_time``) to every trajectory event."""
+    drug_lf = drug_info.lazy().rename({"person_id": "subject_id"})
+    return (
+        trajectories.lazy()
+        .join(drug_lf.select(["subject_id", "drug_epoch_time"]), on="subject_id", how="left")
+        .with_columns(
+            pl.col("time").cast(pl.Datetime).dt.epoch(time_unit="s").alias("time_epoch_s"),
+        )
+        .with_columns(
+            ((pl.col("time_epoch_s") - pl.col("drug_epoch_time")) / 86_400).alias("days_since_drug")
+        )
+    )
+
+
+def compute_follow_up(
+    trajectories: pl.DataFrame,
+    drug_info: pl.DataFrame,
+    follow_up_days: float,
+    target_concept_ids: Optional[Set[str]] = None,
+    competing_concept_ids: Optional[Set[str]] = None,
+    era_gap_days: float = 30.0,
+) -> Tuple[pl.LazyFrame, pl.LazyFrame]:
     """
-    for i in range(1, len(target_days)):
-        if target_days[i] - target_days[i - 1] > era_gap_days:
-            return target_days[i - 1] + era_gap_days
-    return None
+    Work out how long each generated trajectory is observed.
+
+    The generated trajectory is the only data we have for a counterfactual
+    patient, so the time of its **last event** (any code) is its last
+    observation: nothing is known after it, and follow-up cannot extend past it.
+    This is the same rule as for a real record, which is censored at the last
+    recorded event.  Follow-up ends at the earliest of
+
+    1. the last generated event, or *follow_up_days* when that comes first;
+    2. the end of the drug era: the first gap of more than *era_gap_days*
+       between target-drug events.  The index drug at day 0 starts the chain and
+       the last observation closes it, so a patient who never refills is
+       censored at ``era_gap_days`` and one who stops refilling is censored
+       ``era_gap_days`` after the last refill;
+    3. the first event of a competing concept (treatment switch);
+    4. a record-end token (``[END]`` / ``[DEATH]``).
+
+    Returns ``(events, follow_up)``.  *events* are the trajectory events after
+    the index drug and within *follow_up_days*, with ``days_since_drug``.
+    *follow_up* has one row per (subject_id, trajectory_id) with
+    ``last_observed_days``, ``effective_follow_up_days`` and ``terminated``
+    (follow-up ended before the end of the observed data).
+    """
+    n_unmatched = len(set(trajectories["subject_id"].to_list()) - set(drug_info["person_id"].to_list()))
+    if n_unmatched:
+        warnings.warn(
+            f"{n_unmatched} trajectory subjects are not in drug_info; they have no index "
+            f"time and are given zero follow-up."
+        )
+    days = _with_days_since_drug(trajectories, drug_info)
+    after_index = days.filter(pl.col("days_since_drug") > 0)
+    events = after_index.filter(pl.col("days_since_drug") <= follow_up_days)
+
+    last_observed = after_index.group_by(_KEYS).agg(
+        pl.col("days_since_drug").max().alias("last_observed_days")
+    )
+    follow_up = (
+        trajectories.lazy()
+        .select(_KEYS)
+        .unique()
+        .join(last_observed, on=_KEYS, how="left")
+        .with_columns(
+            pl.col("last_observed_days").fill_null(0.0).clip(upper_bound=follow_up_days)
+        )
+        .with_columns(pl.col("last_observed_days").alias("effective_follow_up_days"))
+    )
+
+    if target_concept_ids:
+        refills = events.filter(pl.col("code").is_in(list(target_concept_ids))).select(
+            _KEYS + [pl.col("days_since_drug").alias("day")]
+        )
+        index_day = follow_up.select(_KEYS + [pl.lit(0.0).alias("day")])
+        last_day = follow_up.select(_KEYS + [pl.col("last_observed_days").alias("day")])
+        era_gap_end = (
+            pl.concat([index_day, refills, last_day])
+            .sort(_KEYS + ["day"])
+            .with_columns(pl.col("day").shift(1).over(_KEYS).alias("previous_day"))
+            .filter(pl.col("day") - pl.col("previous_day") > era_gap_days)
+            .group_by(_KEYS)
+            .agg((pl.col("previous_day").min() + era_gap_days).alias("era_gap_end_days"))
+        )
+        follow_up = (
+            follow_up.join(era_gap_end, on=_KEYS, how="left")
+            .with_columns(
+                pl.min_horizontal("effective_follow_up_days", "era_gap_end_days").alias(
+                    "effective_follow_up_days"
+                )
+            )
+            .drop("era_gap_end_days")
+        )
+
+    if competing_concept_ids:
+        first_competing = (
+            events.filter(pl.col("code").is_in(list(competing_concept_ids)))
+            .group_by(_KEYS)
+            .agg(pl.col("days_since_drug").min().alias("competing_days"))
+        )
+        follow_up = (
+            follow_up.join(first_competing, on=_KEYS, how="left")
+            .with_columns(
+                pl.min_horizontal("effective_follow_up_days", "competing_days").alias(
+                    "effective_follow_up_days"
+                )
+            )
+            .drop("competing_days")
+        )
+
+    end_of_record = (
+        events.filter(pl.col("code").is_in(list(_RECORD_END_TOKENS)))
+        .group_by(_KEYS)
+        .agg(pl.col("days_since_drug").min().alias("end_of_record_days"))
+    )
+    follow_up = (
+        follow_up.join(end_of_record, on=_KEYS, how="left")
+        .with_columns(
+            pl.min_horizontal("effective_follow_up_days", "end_of_record_days").alias(
+                "effective_follow_up_days"
+            ),
+            (
+                (pl.col("effective_follow_up_days") < pl.col("last_observed_days"))
+                | pl.col("end_of_record_days").is_not_null()
+            ).alias("terminated"),
+        )
+        .drop("end_of_record_days")
+    )
+    return events, follow_up
 
 
 def _find_first_inpatient_outcome(
@@ -163,14 +281,10 @@ def compute_tte(
       - event      : 1 if outcome occurred, 0 if censored
       - time_days  : days from drug_epoch_time to first outcome (or follow-up)
 
-    Follow-up is censored at the earliest of three conditions, mirroring
-    ``compute_drug_era_end_time`` in ``extract_drug_initiation_sequences.py``:
-
-    1. **Era gap**: consecutive target drug events are > *era_gap_days* apart.
-       Follow-up ends at ``last_target_event + era_gap_days``.
-    2. **Treatment switch**: a concept from *competing_concept_ids* appears in
-       the generated trajectory.  Follow-up ends at that event.
-    3. **End of sequence / no discontinuation**: right-censored at *follow_up_days*.
+    Follow-up ends at the last generated event (the last observation of the
+    counterfactual patient), the end of the drug era, a treatment switch, a
+    record-end token or *follow_up_days*, whichever comes first.  See
+    :func:`compute_follow_up` for the exact rules.
 
     Parameters
     ----------
@@ -210,102 +324,13 @@ def compute_tte(
     """
     outcome_set = expanded_outcome_set if expanded_outcome_set is not None else set(outcome_concept_ids)
 
-    drug_lf = drug_info.lazy().rename({"person_id": "subject_id"})
-
-    # Attach drug_epoch_time to each event and compute days_since_drug.
-    # Only events strictly after the drug start and within follow_up_days matter.
-    traj_lf = (
-        trajectories.lazy()
-        .join(drug_lf.select(["subject_id", "drug_epoch_time"]), on="subject_id", how="left")
-        .with_columns(
-            pl.col("time").cast(pl.Datetime).dt.epoch(time_unit="s").alias("time_epoch_s"),
-        )
-        .filter(pl.col("time_epoch_s") > pl.col("drug_epoch_time"))
-        .with_columns(
-            ((pl.col("time_epoch_s") - pl.col("drug_epoch_time")) / 86_400).alias("days_since_drug")
-        )
-        .filter(pl.col("days_since_drug") <= follow_up_days)
-    )
-
-    # All unique (subject_id, trajectory_id) pairs; effective follow-up starts
-    # at follow_up_days and may be reduced by era-gap or competing events below.
-    all_pairs = (
-        trajectories.lazy()
-        .select(["subject_id", "trajectory_id"])
-        .unique()
-        .with_columns(pl.lit(follow_up_days).alias("effective_follow_up_days"))
-    )
-
-    # --- Condition 1: era gap ---
-    # Find the first gap > era_gap_days between consecutive target drug events
-    # in the generated trajectory; censor at last_target_time + era_gap_days.
-    if target_concept_ids:
-        target_era_end = (
-            traj_lf
-            .filter(pl.col("code").is_in(list(target_concept_ids)))
-            .group_by(["subject_id", "trajectory_id"])
-            .agg(pl.col("days_since_drug").sort().alias("target_days"))
-            .with_columns(
-                pl.col("target_days").map_elements(
-                    lambda days: _find_era_gap_end(days, era_gap_days),
-                    return_dtype=pl.Float64,
-                ).alias("era_gap_end_days")
-            )
-            .select(["subject_id", "trajectory_id", "era_gap_end_days"])
-        )
-        all_pairs = (
-            all_pairs
-            .join(target_era_end, on=["subject_id", "trajectory_id"], how="left")
-            .with_columns(
-                pl.min_horizontal(
-                    "effective_follow_up_days",
-                    pl.col("era_gap_end_days").fill_null(follow_up_days),
-                ).alias("effective_follow_up_days")
-            )
-            .drop("era_gap_end_days")
-        )
-
-    # --- Condition 2: treatment switch ---
-    # Censor at the first generated event whose code belongs to a competing /
-    # exclusion drug class (opposite arm or other excluded antihypertensives).
-    if competing_concept_ids:
-        first_competing = (
-            traj_lf
-            .filter(pl.col("code").is_in(list(competing_concept_ids)))
-            .group_by(["subject_id", "trajectory_id"])
-            .agg(pl.col("days_since_drug").min().alias("competing_days"))
-        )
-        all_pairs = (
-            all_pairs
-            .join(first_competing, on=["subject_id", "trajectory_id"], how="left")
-            .with_columns(
-                pl.min_horizontal(
-                    "effective_follow_up_days",
-                    pl.col("competing_days").fill_null(follow_up_days),
-                ).alias("effective_follow_up_days")
-            )
-            .drop("competing_days")
-        )
-
-    # --- Condition 3: end of record / death ---
-    # Censor at [END] or [DEATH] if the model generates one of these tokens,
-    # mirroring compute_drug_era_end_time in extract_drug_initiation_sequences.py.
-    end_of_record = (
-        traj_lf
-        .filter(pl.col("code").is_in(list(_RECORD_END_TOKENS)))
-        .group_by(["subject_id", "trajectory_id"])
-        .agg(pl.col("days_since_drug").min().alias("end_of_record_days"))
-    )
-    all_pairs = (
-        all_pairs
-        .join(end_of_record, on=["subject_id", "trajectory_id"], how="left")
-        .with_columns(
-            pl.min_horizontal(
-                "effective_follow_up_days",
-                pl.col("end_of_record_days").fill_null(follow_up_days),
-            ).alias("effective_follow_up_days")
-        )
-        .drop("end_of_record_days")
+    traj_lf, all_pairs = compute_follow_up(
+        trajectories,
+        drug_info,
+        follow_up_days,
+        target_concept_ids,
+        competing_concept_ids,
+        era_gap_days,
     )
 
     # --- Outcome events within effective follow-up ---
@@ -385,74 +410,130 @@ def compute_tte(
 
 
 # ---------------------------------------------------------------------------
-# Cox PH via partial likelihood  (single binary covariate)
+# Cox PH via partial likelihood  (single covariate, Breslow ties)
 # ---------------------------------------------------------------------------
+
+def _breslow_terms(
+    time: np.ndarray, event: np.ndarray, x: np.ndarray, beta: float
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    The distinct event times and, for each, the number of events and the sums over its risk set
+    (S0 = sum exp(b x), S1 = sum x exp(b x), S2 = sum x^2 exp(b x)); the risk set of a time is every
+    subject with a time at or after it, so tied times share one risk set (Breslow).
+    """
+    order = np.argsort(time, kind="stable")
+    t, e, xs = time[order], event[order], x[order]
+    w = np.exp(beta * xs)
+    s0_all = np.cumsum(w[::-1])[::-1]
+    s1_all = np.cumsum((w * xs)[::-1])[::-1]
+    s2_all = np.cumsum((w * xs * xs)[::-1])[::-1]
+    event_times, d = np.unique(t[e == 1], return_counts=True)
+    first = np.searchsorted(t, event_times, side="left")
+    return event_times, d, s0_all[first], s1_all[first], s2_all[first]
+
 
 def _cox_partial_log_likelihood(beta: float, time: np.ndarray, event: np.ndarray, x: np.ndarray) -> float:
     """
-    Negative partial log-likelihood for a Cox PH model with a single
-    covariate *x* (binary: 1=treated, 0=non-treated).
+    Negative Breslow partial log-likelihood of a Cox PH model with a single covariate *x*:
 
-    L(β) = Σ_i { event_i * [β x_i - log(Σ_{j: t_j ≥ t_i} exp(β x_j))] }
+        l(b) = sum_i event_i * b * x_i  -  sum_k d_k * log(sum_{j: t_j >= t_k} exp(b x_j))
+
+    over the distinct event times t_k with d_k events each.
     """
-    order = np.argsort(time)
-    t = time[order]
-    e = event[order]
-    xi = x[order]
+    _, d, s0, _, _ = _breslow_terms(time, event, x, beta)
+    return float(-(beta * np.sum(event * x) - np.sum(d * np.log(s0 + EPSILON))))
 
-    n = len(t)
-    log_risk = beta * xi  # shape (n,)
 
-    # Compute log(Σ risk sets) efficiently with a reverse cumsum
-    # At each event time t_i, the risk set is {j : t_j >= t_i}
-    exp_xb = np.exp(log_risk)
-    # Reverse cumsum gives Σ_{j>=i} exp(xb_j) for each position i
-    risk_set_sum = np.cumsum(exp_xb[::-1])[::-1]
+def _cox_score_residuals(
+    time: np.ndarray, event: np.ndarray, x: np.ndarray, beta: float
+) -> Tuple[np.ndarray, float]:
+    """
+    The score residual of every subject at *beta* (they sum to zero at the maximum) and the information.
 
-    pll = np.sum(e * (log_risk - np.log(risk_set_sum + EPSILON)))
-    return -pll   # minimise negative log-likelihood
+        r_i = event_i (x_i - xbar(T_i)) - exp(b x_i) sum_{k: t_k <= T_i} d_k (x_i - xbar_k) / S0_k
+    """
+    event_times, d, s0, s1, s2 = _breslow_terms(time, event, x, beta)
+    xbar = s1 / s0
+    information = float(np.sum(d * (s2 / s0 - xbar ** 2)))
+    cum0 = np.cumsum(d / s0)
+    cum1 = np.cumsum(d * xbar / s0)
+    last = np.searchsorted(event_times, time, side="right") - 1          # last event time <= T_i
+    a0 = np.where(last >= 0, cum0[np.maximum(last, 0)], 0.0)
+    a1 = np.where(last >= 0, cum1[np.maximum(last, 0)], 0.0)
+    own = np.minimum(np.searchsorted(event_times, time, side="left"), len(event_times) - 1)
+    residual = event * (x - xbar[own]) - np.exp(beta * x) * (x * a0 - a1)
+    return residual, information
+
+
+def fit_cox_details(
+    time: np.ndarray,
+    event: np.ndarray,
+    treatment: np.ndarray,
+    clusters: Optional[np.ndarray] = None,
+) -> Dict[str, float]:
+    """
+    Fit the Cox model with one covariate and return the estimate with its standard errors.
+
+    The standard error of the model (the inverse of the information) assumes independent observations. When
+    *clusters* is given (one label per observation, e.g. the subject id), the robust sandwich standard error with
+    the observations of a cluster summed is returned as well, and it is what hr_lower/hr_upper/p_value use.
+    Generated trajectories of one patient, and the two arms of the same patient, are correlated, so the model-based
+    interval is too narrow for them.
+    """
+    time = np.asarray(time, dtype=float)
+    event = np.asarray(event, dtype=int)
+    x = np.asarray(treatment, dtype=float)
+    result = minimize_scalar(
+        _cox_partial_log_likelihood,
+        bounds=(-10, 10),
+        method="bounded",
+        args=(time, event, x),
+    )
+    beta = float(result.x)
+    residual, information = _cox_score_residuals(time, event, x, beta)
+    se_model = 1.0 / math.sqrt(information + EPSILON)
+    se_robust = None
+    n_clusters = None
+    if clusters is not None:
+        _, inverse = np.unique(np.asarray(clusters), return_inverse=True)
+        n_clusters = int(inverse.max()) + 1
+        cluster_scores = np.bincount(inverse, weights=residual, minlength=n_clusters)
+        correction = n_clusters / (n_clusters - 1) if n_clusters > 1 else 1.0
+        se_robust = math.sqrt(correction * float(np.sum(cluster_scores ** 2))) / (information + EPSILON)
+    se = se_robust if se_robust is not None else se_model
+
+    MAX_EXP = 700  # math.exp overflows above ~709
+    bound = lambda v: math.exp(max(-MAX_EXP, min(MAX_EXP, v)))
+    z = beta / (se + EPSILON)
+    return {
+        "beta": beta,
+        "hr": bound(beta),
+        "hr_lower_95": bound(beta - 1.96 * se),
+        "hr_upper_95": bound(beta + 1.96 * se),
+        "p_value": float(chi2.sf(z ** 2, df=1)),
+        "se_model": se_model,
+        "se_robust": se_robust,
+        "n_clusters": n_clusters,
+        "hr_lower_95_model": bound(beta - 1.96 * se_model),
+        "hr_upper_95_model": bound(beta + 1.96 * se_model),
+    }
 
 
 def fit_cox(
     time: np.ndarray,
     event: np.ndarray,
     treatment: np.ndarray,
+    clusters: Optional[np.ndarray] = None,
 ) -> Tuple[float, float, float, float]:
     """
-    Estimate HR = exp(β) for a binary treatment covariate.
+    Estimate HR = exp(β) for a binary treatment covariate, see :func:`fit_cox_details`.
 
     Returns
     -------
     (hr, hr_lower_95, hr_upper_95, p_value)
     """
-    # Minimise NLL over β
-    result = minimize_scalar(
-        _cox_partial_log_likelihood,
-        bounds=(-10, 10),
-        method="bounded",
-        args=(time, event, treatment),
-    )
-    beta_hat = result.x
-
-    # Numerical Hessian (second derivative) at β̂ for variance estimate
-    h = 1e-5
-    f0 = _cox_partial_log_likelihood(beta_hat, time, event, treatment)
-    fp = _cox_partial_log_likelihood(beta_hat + h, time, event, treatment)
-    fm = _cox_partial_log_likelihood(beta_hat - h, time, event, treatment)
-    hess = (fp - 2 * f0 + fm) / (h ** 2)
-    var_beta = 1.0 / (hess + EPSILON)
-    se_beta = math.sqrt(abs(var_beta))
-
-    MAX_EXP = 700  # math.exp overflows above ~709
-    hr = math.exp(max(-MAX_EXP, min(MAX_EXP, beta_hat)))
-    hr_lower = math.exp(max(-MAX_EXP, min(MAX_EXP, beta_hat - 1.96 * se_beta)))
-    hr_upper = math.exp(max(-MAX_EXP, min(MAX_EXP, beta_hat + 1.96 * se_beta)))
-
-    # Wald test p-value
-    z = beta_hat / (se_beta + EPSILON)
-    p_value = 2 * (1 - chi2.cdf(z ** 2, df=1))
-
-    return hr, hr_lower, hr_upper, p_value
+    fit = fit_cox_details(time, event, treatment, clusters)
+    return fit["hr"], fit["hr_lower_95"], fit["hr_upper_95"], fit["p_value"]
 
 
 # ---------------------------------------------------------------------------
@@ -516,38 +597,61 @@ def kaplan_meier(
     """
     Compute the Kaplan-Meier survival estimate.
 
-    Returns (time_points, survival_probabilities).
+    At every distinct event time t_k the survival is multiplied by (1 - d_k / n_k), with n_k the number of subjects
+    whose time is at or after t_k (events and censored ones alike).
+
+    Returns (time_points, survival_probabilities), starting at (0, 1).
     """
-    order = np.argsort(time)
-    t = time[order]
-    e = event[order]
-
-    unique_times = np.unique(t[e == 1])
-    n_total = len(t)
-
-    km_times = [0.0]
-    km_surv = [1.0]
-
-    n_at_risk = n_total
-    prev_t = 0.0
-    for ut in unique_times:
-        # Update at-risk count for any censored/events between prev_t and ut
-        n_at_risk -= np.sum((t >= prev_t) & (t < ut))
-        d = np.sum((t == ut) & (e == 1))
-        if n_at_risk > 0:
-            km_surv.append(km_surv[-1] * (1 - d / n_at_risk))
-        else:
-            km_surv.append(km_surv[-1])
-        km_times.append(float(ut))
-        n_at_risk -= d
-        prev_t = ut
-
-    return np.array(km_times), np.array(km_surv)
+    time = np.asarray(time, dtype=float)
+    event = np.asarray(event, dtype=int)
+    t = np.sort(time)
+    event_times, d = np.unique(time[event == 1], return_counts=True)
+    at_risk = len(t) - np.searchsorted(t, event_times, side="left")
+    survival = np.cumprod(1.0 - d / at_risk)
+    return np.concatenate([[0.0], event_times]), np.concatenate([[1.0], survival])
 
 
 # ---------------------------------------------------------------------------
 # Observed-outcome baseline analysis
 # ---------------------------------------------------------------------------
+
+def observed_tte(
+    observed: pl.DataFrame, outcome_concept_id: str, follow_up_days: float
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    (time_days, event) of one outcome for patients from ``observed_outcomes``.
+
+    *observed* has ``drug_epoch_time``, the outcome column (epoch time of the
+    first outcome, null if none) and, joined from ``drug_info``,
+    ``era_end_epoch_time`` and ``last_observed_epoch_time`` (both nullable).
+    Follow-up is censored at the earliest of *follow_up_days*, the end of the
+    drug era (discontinuation or switch) and the last observation of the record,
+    the same rules as for generated trajectories (:func:`compute_follow_up`).
+    """
+    for column in ("era_end_epoch_time", "last_observed_epoch_time"):
+        if column not in observed.columns:
+            observed = observed.with_columns(pl.lit(None, dtype=pl.Float64).alias(column))
+
+    def days(column: str) -> pl.Expr:
+        return (pl.col(column).cast(pl.Float64) - pl.col("drug_epoch_time")) / 86_400
+
+    frame = observed.select(
+        pl.min_horizontal(
+            pl.lit(float(follow_up_days)),
+            days("era_end_epoch_time").clip(lower_bound=0.0),
+            days("last_observed_epoch_time").clip(lower_bound=0.0),
+        ).alias("censor_days"),
+        days(outcome_concept_id).alias("outcome_days"),
+    ).with_columns(
+        (
+            (pl.col("outcome_days") > 0) & (pl.col("outcome_days") <= pl.col("censor_days"))
+        ).fill_null(False).alias("event")
+    )
+    time_days = frame.select(
+        pl.when(pl.col("event")).then(pl.col("outcome_days")).otherwise(pl.col("censor_days"))
+    ).to_series()
+    return time_days.to_numpy().astype(float), frame["event"].to_numpy().astype(int)
+
 
 def analyse_observed_outcomes(
     observed_outcomes_path: str,
@@ -595,9 +699,13 @@ def analyse_observed_outcomes(
     # drug_epoch_time is already in obs; only pull arm and era_end from drug_info
     # to avoid duplicate-column conflicts on join.
     _info_raw = _read(drug_info_path)
-    if "era_end_epoch_time" not in _info_raw.columns:
-        _info_raw = _info_raw.with_columns(pl.lit(None, dtype=pl.Float64).alias("era_end_epoch_time"))
-    info = _info_raw.select(["person_id", "arm", "era_end_epoch_time"])
+    for _column in ("era_end_epoch_time", "last_observed_epoch_time"):
+        if _column not in _info_raw.columns:
+            print(f"  Warning: drug_info has no {_column}; re-run the extraction to censor on it.")
+            _info_raw = _info_raw.with_columns(pl.lit(None, dtype=pl.Float64).alias(_column))
+    info = _info_raw.select(
+        ["person_id", "arm", "era_end_epoch_time", "last_observed_epoch_time"]
+    )
 
     # Join arm label and era end onto observed outcomes
     df = obs.join(info, on="person_id", how="left")
@@ -615,34 +723,8 @@ def analyse_observed_outcomes(
 
         print(f"\n  Outcome: {oc_id}")
 
-        def _tte(arm_df: pl.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
-            """Compute (time_days, event) arrays for one arm.
-
-            Censoring at the earlier of follow_up_days and era_end_epoch_time
-            (treatment discontinuation or switch to another antihypertensive).
-            """
-            times, events = [], []
-            for row in arm_df.select(["drug_epoch_time", "era_end_epoch_time", oc_id]).iter_rows():
-                drug_t, era_end_t, outcome_t = row
-                # Effective censoring = min(follow_up_days, era_days)
-                if drug_t is not None and era_end_t is not None:
-                    era_days = (float(era_end_t) - float(drug_t)) / 86_400
-                    censor_days = min(follow_up_days, max(era_days, 0.0))
-                else:
-                    censor_days = follow_up_days
-
-                if outcome_t is not None and drug_t is not None:
-                    t_days = (float(outcome_t) - float(drug_t)) / 86_400
-                    if 0 < t_days <= censor_days:
-                        times.append(t_days)
-                        events.append(1)
-                        continue
-                times.append(censor_days)
-                events.append(0)
-            return np.array(times, dtype=float), np.array(events, dtype=int)
-
-        time_a, event_a = _tte(source_df)
-        time_b, event_b = _tte(comparator_df)
+        time_a, event_a = observed_tte(source_df, oc_id, follow_up_days)
+        time_b, event_b = observed_tte(comparator_df, oc_id, follow_up_days)
 
         n_ev_a = int(event_a.sum())
         n_ev_b = int(event_b.sum())
@@ -754,24 +836,25 @@ def faithfulness_check_outcome(
         print(f"    Outcome column {outcome_concept_id} not in observed_outcomes — skipping.")
         return None
 
-    obs_times, obs_events = [], []
-    for row in observed_outcomes.select(["drug_epoch_time", outcome_concept_id]).iter_rows():
-        drug_t, outcome_t = row
-        if outcome_t is not None and drug_t is not None:
-            t_days = (float(outcome_t) - float(drug_t)) / 86_400
-            if 0 < t_days <= follow_up_days:
-                obs_times.append(t_days)
-                obs_events.append(1)
-                continue
-        obs_times.append(follow_up_days)
-        obs_events.append(0)
+    censoring_info = drug_info.select(
+        [
+            "person_id",
+            *[
+                c
+                for c in ("era_end_epoch_time", "last_observed_epoch_time")
+                if c in drug_info.columns
+            ],
+        ]
+    ).unique("person_id")
+    observed = observed_outcomes.join(censoring_info, on="person_id", how="left")
+    if "last_observed_epoch_time" not in observed.columns:
+        print("    Warning: drug_info has no last_observed_epoch_time; re-run the extraction.")
+    time_obs, event_obs = observed_tte(observed, outcome_concept_id, follow_up_days)
 
     # Use each (subject_id, trajectory_id) as a separate observation (same as
     # the main HR analysis).  Observed outcomes are one row per patient.
     time_gen  = tte_gen["time_days"].to_numpy()
     event_gen = tte_gen["event"].to_numpy().astype(int)
-    time_obs  = np.array(obs_times, dtype=float)
-    event_obs = np.array(obs_events, dtype=int)
 
     n_ev_gen = int(event_gen.sum())
     n_ev_obs = int(event_obs.sum())
@@ -787,12 +870,17 @@ def faithfulness_check_outcome(
     event_all     = np.concatenate([event_gen, event_obs])
     treatment_all = np.concatenate([np.ones(len(time_gen)), np.zeros(len(time_obs))])
 
-    hr, hr_lower, hr_upper, cox_p = fit_cox(time_all, event_all, treatment_all)
+    # The generated trajectories and the observed record of a patient are the
+    # same person, so they form one cluster.
+    clusters = np.concatenate([tte_gen["subject_id"].to_numpy(), observed["person_id"].to_numpy()])
+
+    cox = fit_cox_details(time_all, event_all, treatment_all, clusters=clusters)
+    hr, hr_lower, hr_upper, cox_p = cox["hr"], cox["hr_lower_95"], cox["hr_upper_95"], cox["p_value"]
     lr_stat, lr_p = log_rank_test(time_gen, event_gen, time_obs, event_obs)
 
     print(f"    HR (generated vs observed {source_label}) = {hr:.3f}  "
           f"(95% CI: {hr_lower:.3f}–{hr_upper:.3f})  Cox p={cox_p:.4f}  "
-          f"[expect ≈ 1.0]")
+          f"[robust, {cox['n_clusters']:,} clusters; expect ≈ 1.0]")
     print(f"    Log-rank stat={lr_stat:.3f}  p={lr_p:.4f}")
 
     # KM curves
@@ -817,6 +905,7 @@ def faithfulness_check_outcome(
         "hr_lower_95": hr_lower,
         "hr_upper_95": hr_upper,
         "cox_p_value": cox_p,
+        "n_clusters": cox["n_clusters"],
         "log_rank_stat": lr_stat,
         "log_rank_p_value": lr_p,
         "note": f"HR should be ≈ 1.0 if model faithfully reproduces {source_label} outcomes",
@@ -887,9 +976,10 @@ def analyse_outcome(
 
     # Use each (subject_id, trajectory_id) as a separate observation in the
     # Cox model.  This preserves trajectory-level variance and avoids ad-hoc
-    # aggregation choices (max event / mean time).  Within-patient trajectories
-    # are correlated (shared pre-drug context), so CIs are slightly optimistic,
-    # but the HR point estimate remains valid.
+    # aggregation choices (max event / mean time).  Trajectories of a patient
+    # share their pre-drug context, and the two arms contain the same patients,
+    # so observations are clustered by subject_id and the CI and p-value use the
+    # cluster-robust variance.
     time_a  = tte_a["time_days"].to_numpy()
     event_a = tte_a["event"].to_numpy().astype(int)
     time_b  = tte_b["time_days"].to_numpy()
@@ -912,12 +1002,18 @@ def analyse_outcome(
     event_all     = np.concatenate([event_a, event_b])
     treatment_all = np.concatenate([np.ones(len(time_a)), np.zeros(len(time_b))])
 
-    hr, hr_lower, hr_upper, cox_p = fit_cox(time_all, event_all, treatment_all)
+    clusters = np.concatenate([tte_a["subject_id"].to_numpy(), tte_b["subject_id"].to_numpy()])
+
+    cox = fit_cox_details(time_all, event_all, treatment_all, clusters=clusters)
+    hr, hr_lower, hr_upper, cox_p = cox["hr"], cox["hr_lower_95"], cox["hr_upper_95"], cox["p_value"]
     lr_stat, lr_p = log_rank_test(time_a, event_a, time_b, event_b)
 
     print(f"    HR ({arm_a_label} vs {arm_b_label}) = {hr:.3f}  "
-          f"(95% CI: {hr_lower:.3f}–{hr_upper:.3f})  Cox p={cox_p:.4f}")
-    print(f"    Log-rank stat={lr_stat:.3f}  p={lr_p:.4f}")
+          f"(95% CI: {hr_lower:.3f}–{hr_upper:.3f})  Cox p={cox_p:.4f}  "
+          f"[robust, {cox['n_clusters']:,} clusters]")
+    print(f"    Model-based 95% CI: {cox['hr_lower_95_model']:.3f}–{cox['hr_upper_95_model']:.3f} "
+          f"(ignores correlation between trajectories)")
+    print(f"    Log-rank stat={lr_stat:.3f}  p={lr_p:.4f} (ignores correlation)")
 
     # Kaplan-Meier survival curves
     km_t_a, km_s_a = kaplan_meier(time_a, event_a)
@@ -941,6 +1037,9 @@ def analyse_outcome(
         "hr_lower_95": hr_lower,
         "hr_upper_95": hr_upper,
         "cox_p_value": cox_p,
+        "n_clusters": cox["n_clusters"],
+        "hr_lower_95_model": cox["hr_lower_95_model"],
+        "hr_upper_95_model": cox["hr_upper_95_model"],
         "log_rank_stat": lr_stat,
         "log_rank_p_value": lr_p,
         "hr_interpretation": f"HR of {arm_a_label} vs {arm_b_label} (>1 = higher hazard in {arm_a_label})",
@@ -957,105 +1056,21 @@ def _compute_generated_era_end(
 ) -> pl.DataFrame:
     """
     For each (subject_id, trajectory_id) in *trajectories*, compute the
-    effective era end in days from drug start, applying the same three
-    censoring conditions used in ``compute_tte``:
-
-    1. Era gap  — first gap > era_gap_days between target drug events
-    2. Treatment switch — first competing/exclusion drug event
-    3. End of record / death — first [END] or [DEATH] token
+    effective follow-up in days from drug start with the same rules as
+    ``compute_tte`` (see :func:`compute_follow_up`).
 
     Returns a DataFrame with columns:
         subject_id, trajectory_id, effective_follow_up_days, terminated (bool)
     """
-    drug_lf = drug_info.lazy().rename({"person_id": "subject_id"})
-
-    traj_lf = (
-        trajectories.lazy()
-        .join(drug_lf.select(["subject_id", "drug_epoch_time"]), on="subject_id", how="left")
-        .with_columns(
-            pl.col("time").cast(pl.Datetime).dt.epoch(time_unit="s").alias("time_epoch_s"),
-        )
-        .filter(pl.col("time_epoch_s") > pl.col("drug_epoch_time"))
-        .with_columns(
-            ((pl.col("time_epoch_s") - pl.col("drug_epoch_time")) / 86_400).alias("days_since_drug")
-        )
-        .filter(pl.col("days_since_drug") <= follow_up_days)
+    _, follow_up = compute_follow_up(
+        trajectories,
+        drug_info,
+        follow_up_days,
+        target_concept_ids,
+        competing_concept_ids,
+        era_gap_days,
     )
-
-    all_pairs = (
-        trajectories.lazy()
-        .select(["subject_id", "trajectory_id"])
-        .unique()
-        .with_columns(pl.lit(follow_up_days).alias("effective_follow_up_days"))
-    )
-
-    if target_concept_ids:
-        target_era_end = (
-            traj_lf
-            .filter(pl.col("code").is_in(list(target_concept_ids)))
-            .group_by(["subject_id", "trajectory_id"])
-            .agg(pl.col("days_since_drug").sort().alias("target_days"))
-            .with_columns(
-                pl.col("target_days").map_elements(
-                    lambda days: _find_era_gap_end(days, era_gap_days),
-                    return_dtype=pl.Float64,
-                ).alias("era_gap_end_days")
-            )
-            .select(["subject_id", "trajectory_id", "era_gap_end_days"])
-        )
-        all_pairs = (
-            all_pairs
-            .join(target_era_end, on=["subject_id", "trajectory_id"], how="left")
-            .with_columns(
-                pl.min_horizontal(
-                    "effective_follow_up_days",
-                    pl.col("era_gap_end_days").fill_null(follow_up_days),
-                ).alias("effective_follow_up_days")
-            )
-            .drop("era_gap_end_days")
-        )
-
-    if competing_concept_ids:
-        first_competing = (
-            traj_lf
-            .filter(pl.col("code").is_in(list(competing_concept_ids)))
-            .group_by(["subject_id", "trajectory_id"])
-            .agg(pl.col("days_since_drug").min().alias("competing_days"))
-        )
-        all_pairs = (
-            all_pairs
-            .join(first_competing, on=["subject_id", "trajectory_id"], how="left")
-            .with_columns(
-                pl.min_horizontal(
-                    "effective_follow_up_days",
-                    pl.col("competing_days").fill_null(follow_up_days),
-                ).alias("effective_follow_up_days")
-            )
-            .drop("competing_days")
-        )
-
-    end_of_record = (
-        traj_lf
-        .filter(pl.col("code").is_in(list(_RECORD_END_TOKENS)))
-        .group_by(["subject_id", "trajectory_id"])
-        .agg(pl.col("days_since_drug").min().alias("end_of_record_days"))
-    )
-    all_pairs = (
-        all_pairs
-        .join(end_of_record, on=["subject_id", "trajectory_id"], how="left")
-        .with_columns(
-            pl.min_horizontal(
-                "effective_follow_up_days",
-                pl.col("end_of_record_days").fill_null(follow_up_days),
-            ).alias("effective_follow_up_days")
-        )
-        .drop("end_of_record_days")
-        .with_columns(
-            (pl.col("effective_follow_up_days") < follow_up_days).alias("terminated")
-        )
-        .collect()
-    )
-    return all_pairs
+    return follow_up.collect()
 
 
 def _print_generated_era_duration_stats(
@@ -1244,12 +1259,23 @@ def main() -> None:
         exclusion_concepts = expand_to_descendants(args.vocab_path, excl_ids)
         print(f"  Exclusion concepts (other antihypertensives): {len(exclusion_concepts):,}")
 
-    # Build per-arm competing sets (union of opposite-arm + exclusion drugs).
-    # These censor follow-up when a generated trajectory contains a switch event;
-    # trajectories are NOT removed — only their follow-up is shortened.
-    if arm_a_concepts or arm_b_concepts or exclusion_concepts:
-        competing_for_arm_a = (arm_b_concepts | exclusion_concepts) or None
-        competing_for_arm_b = (arm_a_concepts | exclusion_concepts) or None
+    extra_competing_concepts: Set[str] = set()
+    if args.vocab_path and args.competing_concept_ids:
+        competing_ids = [int(x.strip()) for x in args.competing_concept_ids.split(",")]
+        print("Expanding competing concepts for treatment-switch censoring …")
+        extra_competing_concepts = expand_to_descendants(args.vocab_path, competing_ids)
+        print(f"  Competing concepts: {len(extra_competing_concepts):,}")
+    elif args.competing_concept_ids:
+        print("Warning: --competing_concept_ids needs --vocab_path; ignoring it.")
+
+    # Build per-arm competing sets (union of opposite-arm + exclusion + extra
+    # competing drugs).  These censor follow-up when a generated trajectory
+    # contains a switch event; trajectories are NOT removed — only their
+    # follow-up is shortened.
+    other_censoring = exclusion_concepts | extra_competing_concepts
+    if arm_a_concepts or arm_b_concepts or other_censoring:
+        competing_for_arm_a = (arm_b_concepts | other_censoring) or None
+        competing_for_arm_b = (arm_a_concepts | other_censoring) or None
 
     print(f"Loading {args.arm_a} trajectories …")
     traj_a = load_trajectories(args.trajectories_dir, args.arm_a)
@@ -1414,20 +1440,21 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--vocab_path",
         default=None,
-        help="OMOP vocabulary root (concept_ancestor/ parquets). Required for "
-             "contamination filtering via --arm_a_concept_ids / --arm_b_concept_ids.",
+        help="OMOP vocabulary root (concept_ancestor/ parquets). Required to expand "
+             "--arm_a_concept_ids, --arm_b_concept_ids, --exclusion_concept_ids, "
+             "--competing_concept_ids and the outcome concepts to their descendants.",
     )
     parser.add_argument(
         "--arm_a_concept_ids",
         default=None,
-        help="Comma-separated ingredient concept_ids for arm A drug class. "
-             "Arm B trajectories containing these codes will be removed.",
+        help="Comma-separated ingredient concept_ids for arm A drug class. Used for the "
+             "era gap of arm A and as treatment-switch censoring for arm B.",
     )
     parser.add_argument(
         "--arm_b_concept_ids",
         default=None,
-        help="Comma-separated ingredient concept_ids for arm B drug class. "
-             "Arm A trajectories containing these codes will be removed.",
+        help="Comma-separated ingredient concept_ids for arm B drug class. Used for the "
+             "era gap of arm B and as treatment-switch censoring for arm A.",
     )
     parser.add_argument(
         "--exclusion_concept_ids",
@@ -1435,6 +1462,14 @@ def _parse_args() -> argparse.Namespace:
         help="Comma-separated ingredient concept_ids for excluded antihypertensives "
              "(ARBs, dCCBs, ndCCBs, 2nd-line agents). When a generated trajectory "
              "contains one of these codes, follow-up is censored at that event.",
+    )
+    parser.add_argument(
+        "--competing_concept_ids",
+        default=None,
+        help="Comma-separated concept_ids of further drugs that censor follow-up of both "
+             "arms at their first appearance in a generated trajectory (treatment switch), "
+             "in addition to the opposite arm and --exclusion_concept_ids. Each is "
+             "expanded to descendants. Should match the extraction step.",
     )
     parser.add_argument(
         "--era_gap_days",
