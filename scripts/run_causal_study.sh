@@ -286,6 +286,7 @@ _step_end() {
     echo "Elapsed: $(( elapsed / 60 ))m $(( elapsed % 60 ))s"
 }
 
+# (Arrays that can be empty are expanded as ${a[@]+"${a[@]}"}, which also works in bash 3.2 with set -u.)
 # Check the inputs and the output folder before anything runs, so a wrong path is reported at once.
 _fail() {
     echo "ERROR: $1" >&2
@@ -492,9 +493,9 @@ else
         --output_path            "${TARGET_PTS_COMPARATOR_CTX}" \
         --also_write_treated_path "${TARGET_PTS_TARGET_CTX}" \
         --seed                   "${RANDOM_SEED}" \
-        "${_OVERLAP_TARGET_ARGS[@]}" \
-        "${_DROP_UNKNOWN_ARG[@]}" \
-        "${_MAX_TARGET_ARG[@]}"
+        ${_OVERLAP_TARGET_ARGS[@]+"${_OVERLAP_TARGET_ARGS[@]}"} \
+        ${_DROP_UNKNOWN_ARG[@]+"${_DROP_UNKNOWN_ARG[@]}"} \
+        ${_MAX_TARGET_ARG[@]+"${_MAX_TARGET_ARG[@]}"}
 
     if [ "${DESIGN}" = "symmetric" ]; then
         # --- 2b: comparator patients → both arm contexts ---
@@ -523,9 +524,9 @@ else
             --output_path            "${COMPARATOR_PTS_TARGET_CTX}" \
             --also_write_treated_path "${COMPARATOR_PTS_COMPARATOR_CTX}" \
             --seed                   "${RANDOM_SEED}" \
-            "${_OVERLAP_COMPARATOR_ARGS[@]}" \
-            "${_DROP_UNKNOWN_ARG[@]}" \
-            "${_MAX_COMPARATOR_ARG[@]}"
+            ${_OVERLAP_COMPARATOR_ARGS[@]+"${_OVERLAP_COMPARATOR_ARGS[@]}"} \
+            ${_DROP_UNKNOWN_ARG[@]+"${_DROP_UNKNOWN_ARG[@]}"} \
+            ${_MAX_COMPARATOR_ARG[@]+"${_MAX_COMPARATOR_ARG[@]}"}
 
         # --- Concat arm contexts and drug_info ---
         echo "  Combining arm contexts and drug_info …"
@@ -655,7 +656,7 @@ else
         python "${GENERATE_SCRIPT}" \
             "${_ARM_ARGS[@]}" \
             "${_COMMON_GENERATE_ARGS[@]}" \
-            "${_MULTI_SUPPRESS_ARGS[@]}" \
+            ${_MULTI_SUPPRESS_ARGS[@]+"${_MULTI_SUPPRESS_ARGS[@]}"} \
             --gpu_ids "${GPU_IDS}" \
             > "${OUTPUT_ROOT}/generate.log" 2>&1
     elif [ "${SINGLE_GPU}" = "true" ]; then
@@ -663,26 +664,26 @@ else
         CUDA_VISIBLE_DEVICES="${GPU_TARGET}" python "${GENERATE_SCRIPT}" \
             --arm_context "${ARM_A}:${ARM_A_CTX}" \
             "${_COMMON_GENERATE_ARGS[@]}" \
-            "${_SUPPRESS_ARGS_A[@]}" \
+            ${_SUPPRESS_ARGS_A[@]+"${_SUPPRESS_ARGS_A[@]}"} \
             > "${OUTPUT_ROOT}/generate_${ARM_A}.log" 2>&1
         echo "Running ${ARM_B} arm …"
         CUDA_VISIBLE_DEVICES="${GPU_TARGET}" python "${GENERATE_SCRIPT}" \
             --arm_context "${ARM_B}:${ARM_B_CTX}" \
             "${_COMMON_GENERATE_ARGS[@]}" \
-            "${_SUPPRESS_ARGS_B[@]}" \
+            ${_SUPPRESS_ARGS_B[@]+"${_SUPPRESS_ARGS_B[@]}"} \
             > "${OUTPUT_ROOT}/generate_${ARM_B}.log" 2>&1
     else
         CUDA_VISIBLE_DEVICES="${GPU_TARGET}" python "${GENERATE_SCRIPT}" \
             --arm_context "${ARM_A}:${ARM_A_CTX}" \
             "${_COMMON_GENERATE_ARGS[@]}" \
-            "${_SUPPRESS_ARGS_A[@]}" \
+            ${_SUPPRESS_ARGS_A[@]+"${_SUPPRESS_ARGS_A[@]}"} \
             > "${OUTPUT_ROOT}/generate_${ARM_A}.log" 2>&1 &
         PID_A=$!
 
         CUDA_VISIBLE_DEVICES="${GPU_COMPARATOR}" python "${GENERATE_SCRIPT}" \
             --arm_context "${ARM_B}:${ARM_B_CTX}" \
             "${_COMMON_GENERATE_ARGS[@]}" \
-            "${_SUPPRESS_ARGS_B[@]}" \
+            ${_SUPPRESS_ARGS_B[@]+"${_SUPPRESS_ARGS_B[@]}"} \
             > "${OUTPUT_ROOT}/generate_${ARM_B}.log" 2>&1 &
         PID_B=$!
 
