@@ -167,10 +167,12 @@ GPU_TARGET="${GPU_TARGET:-0}"
 GPU_COMPARATOR="${GPU_COMPARATOR:-1}"
 SINGLE_GPU="${SINGLE_GPU:-false}"
 
-# Several GPUs for the generation step: "all" or a list such as "0,1,2,3".  One worker per GPU
-# generates a share of the batches of both arms, so every GPU stays busy; an interrupted run
-# continues where it stopped (rerun the script with SKIP_STEP1=true SKIP_STEP2=true).  Takes
-# precedence over GPU_TARGET / GPU_COMPARATOR / SINGLE_GPU.  Empty = the settings above.
+# Several GPUs for the generation step: "all" or a list such as "0,1,2,3".  The GPUs are divided
+# into one set per arm (in proportion to the batches each arm has left) and one worker per GPU
+# generates a share of the batches of its arm, so the arms run at the same time.  With a single
+# GPU the arms run one after the other.  An interrupted run continues where it stopped (rerun the
+# script with SKIP_STEP1=true SKIP_STEP2=true).  Takes precedence over GPU_TARGET / GPU_COMPARATOR /
+# SINGLE_GPU.  Empty = the settings above.
 GPU_IDS="${GPU_IDS:-}"
 
 # -----------------------------------------------------------------------------
@@ -609,8 +611,8 @@ fi
 # STEP 3 — Generate trajectories for both arms
 #
 #   Default: the target arm on GPU_TARGET and the comparator arm on GPU_COMPARATOR, at the
-#   same time.  SINGLE_GPU=true runs them one after the other on GPU_TARGET; GPU_IDS splits
-#   the batches of both arms over several GPUs.
+#   same time.  SINGLE_GPU=true runs them one after the other on GPU_TARGET; GPU_IDS divides
+#   the GPUs between the two arms (one GPU: the arms one after the other).
 # =============================================================================
 if [ "${SKIP_STEP3}" = "true" ]; then
     echo "Skipping Step 3 (SKIP_STEP3=true)"
@@ -618,7 +620,7 @@ else
     echo "============================================================"
     echo "STEP 3: Generate trajectories  (${NUM_TRAJECTORIES} per patient per arm)  [$(date '+%H:%M:%S')]"
     if [ -n "${GPU_IDS}" ]; then
-        echo "  Mode              : one worker per GPU (GPU_IDS=${GPU_IDS}), both arms in one run"
+        echo "  Mode              : GPUs divided between the arms, one worker per GPU (GPU_IDS=${GPU_IDS})"
     elif [ "${SINGLE_GPU}" = "true" ]; then
         echo "  Mode              : sequential (SINGLE_GPU=true, GPU ${GPU_TARGET})"
     else

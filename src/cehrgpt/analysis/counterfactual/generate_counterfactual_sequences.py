@@ -26,11 +26,10 @@ python generate_counterfactual_sequences.py \\
 Several GPUs
 ------------
 Add ``--gpu_ids all`` (or e.g. ``--gpu_ids 0,1,3``) to run one worker process per GPU.
-The work is cut into tasks of one batch of one trajectory of one arm, and goes in rounds of one
-trajectory: in a round the batches of all arms are dealt out alternately to the workers, so the arms
-are generated at the same time and each round ends with that trajectory complete in every arm.
-Each worker loads its own copy of the model and writes its batches into the same
-``<arm>/<trajectory_id>`` folders.  A batch is finished once its
+The work is cut into tasks of one batch of one trajectory of one arm.  The GPUs are divided into one
+set per arm, in proportion to the batches each arm has left, so the arms are generated at the same
+time; with fewer GPUs than arms all GPUs work on the arms one after the other.  Each worker loads
+its own copy of the model and writes its batches into the same ``<arm>/<trajectory_id>`` folders.  A batch is finished once its
 parquet exists, so rerunning the same command (also with a different number of GPUs)
 continues where an interrupted run stopped.  Worker logs are in ``<output_dir>/worker_logs``.
 """
@@ -573,102 +572,128 @@ def run_generation(
             write_parquet_atomically(df_out, batch_output_path(output_dir, arm, traj_id, batch_i))
 
 
+def split_gpus_by_arm(gpu_ids: List[str], pending_by_arm: Dict[str, int]) -> Dict[str, List[str]]:
+    """
+    Divide the GPUs into one set per arm that has batches left, in proportion to the batches.
+
+    Every arm gets a GPU of its own first; each further GPU goes to the arm with the most batches
+    per GPU so far (the first arm on a tie), and an arm never gets more GPUs than it has batches.
+    Returns ``{}`` when there are fewer GPUs than arms with work: the arms cannot run side by side.
+    """
+    arms = [arm for arm, pending in pending_by_arm.items() if pending > 0]
+    if not arms or len(gpu_ids) < len(arms):
+        return {}
+    count = {arm: 1 for arm in arms}
+    for _ in range(len(gpu_ids) - len(arms)):
+        open_arms = [arm for arm in arms if count[arm] < pending_by_arm[arm]]
+        if not open_arms:
+            break
+        count[max(open_arms, key=lambda arm: pending_by_arm[arm] / count[arm])] += 1
+    groups: Dict[str, List[str]] = {}
+    start = 0
+    for arm in arms:
+        groups[arm] = list(gpu_ids[start : start + count[arm]])
+        start += count[arm]
+    return groups
+
+
 def run_on_multiple_gpus(args: argparse.Namespace, gpu_ids: List[str]) -> int:
     """
-    Deal the pending batches out to one worker process per GPU, one trajectory at a time.
+    Deal the pending batches out to one worker process per GPU.
 
-    A task is one batch of one trajectory of one arm.  The work goes in rounds, one per trajectory:
-    in a round the batches of all arms are dealt out alternately (batch 0 of every arm, batch 1 of
-    every arm, ...), so the arms are generated at the same time and every round ends with the
-    trajectory complete in both arms.  Every worker re-runs this module with ``CUDA_VISIBLE_DEVICES``
-    pinned to its GPU and a ``--task_file`` listing its tasks, loads its own copy of the model, and
-    writes the batches into the usual ``<arm>/<trajectory_id>`` folders.  The pending tasks are
-    recomputed from the parquet files that exist, so rerunning the command resumes an interrupted
-    run.  A round that fails stops the run.
+    A task is one batch of one trajectory of one arm.  The GPUs are divided into one set per arm
+    (``split_gpus_by_arm``), so the arms are generated at the same time; the batches of an arm go out
+    in the order trajectory 0, 1, ... so its first trajectory is complete early.  With fewer GPUs
+    than arms the batches of all arms are dealt out to all GPUs, arm after arm.  Every worker re-runs
+    this module with ``CUDA_VISIBLE_DEVICES`` pinned to its GPU and a ``--task_file`` listing its
+    tasks, loads its own copy of the model, and writes the batches into the usual
+    ``<arm>/<trajectory_id>`` folders.  The pending tasks are recomputed from the parquet files that
+    exist, so rerunning the command resumes an interrupted run.
     """
     arm_map = _resolve_arm_map(args)
     output_dir = Path(args.output_dir)
-    all_tasks: List[Tuple[str, int, int]] = []
+    tasks_by_arm: Dict[str, List[Tuple[int, int]]] = {}
     for arm, context_parquet in arm_map.items():
         num_rows = context_num_rows(str(context_parquet))
-        all_tasks += [
-            (arm, traj_id, batch_i)
-            for traj_id, batch_i in pending_tasks(
-                arm, num_rows, args.batch_size, args.num_trajectories, output_dir
-            )
-        ]
-    if not all_tasks:
+        tasks_by_arm[arm] = pending_tasks(
+            arm, num_rows, args.batch_size, args.num_trajectories, output_dir
+        )
+    if not any(tasks_by_arm.values()):
         print("There is nothing left to generate.")
         return 0
 
-    arm_order = {arm: i for i, arm in enumerate(arm_map)}
-    rounds: Dict[int, List[Tuple[str, int, int]]] = {}
-    for task in sorted(all_tasks, key=lambda t: (t[1], t[2], arm_order[t[0]])):
-        rounds.setdefault(task[1], []).append(task)
+    # (gpu, {arm: [[trajectory_id, batch_index], ...]}) for every worker
+    workers: List[Tuple[str, Dict[str, List[List[int]]]]] = []
+    groups = split_gpus_by_arm(gpu_ids, {arm: len(tasks) for arm, tasks in tasks_by_arm.items()})
+    if groups:
+        for arm, arm_gpus in groups.items():
+            print(f"Arm {arm}: {len(tasks_by_arm[arm]):,} batches on GPU(s) {arm_gpus}")
+            for worker_index, gpu in enumerate(arm_gpus):
+                workers.append((gpu, {arm: [list(t) for t in tasks_by_arm[arm][worker_index :: len(arm_gpus)]]}))
+    else:
+        all_tasks = [(arm, t, b) for arm, tasks in tasks_by_arm.items() for t, b in tasks]
+        num_workers = min(len(gpu_ids), len(all_tasks))
+        print(
+            f"Fewer GPUs than arms: {len(all_tasks):,} batches across GPU(s) {gpu_ids[:num_workers]}, "
+            "arm after arm"
+        )
+        for worker_index in range(num_workers):
+            worker_tasks: Dict[str, List[List[int]]] = {}
+            for arm, traj_id, batch_i in all_tasks[worker_index::num_workers]:
+                worker_tasks.setdefault(arm, []).append([traj_id, batch_i])
+            workers.append((gpu_ids[worker_index], worker_tasks))
 
     task_root = output_dir / "temp" / "tasks"
     log_folder = output_dir / "worker_logs"
     shutil.rmtree(task_root, ignore_errors=True)
     task_root.mkdir(parents=True)
     log_folder.mkdir(parents=True, exist_ok=True)
-    print(f"{len(all_tasks):,} batches to generate in {len(rounds)} round(s), one trajectory each")
 
     worker_argv = strip_cli_option(sys.argv[1:], "--gpu_ids")
+    processes: List[subprocess.Popen] = []
+    log_paths: List[Path] = []
     # Make sure the workers don't outlive us when we are asked to stop
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
-    for traj_id, round_tasks in sorted(rounds.items()):
-        num_workers = min(len(gpu_ids), len(round_tasks))
-        print(
-            f"Trajectory {traj_id}: splitting {len(round_tasks):,} batches across {num_workers} "
-            f"GPUs: {gpu_ids[:num_workers]}"
-        )
-        processes: List[subprocess.Popen] = []
-        log_paths: List[Path] = []
-        exit_codes: List[int] = []
-        try:
-            for worker_index in range(num_workers):
-                worker_tasks: Dict[str, List[List[int]]] = {}
-                for arm, task_traj_id, batch_i in round_tasks[worker_index::num_workers]:
-                    worker_tasks.setdefault(arm, []).append([task_traj_id, batch_i])
-                task_file = task_root / f"worker_{worker_index}.json"
-                task_file.write_text(json.dumps(worker_tasks))
-                log_path = log_folder / f"worker_{worker_index}_gpu_{gpu_ids[worker_index]}.log"
-                log_paths.append(log_path)
-                with open(log_path, "a") as log_file:
-                    processes.append(
-                        subprocess.Popen(
-                            [
-                                sys.executable,
-                                "-m",
-                                "cehrgpt.analysis.counterfactual.generate_counterfactual_sequences",
-                                *worker_argv,
-                                "--task_file",
-                                str(task_file),
-                            ],
-                            env={**os.environ, "CUDA_VISIBLE_DEVICES": gpu_ids[worker_index]},
-                            stdout=log_file,
-                            stderr=subprocess.STDOUT,
-                        )
+    try:
+        for worker_index, (gpu, worker_tasks) in enumerate(workers):
+            task_file = task_root / f"worker_{worker_index}.json"
+            task_file.write_text(json.dumps(worker_tasks))
+            log_path = log_folder / f"worker_{worker_index}_gpu_{gpu}.log"
+            log_paths.append(log_path)
+            with open(log_path, "w") as log_file:
+                processes.append(
+                    subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-m",
+                            "cehrgpt.analysis.counterfactual.generate_counterfactual_sequences",
+                            *worker_argv,
+                            "--task_file",
+                            str(task_file),
+                        ],
+                        env={**os.environ, "CUDA_VISIBLE_DEVICES": gpu},
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
                     )
-                print(f"Started worker {worker_index} on GPU {gpu_ids[worker_index]}, log: {log_path}")
-            exit_codes = [process.wait() for process in processes]
-        finally:
-            for process in processes:
-                if process.poll() is None:
-                    process.terminate()
+                )
+            print(f"Started worker {worker_index} on GPU {gpu} for {list(worker_tasks)}, log: {log_path}")
+        exit_codes = [process.wait() for process in processes]
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
 
-        failed = [i for i, code in enumerate(exit_codes) if code != 0]
-        if failed:
-            for i in failed:
-                print(f"Worker {i} exited with code {exit_codes[i]}, see {log_paths[i]}")
-            return 1
-        print(f"Trajectory {traj_id} finished")
+    failed = [i for i, code in enumerate(exit_codes) if code != 0]
+    if failed:
+        for i in failed:
+            print(f"Worker {i} exited with code {exit_codes[i]}, see {log_paths[i]}")
+        return 1
     shutil.rmtree(task_root, ignore_errors=True)
     try:
         task_root.parent.rmdir()
     except OSError:
         pass
-    print(f"All {len(rounds)} round(s) finished")
+    print(f"All {len(workers)} workers finished")
     return 0
 
 
