@@ -87,6 +87,34 @@ def load_trajectories(trajectories_dir: str, arm: str) -> pl.DataFrame:
 # Drug concept expansion and contamination filtering
 # ---------------------------------------------------------------------------
 
+def restrict_to_common_trajectories(
+    traj_a: pl.DataFrame, traj_b: pl.DataFrame
+) -> Tuple[pl.DataFrame, pl.DataFrame, int, int]:
+    """
+    Keep the (subject_id, trajectory_id) pairs that were generated in both arms.
+
+    The arms are compared trajectory by trajectory, so a pair that one arm lacks (generation of
+    that arm is not finished, or the trajectory has no events) cannot enter either arm.  Returns the
+    two frames and the number of pairs that were kept and left out.
+    """
+    keys_a = traj_a.select(_KEYS).unique()
+    keys_b = traj_b.select(_KEYS).unique()
+    common = keys_a.join(keys_b, on=_KEYS, how="inner")
+    n_common = len(common)
+    n_left_out = len(keys_a) + len(keys_b) - 2 * n_common
+    if n_common == 0:
+        raise ValueError(
+            "no (subject_id, trajectory_id) was generated in both arms: "
+            f"{len(keys_a):,} in one arm, {len(keys_b):,} in the other"
+        )
+    return (
+        traj_a.join(common, on=_KEYS, how="semi"),
+        traj_b.join(common, on=_KEYS, how="semi"),
+        n_common,
+        n_left_out,
+    )
+
+
 def expand_to_descendants(vocab_path: str, concept_ids: List[int]) -> Set[str]:
     """Return all descendant concept_ids (as strings) via concept_ancestor."""
     ancestor_glob = os.path.join(vocab_path, "concept_ancestor", "*.parquet")
@@ -1442,6 +1470,12 @@ def main() -> None:
         dropped = list(dropped_person_ids)
         traj_a = traj_a.filter(~pl.col("subject_id").is_in(dropped))
         traj_b = traj_b.filter(~pl.col("subject_id").is_in(dropped))
+
+    traj_a, traj_b, n_common, n_left_out = restrict_to_common_trajectories(traj_a, traj_b)
+    print(
+        f"Trajectories generated in both arms: {n_common:,} "
+        f"({n_left_out:,} left out because the other arm lacks them)"
+    )
 
     def _read_parquet(path: str) -> pl.DataFrame:
         return pl.read_parquet(

@@ -178,17 +178,32 @@ class MultiGpuTest(GenerationTestCase):
             + [("b", t, b) for t in range(2) for b in range(2)]
         )
 
-    def test_the_batches_are_dealt_out_without_overlap_one_worker_per_gpu(self):
+    def test_the_batches_are_dealt_out_without_overlap_one_worker_per_gpu_and_round(self):
         code, calls, worker_tasks = self.launch(["2", "3"])
         self.assertEqual(code, 0)
-        self.assertEqual([env["CUDA_VISIBLE_DEVICES"] for _, env in calls], ["2", "3"])
+        # two trajectories, so two rounds of one worker per GPU
+        self.assertEqual([env["CUDA_VISIBLE_DEVICES"] for _, env in calls], ["2", "3", "2", "3"])
         self.assertEqual(sorted(sum(worker_tasks, [])), self.all_tasks())
-        self.assertFalse(set(worker_tasks[0]) & set(worker_tasks[1]))
-        self.assertLessEqual(abs(len(worker_tasks[0]) - len(worker_tasks[1])), 1)
+        for first, second in ((0, 1), (2, 3)):
+            self.assertFalse(set(worker_tasks[first]) & set(worker_tasks[second]))
+            self.assertLessEqual(abs(len(worker_tasks[first]) - len(worker_tasks[second])), 1)
         for command, _ in calls:
             self.assertNotIn("--gpu_ids", command)
             self.assertIn("--arm_context", command)
         self.assertFalse((self.output / "temp").exists())
+
+    def test_a_round_is_one_trajectory_of_all_the_arms(self):
+        _, _, worker_tasks = self.launch(["0", "1"])
+        for round_index in (0, 1):
+            tasks = worker_tasks[2 * round_index] + worker_tasks[2 * round_index + 1]
+            self.assertEqual({t for _, t, _ in tasks}, {round_index})
+            self.assertEqual({arm for arm, _, _ in tasks}, {"a", "b"})
+
+    def test_the_arms_are_generated_at_the_same_time_on_different_gpus(self):
+        _, _, worker_tasks = self.launch(["0", "1"])
+        # the batches go out alternately (a0, b0, a1, b1, a2), so each GPU gets one arm
+        self.assertEqual({arm for arm, _, _ in worker_tasks[0]}, {"a"})
+        self.assertEqual({arm for arm, _, _ in worker_tasks[1]}, {"b"})
 
     def test_finished_batches_are_left_out_whatever_the_number_of_gpus(self):
         write_batch = gen.batch_output_path(self.output, "a", 0, 0)
@@ -224,9 +239,10 @@ class MultiGpuTest(GenerationTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(calls, [])
 
-    def test_a_failed_worker_returns_non_zero_and_keeps_the_task_files(self):
-        code, _, _ = self.launch(["0", "1"], exit_code=1)
+    def test_a_failed_worker_returns_non_zero_stops_the_next_round_and_keeps_the_task_files(self):
+        code, calls, _ = self.launch(["0", "1"], exit_code=1)
         self.assertEqual(code, 1)
+        self.assertEqual(len(calls), 2)  # the workers of the first round only
         self.assertTrue((self.output / "temp" / "tasks" / "worker_0.json").exists())
         self.assertTrue((self.output / "worker_logs").is_dir())
 
