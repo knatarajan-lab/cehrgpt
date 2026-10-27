@@ -16,13 +16,16 @@ probes of the model, see cehrgpt.open_vocab.question_encoder. There is no option
 Questions: --questions "text" ..., --questions_file (one per line), or --concepts ids with --embeddings_dir, the
 folder of question_embeddings, which holds the name of each concept id (question_texts.parquet).
 
-With --evaluate and a label column in the features, the probability of each question in the window is
-compared with the label: AUROC, AUPRC, Brier score. The questions are scored one by one; they are not combined.
+With --evaluate, the probability of each question in the window is compared with the label of that question:
+AUROC, AUPRC, Brier score, per question. The label of a question is a column of the features, given with
+--question_label_columns "question=column" (one per question); a single question may use --label_column instead.
+The questions are scored one by one; they are not combined.
 
 Example:
     python -m cehrgpt.tools.zero_shot_qa_predictions --model_path MODEL \
         --features_folder FEATURES/test_features --output_dir OUT \
-        --questions "Type 2 diabetes mellitus" "Heart failure"
+        --questions "Type 2 diabetes mellitus" "Heart failure" --evaluate \
+        --question_label_columns "Type 2 diabetes mellitus=label_t2dm" "Heart failure=label_hf"
 """
 
 import argparse
@@ -71,6 +74,25 @@ def read_questions(args: argparse.Namespace) -> List[str]:
     return questions
 
 
+def question_label_columns(args: argparse.Namespace, questions: List[str]) -> Dict[str, Optional[str]]:
+    """
+    The feature column that holds the label of each question: --question_label_columns, and for a
+    single question without one, --label_column. A question without a column has no label.
+    """
+    columns: Dict[str, Optional[str]] = {q: None for q in questions}
+    for entry in getattr(args, "question_label_columns", None) or []:
+        question, separator, column = entry.rpartition("=")
+        question, column = question.strip(), column.strip()
+        if not separator or not question or not column:
+            raise ValueError(f'--question_label_columns takes "question=column", got {entry!r}')
+        if question not in columns:
+            raise ValueError(f"--question_label_columns names {question!r}, which is not one of the questions: {questions}")
+        columns[question] = column
+    if len(questions) == 1 and columns[questions[0]] is None:
+        columns[questions[0]] = args.label_column
+    return columns
+
+
 def run(args: argparse.Namespace, encoder=None) -> Dict[str, object]:
     """encoder: for tests, an object with describe() and encode(); it is verified like the one that is loaded."""
     predictor = OpenVocabPredictor.from_pretrained(args.model_path, args.device)
@@ -82,12 +104,20 @@ def run(args: argparse.Namespace, encoder=None) -> Dict[str, object]:
     window = parse_window(args.window)
 
     os.makedirs(args.output_dir, exist_ok=True)
-    extra = [args.label_column] + ([args.gap_days_column] if args.gap_days_column else [])
+    n_questions = len(questions)
+    label_columns = question_label_columns(args, questions)
+    if args.evaluate:
+        unlabelled = [q for q, column in label_columns.items() if column is None]
+        if unlabelled:
+            raise ValueError(
+                f'--evaluate needs the label column of every question, give --question_label_columns "question=column" '
+                f"for: {unlabelled}"
+            )
+    extra = sorted({c for c in label_columns.values() if c}) + ([args.gap_days_column] if args.gap_days_column else [])
     writer = None
     scored: List[np.ndarray] = []
     labels_seen: List[np.ndarray] = []
     total = 0
-    n_questions = len(questions)
     question_names = np.array(questions, dtype=object)
     for batch in iter_feature_batches(args.features_folder, args.batch_size, extra):
         gap = torch.from_numpy(np.array(batch[args.gap_days_column], dtype=np.float32)) if args.gap_days_column else None
@@ -95,7 +125,11 @@ def run(args: argparse.Namespace, encoder=None) -> Dict[str, object]:
             gap = torch.full((batch["features"].shape[0],), float(args.gap_days))
         probabilities = predictor.probabilities(torch.from_numpy(batch["features"]), question_vectors, [window], gap)[:, 0].cpu().numpy()
         rows = probabilities.shape[0]
-        labels = batch.get(args.label_column)
+        # one label per (patient, question); only when every question has its column in the features
+        columns_of_labels = [batch.get(label_columns[q]) if label_columns[q] else None for q in questions]
+        labels = None
+        if all(c is not None for c in columns_of_labels):
+            labels = np.stack([np.asarray(c) for c in columns_of_labels], axis=1)
         # long format, patient major: one row per (patient, question)
         columns = {
             "subject_id": pa.array(np.repeat(batch["subject_id"], n_questions).astype(np.int64)),
@@ -104,7 +138,7 @@ def run(args: argparse.Namespace, encoder=None) -> Dict[str, object]:
             "probability": pa.array(probabilities.reshape(-1).astype(np.float32)),
         }
         if labels is not None:
-            columns["label"] = pa.array(np.repeat(labels.astype(np.int8), n_questions))
+            columns["label"] = pa.array(labels.reshape(-1).astype(np.int8))
         table = pa.table(columns)
         if writer is None:
             writer = pq.ParquetWriter(os.path.join(args.output_dir, "predictions.parquet"), table.schema)
@@ -112,7 +146,8 @@ def run(args: argparse.Namespace, encoder=None) -> Dict[str, object]:
         total += rows
         if args.evaluate:
             if labels is None:
-                raise ValueError(f"--evaluate needs the label column {args.label_column!r} in the features")
+                missing = sorted({c for c in label_columns.values() if c and c not in batch})
+                raise ValueError(f"--evaluate needs the label column(s) {missing} in the features")
             scored.append(probabilities)
             labels_seen.append(labels)
     if writer is not None:
@@ -120,6 +155,7 @@ def run(args: argparse.Namespace, encoder=None) -> Dict[str, object]:
     metrics: Dict[str, object] = {
         "num_patients": total,
         "questions": questions,
+        "label_columns": label_columns,
         "window_days": window_name(window),
         "model_path": args.model_path,
         "question_embedder": {
@@ -132,7 +168,7 @@ def run(args: argparse.Namespace, encoder=None) -> Dict[str, object]:
         labels_of_outcome = np.concatenate(labels_seen)
         metrics["outcome"] = {
             "per_question": {
-                q: evaluate_predictions(labels_of_outcome, probabilities_of_outcome[:, i])
+                q: evaluate_predictions(labels_of_outcome[:, i], probabilities_of_outcome[:, i])
                 for i, q in enumerate(questions)
             },
         }
@@ -154,8 +190,9 @@ def create_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--window", default="365", help='Days after the prediction time: "365" (default) is the first year, "30-90" is days 30 to 90')
     parser.add_argument("--gap_days", type=float, default=0.0, help="Days between the last event and the prediction time, for every patient")
     parser.add_argument("--gap_days_column", default=None, help="A column with the gap per patient (overrides --gap_days)")
-    parser.add_argument("--label_column", default="boolean_value", help="A column with the observed outcome, written next to the predictions")
-    parser.add_argument("--evaluate", action="store_true", help="Compare the probability of each question with the label column")
+    parser.add_argument("--label_column", default="boolean_value", help="The label column when there is a single question and no --question_label_columns for it")
+    parser.add_argument("--question_label_columns", nargs="+", default=None, metavar="QUESTION=COLUMN", help='The feature column with the observed outcome of each question, e.g. "Heart failure=label_hf"; written next to the predictions')
+    parser.add_argument("--evaluate", action="store_true", help="Compare the probability of each question with its label column (AUROC, AUPRC, Brier score per question)")
     parser.add_argument("--probe_similarity", type=float, default=0.999, help="The lowest cosine similarity between a probe and its stored vector for the encoder to be accepted")
     parser.add_argument("--fp16", action="store_true", help="Run the question encoder in half precision on a GPU (still has to reproduce the probes)")
     parser.add_argument("--batch_size", type=int, default=4096)

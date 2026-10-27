@@ -24,7 +24,7 @@ def arguments(model_path, features, output, **kwargs):
     defaults = dict(
         model_path=model_path, features_folder=features, output_dir=output, questions=["asthma", "gout"],
         questions_file=None, concepts=None, embeddings_dir=None, window="365", gap_days=0.0,
-        gap_days_column=None, label_column="boolean_value", evaluate=False,
+        gap_days_column=None, label_column="boolean_value", question_label_columns=None, evaluate=False,
         probe_similarity=0.999, fp16=False, batch_size=4,
         device="cpu",
     )
@@ -51,6 +51,8 @@ class ZeroShotQATest(unittest.TestCase):
             "subject_id": pa.array(np.arange(self.n), pa.int64()),
             "prediction_time_posix": pa.array(np.arange(self.n) * 1000.0),
             "boolean_value": pa.array([0, 1] * 3 + [0], pa.int8()),
+            "label_asthma": pa.array([0, 1] * 3 + [0], pa.int8()),
+            "label_gout": pa.array([0, 0, 1, 0, 0, 1, 0], pa.int8()),
             "features": pa.array([list(rng.normal(size=2 * N_EMBD).astype(np.float32)) for _ in range(self.n)]),
         }), os.path.join(self.features, "part-0.parquet"))
         self.output = os.path.join(self.tmp.name, "out")
@@ -92,11 +94,39 @@ class ZeroShotQATest(unittest.TestCase):
         year = pq.read_table(os.path.join(self.output, "predictions.parquet")).to_pandas()
         self.assertTrue((month["probability"].to_numpy() <= year["probability"].to_numpy() + 1e-7).all())
 
-    def test_evaluate_scores_each_question(self):
-        outcome = self.run_tool(evaluate=True)["outcome"]
+    LABELS = ["asthma=label_asthma", "gout=label_gout"]
+
+    def test_evaluate_scores_each_question_against_its_own_label(self):
+        outcome = self.run_tool(evaluate=True, question_label_columns=self.LABELS)["outcome"]
         self.assertEqual(set(outcome["per_question"]), {"asthma", "gout"})
-        self.assertEqual(outcome["per_question"]["asthma"]["n"], self.n)
+        asthma, gout = outcome["per_question"]["asthma"], outcome["per_question"]["gout"]
+        self.assertEqual(asthma["n"], self.n)
+        self.assertEqual((asthma["positives"], gout["positives"]), (3, 2))
+        for metrics in (asthma, gout):
+            self.assertIsNotNone(metrics["auroc"])
+            self.assertIsNotNone(metrics["auprc"])
         self.assertNotIn("any_of_the_questions", outcome)
+
+    def test_the_label_of_each_question_is_written_next_to_its_probability(self):
+        metrics = self.run_tool(question_label_columns=self.LABELS)
+        self.assertEqual(metrics["label_columns"], {"asthma": "label_asthma", "gout": "label_gout"})
+        table = pq.read_table(os.path.join(self.output, "predictions.parquet")).to_pandas()
+        gout = table[table["question"] == "gout"].sort_values("subject_id")
+        self.assertEqual(gout["label"].tolist(), [0, 0, 1, 0, 0, 1, 0])
+
+    def test_several_questions_need_a_label_column_each(self):
+        with self.assertRaisesRegex(ValueError, "label column of every question.*gout"):
+            self.run_tool(evaluate=True, question_label_columns=["asthma=label_asthma"])
+        with self.assertRaisesRegex(ValueError, "not one of the questions"):
+            self.run_tool(evaluate=True, question_label_columns=["copd=label_asthma"])
+        with self.assertRaisesRegex(ValueError, "question=column"):
+            self.run_tool(evaluate=True, question_label_columns=["label_asthma"])
+        with self.assertRaisesRegex(ValueError, "label_missing"):
+            self.run_tool(evaluate=True, question_label_columns=["asthma=label_asthma", "gout=label_missing"])
+
+    def test_a_single_question_falls_back_to_the_label_column(self):
+        outcome = self.run_tool(questions=["asthma"], evaluate=True)["outcome"]
+        self.assertEqual(outcome["per_question"]["asthma"]["positives"], 3)
 
     def test_another_encoder_is_refused(self):
         for other in (FakeEncoder(name="other"), FakeEncoder(salt="changed")):
