@@ -25,9 +25,6 @@ def write_study(folder: Path, default_pair=True, indication=True):
         "era_gap_days": 45,
         "monotherapy_window_days": None,
         "time_at_risk": {"min_days_at_risk": 2},
-        "reference_results": [
-            {"target": "Class A", "comparator": "Class B", "label": "Event", "hr": 1.5, "ci_lower": 1.1, "ci_upper": 2.0}
-        ],
     }
     if default_pair:
         definition["default_pair"] = {"target": "Class A", "comparator": "Class B"}
@@ -35,6 +32,12 @@ def write_study(folder: Path, default_pair=True, indication=True):
         definition["indication"] = {"name": "Condition", "concept_ids": [777], "window_days": 90}
     (folder / "study.json").write_text(json.dumps(definition))
     (folder / "outcomes.csv").write_text("name,concept_ids\n")
+    (folder / "reference_results.csv").write_text(
+        "target,comparator,outcome,time_at_risk,adjustment,source,hr,ci_lower,ci_upper,note\n"
+        "Class A,Class B,Event,intent_to_treat,stratified,CUMC,1.5,1.1,2.0,\n"
+        "Class A,Class B,Event,intent_to_treat,stratified,Meta-analysis,1.2,1.0,1.4,\n"
+        "Class A,Class B,Cut,on_treatment,matched,CUMC,0.5,,0.9,cut\n"
+    )
 
 
 class BundledStudyTest(unittest.TestCase):
@@ -96,11 +99,16 @@ class BundledStudyTest(unittest.TestCase):
 
     def test_the_reference_results_belong_to_their_pair(self):
         pair = study.resolve_pair()
-        lines = study.reference_lines(pair)
-        self.assertIn("AMI", lines[1])
-        self.assertIn("1.01", lines[1])  # thiazides vs ACE inhibitors: the inverse of 0.99
-        reverse = study.reference_lines(study.resolve_pair("ACE inhibitors", "Thiazide or thiazide-like diuretics"))
-        self.assertIn("0.99", reverse[1])
+        lines = study.reference_lines(pair, time_at_risk="intent_to_treat")
+        self.assertIn("Acute myocardial infarction", lines[1])
+        self.assertIn("0.98", lines[1])  # the result of CUMC, intent-to-treat, PS-stratified
+        self.assertIn("CUMC", lines[1])
+        self.assertTrue(all("CUMC" in line for line in lines[1:7]))
+        self.assertIn("meta-analyses", lines[-1])
+        reverse = study.reference_lines(
+            study.resolve_pair("ACE inhibitors", "Thiazide or thiazide-like diuretics"), time_at_risk="intent_to_treat"
+        )
+        self.assertIn("1.02", reverse[1])  # 1 / 0.983
         other = study.resolve_pair("Angiotensin receptor blockers (ARBs)", "Loop diuretics")
         self.assertEqual(study.reference_lines(other), [])
 
@@ -147,9 +155,20 @@ class CustomStudyTest(unittest.TestCase):
         self.assertEqual(study.resolve_pair("Class A", "Class C", study=str(folder))["exclusion"], [3, 6])
 
     def test_the_reference_results_of_the_study_are_listed_for_its_pair(self):
-        lines = study.reference_lines(study.resolve_pair(study=str(self.path)), str(self.path))
+        pair = study.resolve_pair(study=str(self.path))
+        lines = study.reference_lines(pair, str(self.path))
         self.assertIn("Mini Study", lines[0])
+        # the result of the replicated site is listed, the one of the meta-analysis is only counted
         self.assertIn("1.50", lines[1])
+        self.assertNotIn("1.20", "".join(lines))
+        self.assertIn("1 results of meta-analyses", lines[-1])
+
+    def test_the_reference_results_can_be_limited_to_one_design(self):
+        pair = study.resolve_pair(study=str(self.path))
+        results = study.reference_results(pair, str(self.path), time_at_risk="on_treatment")
+        self.assertEqual([r["outcome"] for r in results], ["Cut"])
+        self.assertIsNone(results[0]["ci_lower"])
+        self.assertIn("?–0.90", study.reference_lines(pair, str(self.path), time_at_risk="on_treatment")[1])
 
     def test_a_folder_that_is_not_a_study_is_refused(self):
         with self.assertRaisesRegex(ValueError, "no study"):
@@ -197,7 +216,7 @@ class CommandLineTest(unittest.TestCase):
     def test_the_lists(self):
         self.assertIn("ACE inhibitors  (10 ingredient(s))", self.run_tool("--list"))
         self.assertIn("legend_hypertension", self.run_tool("--studies"))
-        self.assertIn("AMI", self.run_tool("--reference"))
+        self.assertIn("Acute myocardial infarction", self.run_tool("--reference"))
 
 
 if __name__ == "__main__":

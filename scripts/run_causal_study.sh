@@ -113,6 +113,12 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-$(pwd)/output/${STUDY_LABEL}_${TARGET_LABEL}_vs_${CO
 # Number of stochastic trajectories per patient per arm
 NUM_TRAJECTORIES="${NUM_TRAJECTORIES:-5}"
 
+# Nucleus sampling threshold of the generation (1.0 samples from the full distribution; top_k is not used).
+# To generate again from the same contexts with another value, keep OUTPUT_ROOT, set SKIP_STEP1=true
+# SKIP_STEP2=true, and give TRAJECTORIES_DIR and RESULTS_DIR new folders so the first run is kept, e.g.
+#   TOP_P=0.9 TRAJECTORIES_DIR=$OUTPUT_ROOT/trajectories_top_p_0.9 RESULTS_DIR=$OUTPUT_ROOT/results_top_p_0.9 ...
+TOP_P="${TOP_P:-1.0}"
+
 # Maximum patients to draw (random sample) from the target patients and, in the symmetric
 # design, from the comparator patients before combining.  Set to "" to use all patients
 # (MAX_TARGET_PATIENTS="" bash scripts/run_causal_study.sh).
@@ -263,8 +269,8 @@ else
     OVERLAP_SCORE_PATHS=("${TARGET_OVERLAP_SCORES}")
 fi
 
-TRAJ_DIR="${OUTPUT_ROOT}/trajectories"
-RESULTS_DIR="${OUTPUT_ROOT}/results"
+TRAJ_DIR="${TRAJECTORIES_DIR:-${OUTPUT_ROOT}/trajectories}"
+RESULTS_DIR="${RESULTS_DIR:-${OUTPUT_ROOT}/results}"
 OUTCOME_DEFS_DIR="${OUTPUT_ROOT}/outcome_definitions"
 OUTCOME_DEFINITIONS="${OUTCOME_DEFS_DIR}/outcome_definitions.json"
 OUTCOME_SCRIPT="src/cehrgpt/analysis/counterfactual/outcome_definitions.py"
@@ -655,6 +661,7 @@ else
         --batch_size                "${BATCH_SIZE}"
         --generation_input_length   "${GENERATION_INPUT_LENGTH}"
         --generation_max_new_tokens "${GENERATION_MAX_NEW_TOKENS}"
+        --top_p                     "${TOP_P}"
         --num_workers               "${NUM_WORKERS}"
     )
 

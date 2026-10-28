@@ -35,9 +35,7 @@ checks that the folder can be read and shows its exposures.
  "washout_days": 365,
  "era_gap_days": 30,
  "monotherapy_window_days": 7,
- "time_at_risk": {"min_days_at_risk": 1},
- "reference_results": [{"target": "...", "comparator": "...", "label": "AMI",
-                        "hr": 0.99, "ci_lower": 0.87, "ci_upper": 1.13}]
+ "time_at_risk": {"min_days_at_risk": 1}
 }
 ```
 
@@ -53,7 +51,6 @@ checks that the folder can be read and shows its exposures.
 | `era_gap_days` | Records of a drug at most this many days apart belong to one continuous exposure |
 | `monotherapy_window_days` | Exactly one drug of the study may start from the index date up to this many days later; a combination product counts for each of its ingredients. `null`: the older same-visit checks |
 | `time_at_risk.min_days_at_risk` | Patients with less time at risk are left out |
-| `reference_results` | Published results for a pair (matched by the names of `target` and `comparator`); the script prints them at the end for that pair. Optional |
 
 Other keys may be added (for example the source files); the code ignores what it does not use. A
 value used as a default in the scripts may contain only letters, digits and `_ , . -`.
@@ -121,3 +118,22 @@ are options of the script.
    reads `outcomes.csv`, lists the outcomes that need an inpatient or ER visit and reports mistakes in the file.
 3. Run `STUDY=<folder> bash scripts/run_causal_study.sh`.
 4. To bundle it, put the folder here and add it to the table above.
+
+## `reference_results.csv` (optional)
+
+Published results to compare a run with; one row per result.
+
+```
+target,comparator,outcome,time_at_risk,adjustment,source,hr,ci_lower,ci_upper,note
+Thiazide or thiazide-like diuretics,ACE inhibitors,Stroke,intent_to_treat,stratified,CUMC,0.91,0.729,1.135,
+```
+
+| Column | Meaning |
+|---|---|
+| `target`, `comparator` | Exact names from `exposures.csv`. The results of the opposite comparison are inverted (1/hr, the interval inverted and swapped) |
+| `outcome` | Name of the outcome |
+| `time_at_risk` | `on_treatment` or `intent_to_treat`; the script prints the results of its own `TIME_AT_RISK` |
+| `adjustment` | `stratified` or `matched` (propensity score) |
+| `source` | The database. A result of the site that is replicated (for example `CUMC`) is used where there is one; `Meta-analysis` results are only counted at the end of a run |
+| `hr`, `ci_lower`, `ci_upper` | Hazard ratio and 95% interval; `ci_lower` or `ci_upper` may be empty when the interval is cut off in the source |
+| `note` | Free text |

@@ -306,9 +306,13 @@ def generate_trajectories_for_batch(
     trajectory_id: int,
     max_length: int,
     forbidden_token_ids: Optional[List[int]] = None,
+    top_p: float = 1.0,
 ) -> pl.DataFrame:
     """
     Generate one set of trajectories for a single data batch.
+
+    top_p is the nucleus sampling threshold; 1.0 samples from the full distribution. top_k is
+    never applied (it is the vocabulary size).
 
     Returns a polars DataFrame with one row per generated clinical event.
     """
@@ -329,7 +333,7 @@ def generate_trajectories_for_batch(
         values=batched_values,
         value_indicators=batched_value_indicators,
         max_length=max_length,
-        top_p=1.0,
+        top_p=top_p,
         top_k=cehrgpt_tokenizer.vocab_size,
         device=device,
         suppress_token_ids=forbidden_token_ids,
@@ -479,6 +483,7 @@ def run_generation(
     num_workers: int,
     forbidden_token_ids: Optional[List[int]] = None,
     tasks: Optional[List[Tuple[int, int]]] = None,
+    top_p: float = 1.0,
 ) -> None:
     """
     Load a context parquet, run *num_trajectories* generation passes, and
@@ -492,6 +497,8 @@ def run_generation(
     max_length
         Total sequence length budget for model.generate()
         (= context_length + generation_max_new_tokens).
+    top_p
+        Nucleus sampling threshold of the generation (1.0: the full distribution).
     tasks
         ``(trajectory_id, batch_index)`` pairs to generate, as handed out to a worker by
         ``run_on_multiple_gpus``.  Default: every batch whose parquet is missing.
@@ -568,6 +575,7 @@ def run_generation(
                 trajectory_id=traj_id,
                 max_length=max_length,
                 forbidden_token_ids=forbidden_token_ids,
+                top_p=top_p,
             )
             write_parquet_atomically(df_out, batch_output_path(output_dir, arm, traj_id, batch_i))
 
@@ -801,6 +809,12 @@ Examples
         help="Maximum number of new tokens to generate (default: 1024)",
     )
     parser.add_argument(
+        "--top_p",
+        type=float,
+        default=1.0,
+        help="Nucleus sampling threshold (default: 1.0, the full distribution; top_k is not used)",
+    )
+    parser.add_argument(
         "--num_workers",
         type=int,
         default=0,
@@ -988,6 +1002,7 @@ def main() -> None:
             num_workers=args.num_workers,
             forbidden_token_ids=forbidden_map[arm],
             tasks=worker_tasks[arm] if worker_tasks is not None else None,
+            top_p=args.top_p,
         )
 
     print("\nAll generation complete.")

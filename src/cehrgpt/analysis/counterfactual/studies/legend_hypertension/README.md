@@ -187,7 +187,6 @@ Each value is a number that appears once in a file of LEGEND; read it from there
 | `description` | | one sentence, free text |
 | `exposures` | `exposures.csv` | `levels`: the values of `type` in the order `Drug class`, `Drug major class`, `Drug`; `default_level`: `Drug class`; `drug_level`: `Drug` |
 | `default_pair` | `inst/settings/ExposuresOfInterest.csv`, column `order` | `Thiazide or thiazide-like diuretics` (`order` 1) as target against `ACE inhibitors` (`order` 2) as comparator, the same way round as LEGEND (exact names from `exposures.csv`) |
-| `reference_results` | the previous analysis script | the three results that script listed for ACE inhibitors vs thiazides: AMI 0.99 (0.87–1.13), Heart failure 1.18 (1.07–1.30), Stroke 1.09 (0.99–1.20); they are copied, not read from LEGEND, so say where they came from if the user asks. The same three for the default pair (thiazides vs ACE inhibitors) are their inverses: 1/hr, with the interval inverted and swapped (1.01, 0.85, 0.92) |
 | `indication.name` | | the indication, `Hypertension` |
 | `indication.concept_ids` | `inst/sql/sql_server/CreateExposureCohortsHypertension.sql`, last block | `WHERE condition_concept_id IN (SELECT descendant_concept_id ... WHERE ancestor_concept_id IN (316866))`: the ids in the `IN (...)` (descendants count too) |
 | `indication.window_days` | same block | `condition_start_date >= DATEADD(DAY, -365, new_user.cohort_start_date)` together with `condition_start_date <= new_user.cohort_start_date`: 365 days up to and including the index date |
@@ -239,3 +238,18 @@ Run these, and say so in the answer if any differs from what is written here (an
 
 If the new counts or concept sets differ from the old files, show the user a diff of the data files
 before replacing them: a changed outcome changes every result downstream.
+
+## `reference_results.csv`
+
+The hazard ratios of thiazides vs ACE inhibitors in the supplementary material of the LEGEND-HTN paper
+(`SupplementaryMaterial_Lancet_revision.pdf`), for the four designs (on-treatment or intent-to-treat,
+propensity score stratified or matched). The PDF has no table of them: they are read from the coordinates
+of the forest plots (the confidence interval is symmetric on the log scale, so the hazard ratio is the
+midpoint of its line), by `docs/legend_supplement/extract_thz_acei.py`.
+
+* Acute myocardial infarction, hospitalization with heart failure and stroke: the **CUMC** results
+  (figures 8a to 11c, pages 57 to 68), because CUMC is the site that is replicated.
+* The 46 safety outcomes: the **meta-analysis** (figures 12a, 13a, 14a and 15a, pages 69, 72, 75 and 77),
+  which has no result per site.
+* One CUMC interval (stroke, on-treatment, matched) is cut off at the border of the plot: its point
+  estimate is read from the marker and its lower limit is empty.

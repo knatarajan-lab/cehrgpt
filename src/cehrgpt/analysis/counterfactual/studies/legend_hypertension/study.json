@@ -35,58 +35,5 @@
   "R/CreateExposureCohorts.R",
   "inst/settings/cmAnalysisListHypertension.json",
   "inst/settings/ExposuresOfInterest.csv"
- ],
- "reference_results": [
-  {
-   "target": "Thiazide or thiazide-like diuretics",
-   "comparator": "ACE inhibitors",
-   "label": "AMI",
-   "hr": 1.01,
-   "ci_lower": 0.88,
-   "ci_upper": 1.15,
-   "note": "the inverse of the result of ACE inhibitors vs thiazides: 1/hr, with the interval inverted and swapped"
-  },
-  {
-   "target": "Thiazide or thiazide-like diuretics",
-   "comparator": "ACE inhibitors",
-   "label": "Heart failure",
-   "hr": 0.85,
-   "ci_lower": 0.77,
-   "ci_upper": 0.93,
-   "note": "the inverse of the result of ACE inhibitors vs thiazides: 1/hr, with the interval inverted and swapped"
-  },
-  {
-   "target": "Thiazide or thiazide-like diuretics",
-   "comparator": "ACE inhibitors",
-   "label": "Stroke",
-   "hr": 0.92,
-   "ci_lower": 0.83,
-   "ci_upper": 1.01,
-   "note": "the inverse of the result of ACE inhibitors vs thiazides: 1/hr, with the interval inverted and swapped"
-  },
-  {
-   "target": "ACE inhibitors",
-   "comparator": "Thiazide or thiazide-like diuretics",
-   "label": "AMI",
-   "hr": 0.99,
-   "ci_lower": 0.87,
-   "ci_upper": 1.13
-  },
-  {
-   "target": "ACE inhibitors",
-   "comparator": "Thiazide or thiazide-like diuretics",
-   "label": "Heart failure",
-   "hr": 1.18,
-   "ci_lower": 1.07,
-   "ci_upper": 1.3
-  },
-  {
-   "target": "ACE inhibitors",
-   "comparator": "Thiazide or thiazide-like diuretics",
-   "label": "Stroke",
-   "hr": 1.09,
-   "ci_lower": 0.99,
-   "ci_upper": 1.2
-  }
  ]
 }
