@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 
 import polars as pl
 
@@ -34,6 +35,8 @@ class PatientDiagnosticsTest(unittest.TestCase):
         self.assertEqual(result["tokens_after_index"], 7)
         self.assertEqual(result["tokens_in_window"], 4)  # [VE] of the index visit and the visit of day 20
         self.assertEqual(result["visits_in_window"], 1)
+        self.assertEqual(result["events_in_window"], 1)  # the refill; [VS] and [VE] are not events
+        self.assertEqual(result["event_days_in_window"], 1)
         self.assertEqual(result["same_drug_repeats"], 1)
         self.assertTrue(result["index_token_is_drug"])
 
@@ -59,6 +62,47 @@ class PatientDiagnosticsTest(unittest.TestCase):
 
     def test_a_prefix_that_does_not_end_with_the_drug_is_reported(self):
         self.assertFalse(self.diagnostics(prefix_length=3)["index_token_is_drug"])
+
+
+class GeneratedTest(unittest.TestCase):
+    def trajectories(self):
+        start = datetime(2020, 1, 1)
+        rows = [
+            # patient 1, arm_a: keeps the drug, refills on day 10 and day 200, dies on day 250, an event follows
+            (1, "arm_a", 0, 0, "x"), (1, "arm_a", 0, 10, "drug"), (1, "arm_a", 0, 200, "drug"),
+            (1, "arm_a", 0, 250, "[DEATH]"), (1, "arm_a", 0, 300, "late"),
+            # patient 2, arm_a: one event, no repeat of the drug
+            (2, "arm_a", 0, 5, "x"),
+        ]
+        return pl.DataFrame(
+            {
+                "subject_id": [r[0] for r in rows],
+                "arm": [r[1] for r in rows],
+                "trajectory_id": [r[2] for r in rows],
+                "prediction_time": [start] * len(rows),
+                "time": [start + timedelta(days=r[3]) for r in rows],
+                "code": [r[4] for r in rows],
+            }
+        ).lazy()
+
+    def test_the_events_after_death_are_left_out_and_counted(self):
+        arm_drugs = pl.DataFrame({"arm": ["arm_a"] * 2, "person_id": [1, 2], "drug_concept_id": ["drug", "drug"]})
+        drug_info = pl.DataFrame({"person_id": [1, 2], "drug_concept_id": ["drug", "other"], "arm": ["source", "comparator"]})
+        result = diagnose.generated_diagnostics(self.trajectories(), arm_drugs, drug_info, 365.0, 30).sort("subject_id")
+        first, second = result.to_dicts()
+        self.assertEqual(first["last_event_day"], 250.0)
+        self.assertEqual(first["events_in_window"], 3)  # x and the two refills; [DEATH] is not an event
+        self.assertEqual(first["same_drug_repeats"], 2)
+        self.assertEqual(first["first_repeat_day"], 10.0)
+        self.assertFalse(first["era_is_one_prescription"])
+        self.assertTrue(first["has_death"])
+        self.assertEqual(first["events_after_death"], 1)
+        self.assertEqual(first["group"], "actual")
+        self.assertEqual(second["group"], "swapped")  # the drug of the arm is not the drug the patient received
+        self.assertTrue(second["era_is_one_prescription"])
+        summary = diagnose.summarize_generated(result, 365.0)
+        self.assertEqual(set(summary), {"arm_a / actual", "arm_a / swapped"})
+        self.assertIn("arm_a / actual", diagnose.format_generated_report(summary, 365.0))
 
 
 class CollectTest(unittest.TestCase):

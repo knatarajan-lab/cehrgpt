@@ -28,6 +28,11 @@ python diagnose_original_sequences.py \\
     --source_name thiazides --comparator_name ace_inhibitors \\
     --output_dir             /path/to/diagnostics
 
+With ``--trajectories_dir`` and one ``--arm_context ARM:PATH`` per generated arm it reads the generated
+trajectories instead (or as well) and prints the same numbers per arm, for the patients who received that
+drug (``actual``) and for those whose drug was swapped (``swapped``).  The trajectories do not hold
+``[END]``, ``[VS]`` or ``[VE]``, so events and days with an event are counted, not visits.
+
 ``--drug_info`` is the drug_info of ONE extraction (Step 1a); Step 1b writes the same patients
 again with the arms swapped.  ``arm`` says which class the patient received: ``source`` is the
 class that extraction used as its source (the target class for Step 1a).
@@ -44,11 +49,28 @@ import polars as pl
 
 from cehrgpt.analysis.counterfactual.extract_drug_initiation_sequences import (
     DAY_SECONDS,
+    END_TOKEN,
+    VISIT_END_TOKEN,
     VISIT_START_TOKEN,
     compute_last_observed_time,
 )
+from cehrgpt.gpt_utils import is_att_token, is_inpatient_hour_token
 
 SEQUENCE_COLUMNS = ["person_id", "concept_ids", "epoch_times"]
+DEATH_TOKEN = "[DEATH]"
+
+
+def is_event_token(token: str) -> bool:
+    """A clinical event: not a visit marker, a time token between events, or the end of the record.
+
+    The generated trajectories keep only these (and [DEATH]), so counts of events compare the
+    original records with them.
+    """
+    return not (
+        token in (VISIT_START_TOKEN, VISIT_END_TOKEN, END_TOKEN)
+        or is_att_token(token)
+        or is_inpatient_hour_token(token)
+    )
 
 
 def patient_diagnostics(
@@ -85,12 +107,17 @@ def patient_diagnostics(
         return float((epochs[min(budget, len(epochs) - 1)] - index_time) / DAY_SECONDS)
 
     tokens_in_window = int(in_window.sum())
+    is_event = np.fromiter((is_event_token(t) for t in after), dtype=bool, count=len(after))
+    event_in_window = in_window & is_event
+    event_days = np.floor((epochs[1:][event_in_window] - index_time) / DAY_SECONDS)
     return {
         "prefix_tokens": prefix_length,
         "index_token_is_drug": bool(tokens[0] == drug_concept_id),
         "follow_up_days": follow_up_days,
         "tokens_after_index": int(len(tokens) - 1),
         "tokens_in_window": tokens_in_window,
+        "events_in_window": int(event_in_window.sum()),
+        "event_days_in_window": int(len(np.unique(event_days))),
         "visits_in_window": int(((after == VISIT_START_TOKEN) & in_window).sum()),
         "same_drug_repeats": int(((after == drug_concept_id) & in_window).sum()),
         "needs_more_than_lower_budget": tokens_in_window > budget_lower,
@@ -197,6 +224,8 @@ def summarize(diagnostics: pl.DataFrame, window_days: float) -> Dict[str, Dict[s
             "share_with_full_follow_up": float(full_year.mean()),
             "follow_up_days": describe(group["follow_up_days"]),
             "tokens_in_window": describe(group["tokens_in_window"]),
+            "events_in_window": describe(group["events_in_window"]),
+            "event_days_in_window": describe(group["event_days_in_window"]),
             "visits_in_window": describe(group["visits_in_window"]),
             "share_needing_more_than_lower_budget": float(group["needs_more_than_lower_budget"].mean()),
             "share_needing_more_than_upper_budget": float(group["needs_more_than_upper_budget"].mean()),
@@ -231,6 +260,8 @@ def format_report(summary: Dict[str, Dict[str, Any]], window_days: float, budget
             f"    need more tokens than the most  : {s['share_needing_more_than_upper_budget']:.1%}",
             _line("days the fewest tokens cover", s["days_covered_lower_budget"]),
             _line("days the most tokens cover", s["days_covered_upper_budget"]),
+            _line(f"events in the first {window_days:g} days", s["events_in_window"]),
+            _line("days with an event", s["event_days_in_window"]),
             _line(f"visits in the first {window_days:g} days", s["visits_in_window"]),
             f"    repeat record of the index drug : {s['share_with_a_repeat_of_the_drug']:.1%}",
             _line("repeats of the index drug", s["same_drug_repeats"]),
@@ -242,10 +273,129 @@ def format_report(summary: Dict[str, Dict[str, Any]], window_days: float, budget
     return "\n".join(lines)
 
 
+
+# ---------------------------------------------------------------------------
+# Generated trajectories
+# ---------------------------------------------------------------------------
+
+def read_arm_drugs(arm_contexts: Dict[str, str]) -> pl.DataFrame:
+    """(arm, person_id, drug_concept_id): the index drug of the prefix of each patient in each arm."""
+    frames = []
+    for arm, path in arm_contexts.items():
+        files = _glob_parquet(path)
+        if not files:
+            raise FileNotFoundError(f"No parquet files at {path}")
+        frame = pl.concat(
+            [pl.read_parquet(f, columns=["person_id", "drug_concept_id"]) for f in files], how="vertical_relaxed"
+        )
+        frames.append(
+            frame.unique(subset="person_id", keep="first", maintain_order=True)
+            .with_columns(pl.lit(arm).alias("arm"), pl.col("drug_concept_id").cast(pl.String))
+        )
+    return pl.concat(frames)
+
+
+def generated_diagnostics(
+    trajectories: pl.LazyFrame,
+    arm_drugs: pl.DataFrame,
+    drug_info: pl.DataFrame,
+    window_days: float,
+    era_gap_days: int,
+) -> pl.DataFrame:
+    """
+    One row per generated trajectory: how far it runs after the index time, what it holds in the
+    first window_days, and whether the index drug is written again.
+
+    The [END] token is not saved with a trajectory, so the end of a record cannot be told apart from
+    a trajectory that stopped; the last generated event is the only trace of where it ends.
+    ``group`` is ``actual`` when the arm gives the patient the drug they really received and
+    ``swapped`` otherwise.
+    """
+    days = ((pl.col("time") - pl.col("prediction_time")).dt.total_seconds() / DAY_SECONDS).alias("day")
+    keys = ["arm", "subject_id", "trajectory_id"]
+    events = trajectories.select(keys + ["code", days]).join(
+        arm_drugs.lazy().rename({"person_id": "subject_id", "drug_concept_id": "arm_drug"}),
+        on=["arm", "subject_id"], how="left",
+    )
+    # [END] stops the generation (the rest of the row is padding, which is not saved), but [DEATH] does
+    # not: events written after it are kept apart, as the record of a patient ends there
+    death_day = pl.col("day").filter(pl.col("code") == DEATH_TOKEN).min().over(keys)
+    events = events.with_columns(death_day.alias("death_day"))
+    after_death = pl.col("death_day").is_not_null() & (pl.col("day") > pl.col("death_day"))
+    events_after_death = events.filter(after_death).group_by(keys).agg(pl.len().alias("events_after_death"))
+    events = events.filter(~after_death)
+    in_window = (pl.col("day") >= 0) & (pl.col("day") <= window_days)
+    repeat = (pl.col("code") == pl.col("arm_drug")) & in_window
+    per_trajectory = (
+        events.group_by(keys).agg(
+            pl.col("arm_drug").first(),
+            pl.col("day").max().alias("last_event_day"),
+            (~pl.col("code").is_in([DEATH_TOKEN]) & in_window).sum().alias("events_in_window"),
+            pl.col("day").filter(in_window).floor().n_unique().alias("event_days_in_window"),
+            repeat.sum().alias("same_drug_repeats"),
+            pl.col("day").filter(repeat & (pl.col("day") > 0)).min().alias("first_repeat_day"),
+            (pl.col("code") == DEATH_TOKEN).any().alias("has_death"),
+        )
+        .join(events_after_death, on=keys, how="left")
+        .with_columns(pl.col("events_after_death").fill_null(0))
+    ).collect()
+    original = drug_info.select(
+        pl.col("person_id").alias("subject_id"), pl.col("drug_concept_id").cast(pl.String).alias("original_drug"),
+        pl.col("arm").alias("actual_arm"),
+    )
+    return (
+        per_trajectory.join(original, on="subject_id", how="left")
+        .with_columns(
+            pl.when(pl.col("arm_drug") == pl.col("original_drug")).then(pl.lit("actual")).otherwise(pl.lit("swapped")).alias("group"),
+            (pl.col("first_repeat_day").is_null() | (pl.col("first_repeat_day") > era_gap_days)).alias("era_is_one_prescription"),
+        )
+    )
+
+
+def summarize_generated(diagnostics: pl.DataFrame, window_days: float) -> Dict[str, Dict[str, Any]]:
+    summary: Dict[str, Dict[str, Any]] = {}
+    for (arm, group), rows in diagnostics.sort(["arm", "group"]).group_by(["arm", "group"], maintain_order=True):
+        summary[f"{arm} / {group}"] = {
+            "trajectories": len(rows),
+            "patients": rows["subject_id"].n_unique(),
+            "share_reaching_window": float((rows["last_event_day"] >= window_days).mean()),
+            "last_event_day": describe(rows["last_event_day"]),
+            "events_in_window": describe(rows["events_in_window"]),
+            "event_days_in_window": describe(rows["event_days_in_window"]),
+            "share_with_a_repeat_of_the_drug": float((rows["same_drug_repeats"] > 0).mean()),
+            "same_drug_repeats": describe(rows["same_drug_repeats"]),
+            "share_era_is_one_prescription": float(rows["era_is_one_prescription"].mean()),
+            "share_with_death": float(rows["has_death"].mean()),
+            "share_with_events_after_death": float((rows["events_after_death"] > 0).mean()),
+        }
+    return summary
+
+
+def format_generated_report(summary: Dict[str, Dict[str, Any]], window_days: float) -> str:
+    lines = ["=" * 60, "Generated trajectories after the prefixes", "=" * 60]
+    for name, s in summary.items():
+        lines += [
+            f"\n  {name}  ({s['trajectories']:,} trajectories, {s['patients']:,} patients)",
+            f"    last event at {window_days:g} days or later    : {s['share_reaching_window']:.1%}",
+            _line("day of the last event", s["last_event_day"]),
+            _line(f"events in the first {window_days:g} days", s["events_in_window"]),
+            _line("days with an event", s["event_days_in_window"]),
+            f"    repeat record of the index drug : {s['share_with_a_repeat_of_the_drug']:.1%}",
+            _line("repeats of the index drug", s["same_drug_repeats"]),
+            f"    no repeat within the era gap     : {s['share_era_is_one_prescription']:.1%}",
+            f"    [DEATH] generated               : {s['share_with_death']:.1%}  "
+            f"(events written after it, left out: {s['share_with_events_after_death']:.1%})",
+        ]
+    lines.append("=" * 60)
+    return "\n".join(lines)
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--patient_sequence_path", required=True, help="The patient sequences (folder of parquet files) of Step 1")
-    parser.add_argument("--contexts", nargs="+", required=True, help="Prefix parquet files or folders of Step 2 (the arm contexts)")
+    parser.add_argument("--patient_sequence_path", default=None, help="The patient sequences (folder of parquet files) of Step 1")
+    parser.add_argument("--contexts", nargs="+", default=None, help="Prefix parquet files or folders of Step 2 (the arm contexts); with --patient_sequence_path")
+    parser.add_argument("--trajectories_dir", default=None, help="Generated trajectories (<arm>/<trajectory_id>/batch_*.parquet); needs --arm_context")
+    parser.add_argument("--arm_context", action="append", default=None, metavar="ARM:PATH", help="The context file of a generated arm, as given to the generation (repeat for each arm)")
     parser.add_argument("--drug_info", required=True, help="drug_info folder of one extraction (Step 1a)")
     parser.add_argument("--source_name", default="source", help="Name of the arm 'source' of that extraction (the target class)")
     parser.add_argument("--comparator_name", default="comparator", help="Name of the arm 'comparator' of that extraction")
@@ -259,26 +409,55 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    sequence_files = _glob_parquet(args.patient_sequence_path)
-    if not sequence_files:
-        raise FileNotFoundError(f"No parquet files at {args.patient_sequence_path}")
-    prefix_lengths = read_prefix_lengths(args.contexts)
+    original = bool(args.patient_sequence_path or args.contexts)
+    if original and not (args.patient_sequence_path and args.contexts):
+        raise SystemExit("--patient_sequence_path and --contexts go together")
+    if not original and not args.trajectories_dir:
+        raise SystemExit("give --patient_sequence_path with --contexts, or --trajectories_dir with --arm_context")
+    if args.trajectories_dir and not args.arm_context:
+        raise SystemExit("--trajectories_dir needs one --arm_context ARM:PATH per generated arm")
     drug_info = read_drug_info(
         args.drug_info, args.era_gap_days, {"source": args.source_name, "comparator": args.comparator_name}
     )
-    print(f"{len(prefix_lengths):,} prefixes, {len(drug_info):,} drug_info rows, {len(sequence_files)} sequence files")
-    diagnostics = collect_diagnostics(
-        sequence_files, prefix_lengths, drug_info, args.window_days,
-        args.generation_input_length, args.generation_max_new_tokens,
-    )
-    summary = summarize(diagnostics, args.window_days)
-    budgets = (f"fewest tokens written {args.generation_max_new_tokens}, "
-               f"most {args.generation_input_length + args.generation_max_new_tokens} minus the prefix")
-    print(format_report(summary, args.window_days, budgets))
     os.makedirs(args.output_dir, exist_ok=True)
-    diagnostics.write_csv(os.path.join(args.output_dir, "diagnostics.csv"))
-    with open(os.path.join(args.output_dir, "diagnostics_summary.json"), "w") as f:
-        json.dump(summary, f, indent=2)
+
+    if original:
+        sequence_files = _glob_parquet(args.patient_sequence_path)
+        if not sequence_files:
+            raise FileNotFoundError(f"No parquet files at {args.patient_sequence_path}")
+        prefix_lengths = read_prefix_lengths(args.contexts)
+        print(f"{len(prefix_lengths):,} prefixes, {len(drug_info):,} drug_info rows, {len(sequence_files)} sequence files")
+        diagnostics = collect_diagnostics(
+            sequence_files, prefix_lengths, drug_info, args.window_days,
+            args.generation_input_length, args.generation_max_new_tokens,
+        )
+        summary = summarize(diagnostics, args.window_days)
+        budgets = (f"fewest tokens written {args.generation_max_new_tokens}, "
+                   f"most {args.generation_input_length + args.generation_max_new_tokens} minus the prefix")
+        print(format_report(summary, args.window_days, budgets))
+        diagnostics.write_csv(os.path.join(args.output_dir, "diagnostics.csv"))
+        with open(os.path.join(args.output_dir, "diagnostics_summary.json"), "w") as f:
+            json.dump(summary, f, indent=2)
+
+    if args.trajectories_dir:
+        arm_contexts = {}
+        for spec in args.arm_context:
+            arm, separator, path = spec.partition(":")
+            if not separator or not arm or not path:
+                raise SystemExit(f"--arm_context takes ARM:PATH, got {spec!r}")
+            arm_contexts[arm] = path
+        files = sorted(glob.glob(os.path.join(os.path.expanduser(args.trajectories_dir), "*", "*", "*.parquet")))
+        if not files:
+            raise FileNotFoundError(f"No batch files under {args.trajectories_dir}/<arm>/<trajectory_id>/")
+        print(f"{len(files):,} trajectory batch files")
+        generated = generated_diagnostics(
+            pl.scan_parquet(files), read_arm_drugs(arm_contexts), drug_info, args.window_days, args.era_gap_days
+        )
+        generated_summary = summarize_generated(generated, args.window_days)
+        print(format_generated_report(generated_summary, args.window_days))
+        generated.write_csv(os.path.join(args.output_dir, "generated_diagnostics.csv"))
+        with open(os.path.join(args.output_dir, "generated_diagnostics_summary.json"), "w") as f:
+            json.dump(generated_summary, f, indent=2)
     print(f"Written to {args.output_dir}")
 
 
