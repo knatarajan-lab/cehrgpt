@@ -51,6 +51,7 @@ checks that the folder can be read and shows its exposures.
 | `era_gap_days` | Records of a drug at most this many days apart belong to one continuous exposure |
 | `monotherapy_window_days` | Exactly one drug of the study may start from the index date up to this many days later; a combination product counts for each of its ingredients. `null`: the older same-visit checks |
 | `time_at_risk.min_days_at_risk` | Patients with less time at risk are left out |
+| `primary_outcomes` | Names of the outcomes the publication calls primary (optional). `compare_hazard_ratios.py` shows them first, then the other outcomes of `reference_results.csv` as safety outcomes, in the order of that file |
 
 Other keys may be added (for example the source files); the code ignores what it does not use. A
 value used as a default in the scripts may contain only letters, digits and `_ , . -`.

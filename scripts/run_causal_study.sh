@@ -279,6 +279,7 @@ EXTRACT_SCRIPT="src/cehrgpt/analysis/counterfactual/extract_drug_initiation_sequ
 SWAP_SCRIPT="src/cehrgpt/analysis/counterfactual/create_drug_swap_context.py"
 GENERATE_SCRIPT="src/cehrgpt/analysis/counterfactual/generate_counterfactual_sequences.py"
 HR_SCRIPT="src/cehrgpt/analysis/counterfactual/hazard_ratio_estimation.py"
+COMPARE_SCRIPT="src/cehrgpt/analysis/counterfactual/compare_hazard_ratios.py"
 PLOT_SCRIPT="src/cehrgpt/analysis/counterfactual/overlap_plot.py"
 
 # =============================================================================
@@ -740,7 +741,8 @@ fi
 #
 #   (a) generated trajectories: arm A vs arm B, written to hazard_ratio_summary.csv;
 #   (b) the observed cohorts: the real target and comparator patients of Step 1a, written to
-#       observed_hazard_ratio_summary.csv, as a reference for (a).
+#       observed_hazard_ratio_summary.csv, as a reference for (a);
+#   (c) both side by side in generated_vs_observed_hazard_ratios.csv, printed with the primary outcomes first.
 #   Both leave out the patients that had an outcome before the index date (for that outcome)
 #   and the patients dropped by the overlap check of Step 2.
 # =============================================================================
@@ -806,6 +808,14 @@ else
         --vocab_path              "${VOCAB_PATH}" \
         --era_gap_days            "${ERA_GAP_DAYS}" \
         "${_HR_EXTRA_ARGS[@]}"
+
+    # (c) generated against observed hazard ratios, side by side: the primary outcomes of the study first, then
+    #     its safety outcomes, in the order of the publication
+    python "${COMPARE_SCRIPT}" \
+        --results_dir "${RESULTS_DIR}" \
+        --arm_a       "${ARM_A}" \
+        --arm_b       "${ARM_B}" \
+        --study       "${STUDY}"
     _step_end
 
     echo "Step 4 complete."
@@ -821,6 +831,7 @@ echo ""
 echo "Key files:"
 echo "  ${RESULTS_DIR}/hazard_ratio_summary.csv           (generated ${TARGET_NAME} vs generated ${COMPARATOR_NAME})"
 echo "  ${RESULTS_DIR}/observed_hazard_ratio_summary.csv  (observed ${TARGET_NAME} vs observed ${COMPARATOR_NAME})"
+echo "  ${RESULTS_DIR}/generated_vs_observed_hazard_ratios.csv  (both side by side, in the order of the publication)"
 echo "  ${RESULTS_DIR}/control_outcome_summary.csv        (negative / positive controls, when given)"
 echo "  ${RESULTS_DIR}/preference_score_overlap.png       (overlap of the two groups of patients; _summary.csv beside it)"
 echo "  ${RESULTS_DIR}/km_<concept_id>.csv"

@@ -14,6 +14,11 @@
   "target": "Thiazide or thiazide-like diuretics",
   "comparator": "ACE inhibitors"
  },
+ "primary_outcomes": [
+  "Acute myocardial infarction",
+  "Hospitalization with heart failure",
+  "Stroke"
+ ],
  "indication": {
   "name": "Hypertension",
   "concept_ids": [

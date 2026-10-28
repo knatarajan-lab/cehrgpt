@@ -186,6 +186,22 @@ def reference_results(pair: Dict, study: str = DEFAULT_STUDY, time_at_risk: Opti
     return results
 
 
+def outcome_order(study: str = DEFAULT_STUDY) -> Dict[str, List[str]]:
+    """
+    The outcomes of the publication in its order, to lay out results like it: ``primary`` (the
+    ``primary_outcomes`` of study.json) first, then ``safety``, every other outcome of
+    reference_results.csv in the order of the file.  Both are empty without those files.
+    """
+    primary = list(load_study(study).get("primary_outcomes", []))
+    path = study_dir(study) / "reference_results.csv"
+    named: List[str] = []
+    if path.is_file():
+        with open(path, newline="") as f:
+            named = [r["outcome"].strip() for r in csv.DictReader(f)]
+    safety = [o for o in dict.fromkeys(named) if o not in primary]
+    return {"primary": primary, "safety": safety}
+
+
 def _interval(row: Dict) -> str:
     lower = "?" if row["ci_lower"] is None else f"{row['ci_lower']:.2f}"
     upper = "?" if row["ci_upper"] is None else f"{row['ci_upper']:.2f}"
