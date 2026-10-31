@@ -1137,14 +1137,15 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 [demographic_embeddings, random_vectors, medical_event_embeddings],
                 dim=1,
             )
-            position_ids = torch.concat(
-                [
-                    position_ids[:, : self.config.demographics_size],
-                    position_ids[:, :1],
-                    position_ids[:, self.config.demographics_size :],
-                ],
-                dim=1,
-            )
+            if position_ids is not None:
+                position_ids = torch.concat(
+                    [
+                        position_ids[:, : self.config.demographics_size],
+                        position_ids[:, :1],
+                        position_ids[:, self.config.demographics_size :],
+                    ],
+                    dim=1,
+                )
 
         if self.include_values:
             if (
@@ -2304,10 +2305,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # consumes ages. The previous implementation decoded every sampled token
         # on CPU, updated a NumPy array, rebuilt the entire growing age history,
         # and copied it back to the GPU at every decoding step.
-        track_ages = (
-            getattr(self.cehrgpt.config, "backbone", "gpt2") == "gpt2"
-            and getattr(self.cehrgpt.config, "apply_rotary", False)
-        ) or self.cehrgpt.config.causal_sfm
+        track_ages = getattr(self.cehrgpt.config, "apply_rotary", False)
         if track_ages:
             time_delta_lookup = torch.zeros(
                 self.config.vocab_size, dtype=torch.float32, device=input_ids.device
