@@ -369,6 +369,11 @@ def main(args):
         temp_folder = os.path.join(args.output_folder, folder_name, "temp")
     os.makedirs(prediction_output_folder_name, exist_ok=True)
     os.makedirs(temp_folder, exist_ok=True)
+    # An interrupted worker can leave a lock for a record whose buffered result
+    # never reached parquet.  This worker owns its temp folder, so those locks
+    # are safe to retry; durable .done flags are created only after a flush.
+    for stale_lock in glob.glob(os.path.join(temp_folder, "*.lock")):
+        os.remove(stale_lock)
 
     LOG.info("Loading tokenizer at %s", args.model_folder)
     LOG.info("Loading model at %s", args.model_folder)
@@ -405,6 +410,7 @@ def main(args):
         generation_config=generation_config,
         batch_size=args.batch_size,
         device=get_device(),
+        store_generated_trajectories=args.store_generated_trajectories,
     )
     if args.prepared_dataset_path:
         test_dataset = load_from_disk(args.prepared_dataset_path)
@@ -443,6 +449,7 @@ def main(args):
             generation_config.max_length - generation_config.max_new_tokens,
             known_numeric_tokens,
         )
+        partial_history = ts_pred_model.prepare_prompt(partial_history)
 
         concept_time_to_event = ts_pred_model.predict_time_to_events(
             partial_history,
@@ -462,6 +469,7 @@ def main(args):
         )
         tte_outputs.append(
             {
+                "_sample_identifier": sample_identifier,
                 "subject_id": record["person_id"],
                 "prediction_time": index_date,
                 "visit_counter": visit_counter,
@@ -475,15 +483,21 @@ def main(args):
                 "prefix": list(partial_history),
             }
         )
-        delete_lock_create_processed_flag(
-            output_folder=temp_folder, sample_id=sample_identifier
-        )
         flush_to_disk_if_full(
-            tte_outputs, prediction_output_folder_name, args.buffer_size
+            tte_outputs,
+            prediction_output_folder_name,
+            args.buffer_size,
+            temp_folder,
         )
 
     # Final flush
-    flush_to_disk_if_full(tte_outputs, prediction_output_folder_name, args.buffer_size)
+    flush_to_disk_if_full(
+        tte_outputs,
+        prediction_output_folder_name,
+        args.buffer_size,
+        temp_folder,
+        force=True,
+    )
     # Remove the temp folder
     shutil.rmtree(temp_folder)
 
@@ -566,9 +580,13 @@ def filter_out_existing_results(
 
 
 def flush_to_disk_if_full(
-    tte_outputs: List[Dict[str, Any]], prediction_output_folder_name, buffer_size: int
+    tte_outputs: List[Dict[str, Any]],
+    prediction_output_folder_name: str,
+    buffer_size: int,
+    temp_folder: str,
+    force: bool = False,
 ) -> None:
-    if len(tte_outputs) >= buffer_size:
+    if tte_outputs and (force or len(tte_outputs) >= buffer_size):
         LOG.info(
             "%s: Flushing time to visit predictions to disk", datetime.datetime.now()
         )
@@ -589,6 +607,11 @@ def flush_to_disk_if_full(
                 "prefix",
             ],
         ).to_parquet(output_parquet_file)
+        for output in tte_outputs:
+            delete_lock_create_processed_flag(
+                output_folder=temp_folder,
+                sample_id=output["_sample_identifier"],
+            )
         tte_outputs.clear()
 
 
@@ -680,6 +703,11 @@ def create_arg_parser():
         "--debug",
         dest="debug",
         action="store_true",
+    )
+    base_arg_parser.add_argument(
+        "--store_generated_trajectories",
+        action="store_true",
+        help="Persist raw generated token trajectories in the prediction parquet files.",
     )
     base_arg_parser.add_argument(
         "--max_n_trial",

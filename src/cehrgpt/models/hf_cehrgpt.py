@@ -1607,7 +1607,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 remove_prefix_length = input_ids.shape[1] - 1
 
             input_ids = input_ids[:, remove_prefix_length:]
-            ages = ages[:, remove_prefix_length:]
+            # Generation callers may keep only the age of the newest token once
+            # the prefix is represented by the KV cache.  Otherwise trim the
+            # full age history in lockstep with input_ids.
+            if ages is not None and ages.shape[1] > 1:
+                ages = ages[:, remove_prefix_length:]
 
         attention_mask = kwargs.get("attention_mask", None)
         random_vectors = kwargs.get("random_vectors", None)
@@ -2268,6 +2272,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         lab_token_ids = torch.tensor(
             cehrgpt_tokenizer.lab_token_ids,
             dtype=torch.int32,
+            device=input_ids.device,
         )
         if model_kwargs.get("value_indicators", None) is not None:
             value_indicators = model_kwargs.get("value_indicators")
@@ -2295,24 +2300,79 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         model_kwargs["value_indicators"] = value_indicators
         model_kwargs["values"] = values
 
-        # A variable to keep track of time and initialize it to zero
-        batched_time_delta = np.zeros((batch_size,), dtype=np.float32)
-        batched_ages = model_kwargs.get("ages", None)
-        if batched_ages is None:
-            batched_ages = []
-            for token_ids in input_ids.detach().cpu():
-                concept_ids = cehrgpt_tokenizer.decode(
-                    token_ids.numpy(), skip_special_tokens=False
+        # Keep generated time and age state on the accelerator when the model
+        # consumes ages. The previous implementation decoded every sampled token
+        # on CPU, updated a NumPy array, rebuilt the entire growing age history,
+        # and copied it back to the GPU at every decoding step.
+        track_ages = (
+            getattr(self.cehrgpt.config, "backbone", "gpt2") == "gpt2"
+            and getattr(self.cehrgpt.config, "apply_rotary", False)
+        ) or self.cehrgpt.config.causal_sfm
+        if track_ages:
+            time_delta_lookup = torch.zeros(
+                self.config.vocab_size, dtype=torch.float32, device=input_ids.device
+            )
+            time_token_ids = []
+            time_token_days = []
+            for token, token_id in cehrgpt_tokenizer.get_vocab().items():
+                if token_id < self.config.vocab_size and is_att_token(token):
+                    time_token_ids.append(token_id)
+                    time_token_days.append(extract_time_interval_in_days(token))
+            if time_token_ids:
+                time_delta_lookup[
+                    torch.tensor(time_token_ids, device=input_ids.device)
+                ] = torch.tensor(
+                    time_token_days, dtype=torch.float32, device=input_ids.device
                 )
-                batched_ages.append(construct_age_sequence(concept_ids))
-            # Turn this to a numpy array for easy manipulation
-            batched_ages = np.asarray(batched_ages)
+            batched_time_delta = torch.zeros(
+                batch_size, dtype=torch.float32, device=input_ids.device
+            )
+            batched_ages = model_kwargs.get("ages", None)
+            if batched_ages is None:
+                batched_ages = []
+                for token_ids in input_ids.detach().cpu():
+                    concept_ids = cehrgpt_tokenizer.decode(
+                        token_ids.numpy(), skip_special_tokens=False
+                    )
+                    batched_ages.append(construct_age_sequence(concept_ids))
+                batched_ages = torch.as_tensor(
+                    np.asarray(batched_ages), device=input_ids.device
+                )
+            else:
+                batched_ages = batched_ages.to(input_ids.device)
+            base_ages = batched_ages[:, -1]
+            model_kwargs["ages"] = batched_ages
         else:
-            batched_ages = batched_ages.cpu().numpy()
-        # This is the base to which we will add the time delta
-        base_ages = np.asarray([ages[-1] for ages in batched_ages])
-        # Update the keyword arguments for the prepare_inputs_for_generation
-        model_kwargs["ages"] = torch.tensor(batched_ages).to(input_ids.device)
+            time_delta_lookup = None
+            batched_time_delta = None
+            batched_ages = None
+            base_ages = None
+            model_kwargs["ages"] = None
+
+        # `generate(num_return_sequences=N)` expands one prompt to N identical
+        # rows before entering this sampling loop.  In eval mode, and without
+        # the per-sequence causal-SFM random vector, prefill that shared prompt
+        # once and broadcast its KV cache instead of doing N identical prefills.
+        share_prompt_prefill = (
+            batch_size > 1
+            and not self.training
+            and not self.cehrgpt.config.causal_sfm
+            and model_kwargs.get("use_cache", False)
+            and not output_attentions
+            and not output_hidden_states
+            and model_kwargs.get("past_key_values") is None
+            and torch.equal(input_ids, input_ids[:1].expand_as(input_ids))
+            and (
+                batched_ages is None
+                or torch.equal(batched_ages, batched_ages[:1].expand_as(batched_ages))
+            )
+            and torch.equal(
+                value_indicators,
+                value_indicators[:1].expand_as(value_indicators),
+            )
+            and torch.equal(values, values[:1].expand_as(values))
+        )
+        prompt_prefilled = False
 
         while self._has_unfinished_sequences(
             this_peer_finished, synced_gpus, device=input_ids.device
@@ -2323,12 +2383,43 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             )
 
             # forward pass to get next token
-            outputs = self(
-                **model_inputs,
-                return_dict=True,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-            )
+            if share_prompt_prefill and not prompt_prefilled:
+                single_inputs = {
+                    key: (
+                        value[:1]
+                        if isinstance(value, torch.Tensor)
+                        and value.ndim > 0
+                        and value.shape[0] == batch_size
+                        else value
+                    )
+                    for key, value in model_inputs.items()
+                }
+                outputs = self(
+                    **single_inputs,
+                    return_dict=True,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                )
+                outputs.logits = outputs.logits.expand(batch_size, -1, -1)
+                if outputs.next_value_logits is not None:
+                    outputs.next_value_logits = outputs.next_value_logits.expand(
+                        batch_size, -1, -1
+                    )
+                outputs.past_key_values = tuple(
+                    tuple(
+                        state.expand(batch_size, *state.shape[1:])
+                        for state in layer_past
+                    )
+                    for layer_past in outputs.past_key_values
+                )
+                prompt_prefilled = True
+            else:
+                outputs = self(
+                    **model_inputs,
+                    return_dict=True,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                )
 
             if synced_gpus and this_peer_finished:
                 continue  # don't waste resources running the code we don't need
@@ -2372,21 +2463,17 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             else:
                 next_tokens = torch.argmax(next_token_scores, dim=-1)
 
-            # TODO: decode to get time tokens and recalculate the age at this time step
-            # Look for a potential time token
-            for batch_i, next_concept_id in enumerate(
-                cehrgpt_tokenizer.decode(
-                    next_tokens.detach().cpu().numpy(), skip_special_tokens=False
-                )
-            ):
-                if is_att_token(next_concept_id):
-                    batched_time_delta[batch_i] += extract_time_interval_in_days(
-                        next_concept_id
+            if track_ages:
+                batched_time_delta.add_(time_delta_lookup[next_tokens])
+                next_age = (
+                    base_ages
+                    + torch.div(batched_time_delta, 365, rounding_mode="floor").to(
+                        base_ages.dtype
                     )
-
-            next_age = (base_ages + batched_time_delta // 365).astype(int)[..., None]
-            batched_ages = np.concatenate([batched_ages, next_age], axis=-1)
-            model_kwargs["ages"] = torch.tensor(batched_ages).to(input_ids.device)
+                ).unsqueeze(-1)
+                # With a populated KV cache the next forward pass consumes one token,
+                # so it only needs the age for that token rather than the full history.
+                model_kwargs["ages"] = next_age
 
             # finished sentences should have their next token be a padding token
             if eos_token_id_tensor is not None:
@@ -2403,7 +2490,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             if self.cehrgpt.include_values:
                 next_value_indicators = torch.isin(
-                    next_tokens, lab_token_ids.to(next_tokens.device)
+                    next_tokens, lab_token_ids
                 )
                 next_value_logits = outputs.next_value_logits[:, -1]
                 # sample

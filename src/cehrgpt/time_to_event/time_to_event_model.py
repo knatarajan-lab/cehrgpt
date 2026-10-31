@@ -1,4 +1,3 @@
-import math
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -6,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 from cehrbert_data.decorators.patient_event_decorator_base import time_month_token
-from transformers import GenerationConfig
+from transformers import GenerationConfig, StoppingCriteria, StoppingCriteriaList
 
 from cehrgpt.gpt_utils import (
     extract_time_interval_in_days,
@@ -31,6 +30,81 @@ class TimeToEvent:
     # The raw generated continuation for every simulated trial (not just the ones that
     # satisfied the stopping criteria), kept for manual investigation of model behavior.
     generated_trajectories: List[List[str]] = field(default_factory=list)
+
+
+class TimeToEventStoppingCriteria(StoppingCriteria):
+    """Stop each sampled trajectory once its task outcome is determined."""
+
+    def __init__(
+        self,
+        tokenizer: CehrGptTokenizer,
+        outcome_events: List[str],
+        future_visit_start: int,
+        future_visit_end: int,
+        prediction_window_start: int,
+        prediction_window_end: int,
+    ):
+        vocab = tokenizer.get_vocab()
+        vocab_size = max(vocab.values(), default=-1) + 1
+        self._time_days = torch.zeros(vocab_size, dtype=torch.float32)
+        self._is_time = torch.zeros(vocab_size, dtype=torch.bool)
+        self._is_visit_start = torch.zeros(vocab_size, dtype=torch.bool)
+        self._is_outcome = torch.zeros(vocab_size, dtype=torch.bool)
+        for token, token_id in vocab.items():
+            if is_att_token(token):
+                self._is_time[token_id] = True
+                self._time_days[token_id] = extract_time_interval_in_days(token)
+            if is_visit_start(token):
+                self._is_visit_start[token_id] = True
+        outcome_ids = [vocab[event] for event in outcome_events if event in vocab]
+        if outcome_ids:
+            self._is_outcome[outcome_ids] = True
+        self.future_visit_start = future_visit_start
+        self.future_visit_end = future_visit_end
+        self.prediction_window_start = prediction_window_start
+        self.prediction_window_end = prediction_window_end
+        self._device = None
+        self._time_delta = None
+        self._visit_count = None
+        self._finished = None
+
+    def _move_to(self, device: torch.device, batch_size: int) -> None:
+        if self._device != device:
+            self._time_days = self._time_days.to(device)
+            self._is_time = self._is_time.to(device)
+            self._is_visit_start = self._is_visit_start.to(device)
+            self._is_outcome = self._is_outcome.to(device)
+            self._device = device
+        self._time_delta = torch.zeros(batch_size, dtype=torch.float32, device=device)
+        self._visit_count = torch.zeros(batch_size, dtype=torch.long, device=device)
+        self._finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+    def __call__(self, input_ids, scores, **kwargs) -> torch.BoolTensor:
+        batch_size = input_ids.shape[0]
+        if self._finished is None or self._finished.shape[0] != batch_size:
+            self._move_to(input_ids.device, batch_size)
+
+        next_tokens = input_ids[:, -1]
+        self._visit_count.add_(self._is_visit_start[next_tokens].long())
+        crossed_visit_limit = (
+            self._visit_count > self.future_visit_end
+            if self.future_visit_end != -1
+            else torch.zeros_like(self._finished)
+        )
+        crossed_time_limit = (
+            self._time_delta > self.prediction_window_end
+            if self.prediction_window_end != -1
+            else torch.zeros_like(self._finished)
+        )
+        eligible_outcome = (
+            (self._visit_count >= self.future_visit_start)
+            & (self._time_delta >= self.prediction_window_start)
+            & ~self._is_time[next_tokens]
+            & self._is_outcome[next_tokens]
+        )
+        self._finished |= crossed_visit_limit | crossed_time_limit | eligible_outcome
+        self._time_delta.add_(self._time_days[next_tokens])
+        return self._finished
 
 
 def create_time_to_event(
@@ -73,6 +147,7 @@ class TimeToEventModel:
         generation_config: GenerationConfig,
         device: torch.device = torch.device("cpu"),
         batch_size: int = 32,
+        store_generated_trajectories: bool = False,
     ):
         self.tokenizer = tokenizer
         self.model = model.eval()
@@ -83,39 +158,87 @@ class TimeToEventModel:
         self.outcome_events = [str(event) for event in outcome_events]
         self.device = device
         self.batch_size = batch_size
+        self.store_generated_trajectories = store_generated_trajectories
         self.max_sequence = model.config.n_positions
 
     def is_outcome_event(self, token: str) -> bool:
         return token in self.outcome_events
 
+    def prepare_prompt(self, partial_history: Union[np.ndarray, List[str]]) -> List[str]:
+        """Fit a history to the encoded context while preserving demographics."""
+        history = list(partial_history)
+        max_prompt_tokens = (
+            self.generation_config.max_length
+            - self.generation_config.max_new_tokens
+        )
+        if len(self.tokenizer.encode(history)) <= max_prompt_tokens:
+            return history
+
+        demographics = history[:4]
+        if len(self.tokenizer.encode(demographics)) > max_prompt_tokens:
+            raise ValueError("The demographic prompt does not fit in the model context")
+
+        # Drop old visits, not the year/age/gender/race header. Verify encoded
+        # length so tokenizer-added special tokens count toward the context.
+        prompt = history
+        while len(self.tokenizer.encode(prompt)) > max_prompt_tokens and len(prompt) > 4:
+            next_visit = next(
+                (
+                    index
+                    for index in range(5, len(prompt))
+                    if is_visit_start(prompt[index])
+                ),
+                None,
+            )
+            if next_visit is None:
+                remove_index = 5 if len(prompt) > 5 and is_visit_start(prompt[4]) else 4
+                prompt.pop(remove_index)
+            else:
+                prompt = demographics + prompt[next_visit:]
+        return prompt
+
     def simulate(
         self,
         partial_history: Union[np.ndarray, List[str]],
+        future_visit_start: int = 0,
+        future_visit_end: int = -1,
+        prediction_window_start: int = 0,
+        prediction_window_end: int = 365,
     ) -> List[List[str]]:
+        partial_history = self.prepare_prompt(partial_history)
         token_ids = self.tokenizer.encode(partial_history)
         prompt = torch.tensor(token_ids).unsqueeze(0).to(self.device)
 
         simulated_sequences = []
-        num_iters = max(
-            math.ceil(self.generation_config.num_return_sequences / self.batch_size), 1
-        )
         old_num_return_sequences = self.generation_config.num_return_sequences
-        self.generation_config.num_return_sequences = min(
-            self.batch_size, old_num_return_sequences
-        )
-        with torch.no_grad():
-            for _ in range(num_iters):
+        with torch.inference_mode():
+            while len(simulated_sequences) < old_num_return_sequences:
+                self.generation_config.num_return_sequences = min(
+                    self.batch_size,
+                    old_num_return_sequences - len(simulated_sequences),
+                )
+                stopping_criteria = StoppingCriteriaList(
+                    [
+                        TimeToEventStoppingCriteria(
+                            tokenizer=self.tokenizer,
+                            outcome_events=self.outcome_events,
+                            future_visit_start=future_visit_start,
+                            future_visit_end=future_visit_end,
+                            prediction_window_start=prediction_window_start,
+                            prediction_window_end=prediction_window_end,
+                        )
+                    ]
+                )
                 results = self.model.generate(
                     inputs=prompt,
                     generation_config=self.generation_config,
                     cehrgpt_tokenizer=self.tokenizer,
+                    stopping_criteria=stopping_criteria,
                 )
-                # Clear the cache
-                torch.cuda.empty_cache()
                 # Add the sequences to the result array
                 simulated_sequences.extend(
                     [
-                        self.tokenizer.decode(seq.cpu().numpy())
+                        self.tokenizer.decode(seq[len(token_ids) :].cpu().numpy())
                         for seq in results.sequences
                     ]
                 )
@@ -133,7 +256,6 @@ class TimeToEventModel:
         debug: bool = False,
         max_n_trial: int = 2,
     ) -> Optional[TimeToEvent]:
-        patient_history_length = len(partial_history)
         time_event_tuples = []
         seqs_failed_to_convert = []
         generated_trajectories = []
@@ -148,14 +270,21 @@ class TimeToEventModel:
                 time_event_tuples
             )
             # self.generation_config.max_new_tokens = max_new_tokens * (n_trial + 1)
-            simulated_seqs = self.simulate(partial_history)
+            simulated_seqs = self.simulate(
+                partial_history,
+                future_visit_start,
+                future_visit_end,
+                prediction_window_start,
+                prediction_window_end,
+            )
             n_trial += 1
             for seq in simulated_seqs:
                 visit_counter = 0
                 time_delta = 0
                 success = False
-                generated_trajectory = seq[patient_history_length:]
-                generated_trajectories.append(generated_trajectory)
+                generated_trajectory = seq
+                if self.store_generated_trajectories:
+                    generated_trajectories.append(generated_trajectory)
                 for next_token in generated_trajectory:
                     visit_counter += int(is_visit_start(next_token))
                     if (
@@ -178,7 +307,7 @@ class TimeToEventModel:
                 if not success:
                     # This indicates the generated sequence did not satisfy the criteria
                     if future_visit_end != -1 or prediction_window_end != -1:
-                        seqs_failed_to_convert.append(seq[patient_history_length:])
+                        seqs_failed_to_convert.append(generated_trajectory)
                     else:
                         time_event_tuples.append(("0", time_delta))
 
