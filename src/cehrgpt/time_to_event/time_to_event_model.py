@@ -148,6 +148,7 @@ class TimeToEventModel:
         device: torch.device = torch.device("cpu"),
         batch_size: int = 32,
         store_generated_trajectories: bool = False,
+        enable_early_stopping: bool = True,
     ):
         self.tokenizer = tokenizer
         self.model = model.eval()
@@ -159,6 +160,7 @@ class TimeToEventModel:
         self.device = device
         self.batch_size = batch_size
         self.store_generated_trajectories = store_generated_trajectories
+        self.enable_early_stopping = enable_early_stopping
         self.max_sequence = model.config.n_positions
 
     def is_outcome_event(self, token: str) -> bool:
@@ -217,23 +219,25 @@ class TimeToEventModel:
                     self.batch_size,
                     old_num_return_sequences - len(simulated_sequences),
                 )
-                stopping_criteria = StoppingCriteriaList(
-                    [
-                        TimeToEventStoppingCriteria(
-                            tokenizer=self.tokenizer,
-                            outcome_events=self.outcome_events,
-                            future_visit_start=future_visit_start,
-                            future_visit_end=future_visit_end,
-                            prediction_window_start=prediction_window_start,
-                            prediction_window_end=prediction_window_end,
-                        )
-                    ]
-                )
+                generation_kwargs = {}
+                if self.enable_early_stopping:
+                    generation_kwargs["stopping_criteria"] = StoppingCriteriaList(
+                        [
+                            TimeToEventStoppingCriteria(
+                                tokenizer=self.tokenizer,
+                                outcome_events=self.outcome_events,
+                                future_visit_start=future_visit_start,
+                                future_visit_end=future_visit_end,
+                                prediction_window_start=prediction_window_start,
+                                prediction_window_end=prediction_window_end,
+                            )
+                        ]
+                    )
                 results = self.model.generate(
                     inputs=prompt,
                     generation_config=self.generation_config,
                     cehrgpt_tokenizer=self.tokenizer,
-                    stopping_criteria=stopping_criteria,
+                    **generation_kwargs,
                 )
                 # Add the sequences to the result array
                 simulated_sequences.extend(

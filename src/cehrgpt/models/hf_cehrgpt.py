@@ -832,6 +832,12 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         # Model parallel
         self.model_parallel = False
         self.device_map = None
+
+        # Private validation switches used by the differential equivalence tests.
+        # Production behavior keeps both at their optimized defaults.  Keeping the
+        # switches off the serialized config avoids changing checkpoint semantics.
+        self._generation_share_prompt_prefill = True
+        self._generation_track_ages_override = None
         self.gradient_checkpointing = False
 
         # Initialize weights and apply final processing
@@ -2305,7 +2311,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # consumes ages. The previous implementation decoded every sampled token
         # on CPU, updated a NumPy array, rebuilt the entire growing age history,
         # and copied it back to the GPU at every decoding step.
-        track_ages = getattr(self.cehrgpt.config, "apply_rotary", False)
+        track_ages_override = self._generation_track_ages_override
+        track_ages = (
+            getattr(self.cehrgpt.config, "apply_rotary", False)
+            if track_ages_override is None
+            else track_ages_override
+        )
         if track_ages:
             time_delta_lookup = torch.zeros(
                 self.config.vocab_size, dtype=torch.float32, device=input_ids.device
@@ -2352,7 +2363,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # the per-sequence causal-SFM random vector, prefill that shared prompt
         # once and broadcast its KV cache instead of doing N identical prefills.
         share_prompt_prefill = (
-            batch_size > 1
+            self._generation_share_prompt_prefill
+            and batch_size > 1
             and not self.training
             and not self.cehrgpt.config.causal_sfm
             and model_kwargs.get("use_cache", False)
