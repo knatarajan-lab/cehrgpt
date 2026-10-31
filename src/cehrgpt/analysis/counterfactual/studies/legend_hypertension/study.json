@@ -1,0 +1,44 @@
+{
+ "name": "LEGEND-Hypertension",
+ "description": "Cohort rules and exposures of the OHDSI LEGEND hypertension study (new users of antihypertensive drug classes)",
+ "exposures": {
+  "levels": [
+   "Drug class",
+   "Drug major class",
+   "Drug"
+  ],
+  "default_level": "Drug class",
+  "drug_level": "Drug"
+ },
+ "default_pair": {
+  "target": "Thiazide or thiazide-like diuretics",
+  "comparator": "ACE inhibitors"
+ },
+ "primary_outcomes": [
+  "Acute myocardial infarction",
+  "Hospitalization with heart failure",
+  "Stroke"
+ ],
+ "indication": {
+  "name": "Hypertension",
+  "concept_ids": [
+   316866
+  ],
+  "window_days": 365
+ },
+ "washout_days": 365,
+ "era_gap_days": 30,
+ "monotherapy_window_days": 7,
+ "time_at_risk": {
+  "risk_window_start_day": 1,
+  "min_days_at_risk": 1,
+  "remove_subjects_with_prior_outcome": true,
+  "intent_to_treat_min_days_at_risk": 1
+ },
+ "source_files": [
+  "inst/sql/sql_server/CreateExposureCohortsHypertension.sql",
+  "R/CreateExposureCohorts.R",
+  "inst/settings/cmAnalysisListHypertension.json",
+  "inst/settings/ExposuresOfInterest.csv"
+ ]
+}
