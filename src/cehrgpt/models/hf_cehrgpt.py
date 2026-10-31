@@ -2367,6 +2367,13 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             and batch_size > 1
             and not self.training
             and not self.cehrgpt.config.causal_sfm
+            # Flash Attention selects batch-dependent kernels.  On the production
+            # BF16 checkpoint, a one-row prefill changed the next-token distribution
+            # relative to the legacy repeated-batch prefill, so only use this exact
+            # optimization on attention implementations covered by the differential
+            # equivalence test.
+            and getattr(self.config, "_attn_implementation", "eager")
+            != "flash_attention_2"
             and model_kwargs.get("use_cache", False)
             and not output_attentions
             and not output_hidden_states
