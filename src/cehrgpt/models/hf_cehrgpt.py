@@ -843,6 +843,13 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+    def _can_share_generation_prompt_prefill(self) -> bool:
+        return (
+            self._generation_share_prompt_prefill
+            and getattr(self.config, "_attn_implementation", "eager")
+            != "flash_attention_2"
+        )
+
         # We do need to update the pre-computed attention bias matrix if sample packing requires a larger context window
         if self.config.sample_packing_max_positions > self.config.n_positions:
             logger.info(
@@ -2363,7 +2370,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # the per-sequence causal-SFM random vector, prefill that shared prompt
         # once and broadcast its KV cache instead of doing N identical prefills.
         share_prompt_prefill = (
-            self._generation_share_prompt_prefill
+            self._can_share_generation_prompt_prefill()
             and batch_size > 1
             and not self.training
             and not self.cehrgpt.config.causal_sfm
@@ -2372,8 +2379,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # relative to the legacy repeated-batch prefill, so only use this exact
             # optimization on attention implementations covered by the differential
             # equivalence test.
-            and getattr(self.config, "_attn_implementation", "eager")
-            != "flash_attention_2"
             and model_kwargs.get("use_cache", False)
             and not output_attentions
             and not output_hidden_states

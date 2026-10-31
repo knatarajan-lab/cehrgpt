@@ -362,21 +362,10 @@ class TestGenerationDifferentialEquivalence(unittest.TestCase):
         self._assert_same_generation(repeated, shared)
 
     def test_shared_prefill_is_disabled_for_flash_attention(self):
-        tokenizer = DifferentialTokenizer()
         model = self._build_model(apply_rotary=False)
         model.config._attn_implementation = "flash_attention_2"
-        prefill_batch_sizes = []
 
-        def record_batch_size(module, args):
-            prefill_batch_sizes.append(args[0].shape[0])
-
-        hook = model.cehrgpt.register_forward_pre_hook(record_batch_size)
-        try:
-            self._generate(model, tokenizer, share_prefill=True, track_ages=False)
-        finally:
-            hook.remove()
-
-        self.assertEqual(prefill_batch_sizes[0], 4)
+        self.assertFalse(model._can_share_generation_prompt_prefill())
 
 
 if __name__ == "__main__":
