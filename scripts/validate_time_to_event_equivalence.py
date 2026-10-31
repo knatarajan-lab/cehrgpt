@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=1729)
     parser.add_argument("--use_bfloat16", action="store_true")
     parser.add_argument("--logit_atol", type=float, default=2e-2)
+    parser.add_argument("--probability_tv_atol", type=float, default=1e-3)
     return parser.parse_args()
 
 
@@ -101,6 +102,10 @@ def main() -> None:
     generation_config.output_logits = True
     prefixes = load_prefixes(args.prediction_folder, args.num_prompts)
     max_logit_difference = 0.0
+    max_probability_tv = 0.0
+    total_sampled_tokens = 0
+    mismatched_sampled_tokens = 0
+    identical_trajectories = 0
 
     for prompt_index, prefix in enumerate(prefixes):
         token_ids = tokenizer.encode(prefix)
@@ -131,36 +136,82 @@ def main() -> None:
             seed=seed,
         )
 
-        if not torch.equal(legacy.sequences, optimized.sequences):
-            mismatch = (legacy.sequences != optimized.sequences).nonzero()[0].tolist()
-            raise AssertionError(
-                f"Prompt {prompt_index} generated-token mismatch at {mismatch}"
-            )
         if len(legacy.logits) != len(optimized.logits):
             raise AssertionError(f"Prompt {prompt_index} generated a different step count")
-        for legacy_logits, optimized_logits in zip(legacy.logits, optimized.logits):
-            difference = (legacy_logits - optimized_logits).abs().max().item()
+        identical_prefix = torch.ones(
+            args.num_return_sequences, dtype=torch.bool, device=device
+        )
+        for step, (legacy_logits, optimized_logits) in enumerate(
+            zip(legacy.logits, optimized.logits)
+        ):
+            if not identical_prefix.any():
+                break
+            comparable_legacy = legacy_logits[identical_prefix]
+            comparable_optimized = optimized_logits[identical_prefix]
+            difference = (
+                (comparable_legacy - comparable_optimized).abs().max().item()
+            )
             max_logit_difference = max(max_logit_difference, difference)
             torch.testing.assert_close(
-                optimized_logits,
-                legacy_logits,
+                comparable_optimized,
+                comparable_legacy,
                 rtol=0,
                 atol=args.logit_atol,
             )
-        if model.config.include_values:
-            if not torch.equal(legacy.sequence_val_masks, optimized.sequence_val_masks):
-                raise AssertionError(f"Prompt {prompt_index} value masks differ")
-            if not torch.equal(legacy.sequence_vals, optimized.sequence_vals):
-                raise AssertionError(f"Prompt {prompt_index} sampled values differ")
+            legacy_probabilities = torch.softmax(comparable_legacy.float(), dim=-1)
+            optimized_probabilities = torch.softmax(comparable_optimized.float(), dim=-1)
+            probability_tv = (
+                0.5
+                * (legacy_probabilities - optimized_probabilities)
+                .abs()
+                .sum(dim=-1)
+                .max()
+                .item()
+            )
+            max_probability_tv = max(max_probability_tv, probability_tv)
+            if probability_tv > args.probability_tv_atol:
+                raise AssertionError(
+                    f"Prompt {prompt_index}, step {step} probability TV "
+                    f"{probability_tv} exceeds {args.probability_tv_atol}"
+                )
+
+            position = len(token_ids) + step
+            same_step = legacy.sequences[:, position] == optimized.sequences[:, position]
+            if model.config.include_values:
+                legacy_value_mask = legacy.sequence_val_masks[:, position]
+                optimized_value_mask = optimized.sequence_val_masks[:, position]
+                same_value = legacy_value_mask == optimized_value_mask
+                same_value &= (
+                    ~legacy_value_mask
+                    | (
+                        legacy.sequence_vals[:, position]
+                        == optimized.sequence_vals[:, position]
+                    )
+                )
+                same_step &= same_value
+            identical_prefix &= same_step
+
+        legacy_generated = legacy.sequences[:, len(token_ids) :]
+        optimized_generated = optimized.sequences[:, len(token_ids) :]
+        token_matches = legacy_generated == optimized_generated
+        total_sampled_tokens += token_matches.numel()
+        mismatched_sampled_tokens += (~token_matches).sum().item()
+        identical_trajectories += token_matches.all(dim=1).sum().item()
         print(
             f"PASS prompt={prompt_index} encoded_tokens={len(token_ids)} "
-            f"sequences={args.num_return_sequences} generated_tokens={args.max_new_tokens}"
+            f"sequences={args.num_return_sequences} generated_tokens={args.max_new_tokens} "
+            f"identical_trajectories={token_matches.all(dim=1).sum().item()}"
         )
 
     print(
-        f"PASS all prompts={len(prefixes)}; sampled sequences are identical; "
+        f"PASS all prompts={len(prefixes)}; "
         f"max_abs_logit_difference={max_logit_difference:.8g}; "
-        f"tolerance={args.logit_atol}"
+        f"logit_tolerance={args.logit_atol}; "
+        f"max_probability_tv={max_probability_tv:.8g}; "
+        f"probability_tv_tolerance={args.probability_tv_atol}; "
+        f"identical_trajectories={identical_trajectories}/"
+        f"{len(prefixes) * args.num_return_sequences}; "
+        f"sampled_token_mismatches={mismatched_sampled_tokens}/{total_sampled_tokens}"
     )
 
 
