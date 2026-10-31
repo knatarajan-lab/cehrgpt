@@ -833,22 +833,10 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.model_parallel = False
         self.device_map = None
 
-        # Private validation switches used by the differential equivalence tests.
-        # Production behavior keeps both at their optimized defaults.  Keeping the
-        # switches off the serialized config avoids changing checkpoint semantics.
-        self._generation_share_prompt_prefill = True
-        self._generation_track_ages_override = None
         self.gradient_checkpointing = False
 
         # Initialize weights and apply final processing
         self.post_init()
-
-    def _can_share_generation_prompt_prefill(self) -> bool:
-        return (
-            self._generation_share_prompt_prefill
-            and getattr(self.config, "_attn_implementation", "eager")
-            != "flash_attention_2"
-        )
 
         # We do need to update the pre-computed attention bias matrix if sample packing requires a larger context window
         if self.config.sample_packing_max_positions > self.config.n_positions:
@@ -1495,6 +1483,19 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+
+        # Private validation switches used by the differential equivalence tests.
+        # Production behavior keeps both at their optimized defaults.  Keeping the
+        # switches off the serialized config avoids changing checkpoint semantics.
+        self._generation_share_prompt_prefill = True
+        self._generation_track_ages_override = None
+
+    def _can_share_generation_prompt_prefill(self) -> bool:
+        return (
+            self._generation_share_prompt_prefill
+            and getattr(self.config, "_attn_implementation", "eager")
+            != "flash_attention_2"
+        )
 
     def parallelize(self, device_map=None):
         warnings.warn(
