@@ -45,6 +45,7 @@ from cehrgpt.models.hf_modeling_outputs import (
 )
 from cehrgpt.models.linear_prob import LinearProbBlock
 from cehrgpt.models.qwen2 import Qwen2Block
+from cehrgpt.open_vocab.head import OpenVocabularyHead, open_vocab_nll_loss
 
 logger = logging.get_logger(__name__)
 
@@ -442,6 +443,10 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
 
     def _init_weights(self, module):
         """Initialize the weights."""
+        # The open vocabulary head sets its own initial state (zero question weights, a low initial
+        # hazard) which the GPT-2 scheme would overwrite
+        if getattr(module, "keep_initialization", False):
+            return
         if isinstance(module, (nn.Linear, Conv1D)):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
@@ -1475,12 +1480,20 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         if self.config.include_motor_time_to_event:
             self.enable_motor_tte()
 
+        # The patient timeline QA head. It is switched on and off by the trainer (open_vocab_start_step):
+        # until then the forward pass skips it
+        self.open_vocab_head = None
+        self.open_vocab_active = True
+
         # Model parallel
         self.model_parallel = False
         self.device_map = None
 
         # Initialize weights and apply final processing
         self.post_init()
+
+        if self.config.include_open_vocab:
+            self.enable_open_vocab()
 
     def parallelize(self, device_map=None):
         warnings.warn(
@@ -1583,6 +1596,42 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             motor_num_time_pieces=self.config.motor_num_time_pieces,
             task_prevalence_rates=getattr(self.config, "motor_task_prevalence_rates", None),
         )
+
+    def enable_open_vocab(self, question_embeddings: Optional[torch.Tensor] = None):
+        """
+        Add the patient timeline QA head: it reads the global (linear probing) and the local (last
+        transformer layer) state at the prediction points of the MOTOR head and answers any question
+        given by the embedding of its name. The embeddings of all the questions are a frozen buffer of
+        the model, so a checkpoint is self-contained.
+        """
+        config = self.config
+        self.open_vocab_head = OpenVocabularyHead(
+            feature_dim=2 * config.n_embd,
+            question_dim=config.open_vocab_question_dim,
+            hidden_dim=config.n_embd,
+            num_time_pieces=config.motor_num_time_pieces,
+            residual_dim=config.open_vocab_residual_dim,
+        )
+        # post_init has run, so the head keeps its own initialisation; mark it for later loads too
+        for module in self.open_vocab_head.modules():
+            module.keep_initialization = True
+        if self.motor_tte is not None:
+            # a head added to a model that was loaded on a device, or in a lower precision
+            reference = self.motor_tte.final_layer.weight
+            self.open_vocab_head.to(device=reference.device, dtype=reference.dtype)
+        shape = (config.open_vocab_num_question_rows, config.open_vocab_question_dim)
+        if question_embeddings is None:
+            question_embeddings = torch.zeros(shape, dtype=torch.float32)
+        device = self.open_vocab_head.final_layer.weight.device
+        self.register_buffer("question_embeddings", torch.zeros(shape, dtype=torch.float32, device=device), persistent=True)
+        self.set_question_embeddings(question_embeddings)
+
+    def set_question_embeddings(self, question_embeddings: torch.Tensor):
+        shape = (self.config.open_vocab_num_question_rows, self.config.open_vocab_question_dim)
+        question_embeddings = torch.as_tensor(question_embeddings, dtype=torch.float32)
+        if tuple(question_embeddings.shape) != shape:
+            raise ValueError(f"question embeddings of shape {tuple(question_embeddings.shape)}, expected {shape}")
+        self.question_embeddings.data.copy_(question_embeddings)
 
     def prepare_inputs_for_generation(
         self,
@@ -1696,6 +1745,43 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             cached = self.motor_time_bins.to(device)
             self._motor_time_bins_on_device = cached
         return cached
+
+    def open_vocab_nll_loss(
+        self,
+        global_hidden_states,
+        local_hidden_states,
+        motor_tte_task_indicators,
+        motor_censor_times,
+        question_rows,
+        event_rows,
+        event_questions,
+        event_times,
+    ):
+        """
+        The loss of the patient timeline QA head at the prediction points of the MOTOR head, for the
+        questions given by question_rows (rows of the question embedding buffer).
+        """
+        with torch.profiler.record_function("open_vocab_loss"):
+            n_embd = self.config.n_embd
+            mask = motor_tte_task_indicators.to(torch.bool)
+            features = torch.cat(
+                [
+                    global_hidden_states[mask].view(-1, n_embd),
+                    local_hidden_states[mask].view(-1, n_embd),
+                ],
+                dim=-1,
+            )
+            censor_times = motor_censor_times[mask].view(-1)
+            embeddings = self.question_embeddings[question_rows].to(features.dtype)
+            hazards = self.open_vocab_head(features, embeddings).float()
+            return open_vocab_nll_loss(
+                hazards,
+                event_rows,
+                event_questions,
+                event_times,
+                censor_times,
+                self._get_motor_time_bins(hazards.device),
+            )
 
     def motor_nll_loss(self, *args, **kwargs):
         # A named range, so a GPU profile shows how much of a step the MOTOR loss takes
@@ -1813,6 +1899,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         epoch_times: Optional[torch.FloatTensor] = None,
         age_reconstruction: Optional[torch.LongTensor] = None,
         year_reconstruction: Optional[torch.LongTensor] = None,
+        open_vocab_question_rows: Optional[torch.LongTensor] = None,
+        open_vocab_event_rows: Optional[torch.LongTensor] = None,
+        open_vocab_event_questions: Optional[torch.LongTensor] = None,
+        open_vocab_event_times: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple, CehrGptCausalLMOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -1922,6 +2012,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         time_to_visit_loss = None
         token_value_loss = None
         motor_tte_loss = None
+        open_vocab_loss = None
         age_at_vs_loss = None
         year_at_vs_loss = None
 
@@ -2016,6 +2107,33 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     motor_end_index=motor_end_index,
                 )
                 loss += motor_tte_loss * self.config.motor_time_to_event_weight
+
+            if self.open_vocab_head is not None:
+                if (
+                    self.open_vocab_active
+                    and linear_prob_hidden_states is not None
+                    and motor_tte_task_indicators is not None
+                    and motor_censor_times is not None
+                    and open_vocab_question_rows is not None
+                    and open_vocab_event_rows is not None
+                    and open_vocab_event_questions is not None
+                    and open_vocab_event_times is not None
+                ):
+                    open_vocab_loss = self.open_vocab_nll_loss(
+                        global_hidden_states=linear_prob_hidden_states,
+                        local_hidden_states=hidden_states,
+                        motor_tte_task_indicators=motor_tte_task_indicators,
+                        motor_censor_times=motor_censor_times,
+                        question_rows=open_vocab_question_rows,
+                        event_rows=open_vocab_event_rows,
+                        event_questions=open_vocab_event_questions,
+                        event_times=open_vocab_event_times,
+                    )
+                    loss += open_vocab_loss * self.config.open_vocab_loss_weight
+                elif self.training:
+                    # The head is off, but its parameters have to stay in the graph (with a zero
+                    # gradient) or distributed data parallel fails on parameters that got no gradient
+                    loss = loss + 0.0 * sum(p.sum() for p in self.open_vocab_head.parameters())
 
             # We add another loss term when use_sub_time_tokenization is enabled, we need to recover the sub time token
             # predictions for year/month/token
@@ -2187,6 +2305,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             time_to_visit_loss=time_to_visit_loss,
             token_value_loss=token_value_loss,
             motor_tte_loss=motor_tte_loss,
+            open_vocab_loss=open_vocab_loss,
             age_at_vs_loss=age_at_vs_loss,
             year_at_vs_loss=year_at_vs_loss,
         )
