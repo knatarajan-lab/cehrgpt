@@ -26,6 +26,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use_bfloat16", action="store_true")
     parser.add_argument("--logit_atol", type=float, default=2e-2)
     parser.add_argument("--probability_tv_atol", type=float, default=1e-3)
+    parser.add_argument(
+        "--comparison",
+        choices=("combined", "shared_prefill", "age_tracking"),
+        default="combined",
+    )
     return parser.parse_args()
 
 
@@ -101,6 +106,15 @@ def main() -> None:
     )
     generation_config.output_logits = True
     prefixes = load_prefixes(args.prediction_folder, args.num_prompts)
+    comparison_paths = {
+        "combined": ((False, True), (True, False)),
+        "shared_prefill": ((False, False), (True, False)),
+        "age_tracking": ((False, True), (False, False)),
+    }
+    (legacy_share_prefill, legacy_track_ages), (
+        optimized_share_prefill,
+        optimized_track_ages,
+    ) = comparison_paths[args.comparison]
     max_logit_difference = 0.0
     max_probability_tv = 0.0
     total_sampled_tokens = 0
@@ -122,8 +136,8 @@ def main() -> None:
             tokenizer,
             prompt,
             generation_config,
-            share_prompt_prefill=False,
-            track_ages=True,
+            share_prompt_prefill=legacy_share_prefill,
+            track_ages=legacy_track_ages,
             seed=seed,
         )
         optimized = generate(
@@ -131,8 +145,8 @@ def main() -> None:
             tokenizer,
             prompt,
             generation_config,
-            share_prompt_prefill=True,
-            track_ages=False,
+            share_prompt_prefill=optimized_share_prefill,
+            track_ages=optimized_track_ages,
             seed=seed,
         )
 
@@ -204,7 +218,7 @@ def main() -> None:
         )
 
     print(
-        f"PASS all prompts={len(prefixes)}; "
+        f"PASS comparison={args.comparison}; prompts={len(prefixes)}; "
         f"max_abs_logit_difference={max_logit_difference:.8g}; "
         f"logit_tolerance={args.logit_atol}; "
         f"max_probability_tv={max_probability_tv:.8g}; "
