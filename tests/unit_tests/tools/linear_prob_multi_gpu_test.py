@@ -6,7 +6,7 @@ from unittest import mock
 import pytest
 from datasets import Dataset, DatasetDict, load_from_disk
 
-from cehrgpt.models.special_tokens import LINEAR_PROB_TOKEN
+from cehrgpt.models.special_tokens import LINEAR_PROB_TOKEN, RANDOM_TOKEN
 from cehrgpt.tools.linear_prob import compute_cehrgpt_features as cf
 
 
@@ -108,7 +108,10 @@ def test_parent_launches_one_worker_per_device_with_clean_argv(parent_setup):
     # the tokenizer the dataset was tokenized with replaces the original one
     assert argv.count("--tokenizer_name_or_path") == 1
     assert argv[argv.index("--tokenizer_name_or_path") + 1] == "/resolved/tokenizer"
-    tokenizer.add_tokens.assert_called_once_with(LINEAR_PROB_TOKEN)
+    assert [c.args[0] for c in tokenizer.add_tokens.call_args_list] == [
+        LINEAR_PROB_TOKEN,
+        RANDOM_TOKEN,
+    ]
     # shards are cleaned up after success
     assert not (tmp_path / "temp" / "shards").exists()
 

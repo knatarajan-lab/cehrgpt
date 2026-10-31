@@ -8,7 +8,7 @@ import torch.nn.functional as f
 from torch import nn
 from torch.distributions import Gamma
 from torch.nn import CrossEntropyLoss
-from transformers import GenerationConfig, PreTrainedModel
+from transformers import GenerationConfig, PretrainedConfig, PreTrainedModel
 from transformers.activations import gelu_new
 from transformers.generation.logits_process import LogitsProcessorList
 from transformers.generation.stopping_criteria import StoppingCriteriaList
@@ -17,6 +17,10 @@ from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.pytorch_utils import Conv1D
 from transformers.utils import is_flash_attn_2_available, logging
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
+
+logger = logging.get_logger(__name__)
+
+from cehrbert.models.hf_models.hf_cehrbert import TimeEmbeddingLayer
 
 from cehrgpt.gpt_utils import (
     construct_age_sequence,
@@ -27,13 +31,19 @@ from cehrgpt.gpt_utils import (
 )
 from cehrgpt.models.activations import RMSNorm
 from cehrgpt.models.config import CEHRGPTConfig
-from cehrgpt.models.gpt2 import GPT2Block, is_sample_pack
+from cehrgpt.models.gpt2 import (
+    GPT2Block,
+    HAS_XFORMERS,
+    is_sample_pack,
+    reuse_unpad_data_during_forward,
+)
 from cehrgpt.models.hf_modeling_outputs import (
     CehrGptCausalLMOutput,
     CehrGptGenerateDecoderOnlyOutput,
     CehrGptOutputWithPast,
     CehrGptSequenceClassifierOutput,
 )
+from cehrgpt.models.linear_prob import LinearProbBlock
 from cehrgpt.models.qwen2 import Qwen2Block
 
 logger = logging.get_logger(__name__)
@@ -96,12 +106,214 @@ def create_sample_packing_attention_mask(attention_mask: torch.Tensor) -> torch.
     return attn_matrix
 
 
+def build_local_attention_mask(
+    input_ids: torch.Tensor,
+    vs_token_id: int,
+    n_prev_visits: int,
+    attention_mask: Optional[torch.Tensor] = None,
+    att_token_ids: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Build a local causal attention mask based on visit boundaries.
+
+    Each token may attend to tokens within the current visit and the previous
+    ``n_prev_visits`` visits.  Demographic tokens (before the first [VS] in
+    each sample) are always visible within the same sample.  ATT (time-interval)
+    tokens at any position are also always visible within the same sample so that
+    every token retains temporal context regardless of window size.
+
+    When ``attention_mask`` is provided and the batch is sample-packed (i.e.
+    contains interleaved zeros), visit indices are computed per-segment so
+    that [VS] tokens from one packed sample do not affect the window of another.
+
+    Args:
+        input_ids: (B, L) token IDs.
+        vs_token_id: Integer ID of the [VS] / VS token.
+        n_prev_visits: Number of prior visits to include in the attention window.
+        attention_mask: Optional (B, L) binary mask (1 = real token, 0 = padding).
+            Required for correct behaviour with sample-packed batches.
+        att_token_ids: Optional 1-D tensor of integer IDs for ATT (time-interval)
+            tokens (e.g. D7, W2, i-D3).  When provided, key positions that hold
+            an ATT token are always visible to any later token in the same sample,
+            regardless of the visit window.
+
+    Returns:
+        Float additive mask of shape (B, 1, L, L) where 0.0 means "attend" and
+        ``torch.finfo(float32).min`` means "mask out".  Add this directly to the
+        existing causal attention bias before softmax.
+    """
+    B, L = input_ids.shape
+    device = input_ids.device
+
+    vs_cumsum = (input_ids == vs_token_id).cumsum(dim=-1)  # (B, L)
+
+    segment_ids = None  # set only for sample-packed batches
+    if attention_mask is not None and is_sample_pack(attention_mask):
+        # Compute a per-segment visit index that resets at each packed-sample boundary.
+        # A segment starts where a real token (mask=1) follows a padding token (mask=0).
+        is_seg_start = attention_mask.bool().clone()          # (B, L)
+        is_seg_start[:, 1:] &= ~attention_mask[:, :-1].bool()
+
+        # At each segment start (except position 0), record the vs_cumsum accumulated
+        # by all previous segments so we can subtract it out.
+        seg_offset = torch.zeros_like(vs_cumsum)              # (B, L)
+        seg_offset[:, 1:] = torch.where(
+            is_seg_start[:, 1:],
+            vs_cumsum[:, :-1],
+            seg_offset[:, :L - 1],
+        )
+        # Forward-fill the offset within each segment via cummax (offsets are
+        # non-decreasing because vs_cumsum is non-decreasing).
+        # cummax is not supported on MPS; fall back to CPU for that device.
+        if device.type == "mps":
+            seg_offset = seg_offset.cpu().cummax(dim=-1).values.to(device)
+        else:
+            seg_offset = seg_offset.cummax(dim=-1).values          # (B, L)
+        visit_idx = vs_cumsum - seg_offset                    # (B, L) — resets per segment
+
+        # Segment IDs: used to restrict the "demographics always visible" rule
+        # to the same packed sample (not across sample boundaries).
+        segment_ids = is_seg_start.int().cumsum(dim=-1)       # (B, L) — 1-indexed per segment
+    else:
+        visit_idx = vs_cumsum                                 # (B, L)
+
+    vi = visit_idx.unsqueeze(2)  # (B, L, 1)  — query visit index
+    vj = visit_idx.unsqueeze(1)  # (B, 1, L)  — key visit index
+    causal = torch.ones(L, L, dtype=torch.bool, device=device).tril()  # (L, L)
+
+    # (B, 1, L) — True where a key position holds an ATT token; always visible.
+    if att_token_ids is not None and att_token_ids.numel() > 0:
+        is_att_j = torch.isin(input_ids, att_token_ids).unsqueeze(1)  # (B, 1, L)
+    else:
+        is_att_j = None
+
+    # Demographics (visit_idx == 0) and ATT tokens are always visible, and the
+    # visit window must stay within the same packed sample.
+    if segment_ids is not None:
+        same_seg = segment_ids.unsqueeze(2) == segment_ids.unsqueeze(1)  # (B, L, L)
+        is_demographics = (vj == 0) & same_seg
+        is_always_visible = is_demographics
+        if is_att_j is not None:
+            is_always_visible = is_always_visible | (is_att_j & same_seg)
+        in_window = is_always_visible | ((vj >= vi - n_prev_visits) & same_seg)
+    else:
+        in_window = (vj == 0) | (vj >= vi - n_prev_visits)
+        if is_att_j is not None:
+            in_window = in_window | is_att_j
+
+    allowed = causal.unsqueeze(0) & in_window                  # (B, L, L)
+    additive = input_ids.new_zeros(B, L, L, dtype=torch.float32)
+    additive[~allowed] = torch.finfo(torch.float32).min
+
+    additive = additive.unsqueeze(1)  # (B, 1, L, L)
+
+    # Mask out padding key positions so flash_attn_func (which receives this
+    # as attn_bias without unpadding) does not attend to padding tokens.
+    if attention_mask is not None:
+        padding_key = (attention_mask == 0).unsqueeze(1).unsqueeze(2)  # (B, 1, 1, L)
+        additive = additive.masked_fill(padding_key, torch.finfo(torch.float32).min)
+
+    return additive
+
+
+def _build_local_mask_from_config(
+    config,
+    input_ids: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Build a visit-local additive mask (B, 1, L, L) using config-level settings.
+
+    Reads ``vs_token_id``, ``local_attention_n_prev_visits``, and
+    ``att_token_ids`` from *config* and delegates to
+    :func:`build_local_attention_mask`.  Centralises the repeated boilerplate
+    present wherever the local mask is constructed from config fields.
+    """
+    att_ids = getattr(config, "att_token_ids", None)
+    att_ids_tensor = (
+        torch.tensor(att_ids, dtype=input_ids.dtype, device=input_ids.device)
+        if att_ids
+        else None
+    )
+    return build_local_attention_mask(
+        input_ids,
+        config.vs_token_id,
+        getattr(config, "local_attention_n_prev_visits", 5),
+        attention_mask=attention_mask,
+        att_token_ids=att_ids_tensor,
+    )  # (B, 1, L, L) float32
+
+
+def _effective_compute_dtype(fallback: torch.dtype) -> torch.dtype:
+    """Return the active autocast dtype when AMP is enabled, else ``fallback``.
+
+    xformers requires the attn_bias dtype to match the query dtype.  Under
+    bfloat16 AMP the model parameters (and therefore ``self.dtype`` /
+    ``hidden_states.dtype``) stay float32, but matmul outputs (queries, keys,
+    values) are cast to bfloat16.  Building the mask with the autocast dtype
+    avoids a dtype mismatch that would otherwise require a costly re-allocation
+    inside every attention layer.
+    """
+    if torch.is_autocast_enabled():
+        return torch.get_autocast_dtype("cuda")
+    return fallback
+
+
+def _expand_local_mask_for_xformers(
+    local_mask: torch.Tensor,
+    num_heads: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Expand a (B, 1, Lq, Lk) local mask to (B, H, Lq, Lk) for xformers.
+
+    Allocates a single contiguous buffer with the Lk dimension padded to a
+    multiple of 8 (required by the xformers cutlass kernel), copies the mask
+    in, then slices back to the original Lk so that ``stride(-2)`` is aligned
+    while the visible shape is (B, H, Lq, Lk).
+    """
+    local_mask = local_mask.to(dtype)
+    B, _, Lq, Lk = local_mask.shape
+    pad_len = (-Lk) % 8
+    if pad_len > 0:
+        neg_inf = torch.finfo(dtype).min
+        aligned = local_mask.new_full(
+            (B, num_heads, Lq, Lk + pad_len), fill_value=neg_inf
+        )
+        aligned[:, :, :, :Lk] = local_mask.expand(-1, num_heads, -1, -1)
+        return aligned[:, :, :, :Lk]  # stride(-2) = Lk + pad_len (aligned)
+    else:
+        return local_mask.expand(-1, num_heads, -1, -1).contiguous()
+
+
+def _align_local_mask_for_xformers(
+    local_mask: torch.Tensor,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Align a (B, 1, Lq, Lk) local mask for xformers without expanding heads.
+
+    xformers broadcasts the head dimension from 1 to H internally, so there is
+    no need to materialise a full (B, H, Lq, Lk) tensor — keeping (B, 1, Lq, Lk)
+    saves H× memory.  The only requirement is that stride(-2) % 8 == 0 for the
+    xformers cutlass kernel, which is achieved by padding Lk to the next multiple
+    of 8 and slicing back.
+    """
+    local_mask = local_mask.to(dtype)
+    B, _, Lq, Lk = local_mask.shape
+    pad_len = (-Lk) % 8
+    if pad_len > 0:
+        neg_inf = torch.finfo(dtype).min
+        aligned = local_mask.new_full((B, 1, Lq, Lk + pad_len), fill_value=neg_inf)
+        aligned[:, :, :, :Lk] = local_mask
+        return aligned[:, :, :, :Lk]  # stride(-2) = Lk + pad_len (aligned)
+    return local_mask.contiguous()
+
+
 class MotorTaskHead(nn.Module):
     def __init__(
         self,
         input_dim,
         motor_tte_vocab_size,
         motor_num_time_pieces,
+        task_prevalence_rates=None,
         eps=1e-6,
     ):
         super(MotorTaskHead, self).__init__()
@@ -111,6 +323,14 @@ class MotorTaskHead(nn.Module):
         self.final_layer = nn.Linear(input_dim, input_dim * motor_num_time_pieces)
         self.norm = RMSNorm(input_dim, eps)
         self.task_layer = nn.Linear(input_dim, motor_tte_vocab_size)
+        # Initialise task_layer bias with log2(prevalence_rate) per task so the
+        # model starts with calibrated log-hazard predictions (matching the
+        # original MOTOR implementation) rather than zero for all tasks.
+        if task_prevalence_rates is not None:
+            start_bias = torch.log2(
+                torch.tensor(task_prevalence_rates, dtype=torch.float32)
+            )
+            self.task_layer.bias.data = start_bias
         self.task_time_bias = nn.Parameter(
             torch.zeros(1, self.motor_num_time_pieces, motor_tte_vocab_size)
         )
@@ -478,6 +698,66 @@ class CEHRGPTPreTrainedModel(PreTrainedModel):
                     self.config.max_position_embeddings = new_num_position_embeddings
                     self.update_attn_bias(new_num_position_embeddings)
 
+    def prepare_attention_mask(
+        self,
+        inputs: torch.Tensor,
+        attention_mask: Optional[torch.FloatTensor] = None,
+    ):
+        batch_size = inputs.shape[0]
+        # GPT2Attention mask.
+        if attention_mask is not None:
+            if batch_size <= 0:
+                raise ValueError("batch_size has to be defined and > 0")
+
+            if (
+                self.config.causal_sfm
+                and attention_mask.shape[-1] >= self.config.demographics_size
+            ):
+                # # Specify the indices to set to 0
+                # rows = [1, 2, 2, 3, 3, 3]
+                # cols = [0, 0, 1, 0, 1, 2]
+                # # Set the specified indices to 0
+                # attention_mask[rows, cols] = 0.0
+                attention_mask = torch.concat(
+                    [
+                        attention_mask[..., : self.config.demographics_size],
+                        attention_mask.new_ones(attention_mask.shape[:-1] + (1,)),
+                        attention_mask[..., self.config.demographics_size :],
+                    ],
+                    dim=-1,
+                )
+
+            # The flash attention requires the original attention_mask
+            if (
+                not getattr(self.config, "_attn_implementation", "eager")
+                == "flash_attention_2"
+            ):
+                attention_mask = attention_mask.view(batch_size, -1)
+
+                # If this is sample packing, we need to great the
+                if is_sample_pack(attention_mask):
+                    attention_mask = create_sample_packing_attention_mask(
+                        attention_mask
+                    )[:, None, :, :]
+                else:
+                    # We create a 3D attention mask from a 2D tensor mask.
+                    # Sizes are [batch_size, 1, 1, to_seq_length]
+                    # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
+                    # this attention mask is more simple than the triangular masking of causal attention
+                    # used in OpenAI GPT, we just need to prepare the broadcast dimension here.
+                    attention_mask = attention_mask[:, None, None, :]
+
+                # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
+                # masked positions, this operation will create a tensor which is 0.0 for
+                # positions we want to attend and the dtype's smallest value for masked positions.
+                # Since we are adding it to the raw scores before the softmax, this is
+                # effectively the same as removing these entirely.
+                attention_mask = attention_mask.to(
+                    dtype=self.dtype
+                )  # fp16 compatibility
+                attention_mask = (1.0 - attention_mask) * torch.finfo(self.dtype).min
+        return attention_mask
+
 
 class CEHRGPT2Model(CEHRGPTPreTrainedModel):
 
@@ -498,6 +778,19 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             self.vte = nn.Embedding(config.value_vocab_size, self.embed_dim)
             self.concept_value_transformation_layer = ConceptValueTransformationLayer(
                 self.embed_dim
+            )
+
+        if getattr(config, "use_time_embedding", False):
+            self.time_embedding_layer = TimeEmbeddingLayer(
+                embedding_size=config.n_time_embd,
+                scaling_factor=config.time_embedding_scaling_factor,
+            )
+            self.age_embedding_layer = TimeEmbeddingLayer(
+                embedding_size=config.n_time_embd,
+                scaling_factor=config.age_embedding_scaling_factor,
+            )
+            self.time_age_proj = nn.Linear(
+                self.embed_dim + 2 * config.n_time_embd, self.embed_dim
             )
 
         self.drop = nn.Dropout(config.embd_pdrop)
@@ -526,9 +819,25 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             else nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
         )
 
+        if getattr(config, "use_local_attention", False):
+            logger.info(
+                "Local attention enabled: each token attends to the current visit "
+                "and the previous %d visit(s) (vs_token_id=%s).",
+                getattr(config, "local_attention_n_prev_visits", 5),
+                getattr(config, "vs_token_id", None),
+            )
+        else:
+            logger.info("Local attention disabled — using full causal attention.")
+
         # Model parallel
         self.model_parallel = False
         self.device_map = None
+
+        # Private validation switches used by the differential equivalence tests.
+        # Production behavior keeps both at their optimized defaults.  Keeping the
+        # switches off the serialized config avoids changing checkpoint semantics.
+        self._generation_share_prompt_prefill = True
+        self._generation_track_ages_override = None
         self.gradient_checkpointing = False
 
         # Initialize weights and apply final processing
@@ -662,6 +971,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         for layer, heads in heads_to_prune.items():
             self.h[layer].attn.prune_heads(heads)
 
+    @reuse_unpad_data_during_forward
     def forward(
         self,
         input_ids: Optional[torch.LongTensor],
@@ -670,6 +980,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
+        ages: Optional[torch.LongTensor] = None,
+        epoch_times: Optional[torch.FloatTensor] = None,
         random_vectors: Optional[torch.FloatTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
@@ -695,7 +1007,6 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.warn_if_padding_and_no_attention_mask(input_ids, attention_mask)
         input_shape = input_ids.size()
         input_ids = input_ids.view(-1, input_shape[-1])
-        batch_size = input_ids.shape[0]
 
         # When causal SFM is enabled, we need to expand the context window by one to make room for the random vector
         if (
@@ -709,103 +1020,96 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
             # Convert list back to torch.Size if needed
             input_shape = torch.Size(shape_list)
 
-        input_ids.device
-
+        is_full_forward = past_key_values is None  # False during KV-cache generation steps
         if past_key_values is None:
             past_key_values = tuple([None] * len(self.h))
             past_length = 0
         else:
             past_length = past_key_values[0][0].size(-2)
 
-        # GPT2Attention mask.
-        if attention_mask is not None:
-            if batch_size <= 0:
-                raise ValueError("batch_size has to be defined and > 0")
+        raw_attention_mask = attention_mask  # save before conversion for local-attention window
+        attention_mask = self.prepare_attention_mask(input_ids, attention_mask)
 
-            if (
-                self.config.causal_sfm
-                and attention_mask.shape[-1] >= self.config.demographics_size
-            ):
-                # # Specify the indices to set to 0
-                # rows = [1, 2, 2, 3, 3, 3]
-                # cols = [0, 0, 1, 0, 1, 2]
-                # # Set the specified indices to 0
-                # attention_mask[rows, cols] = 0.0
-                attention_mask = torch.concat(
-                    [
-                        attention_mask[..., : self.config.demographics_size],
-                        attention_mask.new_ones(attention_mask.shape[:-1] + (1,)),
-                        attention_mask[..., self.config.demographics_size :],
-                    ],
-                    dim=-1,
-                )
+        # SDPA cannot take `is_causal=True` together with an explicit mask, so causality
+        # has to be folded into the mask. Done once here rather than per layer: at a 16k
+        # packed sequence length the combined mask is a sizeable tensor, and every layer
+        # would otherwise rebuild an identical copy. The eager path does not need this -
+        # it applies its own `bias` buffer inside the attention module.
+        if (
+            attention_mask is not None
+            and getattr(self.config, "backbone", "gpt2") == "qwen2"
+            and getattr(self.config, "_attn_implementation", "eager") == "sdpa"
+        ):
+            query_length = input_shape[-1]
+            key_length = past_length + query_length
+            causal_mask = self.h[0].attn.bias[
+                :, :, key_length - query_length : key_length, :key_length
+            ]
+            attention_mask = attention_mask.masked_fill(
+                ~causal_mask, torch.finfo(self.dtype).min
+            )
+            # Sample packing zeroes the entire row of every separator position, leaving
+            # it attending to nothing. SDPA's fused kernels return NaN for such rows (the
+            # math backend returns a finite average, which is why this only shows up on
+            # GPU), and that NaN spreads to every position in later layers via `0 * NaN`
+            # when their column is weighted. Let those positions attend to themselves so
+            # no row is ever empty. Rows that already attend somewhere are unaffected,
+            # because a position's own diagonal entry is unmasked whenever it is a real
+            # token. The values produced at separator positions are discarded downstream:
+            # their labels are -100 and their columns stay masked for every other query,
+            # so nothing can leak.
+            query_indices = torch.arange(query_length, device=attention_mask.device)
+            attention_mask[
+                ..., query_indices, query_indices + (key_length - query_length)
+            ] = 0.0
 
-            # The flash attention requires the original attention_mask
-            if (
-                not getattr(self.config, "_attn_implementation", "eager")
-                == "flash_attention_2"
-            ):
-                attention_mask = attention_mask.view(batch_size, -1)
+        # Build visit-local attention mask when configured and fold it into attention_mask.
+        # When use_local_attention is True, flash attention is never used; xformers (or
+        # vanilla _attn) handles the mask instead.
+        # For the flash/xformers path the local mask is a 4D additive tensor so that
+        # GPT2FlashAttention can detect it (attention_mask.dim() == 4) and route to xformers.
+        # - Prefill: build_local_attention_mask returns (B, 1, L, L); use as attention_mask.
+        # - Decode (flash path): prepare_inputs_for_generation already zeroed out-of-window
+        #   positions; convert binary raw_attention_mask to additive (B, 1, 1, KV_len).
+        # - Decode/prefill (eager path): fold the local mask into the existing additive
+        #   attention_mask so _attn receives a single combined bias.
+        is_flash = (
+            getattr(self.config, "_attn_implementation", "eager") == "flash_attention_2"
+        )
+        if (
+            getattr(self.config, "use_local_attention", False)
+            and raw_attention_mask is not None
+            and getattr(self.config, "vs_token_id", None) is not None
+        ):
+            if is_full_forward:
+                local_mask = _build_local_mask_from_config(
+                    self.config, input_ids, raw_attention_mask
+                )  # (B, 1, L, L) float32
+            else:
+                # Decode: raw_attention_mask encodes visit-window constraint already.
+                local_mask = (
+                    1.0 - raw_attention_mask[:, None, None, :].to(self.dtype)
+                ) * torch.finfo(self.dtype).min  # (B, 1, 1, KV_len)
 
-                # If this is sample packing, we need to great the
-                if is_sample_pack(attention_mask):
-                    attention_mask = create_sample_packing_attention_mask(
-                        attention_mask
-                    )[:, None, :, :]
+            if is_flash:
+                # Replace binary attention_mask with the 4D additive local mask.
+                # GPT2FlashAttention detects dim==4 and routes to xformers/vanilla.
+                # When xformers is available and this is a full forward pass (not
+                # single-step decode), pre-expand to (B, H, L, L) with alignment
+                # padding once so all layers share a single allocation rather than
+                # each allocating their own (B, H, L, L) buffer.
+                if HAS_XFORMERS and is_full_forward:
+                    # Pre-expand to (B, H, L, L) once; all layers share this allocation.
+                    attention_mask = _expand_local_mask_for_xformers(
+                        local_mask, self.config.n_head, _effective_compute_dtype(self.dtype)
+                    )
                 else:
-                    # We create a 3D attention mask from a 2D tensor mask.
-                    # Sizes are [batch_size, 1, 1, to_seq_length]
-                    # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
-                    # this attention mask is more simple than the triangular masking of causal attention
-                    # used in OpenAI GPT, we just need to prepare the broadcast dimension here.
-                    attention_mask = attention_mask[:, None, None, :]
-
-                # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
-                # masked positions, this operation will create a tensor which is 0.0 for
-                # positions we want to attend and the dtype's smallest value for masked positions.
-                # Since we are adding it to the raw scores before the softmax, this is
-                # effectively the same as removing these entirely.
-                attention_mask = attention_mask.to(
-                    dtype=self.dtype
-                )  # fp16 compatibility
-                attention_mask = (1.0 - attention_mask) * torch.finfo(self.dtype).min
-
-                # SDPA cannot take `is_causal=True` together with an explicit mask, so
-                # causality has to be folded into the mask. Done once here rather than
-                # per layer: at a 16k packed sequence length the combined mask is a
-                # sizeable tensor, and every layer would otherwise rebuild an identical
-                # copy. The eager path does not need this - it applies its own `bias`
-                # buffer inside the attention module.
-                if (
-                    getattr(self.config, "backbone", "gpt2") == "qwen2"
-                    and getattr(self.config, "_attn_implementation", "eager") == "sdpa"
-                ):
-                    query_length = input_shape[-1]
-                    key_length = past_length + query_length
-                    causal_mask = self.h[0].attn.bias[
-                        :, :, key_length - query_length : key_length, :key_length
-                    ]
-                    attention_mask = attention_mask.masked_fill(
-                        ~causal_mask, torch.finfo(self.dtype).min
-                    )
-                    # Sample packing zeroes the entire row of every separator position,
-                    # leaving it attending to nothing. SDPA's fused kernels return NaN
-                    # for such rows (the math backend returns a finite average, which is
-                    # why this only shows up on GPU), and that NaN spreads to every
-                    # position in later layers via `0 * NaN` when their column is
-                    # weighted. Let those positions attend to themselves so no row is
-                    # ever empty. Rows that already attend somewhere are unaffected,
-                    # because a position's own diagonal entry is unmasked whenever it is
-                    # a real token. The values produced at separator positions are
-                    # discarded downstream: their labels are -100 and their columns stay
-                    # masked for every other query, so nothing can leak.
-                    query_indices = torch.arange(
-                        query_length, device=attention_mask.device
-                    )
-                    attention_mask[
-                        ..., query_indices, query_indices + (key_length - query_length)
-                    ] = 0.0
-
+                    # Decode path (B, 1, 1, KV_len) or no xformers: keep as-is;
+                    # GPT2FlashAttention will expand per-layer or route to SDPA.
+                    attention_mask = local_mask.to(self.dtype)
+            else:
+                # Eager: add local mask into the existing additive attention_mask.
+                attention_mask = attention_mask + local_mask.to(attention_mask.dtype)
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
         # attention_probs has shape bsz x n_heads x N x N
@@ -839,14 +1143,15 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 [demographic_embeddings, random_vectors, medical_event_embeddings],
                 dim=1,
             )
-            position_ids = torch.concat(
-                [
-                    position_ids[:, : self.config.demographics_size],
-                    position_ids[:, :1],
-                    position_ids[:, self.config.demographics_size :],
-                ],
-                dim=1,
-            )
+            if position_ids is not None:
+                position_ids = torch.concat(
+                    [
+                        position_ids[:, : self.config.demographics_size],
+                        position_ids[:, :1],
+                        position_ids[:, self.config.demographics_size :],
+                    ],
+                    dim=1,
+                )
 
         if self.include_values:
             if (
@@ -870,6 +1175,19 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
                 concept_embeddings=input_embeddings,
                 value_indicators=value_indicators,
                 value_embeddings=value_embeddings,
+            )
+
+        if (
+            getattr(self.config, "use_time_embedding", False)
+            and ages is not None
+            and epoch_times is not None
+        ):
+            age_embeddings = self.age_embedding_layer(ages.to(torch.float))
+            time_embeddings = self.time_embedding_layer(epoch_times)
+            input_embeddings = gelu_new(
+                self.time_age_proj(
+                    torch.cat([input_embeddings, age_embeddings, time_embeddings], dim=-1)
+                )
             )
 
         hidden_states = self.drop(input_embeddings)
@@ -992,6 +1310,142 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         )
 
 
+class LinearProbModule(CEHRGPTPreTrainedModel):
+
+    def __init__(self, config: Union[CEHRGPTConfig, PretrainedConfig]):
+        super().__init__(config)
+        self.embed_dim = config.hidden_size
+        if config.linear_prob_n_layer:
+            self.linear_prob_n_layer = max(
+                min(config.num_hidden_layers, config.linear_prob_n_layer), 1
+            )
+        else:
+            self.linear_prob_n_layer = config.num_hidden_layers
+        logger.info("linear_prob_n_layer is set to %s", self.linear_prob_n_layer)
+        linear_prob_blocks = []
+        for i in range(self.linear_prob_n_layer):
+            linear_prob_block = LinearProbBlock(config, layer_idx=i)
+            linear_prob_block.is_causal = True
+            linear_prob_blocks.append(linear_prob_block)
+        self.linear_prob = nn.ModuleList(linear_prob_blocks)
+
+        # Model parallel
+        self.model_parallel = False
+        self.device_map = None
+        self.gradient_checkpointing = False
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+        # We do need to update the pre-computed attention bias matrix if sample packing requires a larger context window
+        if self.config.sample_packing_max_positions > self.config.n_positions:
+            logger.info(
+                "Updated attn_bias to %s according to sample_packing_max_positions",
+                config.sample_packing_max_positions,
+            )
+            self.update_attn_bias(self.config.sample_packing_max_positions)
+
+    def parallelize(self, device_map=None):
+        # Check validity of device_map
+        warnings.warn(
+            "`CEHRGPT2Model.parallelize` is deprecated and will be removed in v5 of Transformers, you should load your"
+            " model with `device_map='balanced'` in the call to `from_pretrained`. You can also provide your own"
+            " `device_map` but it needs to be a dictionary module_name to device, so for instance {'h.0': 0, 'h.1': 1,"
+            " ...}",
+            FutureWarning,
+        )
+        self.device_map = (
+            get_device_map(len(self.linear_prob), range(torch.cuda.device_count()))
+            if device_map is None
+            else device_map
+        )
+        assert_device_map(self.device_map, len(self.h))
+        self.model_parallel = True
+        # Load onto devices
+        for k, v in self.device_map.items():
+            for block in v:
+                cuda_device = "cuda:" + str(k)
+                self.linear_prob[block] = self.linear_prob[block].to(cuda_device)
+
+    def deparallelize(self):
+        warnings.warn(
+            "Like `parallelize`, `deparallelize` is deprecated and will be removed in v5 of Transformers.",
+            FutureWarning,
+        )
+        self.model_parallel = False
+        self.device_map = None
+        for index in range(len(self.linear_prob)):
+            self.linear_prob[index] = self.linear_prob[index].to("cpu")
+        torch.cuda.empty_cache()
+
+    def update_attn_bias(self, max_position_embeddings: int):
+        for i in range(len(self.linear_prob)):
+            self.linear_prob[i].crossattention.register_buffer(
+                "bias",
+                torch.tril(
+                    torch.ones(
+                        (max_position_embeddings, max_position_embeddings),
+                        dtype=torch.bool,
+                    )
+                )
+                .view(1, 1, max_position_embeddings, max_position_embeddings)
+                .to(self.linear_prob[i].crossattention.bias.device),
+                persistent=False,
+            )
+
+    @reuse_unpad_data_during_forward
+    def forward(
+        self,
+        linear_prob_hidden_state: Optional[torch.LongTensor],
+        all_encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.FloatTensor] = None,
+    ) -> Union[Tuple, CehrGptOutputWithPast]:
+
+        encoder_attention_mask = self.prepare_attention_mask(
+            linear_prob_hidden_state, encoder_attention_mask
+        )
+        for i, encoder_hidden_states in enumerate(
+            all_encoder_hidden_states[-self.linear_prob_n_layer :]
+        ):
+            # Model parallel
+            if self.model_parallel:
+                torch.cuda.set_device(linear_prob_hidden_state.device)
+                # Ensure that attention_mask is always on the same device as hidden_states
+                if encoder_hidden_states is not None:
+                    encoder_hidden_states = encoder_hidden_states.to(
+                        linear_prob_hidden_state.device
+                    )
+                if encoder_attention_mask is not None:
+                    encoder_attention_mask = encoder_attention_mask.to(
+                        linear_prob_hidden_state.device
+                    )
+
+            linear_prob_layer = self.linear_prob[i]
+            if self.gradient_checkpointing and self.training:
+                linear_prob_hidden_state = self._gradient_checkpointing_func(
+                    linear_prob_layer.__call__,
+                    linear_prob_hidden_state,
+                    encoder_hidden_states,
+                    encoder_attention_mask,
+                )
+            else:
+                linear_prob_hidden_state = linear_prob_layer(
+                    hidden_states=linear_prob_hidden_state,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_attention_mask,
+                )
+
+            # Model Parallel: If it's the last layer for that device, put things on the next device
+            if self.model_parallel:
+                for k, v in self.device_map.items():
+                    if i == v[-1] and "cuda:" + str(k) != self.last_device:
+                        linear_prob_hidden_state = linear_prob_hidden_state.to(
+                            "cuda:" + str(k + 1)
+                        )
+
+        return linear_prob_hidden_state
+
+
 class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight", "value_head.weight"]
 
@@ -1011,13 +1465,22 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             self.value_head = nn.Linear(
                 config.n_embd, config.value_vocab_size, bias=False
             )
+        if self.config.include_age_at_vs_prediction:
+            self.age_at_vs_head = nn.Linear(
+                config.n_embd, config.age_at_vs_vocab_size, bias=False
+            )
+        if self.config.include_year_at_vs_prediction:
+            self.year_at_vs_head = nn.Linear(
+                config.n_embd, config.year_at_vs_vocab_size, bias=False
+            )
+
+        self.motor_time_bins = None
+        self._motor_time_bins_on_device = None
+        self.linear_prob = None
+        self.motor_tte = None
 
         if self.config.include_motor_time_to_event:
-            self.motor_tte = MotorTaskHead(
-                input_dim=config.n_embd,
-                motor_tte_vocab_size=config.motor_tte_vocab_size,
-                motor_num_time_pieces=config.motor_num_time_pieces,
-            )
+            self.enable_motor_tte()
 
         # Model parallel
         self.model_parallel = False
@@ -1047,6 +1510,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         if self.config.include_ttv_prediction:
             self.tte_head = self.tte_head.to(self.cehrgpt.first_device)
         if self.config.include_motor_time_to_event:
+            self.linear_prob.parallelize(self.device_map)
             self.motor_tte = self.motor_tte.to(self.cehrgpt.first_device)
         self.model_parallel = True
 
@@ -1063,6 +1527,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         if self.config.include_ttv_prediction:
             self.tte_head = self.tte_head.to("cpu")
         if self.config.include_motor_time_to_event:
+            self.linear_prob.deparallelize()
+            self.linear_prob = self.linear_prob.to("cpu")
             self.motor_tte = self.motor_tte.to("cpu")
         self.model_parallel = False
         torch.cuda.empty_cache()
@@ -1090,6 +1556,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
     def update_attn_bias(self, max_position_embeddings: int):
         self.cehrgpt.update_attn_bias(max_position_embeddings)
+        self.linear_prob.update_attn_bias(max_position_embeddings)
 
     def update_motor_tte_vocab_size(
         self, motor_tte_vocab_size: Optional[int] = None
@@ -1107,11 +1574,22 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 update_motor_tte_layer = True
 
         if update_motor_tte_layer:
-            self.motor_tte = MotorTaskHead(
-                self.config.n_embd,
-                self.config.motor_tte_vocab_size,
-                self.config.motor_num_time_pieces,
-            )
+            self.enable_motor_tte()
+
+    def enable_motor_tte(self):
+        if str(self.config.motor_time_bins[-1]).lower().startswith("inf"):
+            self.config.motor_time_bins[-1] = float("inf")
+        self.motor_time_bins = torch.tensor(
+            self.config.motor_time_bins, dtype=torch.float32
+        )
+        self._motor_time_bins_on_device = None
+        self.linear_prob = LinearProbModule(self.config)
+        self.motor_tte = MotorTaskHead(
+            input_dim=self.config.n_embd,
+            motor_tte_vocab_size=self.config.motor_tte_vocab_size,
+            motor_num_time_pieces=self.config.motor_num_time_pieces,
+            task_prevalence_rates=getattr(self.config, "motor_task_prevalence_rates", None),
+        )
 
     def prepare_inputs_for_generation(
         self,
@@ -1136,10 +1614,37 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 remove_prefix_length = input_ids.shape[1] - 1
 
             input_ids = input_ids[:, remove_prefix_length:]
-            ages = ages[:, remove_prefix_length:]
+            # Generation callers may keep only the age of the newest token once
+            # the prefix is represented by the KV cache.  Otherwise trim the
+            # full age history in lockstep with input_ids.
+            if ages is not None and ages.shape[1] > 1:
+                ages = ages[:, remove_prefix_length:]
 
         attention_mask = kwargs.get("attention_mask", None)
         random_vectors = kwargs.get("random_vectors", None)
+
+        # During KV-cache generation steps, enforce visit-local attention by
+        # zeroing out positions outside the window in the attention_mask.
+        # full_input_ids is the complete sequence (prompt + all generated tokens);
+        # we use it before input_ids is truncated below.
+        if (
+            past_key_values
+            and attention_mask is not None
+            and getattr(self.config, "use_local_attention", False)
+            and getattr(self.config, "vs_token_id", None) is not None
+        ):
+            full_input_ids = input_ids  # (B, full_L) — before KV-cache truncation
+            # build_local_attention_mask returns (B, 1, full_L, full_L); the last
+            # row [-1] is the window for the new query token (0.0 = allowed, NEG_INF = blocked).
+            local_mask = _build_local_mask_from_config(
+                self.config, full_input_ids
+            )  # (B, 1, full_L, full_L)
+            local_window = (local_mask[:, 0, -1, :] == 0).long()  # (B, full_L)
+            # attention_mask may be shorter than full_input_ids if causal_sfm
+            # inserted a random-vector slot; align by taking the last L positions.
+            L = attention_mask.shape[1]
+            attention_mask = attention_mask & local_window[:, -L:]
+
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
         if inputs_embeds is not None and past_key_values is None:
             model_inputs = {"inputs_embeds": inputs_embeds}
@@ -1185,76 +1690,105 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         return model_inputs
 
-    def motor_nll_loss(
+    def _get_motor_time_bins(self, device: torch.device) -> torch.Tensor:
+        """
+        The MOTOR time bins on `device`, copied once.
+
+        They live on the CPU, and copying them in every loss call is a blocking host-to-device
+        transfer that makes the CPU wait for the GPU each step. A plain attribute, not a buffer,
+        so that model.to(dtype) cannot round the bin edges (bfloat16 cannot hold 365 exactly).
+        """
+        cached = self._motor_time_bins_on_device
+        if cached is None or cached.device != device:
+            cached = self.motor_time_bins.to(device)
+            self._motor_time_bins_on_device = cached
+        return cached
+
+    def motor_nll_loss(self, *args, **kwargs):
+        # A named range, so a GPU profile shows how much of a step the MOTOR loss takes
+        with torch.profiler.record_function("motor_loss"):
+            return self._motor_nll_loss(*args, **kwargs)
+
+    def _motor_nll_loss(
         self,
         hidden_states,
-        motor_tte_times,
-        motor_tte_event_indicators,
+        motor_row_indices,
+        motor_col_indices,
+        motor_values,
+        motor_censor_times,
         motor_tte_task_indicators,
-        motor_tte_masks,
         motor_end_index,
     ):
         """
         Computes the negative log-likelihood (NLL) loss using the LogNormal distribution.
 
         for modeling time-to-event data at each visit.
-
-        Args:
-            hidden_states (Tensor): Hidden representations for sequence tokens [num_of_concepts, hidden_dim].
-            motor_tte_times (Tensor): Raw time-to-event durations [B, T, motor_vocab_size] (flattened).
-            motor_tte_task_indicators: (Tensor): Bool indicators (True if included, False if not included).
-            motor_tte_event_indicators (Tensor): Binary indicators (1 if censored, 0 if event occurred).
-            motor_tte_masks (Tensor): Binary indicators whether the prediction should be masked
-            (1 if not masked, 0 if masked).
-            motor_end_index (Tensor): Tensor indicating the number of valid [VE] tokens in the batch.
-
-        Returns:
-            Tensor: Scalar loss value (mean negative log-likelihood).
         """
         motor_end_index = motor_end_index.sum().item()
-        motor_tte_times = motor_tte_times.view(
-            (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
-        )[:motor_end_index].clamp(min=1e-3)
-        motor_tte_event_indicators = motor_tte_event_indicators.reshape(
-            (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
-        )[:motor_end_index]
-        # motor_tte_masks = motor_tte_masks.view(
-        #     (-1, self.config.motor_num_time_pieces, self.config.motor_tte_vocab_size)
-        # )[:motor_end_index]
+
+        motor_row_indices = motor_row_indices.view((-1, 1))[:motor_end_index]
+        motor_col_indices = motor_col_indices.view((-1, 1))[:motor_end_index]
+        motor_values = motor_values.view((-1, 1))[:motor_end_index]
+
+        motor_censor_times = motor_censor_times[motor_tte_task_indicators].view(-1, 1)
+        time_vectors = torch.tile(
+            motor_censor_times, (1, self.config.motor_tte_vocab_size)
+        )
+        time_vectors[motor_row_indices, motor_col_indices] = motor_values
+
+        event_indicators = torch.zeros(
+            (motor_censor_times.shape[0], self.config.motor_tte_vocab_size),
+            dtype=torch.bool,
+            device=hidden_states.device,
+        )
+        event_indicators[motor_row_indices, motor_col_indices] = True
+
+        event_indicators_3d = event_indicators[:, None, :]
+
+        motor_time_bins = self._get_motor_time_bins(hidden_states.device)
+        start_times = motor_time_bins[:-1]
+        end_times = motor_time_bins[1:]
+        bin_widths = end_times - start_times
+        bin_widths_broadcast = bin_widths[None, :, None]  # (1, n_bins, 1)
+        start_times_broadcast = start_times[None, :, None]  # (1, n_bins, 1)
+        end_times_broadcast = end_times[None, :, None]
+        time_vectors_3d = time_vectors[:, None, :]
+
+        time_diff = time_vectors_3d - start_times_broadcast
+        time_in_bin = torch.clamp(time_diff, min=0)  # First clamp to 0
+        time_in_bin = torch.minimum(
+            time_in_bin, bin_widths_broadcast
+        )  # Then apply upper bound
+        # Optimized mask computation
+        mask = time_in_bin > 0
+
+        # More efficient log computation with better constant
+        log_constant = 1e-8  # Better numerical stability than 1e-10
+        time_in_bin_log = torch.where(
+            mask, torch.log2(torch.clamp(time_in_bin, min=log_constant)), -torch.inf
+        )
+
+        # Event indicator computation in target shape
+        time_in_range = (time_vectors_3d >= start_times_broadcast) & (
+            time_vectors_3d < end_times_broadcast
+        )
+        event_in_bin = event_indicators_3d & time_in_range
 
         tte_features = hidden_states[motor_tte_task_indicators].view(
             (-1, self.config.n_embd)
         )
-
-        assert tte_features.shape[0] == motor_tte_times.shape[0], (
-            "The number of VE tokens in the labels needs to match up "
-            "with the first dimension of motor_time_to_event_vectors. "
-            f"Received ve_token_features.shape[0]: {tte_features.shape[0]}, "
-            f"motor_time_to_event_vectors.shape[0]: {motor_tte_times.shape[0]}"
-        )
-
         # Get Exponential parameters from model
         time_dependent_logits = self.motor_tte(tte_features)
 
         # Compute event loss
         # Calculate the accumulative hazard
         # exp(-sum_{j} lambda_j)
-        survival_loss = torch.exp2(time_dependent_logits + motor_tte_times).mean()
+        num_predictions = motor_censor_times.shape[0]
+        normalizer = num_predictions * self.config.motor_tte_vocab_size
+        survival_loss = torch.exp2(time_dependent_logits + time_in_bin_log).sum() / normalizer
         event_loss = (
-            -math.log(2)
-            * torch.where(motor_tte_event_indicators, time_dependent_logits, 0).mean()
+            -math.log(2) * torch.where(event_in_bin, time_dependent_logits, 0).sum() / normalizer
         )
-
-        # survival_loss = (
-        #     torch.where(motor_tte_masks, lambda_p * motor_tte_times, 0)
-        #     .sum(dim=1)
-        #     .mean()
-        # )
-        # event_loss = (
-        #     -torch.where(motor_tte_event_indicators, torch.log(lambda_p), 0)
-        #     .sum(dim=1)
-        #     .mean()
-        # )
         return survival_loss + event_loss
 
     def forward(
@@ -1272,10 +1806,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         time_to_visits: Optional[torch.FloatTensor] = None,
         time_token_indicators: Optional[torch.BoolTensor] = None,
         sub_time_tokens: Optional[torch.LongTensor] = None,
-        motor_tte_times: Optional[torch.FloatTensor] = None,
-        motor_tte_event_indicators: Optional[torch.BoolTensor] = None,
+        motor_row_indices: Optional[torch.LongTensor] = None,
+        motor_col_indices: Optional[torch.LongTensor] = None,
+        motor_values: Optional[torch.FloatTensor] = None,
+        motor_censor_times: Optional[torch.FloatTensor] = None,
         motor_tte_task_indicators: Optional[torch.BoolTensor] = None,
-        motor_tte_masks: Optional[torch.BoolTensor] = None,
         motor_end_index: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
@@ -1283,6 +1818,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         return_dict: Optional[bool] = None,
         ages: Optional[torch.FloatTensor] = None,
         epoch_times: Optional[torch.FloatTensor] = None,
+        age_reconstruction: Optional[torch.LongTensor] = None,
+        year_reconstruction: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, CehrGptCausalLMOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -1301,11 +1838,14 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             past_key_values=past_key_values,
             attention_mask=attention_mask,
             position_ids=ages,
+            ages=ages,
+            epoch_times=epoch_times,
             random_vectors=random_vectors,
             head_mask=head_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
+            output_hidden_states=output_hidden_states
+            or self.config.include_motor_time_to_event,
             return_dict=return_dict,
         )
         hidden_states = transformer_outputs[0]
@@ -1333,12 +1873,64 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         else:
             value_logits = None
 
+        linear_prob_hidden_states = None
+        # We don't process this during the generation phase, indicated by
+        # attention_mask.shape[1] != hidden_states.shape[1].  When attention_mask
+        # is None (e.g. called from RL PG/KL forward pass without a mask) we treat
+        # the full sequence as non-generation context.
+        if (
+            self.config.include_motor_time_to_event
+            and attention_mask is not None
+            and attention_mask.shape[1] == input_ids.shape[1]
+        ):
+            # all hidden states also contains the first embedding layer outputs so we remove the first layer
+            all_hidden_states = transformer_outputs[2][1:]
+            assert self.config.num_hidden_layers == len(all_hidden_states), (
+                "self.config.num_hidden_layers == len(all_hidden_states) must be true, "
+                f"but received {self.config.num_hidden_layers} and {len(all_hidden_states)}"
+            )
+            linear_prob_input_ids = torch.full_like(
+                input_ids,
+                self.config.linear_prob_token_id,
+                device=input_ids.device,
+                dtype=input_ids.dtype,
+            )
+            linear_prob_hidden_states = self.cehrgpt.wte(linear_prob_input_ids)
+            # Build the visit-local encoder_attention_mask for the linear probe.
+            # When xformers is available, pre-expand to (B, H, L, L) once so all
+            # linear_prob layers share one allocation instead of each allocating
+            # their own (B, H, L, L) buffer.
+            linear_prob_encoder_mask = attention_mask
+            if (
+                getattr(self.config, "use_local_attention", False)
+                and getattr(self.config, "vs_token_id", None) is not None
+            ):
+                local_mask = _build_local_mask_from_config(
+                    self.config, input_ids, attention_mask
+                )  # (B, 1, L, L)
+                linear_prob_encoder_mask = (
+                    _expand_local_mask_for_xformers(
+                        local_mask,
+                        self.config.n_head,
+                        _effective_compute_dtype(hidden_states.dtype),
+                    )
+                    if HAS_XFORMERS
+                    else local_mask.to(_effective_compute_dtype(hidden_states.dtype))
+                )
+            linear_prob_hidden_states = self.linear_prob(
+                linear_prob_hidden_states,
+                all_hidden_states,
+                linear_prob_encoder_mask,
+            )
+
         loss = None
         token_loss = None
         time_token_loss = None
         time_to_visit_loss = None
         token_value_loss = None
         motor_tte_loss = None
+        age_at_vs_loss = None
+        year_at_vs_loss = None
 
         if labels is not None:
             # move labels to correct device to enable model parallelism
@@ -1361,7 +1953,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # Shift so that tokens < n predict n
             shift_logits = lm_logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-            valid_tokens: torch.BoolTensor = shift_labels != 100
+            valid_tokens: torch.BoolTensor = shift_labels != -100
             total_num_tokens = valid_tokens.sum()
             if (
                 self.cehrgpt.config.lab_token_penalty
@@ -1393,7 +1985,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 )
                 token_loss = token_loss.sum() / total_num_tokens
 
-            loss = token_loss * self.cehrgpt.config.next_token_prediction_loss_weight
+            loss = (
+                token_loss
+                * self.cehrgpt.config.next_token_prediction_loss_weight
+                * float(not self.config.freeze_cehrgpt_generation_model)
+            )
 
             if self.cehrgpt.config.entropy_penalty:
                 # Compute probabilities using softmax
@@ -1409,18 +2005,21 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             if (
                 self.config.include_motor_time_to_event
-                and motor_tte_times is not None
-                and motor_tte_event_indicators is not None
+                and linear_prob_hidden_states is not None
+                and motor_row_indices is not None
+                and motor_col_indices is not None
+                and motor_values is not None
+                and motor_censor_times is not None
                 and motor_tte_task_indicators is not None
-                and motor_tte_masks is not None
                 and motor_end_index is not None
             ):
                 motor_tte_loss = self.motor_nll_loss(
-                    hidden_states=hidden_states,
-                    motor_tte_times=motor_tte_times,
-                    motor_tte_event_indicators=motor_tte_event_indicators,
+                    hidden_states=linear_prob_hidden_states,
+                    motor_row_indices=motor_row_indices,
+                    motor_col_indices=motor_col_indices,
+                    motor_values=motor_values,
+                    motor_censor_times=motor_censor_times,
                     motor_tte_task_indicators=motor_tte_task_indicators,
-                    motor_tte_masks=motor_tte_masks,
                     motor_end_index=motor_end_index,
                 )
                 loss += motor_tte_loss * self.config.motor_time_to_event_weight
@@ -1458,7 +2057,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     0,
                 )
                 time_token_loss = time_token_loss.sum() / total_num_tokens
-                loss += time_token_loss * self.config.time_token_loss_weight
+                loss += (
+                    time_token_loss
+                    * self.config.time_token_loss_weight
+                    * float(not self.config.freeze_cehrgpt_generation_model)
+                )
 
             if time_to_visits is not None and time_to_visits is not None:
                 # Get lambda and k parameters
@@ -1504,7 +2107,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     time_to_visit_loss, "time_to_visit_loss", self.tte_head.parameters()
                 )
                 # Compute the loss
-                loss += time_to_visit_loss * self.config.time_to_visit_loss_weight
+                loss += (
+                    time_to_visit_loss
+                    * self.config.time_to_visit_loss_weight
+                    * float(not self.config.freeze_cehrgpt_generation_model)
+                )
 
             if true_values is not None and true_value_indicators is not None:
                 true_values = true_values.to(value_logits.device)
@@ -1527,7 +2134,43 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     token_value_loss = (
                         token_value_loss * self.config.lab_token_loss_weight
                     )
-                loss += token_value_loss * self.config.value_prediction_loss_weight
+                loss += (
+                    token_value_loss
+                    * self.config.value_prediction_loss_weight
+                    * float(not self.config.freeze_cehrgpt_generation_model)
+                )
+
+            if (
+                self.config.include_age_at_vs_prediction
+                and age_reconstruction is not None
+            ):
+                age_logits = self.age_at_vs_head(hidden_states)
+                age_loss_fct = CrossEntropyLoss(ignore_index=-100, reduction="sum")
+                age_at_vs_loss = age_loss_fct(
+                    age_logits.view(-1, self.config.age_at_vs_vocab_size),
+                    age_reconstruction.view(-1),
+                ) / total_num_tokens
+                loss += (
+                    age_at_vs_loss
+                    * self.config.age_at_vs_prediction_loss_weight
+                    * float(not self.config.freeze_cehrgpt_generation_model)
+                )
+
+            if (
+                self.config.include_year_at_vs_prediction
+                and year_reconstruction is not None
+            ):
+                year_logits = self.year_at_vs_head(hidden_states)
+                year_loss_fct = CrossEntropyLoss(ignore_index=-100, reduction="sum")
+                year_at_vs_loss = year_loss_fct(
+                    year_logits.view(-1, self.config.year_at_vs_vocab_size),
+                    year_reconstruction.view(-1),
+                ) / total_num_tokens
+                loss += (
+                    year_at_vs_loss
+                    * self.config.year_at_vs_prediction_loss_weight
+                    * float(not self.config.freeze_cehrgpt_generation_model)
+                )
 
             # Last line of defence: whatever produced a NaN/inf (activations, any loss term),
             # skip this step's update instead of letting it poison the weights.
@@ -1544,12 +2187,15 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             next_value_logits=value_logits,
             past_key_values=transformer_outputs.past_key_values,
             hidden_states=transformer_outputs.hidden_states,
+            linear_prob_hidden_states=linear_prob_hidden_states,
             attentions=transformer_outputs.attentions,
             token_loss=token_loss,
             time_token_loss=time_token_loss,
             time_to_visit_loss=time_to_visit_loss,
             token_value_loss=token_value_loss,
             motor_tte_loss=motor_tte_loss,
+            age_at_vs_loss=age_at_vs_loss,
+            year_at_vs_loss=year_at_vs_loss,
         )
 
     @staticmethod
@@ -1633,6 +2279,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         lab_token_ids = torch.tensor(
             cehrgpt_tokenizer.lab_token_ids,
             dtype=torch.int32,
+            device=input_ids.device,
         )
         if model_kwargs.get("value_indicators", None) is not None:
             value_indicators = model_kwargs.get("value_indicators")
@@ -1660,24 +2307,82 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         model_kwargs["value_indicators"] = value_indicators
         model_kwargs["values"] = values
 
-        # A variable to keep track of time and initialize it to zero
-        batched_time_delta = np.zeros((batch_size,), dtype=np.float32)
-        batched_ages = model_kwargs.get("ages", None)
-        if batched_ages is None:
-            batched_ages = []
-            for token_ids in input_ids.detach().cpu():
-                concept_ids = cehrgpt_tokenizer.decode(
-                    token_ids.numpy(), skip_special_tokens=False
+        # Keep generated time and age state on the accelerator when the model
+        # consumes ages. The previous implementation decoded every sampled token
+        # on CPU, updated a NumPy array, rebuilt the entire growing age history,
+        # and copied it back to the GPU at every decoding step.
+        track_ages_override = self._generation_track_ages_override
+        track_ages = (
+            getattr(self.cehrgpt.config, "apply_rotary", False)
+            if track_ages_override is None
+            else track_ages_override
+        )
+        if track_ages:
+            time_delta_lookup = torch.zeros(
+                self.config.vocab_size, dtype=torch.float32, device=input_ids.device
+            )
+            time_token_ids = []
+            time_token_days = []
+            for token, token_id in cehrgpt_tokenizer.get_vocab().items():
+                if token_id < self.config.vocab_size and is_att_token(token):
+                    time_token_ids.append(token_id)
+                    time_token_days.append(extract_time_interval_in_days(token))
+            if time_token_ids:
+                time_delta_lookup[
+                    torch.tensor(time_token_ids, device=input_ids.device)
+                ] = torch.tensor(
+                    time_token_days, dtype=torch.float32, device=input_ids.device
                 )
-                batched_ages.append(construct_age_sequence(concept_ids))
-            # Turn this to a numpy array for easy manipulation
-            batched_ages = np.asarray(batched_ages)
+            batched_time_delta = torch.zeros(
+                batch_size, dtype=torch.float32, device=input_ids.device
+            )
+            batched_ages = model_kwargs.get("ages", None)
+            if batched_ages is None:
+                batched_ages = []
+                for token_ids in input_ids.detach().cpu():
+                    concept_ids = cehrgpt_tokenizer.decode(
+                        token_ids.numpy(), skip_special_tokens=False
+                    )
+                    batched_ages.append(construct_age_sequence(concept_ids))
+                batched_ages = torch.as_tensor(
+                    np.asarray(batched_ages), device=input_ids.device
+                )
+            else:
+                batched_ages = batched_ages.to(input_ids.device)
+            base_ages = batched_ages[:, -1]
+            model_kwargs["ages"] = batched_ages
         else:
-            batched_ages = batched_ages.cpu().numpy()
-        # This is the base to which we will add the time delta
-        base_ages = np.asarray([ages[-1] for ages in batched_ages])
-        # Update the keyword arguments for the prepare_inputs_for_generation
-        model_kwargs["ages"] = torch.tensor(batched_ages).to(input_ids.device)
+            time_delta_lookup = None
+            batched_time_delta = None
+            batched_ages = None
+            base_ages = None
+            model_kwargs["ages"] = None
+
+        # `generate(num_return_sequences=N)` expands one prompt to N identical
+        # rows before entering this sampling loop.  In eval mode, and without
+        # the per-sequence causal-SFM random vector, prefill that shared prompt
+        # once and broadcast its KV cache instead of doing N identical prefills.
+        share_prompt_prefill = (
+            self._generation_share_prompt_prefill
+            and batch_size > 1
+            and not self.training
+            and not self.cehrgpt.config.causal_sfm
+            and model_kwargs.get("use_cache", False)
+            and not output_attentions
+            and not output_hidden_states
+            and model_kwargs.get("past_key_values") is None
+            and torch.equal(input_ids, input_ids[:1].expand_as(input_ids))
+            and (
+                batched_ages is None
+                or torch.equal(batched_ages, batched_ages[:1].expand_as(batched_ages))
+            )
+            and torch.equal(
+                value_indicators,
+                value_indicators[:1].expand_as(value_indicators),
+            )
+            and torch.equal(values, values[:1].expand_as(values))
+        )
+        prompt_prefilled = False
 
         while self._has_unfinished_sequences(
             this_peer_finished, synced_gpus, device=input_ids.device
@@ -1688,12 +2393,43 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             )
 
             # forward pass to get next token
-            outputs = self(
-                **model_inputs,
-                return_dict=True,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-            )
+            if share_prompt_prefill and not prompt_prefilled:
+                single_inputs = {
+                    key: (
+                        value[:1]
+                        if isinstance(value, torch.Tensor)
+                        and value.ndim > 0
+                        and value.shape[0] == batch_size
+                        else value
+                    )
+                    for key, value in model_inputs.items()
+                }
+                outputs = self(
+                    **single_inputs,
+                    return_dict=True,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                )
+                outputs.logits = outputs.logits.expand(batch_size, -1, -1)
+                if outputs.next_value_logits is not None:
+                    outputs.next_value_logits = outputs.next_value_logits.expand(
+                        batch_size, -1, -1
+                    )
+                outputs.past_key_values = tuple(
+                    tuple(
+                        state.expand(batch_size, *state.shape[1:])
+                        for state in layer_past
+                    )
+                    for layer_past in outputs.past_key_values
+                )
+                prompt_prefilled = True
+            else:
+                outputs = self(
+                    **model_inputs,
+                    return_dict=True,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                )
 
             if synced_gpus and this_peer_finished:
                 continue  # don't waste resources running the code we don't need
@@ -1737,21 +2473,17 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             else:
                 next_tokens = torch.argmax(next_token_scores, dim=-1)
 
-            # TODO: decode to get time tokens and recalculate the age at this time step
-            # Look for a potential time token
-            for batch_i, next_concept_id in enumerate(
-                cehrgpt_tokenizer.decode(
-                    next_tokens.detach().cpu().numpy(), skip_special_tokens=False
-                )
-            ):
-                if is_att_token(next_concept_id):
-                    batched_time_delta[batch_i] += extract_time_interval_in_days(
-                        next_concept_id
+            if track_ages:
+                batched_time_delta.add_(time_delta_lookup[next_tokens])
+                next_age = (
+                    base_ages
+                    + torch.div(batched_time_delta, 365, rounding_mode="floor").to(
+                        base_ages.dtype
                     )
-
-            next_age = (base_ages + batched_time_delta // 365).astype(int)[..., None]
-            batched_ages = np.concatenate([batched_ages, next_age], axis=-1)
-            model_kwargs["ages"] = torch.tensor(batched_ages).to(input_ids.device)
+                ).unsqueeze(-1)
+                # With a populated KV cache the next forward pass consumes one token,
+                # so it only needs the age for that token rather than the full history.
+                model_kwargs["ages"] = next_age
 
             # finished sentences should have their next token be a padding token
             if eos_token_id_tensor is not None:
@@ -1768,7 +2500,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             if self.cehrgpt.include_values:
                 next_value_indicators = torch.isin(
-                    next_tokens, lab_token_ids.to(next_tokens.device)
+                    next_tokens, lab_token_ids
                 )
                 next_value_logits = outputs.next_value_logits[:, -1]
                 # sample
