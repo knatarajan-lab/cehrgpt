@@ -1693,6 +1693,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 "ages": ages,
                 "attention_mask": attention_mask,
                 "random_vectors": random_vectors,
+                # Autoregressive generation only consumes language-model logits.
+                # A MOTOR checkpoint must not run its linear-probe stack during
+                # prompt prefill or retain every layer's hidden states.
+                "output_motor_features": False,
             }
         )
 
@@ -1823,6 +1827,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
+        output_motor_features: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         ages: Optional[torch.FloatTensor] = None,
         epoch_times: Optional[torch.FloatTensor] = None,
@@ -1837,6 +1842,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         """
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
+        )
+        compute_motor_features = (
+            self.config.include_motor_time_to_event
+            and output_motor_features is not False
         )
 
         transformer_outputs = self.cehrgpt(
@@ -1853,7 +1862,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states
-            or self.config.include_motor_time_to_event,
+            or compute_motor_features,
             return_dict=return_dict,
         )
         hidden_states = transformer_outputs[0]
@@ -1887,7 +1896,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # is None (e.g. called from RL PG/KL forward pass without a mask) we treat
         # the full sequence as non-generation context.
         if (
-            self.config.include_motor_time_to_event
+            compute_motor_features
             and attention_mask is not None
             and attention_mask.shape[1] == input_ids.shape[1]
         ):

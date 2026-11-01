@@ -64,6 +64,45 @@ class TestMotorTimeBinsCache(unittest.TestCase):
         self.assertEqual(bins.dtype, torch.float32)
         self.assertEqual(bins[3].item(), 365.0)  # 365 is not representable in bfloat16
 
+    def test_generation_inputs_explicitly_disable_motor_features(self):
+        model = build_model().eval()
+        inputs = torch.tensor([[2, 3, 4]])
+
+        prepared = model.prepare_inputs_for_generation(
+            inputs,
+            cehrgpt_tokenizer=object(),
+            use_cache=True,
+        )
+
+        self.assertIs(prepared["output_motor_features"], False)
+
+    def test_disabling_motor_features_skips_linear_probe_and_hidden_states(self):
+        model = build_model().eval()
+        inputs = torch.tensor([[2, 3, 4]])
+
+        output = model(
+            input_ids=inputs,
+            attention_mask=torch.ones_like(inputs),
+            output_hidden_states=False,
+            output_motor_features=False,
+        )
+
+        self.assertIsNone(output.linear_prob_hidden_states)
+        self.assertIsNone(output.hidden_states)
+
+    def test_motor_features_remain_enabled_by_default_outside_generation(self):
+        model = build_model().eval()
+        inputs = torch.tensor([[2, 3, 4]])
+
+        output = model(
+            input_ids=inputs,
+            attention_mask=torch.ones_like(inputs),
+            output_hidden_states=False,
+        )
+
+        self.assertIsNotNone(output.linear_prob_hidden_states)
+        self.assertIsNotNone(output.hidden_states)
+
 
 if __name__ == "__main__":
     unittest.main()
