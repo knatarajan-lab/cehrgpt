@@ -35,12 +35,13 @@ def safe_divide(numerator_vector, denominator_vector):
 
 def cal_f1_score(vector_a, vector_b, index_matrix):
     # vector_a is train data and vector_b is synthetic data or iteself
+    matched_vector_b = vector_b[index_matrix]
     shared_vector = np.logical_and(
-        vector_a[: len(index_matrix)], vector_b[index_matrix]
+        vector_a[: len(index_matrix)], matched_vector_b
     ).astype(int)
     shared_vector_sum = np.sum(shared_vector, axis=1)
 
-    precision = safe_divide(shared_vector_sum, np.sum(vector_b, axis=1))
+    precision = safe_divide(shared_vector_sum, np.sum(matched_vector_b, axis=1))
     recall = safe_divide(shared_vector_sum, np.sum(vector_a, axis=1))
 
     f1 = safe_divide(2 * recall * precision, recall + precision)

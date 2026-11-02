@@ -21,7 +21,6 @@ export OMOP_VOCAB_DIR="/path/to/source/omop/folder"
 export CEHR_GPT_DATA_DIR="/path/to/training/data"
 export CEHR_GPT_MODEL_DIR="/path/to/trained/model"
 export SYNTHETIC_DATA_OUTPUT_DIR="/path/to/generated/synthetic/data"
-export PRIVACY_ANALYSIS_OUTPUT_DIR="$SYNTHETIC_DATA_OUTPUT_DIR/privacy"
 ```
 
 ## Step 1: Generate Synthetic Sequences
@@ -96,51 +95,9 @@ python -u -m cehrgpt.tools.upload_omop \
 > **Tips**: This step requires spark, please refer to **Spark Environment**: Configured Apache Spark (see [Spark Setup README](./spark_setup.md)).
 > Currently, `upload_omop.py` only supports SQL Server, for other databases, you need to adjust the script.
 
-## Privacy Analyses
+## Step 4: Run Privacy Analyses
 
-### 1. Attribute Inference Analysis
-```bash
-mkdir -p $SYNTHETIC_DATA_OUTPUT_DIR/aia;
-python -u -m cehrgpt.analysis.privacy.attribute_inference \
---training_data_folder $CEHR_GPT_DATA_DIR/patient_sequence/train \
---output_folder $PRIVACY_ANALYSIS_OUTPUT_DIR/aia \
---synthetic_data_folder $SYNTHETIC_DATA_OUTPUT_DIR/top_p10000/generated_sequences/ \
---tokenizer_path $CEHR_GPT_MODEL_DIR \
---attribute_config analysis/privacy/attribute_inference_config.yml \
---n_iterations 10 --num_of_samples 10000
-```
-
-### 2. Membership Inference Analysis
-```bash
-mkdir -p $SYNTHETIC_DATA_OUTPUT_DIR/mia;
-python -u -m cehrgpt.analysis.privacy.member_inference \
---training_data_folder  $CEHR_GPT_DATA_DIR/patient_sequence/train \
---evaluation_data_folder  $CEHR_GPT_DATA_DIR/patient_sequence/test \
---output_folder $PRIVACY_ANALYSIS_OUTPUT_DIR/mia \
---synthetic_data_folder $SYNTHETIC_DATA_OUTPUT_DIR/top_p10000/generated_sequences/ \
---tokenizer_path $CEHR_GPT_MODEL_DIR \
---n_iterations 10 --num_of_samples 10000
-```
-### 3. Nearest Neighbor Inference Analysis
-```bash
-mkdir -p $SYNTHETIC_DATA_OUTPUT_DIR/nearest_neighbor_inference;
-python -u -m cehrgpt.analysis.privacy.nearest_neighbor_inference \
---training_data_folder $CEHR_GPT_DATA_DIR/patient_sequence/train \
---evaluation_data_folder $CEHR_GPT_DATA_DIR/patient_sequence/test \
---metrics_folder $SYNTHETIC_DATA_OUTPUT_DIR/nearest_neighbor_inference \
---synthetic_data_folder $SYNTHETIC_DATA_OUTPUT_DIR/top_p10000/generated_sequences/  \
---concept_tokenizer_path $CEHR_GPT_MODEL_DIR \
---n_iterations 10 --num_of_samples 10000
-```
-### 4. Re-identification Risk Inference Analysis
-```bash
-mkdir $SYNTHETIC_DATA_OUTPUT_DIR/reid;
-python -u -m cehrgpt.analysis.privacy.reid_inference \
---training_data_folder $CEHR_GPT_DATA_DIR/patient_sequence/train \
---evaluation_data_folder $CEHR_GPT_DATA_DIR/patient_sequence/test \
---output_folder $SYNTHETIC_DATA_OUTPUT_DIR/reid \
---synthetic_data_folder $SYNTHETIC_DATA_OUTPUT_DIR/top_p10000/generated_sequences/
-```
+To measure the privacy risk of the generated sequences, follow the [Privacy Analysis Guide](./privacy_analysis.md).
 
 ## Privacy and Compliance
 
