@@ -136,6 +136,8 @@ CEHR-GPT generates comprehensive synthetic patient profiles including demographi
 
 For step-by-step instructions on generating synthetic sequences and converting them to OMOP format, please follow the [Synthetic Data Generation Guide](./synthetic_data_generation.md).
 
+To measure the privacy risk of the synthetic data, follow the [Privacy Analysis Guide](./privacy_analysis.md).
+
 ## 📊 MEDS Support
 
 CEHR-GPT supports the Medical Event Data Standard (MEDS) format for enhanced interoperability.
