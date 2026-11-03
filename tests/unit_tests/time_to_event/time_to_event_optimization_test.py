@@ -213,6 +213,32 @@ class TestSimulationBatching(unittest.TestCase):
         self.assertEqual(prompt[4], "VS")
         self.assertLessEqual(len(tokenizer.encode(prompt)), 7)
 
+    def test_context_window_can_limit_input_below_model_capacity(self):
+        tokenizer = SpecialTokenTokenizer()
+        predictor = TimeToEventModel(
+            tokenizer=tokenizer,
+            model=FakeGenerationModel(),
+            outcome_events=[],
+            generation_config=GenerationConfig(max_length=8, max_new_tokens=1),
+            max_input_length=6,
+        )
+        history = [
+            "year:2000",
+            "age:20",
+            "Gender/1",
+            "Race/1",
+            "VS",
+            "A",
+            "VS",
+            "B",
+            "C",
+        ]
+
+        prompt = predictor.prepare_prompt(history)
+
+        self.assertEqual(prompt[:4], history[:4])
+        self.assertLessEqual(len(tokenizer.encode(prompt)), 6)
+
 
 class TestPredictionFlush(unittest.TestCase):
     def test_force_flush_persists_remainder_before_marking_done(self):

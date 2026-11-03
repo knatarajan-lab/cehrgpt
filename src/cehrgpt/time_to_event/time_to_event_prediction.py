@@ -68,6 +68,20 @@ def get_device():
     return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
+def get_max_input_length(
+    context_window: int, model_max_length: int, max_new_tokens: int
+) -> int:
+    """Resolve the input cap while reserving model capacity for generation."""
+    if context_window <= 0:
+        raise ValueError("--context_window must be greater than zero.")
+    model_input_capacity = model_max_length - max_new_tokens
+    if model_input_capacity <= 0:
+        raise ValueError(
+            "max_new_tokens must be smaller than the model's maximum sequence length."
+        )
+    return min(context_window, model_input_capacity)
+
+
 def resolve_gpu_ids(gpu_ids: str) -> List[str]:
     """
     Resolve --gpu_ids ("all" or comma separated indices) into the CUDA_VISIBLE_DEVICES values.
@@ -403,6 +417,12 @@ def main(args):
         epsilon_cutoff=args.epsilon_cutoff,
         max_new_tokens=task_config.max_new_tokens,
     )
+    max_input_length = get_max_input_length(
+        context_window=args.context_window,
+        model_max_length=generation_config.max_length,
+        max_new_tokens=generation_config.max_new_tokens,
+    )
+    LOG.info(f"Maximum encoded input length {max_input_length}")
     ts_pred_model = TimeToEventModel(
         tokenizer=cehrgpt_tokenizer,
         model=cehrgpt_model,
@@ -411,6 +431,7 @@ def main(args):
         batch_size=args.batch_size,
         device=get_device(),
         store_generated_trajectories=args.store_generated_trajectories,
+        max_input_length=max_input_length,
     )
     if args.prepared_dataset_path:
         test_dataset = load_from_disk(args.prepared_dataset_path)
@@ -441,12 +462,12 @@ def main(args):
         ]
         label = record["label"]
         time_to_event = record["time_to_event"] if "time_to_event" in record else None
-        # Keep the most recent history that leaves room for the tokens to generate. The
-        # demographic header is kept (moved forward in time) and is not part of this budget,
-        # so the prompt can be DEMOGRAPHIC_PROMPT_SIZE tokens longer than the budget.
+        # Keep the most recent history and move the demographic header forward in time.
+        # prepare_prompt then enforces the exact encoded-token cap, including the header and
+        # any tokenizer-added special tokens.
         partial_history = truncate_history_keeping_demographics(
             partial_history,
-            generation_config.max_length - generation_config.max_new_tokens,
+            max_input_length,
             known_numeric_tokens,
         )
         partial_history = ts_pred_model.prepare_prompt(partial_history)
