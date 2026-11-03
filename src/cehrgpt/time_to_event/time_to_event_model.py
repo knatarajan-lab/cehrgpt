@@ -149,6 +149,7 @@ class TimeToEventModel:
         batch_size: int = 32,
         store_generated_trajectories: bool = False,
         enable_early_stopping: bool = True,
+        max_input_length: Optional[int] = None,
     ):
         self.tokenizer = tokenizer
         self.model = model.eval()
@@ -159,6 +160,7 @@ class TimeToEventModel:
         self.outcome_events = [str(event) for event in outcome_events]
         self.device = device
         self.batch_size = batch_size
+        self.max_input_length = max_input_length
         self.store_generated_trajectories = store_generated_trajectories
         self.enable_early_stopping = enable_early_stopping
         self.max_sequence = model.config.n_positions
@@ -173,6 +175,10 @@ class TimeToEventModel:
             self.generation_config.max_length
             - self.generation_config.max_new_tokens
         )
+        if self.max_input_length is not None:
+            if self.max_input_length <= 0:
+                raise ValueError("max_input_length must be greater than zero")
+            max_prompt_tokens = min(max_prompt_tokens, self.max_input_length)
         if len(self.tokenizer.encode(history)) <= max_prompt_tokens:
             return history
 
