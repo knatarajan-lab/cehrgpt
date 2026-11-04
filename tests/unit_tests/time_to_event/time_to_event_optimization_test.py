@@ -328,9 +328,17 @@ class TestGenerationDifferentialEquivalence(unittest.TestCase):
         )
         return CEHRGPT2LMHeadModel(config).eval()
 
-    def _generate(self, model, tokenizer, share_prefill, track_ages):
+    def _generate(
+        self,
+        model,
+        tokenizer,
+        share_prefill,
+        track_ages,
+        last_token_logits_only=True,
+    ):
         model._generation_share_prompt_prefill = share_prefill
         model._generation_track_ages_override = track_ages
+        model._generation_last_token_logits_only = last_token_logits_only
         prompt_tokens = [
             "year:2000",
             "age:20",
@@ -386,6 +394,66 @@ class TestGenerationDifferentialEquivalence(unittest.TestCase):
         shared = self._generate(model, tokenizer, share_prefill=True, track_ages=True)
 
         self._assert_same_generation(repeated, shared)
+
+    def test_last_token_projection_matches_full_prompt_logits_generation(self):
+        tokenizer = DifferentialTokenizer()
+        model = self._build_model(apply_rotary=False)
+
+        full_prompt_logits = self._generate(
+            model,
+            tokenizer,
+            share_prefill=True,
+            track_ages=False,
+            last_token_logits_only=False,
+        )
+        last_token_logits = self._generate(
+            model,
+            tokenizer,
+            share_prefill=True,
+            track_ages=False,
+            last_token_logits_only=True,
+        )
+
+        self._assert_same_generation(full_prompt_logits, last_token_logits)
+
+    def test_generation_projects_only_the_last_prompt_hidden_state(self):
+        tokenizer = DifferentialTokenizer()
+        model = self._build_model(apply_rotary=False)
+        projected_sequence_lengths = []
+
+        def record_lm_head_input(_module, args):
+            projected_sequence_lengths.append(args[0].shape[1])
+
+        handle = model.lm_head.register_forward_pre_hook(record_lm_head_input)
+        try:
+            self._generate(
+                model,
+                tokenizer,
+                share_prefill=True,
+                track_ages=False,
+                last_token_logits_only=True,
+            )
+        finally:
+            handle.remove()
+
+        self.assertTrue(projected_sequence_lengths)
+        self.assertEqual(
+            projected_sequence_lengths, [1] * len(projected_sequence_lengths)
+        )
+
+    def test_regular_forward_still_returns_full_sequence_logits(self):
+        model = self._build_model(apply_rotary=False)
+        input_ids = torch.tensor([[2, 3, 4, 5, 6, 8]], dtype=torch.long)
+
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            ages=torch.zeros_like(input_ids, dtype=torch.float32),
+            output_motor_features=False,
+            return_dict=True,
+        )
+
+        self.assertEqual(outputs.logits.shape, (1, input_ids.shape[1], 24))
 
     def test_shared_prefill_is_disabled_for_flash_attention(self):
         model = self._build_model(apply_rotary=False)

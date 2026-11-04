@@ -1489,6 +1489,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # switches off the serialized config avoids changing checkpoint semantics.
         self._generation_share_prompt_prefill = True
         self._generation_track_ages_override = None
+        self._generation_last_token_logits_only = True
 
     def _can_share_generation_prompt_prefill(self) -> bool:
         return (
@@ -1697,6 +1698,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 # A MOTOR checkpoint must not run its linear-probe stack during
                 # prompt prefill or retain every layer's hidden states.
                 "output_motor_features": False,
+                # Generation consumes only outputs.logits[:, -1, :].  Projecting
+                # every prompt hidden state through the vocabulary head wastes a
+                # large matrix multiplication during prefill.
+                "logits_to_keep": (
+                    1 if self._generation_last_token_logits_only else None
+                ),
             }
         )
 
@@ -1828,6 +1835,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         output_motor_features: Optional[bool] = None,
+        logits_to_keep: Optional[int] = None,
         return_dict: Optional[bool] = None,
         ages: Optional[torch.FloatTensor] = None,
         epoch_times: Optional[torch.FloatTensor] = None,
@@ -1884,9 +1892,20 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             torch.cuda.set_device(self.cehrgpt.first_device)
             hidden_states = hidden_states.to(self.lm_head.weight.device)
 
-        lm_logits = self.lm_head(hidden_states)
+        if logits_to_keep is not None:
+            if labels is not None:
+                raise ValueError(
+                    "logits_to_keep cannot be used when labels are provided"
+                )
+            if logits_to_keep <= 0:
+                raise ValueError("logits_to_keep must be a positive integer")
+            logits_hidden_states = hidden_states[:, -logits_to_keep:, :]
+        else:
+            logits_hidden_states = hidden_states
+
+        lm_logits = self.lm_head(logits_hidden_states)
         if self.cehrgpt.include_values:
-            value_logits = self.value_head(hidden_states)
+            value_logits = self.value_head(logits_hidden_states)
         else:
             value_logits = None
 
