@@ -1,9 +1,10 @@
+import math
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 from datasets import Dataset
 from torch.utils.data import DataLoader
-from transformers import Trainer
+from transformers import EarlyStoppingCallback, Trainer
 from transformers.trainer_utils import has_length, seed_worker
 from transformers.utils import import_utils, logging
 
@@ -31,6 +32,13 @@ class CehrGptTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         self.aux_loss_start_step = kwargs.pop("aux_loss_start_step", 0)
         self.aux_loss_warmup_steps = kwargs.pop("aux_loss_warmup_steps", 0)
+        self.eval_loss_retry_factor = kwargs.pop("eval_loss_retry_factor", 100.0)
+        self._sub_loss_accumulators = {
+            "train": {"sums": {}, "counts": {}},
+            "eval": {"sums": {}, "counts": {}},
+        }
+        self._sub_loss_context = "train"
+        self._last_accepted_eval_losses = {}
         if self.aux_loss_start_step > 0:
             LOG.info("aux_loss_start_step: %s (overrides warmup)", self.aux_loss_start_step)
         elif self.aux_loss_warmup_steps > 0:
@@ -67,16 +75,16 @@ class CehrGptTrainer(Trainer):
             aux_contribution = loss - token_contribution
             loss = token_contribution + aux_weight * aux_contribution
 
-        # Accumulate each sub-loss so we can average over the logging interval.
-        if not hasattr(self, "_sub_loss_sums"):
-            self._sub_loss_sums = {}
-            self._sub_loss_counts = {}
-
+        # Training and evaluation have independent accumulators. In particular, an
+        # unfinished training logging interval must never contaminate validation.
+        accumulator = self._sub_loss_accumulators[self._sub_loss_context]
         for name in _CEHRGPT_SUB_LOSSES:
             value = getattr(outputs, name, None)
             if value is not None:
-                self._sub_loss_sums[name] = self._sub_loss_sums.get(name, 0.0) + value.detach().item()
-                self._sub_loss_counts[name] = self._sub_loss_counts.get(name, 0) + 1
+                accumulator["sums"][name] = (
+                    accumulator["sums"].get(name, 0.0) + value.detach().item()
+                )
+                accumulator["counts"][name] = accumulator["counts"].get(name, 0) + 1
 
         return (loss, outputs) if return_outputs else loss
 
@@ -103,14 +111,119 @@ class CehrGptTrainer(Trainer):
         finally:
             self.label_names = saved_label_names
 
-    def log(self, logs, *args, **kwargs):
-        # Flush averaged sub-losses into the log dict, then reset accumulators.
-        if hasattr(self, "_sub_loss_sums") and self._sub_loss_sums:
-            for name, total in self._sub_loss_sums.items():
-                count = self._sub_loss_counts.get(name, 1)
+    def _reset_sub_losses(self, context: str) -> None:
+        self._sub_loss_accumulators[context] = {"sums": {}, "counts": {}}
+
+    def _flush_sub_losses(self, logs, context: str) -> None:
+        accumulator = self._sub_loss_accumulators[context]
+        if accumulator["sums"]:
+            for name, total in accumulator["sums"].items():
+                count = accumulator["counts"].get(name, 1)
                 logs[name] = round(total / count, 6)
-            self._sub_loss_sums = {}
-            self._sub_loss_counts = {}
+        self._reset_sub_losses(context)
+
+    def _previous_eval_loss(self, metric_key: str) -> Optional[float]:
+        if metric_key in self._last_accepted_eval_losses:
+            return self._last_accepted_eval_losses[metric_key]
+        for record in reversed(self.state.log_history):
+            value = record.get(metric_key)
+            if value is not None and math.isfinite(float(value)):
+                return float(value)
+        return None
+
+    def _should_retry_eval_loss(
+        self, metric_key: str, metrics: Dict[str, float], previous: Optional[float]
+    ) -> bool:
+        if self.eval_loss_retry_factor is None or self.eval_loss_retry_factor <= 1:
+            return False
+        value = metrics.get(metric_key)
+        if value is None:
+            return False
+        value = float(value)
+        if not math.isfinite(value):
+            return True
+        if previous is None or previous <= 0 or value <= 0:
+            return False
+        change_factor = max(value / previous, previous / value)
+        return change_factor >= self.eval_loss_retry_factor
+
+    def _notify_early_stopping_callbacks(self, callbacks, metrics) -> None:
+        for callback in callbacks:
+            control = callback.on_evaluate(
+                self.args,
+                self.state,
+                self.control,
+                metrics=metrics,
+                model=self.model,
+                optimizer=self.optimizer,
+                lr_scheduler=self.lr_scheduler,
+            )
+            if control is not None:
+                self.control = control
+
+    def evaluate(
+        self,
+        eval_dataset=None,
+        ignore_keys=None,
+        metric_key_prefix: str = "eval",
+    ):
+        """Evaluate, retrying implausible loss jumps before early stopping sees them."""
+        metric_key = f"{metric_key_prefix}_loss"
+        previous = self._previous_eval_loss(metric_key)
+
+        # EarlyStoppingCallback acts inside Trainer.evaluate(). Hold it back until a
+        # suspicious result has been repeated (or replaced by a normal retry).
+        original_callbacks = list(self.callback_handler.callbacks)
+        early_stopping_callbacks = [
+            callback
+            for callback in original_callbacks
+            if isinstance(callback, EarlyStoppingCallback)
+        ]
+        if early_stopping_callbacks:
+            self.callback_handler.callbacks = [
+                callback
+                for callback in original_callbacks
+                if callback not in early_stopping_callbacks
+            ]
+
+        self._sub_loss_context = "eval"
+        self._reset_sub_losses("eval")
+        try:
+            metrics = super().evaluate(
+                eval_dataset=eval_dataset,
+                ignore_keys=ignore_keys,
+                metric_key_prefix=metric_key_prefix,
+            )
+            if self._should_retry_eval_loss(metric_key, metrics, previous):
+                LOG.warning(
+                    "%s changed from %s to %s, exceeding the retry factor %s. "
+                    "Repeating validation before early stopping.",
+                    metric_key,
+                    previous,
+                    metrics.get(metric_key),
+                    self.eval_loss_retry_factor,
+                )
+                first_value = metrics.get(metric_key)
+                self._reset_sub_losses("eval")
+                metrics = super().evaluate(
+                    eval_dataset=eval_dataset,
+                    ignore_keys=ignore_keys,
+                    metric_key_prefix=metric_key_prefix,
+                )
+                metrics[f"{metric_key_prefix}_loss_retry_triggered"] = 1.0
+                metrics[f"{metric_key_prefix}_loss_first_attempt"] = first_value
+        finally:
+            self._sub_loss_context = "train"
+            self.callback_handler.callbacks = original_callbacks
+
+        value = metrics.get(metric_key)
+        if value is not None and math.isfinite(float(value)):
+            self._last_accepted_eval_losses[metric_key] = float(value)
+        self._notify_early_stopping_callbacks(early_stopping_callbacks, metrics)
+        return metrics
+
+    def log(self, logs, *args, **kwargs):
+        self._flush_sub_losses(logs, self._sub_loss_context)
         # Log the current aux weight so progress is visible in training logs.
         if self.aux_loss_start_step > 0 or self.aux_loss_warmup_steps > 0:
             logs["aux_loss_weight"] = round(self._aux_weight(), 4)

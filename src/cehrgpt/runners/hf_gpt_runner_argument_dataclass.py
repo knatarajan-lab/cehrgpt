@@ -266,6 +266,15 @@ class CehrGPTArguments:
             "help": "A threshold to denote how much the specified metric must improve to satisfy early stopping conditions."
         },
     )
+    eval_loss_retry_factor: Optional[float] = dataclasses.field(
+        default=100.0,
+        metadata={
+            "help": (
+                "Repeat validation once before early stopping when eval loss changes "
+                "by at least this factor. Set to 1 or less to disable."
+            )
+        },
+    )
     inner_dim: Optional[int] = dataclasses.field(
         default=None,
         metadata={"help": "The dimensionality of the hidden layer"},
