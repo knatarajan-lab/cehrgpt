@@ -762,7 +762,6 @@ def main():
             )["num_of_concepts"],
             aux_loss_warmup_steps=cehrgpt_args.aux_loss_warmup_steps,
             aux_loss_start_step=cehrgpt_args.aux_loss_start_step,
-            eval_loss_retry_factor=cehrgpt_args.eval_loss_retry_factor,
         )
         training_args.per_device_train_batch_size = 1
         training_args.per_device_eval_batch_size = 1
@@ -776,7 +775,6 @@ def main():
             CehrGptTrainer,
             aux_loss_warmup_steps=cehrgpt_args.aux_loss_warmup_steps,
             aux_loss_start_step=cehrgpt_args.aux_loss_start_step,
-            eval_loss_retry_factor=cehrgpt_args.eval_loss_retry_factor,
         )
         data_collator_fn = CehrGptDataCollator
 

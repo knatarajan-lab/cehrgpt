@@ -33,6 +33,7 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
         num_replicas: Optional[int] = None,
         rank: Optional[int] = None,
         seed: int = 0,
+        shuffle: bool = True,
         drop_last: bool = False,
         negative_sampling_probability: Optional[float] = None,
         labels: Optional[List[int]] = None,
@@ -87,6 +88,7 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
         self.num_replicas = num_replicas
         self.rank = rank
         self.seed = seed
+        self.shuffle = shuffle
         self.drop_last = drop_last
         self.negative_sampling_probability = negative_sampling_probability
         self.labels = labels
@@ -98,10 +100,14 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
 
     def __iter__(self) -> Iterator[List[int]]:
 
-        # deterministically shuffle based on epoch and seed
-        g = torch.Generator()
-        g.manual_seed(self.seed + self.sampler.epoch)
-        indices = torch.randperm(len(self.lengths), generator=g).tolist()
+        if self.shuffle:
+            # Deterministically shuffle training samples based on epoch and seed.
+            g = torch.Generator()
+            g.manual_seed(self.seed + self.sampler.epoch)
+            indices = torch.randperm(len(self.lengths), generator=g).tolist()
+        else:
+            # Evaluation must visit samples in the same order on every epoch.
+            indices = list(range(len(self.lengths)))
 
         # Partition indices for this rank
         indices = indices[self.rank :: self.num_replicas]

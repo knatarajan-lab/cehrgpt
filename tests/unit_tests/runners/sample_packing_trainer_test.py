@@ -3,32 +3,21 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-from transformers import EarlyStoppingCallback, Trainer, TrainerControl
+from transformers import Trainer, TrainerControl
 
+from cehrgpt.data.sample_packing_sampler import SamplePackingBatchSampler
 from cehrgpt.runners.sample_packing_trainer import CehrGptTrainer
-
-
-class RecordingEarlyStoppingCallback(EarlyStoppingCallback):
-    def __init__(self):
-        super().__init__(early_stopping_patience=1)
-        self.metrics = []
-
-    def on_evaluate(self, args, state, control, metrics, **kwargs):
-        self.metrics.append(dict(metrics))
-        return control
 
 
 def make_trainer():
     trainer = object.__new__(CehrGptTrainer)
     trainer.aux_loss_start_step = 0
     trainer.aux_loss_warmup_steps = 0
-    trainer.eval_loss_retry_factor = 100.0
     trainer._sub_loss_accumulators = {
         "train": {"sums": {}, "counts": {}},
         "eval": {"sums": {}, "counts": {}},
     }
     trainer._sub_loss_context = "train"
-    trainer._last_accepted_eval_losses = {}
     trainer.args = SimpleNamespace()
     trainer.state = SimpleNamespace(global_step=10, log_history=[])
     trainer.control = TrainerControl()
@@ -88,48 +77,45 @@ class CehrGptTrainerLossAccumulatorTest(unittest.TestCase):
         )
 
 
-class CehrGptTrainerEvaluationRetryTest(unittest.TestCase):
-    def test_implausible_loss_is_retried_before_early_stopping(self):
+class CehrGptTrainerEvaluationTest(unittest.TestCase):
+    def test_evaluation_runs_once_with_fresh_accumulators(self):
         trainer = make_trainer()
-        trainer._last_accepted_eval_losses["eval_loss"] = 3.0
-        early_stopping = RecordingEarlyStoppingCallback()
-        other_callback = object()
-        trainer.callback_handler = SimpleNamespace(
-            callbacks=[other_callback, early_stopping]
-        )
+        trainer._sub_loss_accumulators["eval"] = {
+            "sums": {"motor_tte_loss": 46_931.0},
+            "counts": {"motor_tte_loss": 1},
+        }
 
         with patch.object(
             Trainer,
             "evaluate",
-            side_effect=[{"eval_loss": 46_931.0}, {"eval_loss": 3.2}],
-        ) as evaluate:
-            metrics = trainer.evaluate()
-
-        self.assertEqual(evaluate.call_count, 2)
-        self.assertEqual(metrics["eval_loss"], 3.2)
-        self.assertEqual(metrics["eval_loss_first_attempt"], 46_931.0)
-        self.assertEqual(metrics["eval_loss_retry_triggered"], 1.0)
-        self.assertEqual(early_stopping.metrics, [metrics])
-        self.assertEqual(
-            trainer.callback_handler.callbacks, [other_callback, early_stopping]
-        )
-        self.assertEqual(trainer._last_accepted_eval_losses["eval_loss"], 3.2)
-        self.assertEqual(trainer._sub_loss_context, "train")
-
-    def test_stable_loss_is_not_retried(self):
-        trainer = make_trainer()
-        trainer._last_accepted_eval_losses["eval_loss"] = 3.0
-        early_stopping = RecordingEarlyStoppingCallback()
-        trainer.callback_handler = SimpleNamespace(callbacks=[early_stopping])
-
-        with patch.object(
-            Trainer, "evaluate", return_value={"eval_loss": 3.1}
+            return_value={"eval_loss": 3.2},
         ) as evaluate:
             metrics = trainer.evaluate()
 
         evaluate.assert_called_once()
-        self.assertEqual(metrics, {"eval_loss": 3.1})
-        self.assertEqual(early_stopping.metrics, [metrics])
+        self.assertEqual(metrics, {"eval_loss": 3.2})
+        self.assertEqual(
+            trainer._sub_loss_accumulators["eval"], {"sums": {}, "counts": {}}
+        )
+        self.assertEqual(trainer._sub_loss_context, "train")
+
+
+class SamplePackingBatchSamplerTest(unittest.TestCase):
+    def test_evaluation_order_is_constant_across_epochs(self):
+        sampler = SamplePackingBatchSampler(
+            lengths=[1, 1, 1, 1, 1],
+            max_tokens_per_batch=6,
+            max_position_embeddings=10,
+            seed=42,
+            shuffle=False,
+        )
+
+        epoch_zero = list(sampler)
+        sampler.sampler.set_epoch(7)
+        epoch_seven = list(sampler)
+
+        self.assertEqual(epoch_zero, epoch_seven)
+        self.assertEqual(epoch_zero, [[0, 1], [2, 3], [4]])
 
 
 if __name__ == "__main__":
