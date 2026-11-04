@@ -185,6 +185,7 @@ class CEHRGPTConfig(PretrainedConfig):
         demographics_size=4,
         lab_token_penalty=False,
         lab_token_loss_weight=0.9,
+        domain_normalize_numeric_losses=False,
         value_prediction_loss_weight=1.0,
         entropy_penalty=False,
         entropy_penalty_alpha=0.01,
@@ -334,6 +335,7 @@ class CEHRGPTConfig(PretrainedConfig):
 
         self.lab_token_penalty = lab_token_penalty
         self.lab_token_loss_weight = lab_token_loss_weight
+        self.domain_normalize_numeric_losses = domain_normalize_numeric_losses
         self.entropy_penalty = entropy_penalty
         self.entropy_penalty_alpha = entropy_penalty_alpha
         self.value_prediction_loss_weight = value_prediction_loss_weight

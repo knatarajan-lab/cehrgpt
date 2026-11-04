@@ -1972,9 +1972,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             shift_labels = labels[..., 1:].contiguous()
             valid_tokens: torch.BoolTensor = shift_labels != -100
             total_num_tokens = valid_tokens.sum()
-            if (
-                self.cehrgpt.config.lab_token_penalty
-                and self.cehrgpt.config.lab_token_exists
+            if self.cehrgpt.config.lab_token_exists and (
+                self.cehrgpt.config.domain_normalize_numeric_losses
+                or self.cehrgpt.config.lab_token_penalty
             ):
                 lab_index = torch.isin(
                     shift_labels.view(-1),
@@ -1987,13 +1987,30 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 token_loss = loss_fct(
                     shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
                 )
-                token_loss = torch.where(
-                    lab_index,
-                    token_loss * self.cehrgpt.config.lab_token_loss_weight,
-                    token_loss,
-                )
-
-                token_loss = token_loss.sum() / total_num_tokens
+                if self.cehrgpt.config.domain_normalize_numeric_losses:
+                    valid_index = valid_tokens.view(-1)
+                    lab_index = lab_index & valid_index
+                    non_lab_index = ~lab_index & valid_index
+                    lab_count = lab_index.sum().clamp_min(1)
+                    non_lab_count = non_lab_index.sum().clamp_min(1)
+                    lab_loss = torch.where(lab_index, token_loss, 0).sum() / lab_count
+                    non_lab_loss = (
+                        torch.where(non_lab_index, token_loss, 0).sum()
+                        / non_lab_count
+                    )
+                    token_loss = (
+                        non_lab_loss * non_lab_index.any().to(token_loss.dtype)
+                        + lab_loss
+                        * self.cehrgpt.config.lab_token_loss_weight
+                        * lab_index.any().to(token_loss.dtype)
+                    )
+                else:
+                    token_loss = torch.where(
+                        lab_index,
+                        token_loss * self.cehrgpt.config.lab_token_loss_weight,
+                        token_loss,
+                    )
+                    token_loss = token_loss.sum() / total_num_tokens
             else:
                 # Flatten the tokens
                 loss_fct = CrossEntropyLoss(reduction="none")
@@ -2140,12 +2157,21 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     shift_value_logits.view(-1, shift_value_logits.size(-1)),
                     shift_next_values.view(-1),
                 )
-                token_value_loss = torch.where(
-                    shift_value_indicators.view(-1), token_value_loss, 0
-                )
-                token_value_loss = token_value_loss.sum() / total_num_tokens
+                value_index = shift_value_indicators.view(-1).bool()
+                if self.cehrgpt.config.domain_normalize_numeric_losses:
+                    value_index = value_index & valid_tokens.view(-1)
+                    value_count = value_index.sum().clamp_min(1)
+                    token_value_loss = (
+                        torch.where(value_index, token_value_loss, 0).sum()
+                        / value_count
+                    )
+                else:
+                    token_value_loss = torch.where(
+                        value_index, token_value_loss, 0
+                    ).sum() / total_num_tokens
                 if (
-                    self.cehrgpt.config.lab_token_penalty
+                    not self.cehrgpt.config.domain_normalize_numeric_losses
+                    and self.cehrgpt.config.lab_token_penalty
                     and self.cehrgpt.config.lab_token_exists
                 ):
                     token_value_loss = (

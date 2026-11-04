@@ -232,6 +232,13 @@ class CehrGPTArguments:
         default=1.0,
         metadata={"help": "lab_token_loss_weight penalty co-efficient"},
     )
+    domain_normalize_numeric_losses: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "Average measurement and non-measurement concept losses within "
+            "their domains, and average value loss over value-bearing targets."
+        },
+    )
     value_prediction_loss_weight: Optional[float] = dataclasses.field(
         default=1.0,
         metadata={"help": "The weight of the value prediction loss"},

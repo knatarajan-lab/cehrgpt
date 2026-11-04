@@ -23,6 +23,14 @@ hidden_size: 768
 n_head: 12
 max_position_embeddings: 1024
 
+# Optional: normalize measurement and non-measurement losses within each domain
+# so their aggregate weights do not depend on token frequency. Measurement
+# concept loss is scaled by lab_token_loss_weight; value loss is scaled by
+# value_prediction_loss_weight.
+domain_normalize_numeric_losses: false
+lab_token_loss_weight: 0.5
+value_prediction_loss_weight: 1.0
+
 # torch dataloader configs
 dataloader_num_workers: 4
 dataloader_prefetch_factor: 2
