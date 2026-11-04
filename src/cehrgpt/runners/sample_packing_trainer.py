@@ -31,6 +31,11 @@ class CehrGptTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         self.aux_loss_start_step = kwargs.pop("aux_loss_start_step", 0)
         self.aux_loss_warmup_steps = kwargs.pop("aux_loss_warmup_steps", 0)
+        self._sub_loss_accumulators = {
+            "train": {"sums": {}, "counts": {}},
+            "eval": {"sums": {}, "counts": {}},
+        }
+        self._sub_loss_context = "train"
         if self.aux_loss_start_step > 0:
             LOG.info("aux_loss_start_step: %s (overrides warmup)", self.aux_loss_start_step)
         elif self.aux_loss_warmup_steps > 0:
@@ -67,16 +72,16 @@ class CehrGptTrainer(Trainer):
             aux_contribution = loss - token_contribution
             loss = token_contribution + aux_weight * aux_contribution
 
-        # Accumulate each sub-loss so we can average over the logging interval.
-        if not hasattr(self, "_sub_loss_sums"):
-            self._sub_loss_sums = {}
-            self._sub_loss_counts = {}
-
+        # Training and evaluation have independent accumulators. In particular, an
+        # unfinished training logging interval must never contaminate validation.
+        accumulator = self._sub_loss_accumulators[self._sub_loss_context]
         for name in _CEHRGPT_SUB_LOSSES:
             value = getattr(outputs, name, None)
             if value is not None:
-                self._sub_loss_sums[name] = self._sub_loss_sums.get(name, 0.0) + value.detach().item()
-                self._sub_loss_counts[name] = self._sub_loss_counts.get(name, 0) + 1
+                accumulator["sums"][name] = (
+                    accumulator["sums"].get(name, 0.0) + value.detach().item()
+                )
+                accumulator["counts"][name] = accumulator["counts"].get(name, 0) + 1
 
         return (loss, outputs) if return_outputs else loss
 
@@ -103,14 +108,37 @@ class CehrGptTrainer(Trainer):
         finally:
             self.label_names = saved_label_names
 
-    def log(self, logs, *args, **kwargs):
-        # Flush averaged sub-losses into the log dict, then reset accumulators.
-        if hasattr(self, "_sub_loss_sums") and self._sub_loss_sums:
-            for name, total in self._sub_loss_sums.items():
-                count = self._sub_loss_counts.get(name, 1)
+    def _reset_sub_losses(self, context: str) -> None:
+        self._sub_loss_accumulators[context] = {"sums": {}, "counts": {}}
+
+    def _flush_sub_losses(self, logs, context: str) -> None:
+        accumulator = self._sub_loss_accumulators[context]
+        if accumulator["sums"]:
+            for name, total in accumulator["sums"].items():
+                count = accumulator["counts"].get(name, 1)
                 logs[name] = round(total / count, 6)
-            self._sub_loss_sums = {}
-            self._sub_loss_counts = {}
+        self._reset_sub_losses(context)
+
+    def evaluate(
+        self,
+        eval_dataset=None,
+        ignore_keys=None,
+        metric_key_prefix: str = "eval",
+    ):
+        """Evaluate with a fresh, evaluation-only set of loss accumulators."""
+        self._sub_loss_context = "eval"
+        self._reset_sub_losses("eval")
+        try:
+            return super().evaluate(
+                eval_dataset=eval_dataset,
+                ignore_keys=ignore_keys,
+                metric_key_prefix=metric_key_prefix,
+            )
+        finally:
+            self._sub_loss_context = "train"
+
+    def log(self, logs, *args, **kwargs):
+        self._flush_sub_losses(logs, self._sub_loss_context)
         # Log the current aux weight so progress is visible in training logs.
         if self.aux_loss_start_step > 0 or self.aux_loss_warmup_steps > 0:
             logs["aux_loss_weight"] = round(self._aux_weight(), 4)
@@ -277,6 +305,7 @@ class SamplePackingTrainer(CehrGptTrainer):
             max_position_embeddings=self.max_position_embeddings,
             drop_last=self.args.dataloader_drop_last,
             seed=self.args.seed,
+            shuffle=False,
         )
         dataloader_params = {
             "collate_fn": data_collator,
