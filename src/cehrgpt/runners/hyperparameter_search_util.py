@@ -2,13 +2,13 @@ from functools import partial
 from typing import Callable, List, Optional, Tuple, Union
 
 import optuna
-from cehrbert.runners.hf_runner_argument_dataclass import ModelArguments
 from datasets import Dataset, DatasetDict
 from transformers import EarlyStoppingCallback, TrainerCallback, TrainingArguments
 from transformers.utils import logging
 
 from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
+from cehrgpt.runners.hf_runner_argument_dataclass import ModelArguments
 
 LOG = logging.get_logger("transformers")
 

@@ -3,15 +3,13 @@ import os
 import sys
 from typing import Optional, Tuple
 
-from cehrbert.runners.hf_runner_argument_dataclass import (
-    DataTrainingArguments,
-    ModelArguments,
-)
+from meds_to_cehr.arguments import DataTrainingArguments
 from transformers import HfArgumentParser, TrainingArguments
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
+from cehrgpt.runners.hf_runner_argument_dataclass import ModelArguments
 
 LOG = logging.get_logger("transformers")
 
