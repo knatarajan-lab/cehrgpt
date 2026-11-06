@@ -307,6 +307,23 @@ def _align_local_mask_for_xformers(
     return local_mask.contiguous()
 
 
+def bounded_exp2(exponent: torch.Tensor, max_exponent: Optional[float]) -> torch.Tensor:
+    """
+    Computes exp2(exponent), continuing linearly (with matching slope) above max_exponent.
+
+    A single outlier exponent would otherwise make the loss and its gradient explode;
+    below max_exponent the result is identical to torch.exp2.
+    """
+    if max_exponent is None:
+        return torch.exp2(exponent)
+    linear = 2.0**max_exponent * (1 + math.log(2) * (exponent - max_exponent))
+    return torch.where(
+        exponent >= max_exponent,
+        linear,
+        torch.exp2(exponent.clamp(max=max_exponent)),
+    )
+
+
 class MotorTaskHead(nn.Module):
     def __init__(
         self,
@@ -1804,7 +1821,13 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # exp(-sum_{j} lambda_j)
         num_predictions = motor_censor_times.shape[0]
         normalizer = num_predictions * self.config.motor_tte_vocab_size
-        survival_loss = torch.exp2(time_dependent_logits + time_in_bin_log).sum() / normalizer
+        survival_loss = (
+            bounded_exp2(
+                time_dependent_logits + time_in_bin_log,
+                self.config.motor_max_log2_cumulative_hazard,
+            ).sum()
+            / normalizer
+        )
         event_loss = (
             -math.log(2) * torch.where(event_in_bin, time_dependent_logits, 0).sum() / normalizer
         )
@@ -2057,6 +2080,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     motor_censor_times=motor_censor_times,
                     motor_tte_task_indicators=motor_tte_task_indicators,
                     motor_end_index=motor_end_index,
+                )
+                motor_tte_loss = replace_nonfinite_loss(
+                    motor_tte_loss, "motor_tte_loss", self.motor_tte.parameters()
                 )
                 loss += motor_tte_loss * self.config.motor_time_to_event_weight
 
