@@ -2,7 +2,7 @@ import datetime
 import os
 import random
 import uuid
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -91,6 +91,7 @@ def generate_single_batch(
     num_beams=1,
     num_beam_groups=1,
     epsilon_cutoff=0.0,
+    suppress_token_ids: Optional[List[int]] = None,
     device: Any = "cpu",
 ) -> Dict[str, Any]:
     with torch.no_grad():
@@ -115,6 +116,7 @@ def generate_single_batch(
             num_beams=num_beams,
             num_beam_groups=num_beam_groups,
             epsilon_cutoff=epsilon_cutoff,
+            suppress_tokens=suppress_token_ids or [],
         )
 
         batched_prompts = prompts.to(device)

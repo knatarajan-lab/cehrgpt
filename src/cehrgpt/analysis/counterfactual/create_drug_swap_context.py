@@ -1,0 +1,720 @@
+#!/usr/bin/env python3
+"""
+LEGEND-HTN support: create an active-comparator context by swapping the drug
+concept in a treated_context.parquet with a frequency-sampled comparator drug.
+
+Both arms stop right after the index drug token: the context is the history before the drug plus
+the drug itself (the original one in the actual arm, the comparator in the swapped arm).  Whatever
+follows the drug in the index visit is left to the model, so it is generated given the drug of the
+arm and not copied from the record.
+
+The comparator drug concept is NOT fixed — it is sampled proportional to the
+empirical frequency of each comparator ingredient among patients who actually
+received the comparator class.  This preserves the real-world distribution of
+prescribing patterns in the counterfactual arm.
+
+Example:
+  If 65% of thiazide patients received HCTZ and 35% received chlorthalidone,
+  then ACEi patients assigned to the thiazide counterfactual arm will receive
+  HCTZ with p=0.65 and chlorthalidone with p=0.35 (independently per patient).
+
+Pipeline integration
+--------------------
+                    extract_drug_initiation_sequences.py
+                           |
+              ┌────────────┴────────────┐
+              ▼                         ▼
+  treated_context.parquet        non_treated_context.parquet
+         │
+         │  create_drug_swap_context.py  (once per comparison direction)
+         ▼
+  comparator_context.parquet
+         │
+         └──── generate_counterfactual_sequences.py ──► HR estimation
+
+Usage (ACEi vs Thiazide)
+------------------------
+# ACEi patients → frequency-sampled thiazide counterfactual
+python create_drug_swap_context.py \\
+    --treated_context_path  /data/contexts/treated_context.parquet \\
+    --drug_info_path        /data/contexts/drug_info.parquet \\
+    --vocab_path            /data/omop_vocab \\
+    --tokenizer_path        /models/tokenizer \\
+    --source_concept_ids    1308216,1334456,1341927,1335471,1331235,1340128,1363749,1310756,1373225,1342439 \\
+    --comparator_concept_ids 1395058,974166,978555,907013 \\
+    --output_path           /data/swap/acei_pts_thiazide_ctx.parquet \\
+    --also_write_treated_path /data/swap/acei_pts_acei_ctx.parquet \\
+    --model_path            /models/cehrgpt \\
+    --preference_score_trim 0.05 \\
+    --overlap_scores_path   /data/swap/acei_pts_overlap_scores.parquet
+
+# Thiazide patients → frequency-sampled ACEi counterfactual
+python create_drug_swap_context.py \\
+    --treated_context_path  /data/contexts/treated_context.parquet \\
+    --drug_info_path        /data/contexts/drug_info.parquet \\
+    --vocab_path            /data/omop_vocab \\
+    --tokenizer_path        /models/tokenizer \\
+    --source_concept_ids    1395058,974166,978555,907013 \\
+    --comparator_concept_ids 1308216,1334456,1341927,1335471,1331235,1340128,1363749,1310756,1373225,1342439 \\
+    --output_path           /data/swap/thiazide_pts_acei_ctx.parquet \\
+    --also_write_treated_path /data/swap/thiazide_pts_thiazide_ctx.parquet \\
+    --model_path            /models/cehrgpt \\
+    --preference_score_trim 0.05 \\
+    --overlap_scores_path   /data/swap/thiazide_pts_overlap_scores.parquet
+
+Overlap check
+-------------
+With --preference_score_trim, each patient's preference score
+P(comparator class) / (P(source class) + P(comparator class)) is read from the
+model at the index position.  Patients outside [trim, 1 - trim] are dropped from
+both arms.  Run both directions with the same trim, and pass both scores files to
+hazard_ratio_estimation.py --overlap_scores_path.
+"""
+
+import argparse
+import os
+import random
+from pathlib import Path
+from typing import Dict, List, Optional, Set
+
+import polars as pl
+
+from cehrgpt.tokenization.tokenization_cehrgpt import CehrGptTokenizer
+
+# ---------------------------------------------------------------------------
+# LEGEND-HTN ACEi vs Thiazide ingredient concept_ids
+# ---------------------------------------------------------------------------
+
+# ACE inhibitor ingredient concept_ids (RxNorm ingredients in the OMOP vocabulary)
+ACEI_INGREDIENT_CONCEPT_IDS: List[int] = [
+    1308216,   # Lisinopril
+    1334456,   # Ramipril
+    1341927,   # Enalapril
+    1335471,   # Benazepril
+    1331235,   # Quinapril
+    1340128,   # Captopril
+    1363749,   # Fosinopril
+    1310756,   # Moexipril
+    1373225,   # Perindopril
+    1342439,   # Trandolapril
+]
+
+# Thiazide / thiazide-like diuretic ingredient concept_ids
+THIAZIDE_INGREDIENT_CONCEPT_IDS: List[int] = [
+    1395058,   # Chlorthalidone
+    974166,    # Hydrochlorothiazide (HCTZ)
+    978555,    # Indapamide
+    907013,    # Metolazone
+]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def get_descendants_for_concepts(vocab_path: str, concept_ids: List[int]) -> Set[str]:
+    """
+    Return all descendant concept_ids (as strings) for a list of ingredient
+    concept_ids, including the concepts themselves, via concept_ancestor.
+    """
+    ancestor_glob = os.path.join(vocab_path, "concept_ancestor", "*.parquet")
+    descendants: List[str] = (
+        pl.scan_parquet(ancestor_glob)
+        .filter(pl.col("ancestor_concept_id").is_in(concept_ids))
+        .select(pl.col("descendant_concept_id").cast(pl.String))
+        .collect()
+        ["descendant_concept_id"]
+        .to_list()
+    )
+    result = set(descendants)
+    result.update(str(c) for c in concept_ids)
+    return result
+
+
+def load_vocab(tokenizer_path: str) -> Dict[str, int]:
+    return CehrGptTokenizer.from_pretrained(tokenizer_path).get_vocab()
+
+
+def resolve_comparator_token_ids(
+    tokenizer_path: str,
+    comparator_concept_ids: List[int],
+    drop_unknown: bool = False,
+    vocab: Optional[Dict[str, int]] = None,
+) -> Dict[str, int]:
+    """
+    Map each comparator ingredient to its token id in the CEHR-GPT vocabulary.
+
+    The comparator ingredient replaces the source drug token in the context, so
+    the model can only be conditioned on it if the tokenizer knows it.  A
+    missing ingredient would map to ``[OOV]``, which silently runs the
+    "comparator" arm on an unknown drug, so it is an error.  With *drop_unknown* the
+    ingredients the tokenizer does not know are left out instead (and reported), as long as
+    one is left.
+    """
+    vocab = vocab if vocab is not None else load_vocab(tokenizer_path)
+    missing = [str(c) for c in comparator_concept_ids if str(c) not in vocab]
+    if missing and not drop_unknown:
+        raise ValueError(
+            f"{len(missing)} comparator ingredient concept_id(s) are not in the vocabulary of "
+            f"the tokenizer at {tokenizer_path}: {', '.join(missing)}. Remove them from "
+            f"--comparator_concept_ids, use a tokenizer that was trained on them, or leave them out "
+            f"with --drop_unknown_comparators."
+        )
+    known = {str(c): int(vocab[str(c)]) for c in comparator_concept_ids if str(c) in vocab}
+    if not known:
+        raise ValueError(
+            f"none of the comparator ingredients is in the vocabulary of the tokenizer at {tokenizer_path}"
+        )
+    if missing:
+        print(
+            f"  Warning: {len(missing)} comparator ingredient(s) are not in the vocabulary of the "
+            f"tokenizer and are left out: {', '.join(missing)}"
+        )
+    return known
+
+
+def compute_ingredient_sampling_weights(
+    drug_info: pl.DataFrame,
+    comparator_patient_ids: Set[int],
+    comparator_ingredient_ids: List[int],
+    vocab_path: str,
+) -> Dict[str, float]:
+    """
+    Compute the empirical frequency of each comparator ingredient among
+    patients who actually received the comparator drug class.
+
+    Each comparator patient's drug_concept_id is mapped back to the closest
+    ingredient in *comparator_ingredient_ids* via concept_ancestor.  The
+    resulting normalised weight dict {ingredient_str: probability} is used
+    to sample a realistic comparator concept for each source patient.
+
+    Falls back to a uniform distribution if frequencies cannot be estimated.
+    """
+    comp_drugs = (
+        drug_info
+        .filter(pl.col("person_id").is_in(list(comparator_patient_ids)))
+        ["drug_concept_id"]
+        .to_list()
+    )
+
+    if not comp_drugs:
+        print("  Warning: no comparator patients found — using uniform ingredient weights")
+        n = len(comparator_ingredient_ids)
+        return {str(c): 1.0 / n for c in comparator_ingredient_ids}
+
+    # Build per-ingredient descendants map
+    print(f"  Building ingredient→descendants map for {len(comparator_ingredient_ids)} ingredients …")
+    ingredient_descendants: Dict[str, Set[str]] = {
+        str(ing): get_descendants_for_concepts(vocab_path, [ing])
+        for ing in comparator_ingredient_ids
+    }
+
+    # Count patients per ingredient
+    counts: Dict[str, int] = {str(c): 0 for c in comparator_ingredient_ids}
+    unmatched = 0
+    for drug_str in (str(d) for d in comp_drugs):
+        matched = False
+        for ing_str, descendants in ingredient_descendants.items():
+            if drug_str in descendants:
+                counts[ing_str] += 1
+                matched = True
+                break
+        if not matched:
+            unmatched += 1
+
+    if unmatched:
+        print(f"  Warning: {unmatched:,} comparator drug concepts did not map to any ingredient")
+
+    total = sum(counts.values())
+    if total == 0:
+        print("  Warning: all comparator drugs unmatched — using uniform ingredient weights")
+        n = len(comparator_ingredient_ids)
+        return {str(c): 1.0 / n for c in comparator_ingredient_ids}
+
+    weights = {ing: cnt / total for ing, cnt in counts.items() if cnt > 0}
+    print("  Comparator ingredient sampling weights (empirical frequency):")
+    for ing, w in sorted(weights.items(), key=lambda x: -x[1]):
+        print(f"    concept {ing}: {w:.3%}")
+    return weights
+
+
+# ---------------------------------------------------------------------------
+# Drug swap logic
+# ---------------------------------------------------------------------------
+
+def swap_drug_in_concept_ids(
+    concept_ids: List[str],
+    source_concepts: Set[str],
+    comparator_concept_id: str,
+) -> Optional[tuple]:
+    """
+    Replace the first occurrence of a source drug concept with
+    *comparator_concept_id* in *concept_ids*.
+
+    Returns (swap_pos, modified_list), or None if no source concept was found.
+    """
+    swapped = list(concept_ids)
+    for i, token in enumerate(swapped):
+        if token in source_concepts:
+            swapped[i] = comparator_concept_id
+            return i, swapped
+    return None
+
+
+def cut_after_position(row: Dict, position: int) -> Dict:
+    """
+    End the context of *row* with the token at *position*: every sequence column (a list as long
+    as ``concept_ids``) keeps its first ``position + 1`` entries, the other columns are unchanged.
+    """
+    length = len(row["concept_ids"])
+    cut = dict(row)
+    for column, values in row.items():
+        if values is not None and not isinstance(values, (str, bytes)) and hasattr(values, "__len__") \
+                and len(values) == length:
+            cut[column] = list(values)[: position + 1]
+    return cut
+
+
+def cut_after_index_drug(row: Dict, source_concepts: Set[str]) -> Optional[Dict]:
+    """The context of *row* up to and including its first source drug, None without one."""
+    position = next((i for i, c in enumerate(row["concept_ids"]) if c in source_concepts), None)
+    return None if position is None else cut_after_position(row, position)
+
+
+# ---------------------------------------------------------------------------
+# Overlap check
+# ---------------------------------------------------------------------------
+
+def _apply_overlap_check(
+    df_source: pl.DataFrame,
+    source_concepts: Set[str],
+    comparator_concepts: Set[str],
+    model_path: str,
+    tokenizer_path: str,
+    trim: float,
+    scores_path: Path,
+    context_length: int,
+    batch_size: int,
+) -> pl.DataFrame:
+    """Score every source patient, write the scores, and keep the retained ones."""
+    import torch
+
+    from cehrgpt.analysis.counterfactual import overlap
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_path)
+    model = overlap.load_scoring_model(model_path, tokenizer, device)
+    probabilities = overlap.score_patients(
+        df_source, source_concepts, comparator_concepts, tokenizer, model, device,
+        context_length, batch_size,
+    )
+    del model
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+    scores = overlap.trim_by_preference_score(
+        df_source["person_id"].to_list(), probabilities, trim
+    )
+    scores_path.parent.mkdir(parents=True, exist_ok=True)
+    scores.write_parquet(str(scores_path))
+    overlap.print_overlap_summary(scores, trim)
+    print(f"Overlap scores → {scores_path}")
+
+    retained = scores.filter(pl.col("retained"))["person_id"].to_list()
+    return df_source.filter(pl.col("person_id").is_in(retained))
+
+
+# ---------------------------------------------------------------------------
+# Main function
+# ---------------------------------------------------------------------------
+
+def create_comparator_context(
+    treated_context_path: str,
+    drug_info_path: str,
+    vocab_path: str,
+    tokenizer_path: str,
+    source_concept_ids: List[int],
+    comparator_concept_ids: List[int],
+    output_path: Path,
+    also_write_treated_path: Optional[Path] = None,
+    max_source_patients: Optional[int] = None,
+    seed: int = 42,
+    model_path: Optional[str] = None,
+    preference_score_trim: Optional[float] = None,
+    overlap_scores_path: Optional[Path] = None,
+    context_length: int = 1024,
+    batch_size: int = 8,
+    drop_unknown_comparators: bool = False,
+) -> None:
+    """
+    Filter *treated_context_path* to patients in the SOURCE drug class, then
+    swap each patient's drug concept with a comparator concept sampled
+    proportional to the empirical frequency of comparator ingredients.
+
+    Parameters
+    ----------
+    treated_context_path
+        treated_context.parquet from extract_drug_initiation_sequences.py.
+    drug_info_path
+        drug_info.parquet from the same extraction run.
+    vocab_path
+        OMOP vocabulary root (must contain concept_ancestor/ parquets).
+    tokenizer_path
+        CEHR-GPT tokenizer.  Every comparator ingredient must be in its
+        vocabulary, otherwise a ``ValueError`` is raised before any data is read.
+    source_concept_ids
+        OMOP ingredient concept_ids for the SOURCE drug class.  All clinical-
+        drug descendants are expanded via concept_ancestor.
+    comparator_concept_ids
+        OMOP ingredient concept_ids for the COMPARATOR drug class.  Each
+        source patient's drug is replaced by one of these, sampled
+        proportional to the empirical frequency among patients who actually
+        received the comparator class.
+    output_path
+        Destination parquet for the swapped (comparator) contexts.
+    also_write_treated_path
+        If provided, also write the unmodified (actual) treated contexts for
+        the filtered patients — ready to use as the source arm in generation.
+    max_source_patients
+        If set, randomly sample this many source-class patients before
+        generating contexts (useful for pilot runs on large cohorts).
+    seed
+        Random seed for reproducible frequency-based sampling and patient
+        sub-sampling.
+    model_path
+        CEHR-GPT model used for the overlap check (see ``overlap.py``).
+    preference_score_trim
+        Overlap check: keep only patients whose preference score,
+        P(comparator class) / (P(source class) + P(comparator class)) at the index
+        position, lies in ``[trim, 1 - trim]``.  Dropped patients are removed
+        from both arms.  None disables the check.
+    overlap_scores_path
+        Where to write each patient's probabilities, preference score and
+        retained flag.  Required with *preference_score_trim*; pass it to
+        ``hazard_ratio_estimation.py`` so the observed analysis drops the same patients.
+    context_length, batch_size
+        Input length and batch size of the overlap check; use the generation values.
+    drop_unknown_comparators
+        Leave out the comparator ingredients that the tokenizer does not know instead of
+        stopping.  The ingredients are then sampled by their frequency among the known ones, and
+        the share of the real comparator prescriptions that is left out is printed.
+    """
+    if preference_score_trim is not None:
+        if model_path is None or overlap_scores_path is None:
+            raise ValueError(
+                "preference_score_trim needs model_path and overlap_scores_path"
+            )
+        if not 0.0 < preference_score_trim < 0.5:
+            raise ValueError(
+                f"preference_score_trim must be in (0, 0.5), got {preference_score_trim}"
+            )
+    vocab = load_vocab(tokenizer_path)
+    comparator_token_ids = resolve_comparator_token_ids(
+        tokenizer_path, comparator_concept_ids, drop_unknown_comparators, vocab
+    )
+
+    random.seed(seed)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    drug_info = pl.read_parquet(os.path.join(drug_info_path, "*.parquet") if os.path.isdir(drug_info_path) else drug_info_path)
+
+    # 1. Expand source ingredients to all descendants
+    print(f"[source]     Expanding {len(source_concept_ids)} ingredient(s) via concept_ancestor …")
+    source_concepts = get_descendants_for_concepts(vocab_path, source_concept_ids)
+    print(f"             → {len(source_concepts):,} source drug concepts")
+
+    source_patients: Set[int] = set(
+        drug_info
+        .filter(pl.col("drug_concept_id").is_in(list(source_concepts)))
+        ["person_id"]
+        .to_list()
+    )
+    print(f"             → {len(source_patients):,} source-class patients")
+
+    # The model can only be run on a patient whose own drug is in its vocabulary
+    unknown_drug_patients: Set[int] = set(
+        drug_info
+        .filter(pl.col("person_id").is_in(list(source_patients)))
+        .filter(~pl.col("drug_concept_id").cast(pl.String).is_in(list(vocab)))
+        ["person_id"]
+        .to_list()
+    )
+    if unknown_drug_patients:
+        source_patients -= unknown_drug_patients
+        print(f"             → left out {len(unknown_drug_patients):,} patients whose own drug is not "
+              f"in the vocabulary of the tokenizer; {len(source_patients):,} remain")
+
+    # 2. Expand comparator ingredients and identify comparator patients
+    print(f"[comparator] Expanding {len(comparator_concept_ids)} ingredient(s) via concept_ancestor …")
+    comparator_concepts = get_descendants_for_concepts(vocab_path, comparator_concept_ids)
+    comparator_patients: Set[int] = set(
+        drug_info
+        .filter(pl.col("drug_concept_id").is_in(list(comparator_concepts)))
+        ["person_id"]
+        .to_list()
+    )
+    print(f"             → {len(comparator_patients):,} comparator-class patients (for frequency estimation)")
+
+    # 3. Compute empirical ingredient frequencies from comparator patients
+    weights = compute_ingredient_sampling_weights(
+        drug_info=drug_info,
+        comparator_patient_ids=comparator_patients,
+        comparator_ingredient_ids=comparator_concept_ids,
+        vocab_path=vocab_path,
+    )
+    unknown_weight = sum(w for c, w in weights.items() if c not in comparator_token_ids)
+    if unknown_weight:
+        known_total = sum(w for c, w in weights.items() if c in comparator_token_ids)
+        if known_total <= 0:
+            raise ValueError(
+                "none of the real comparator prescriptions is for an ingredient the tokenizer knows"
+            )
+        print(f"  Left out {unknown_weight:.1%} of the real comparator prescriptions (ingredients the "
+              f"tokenizer does not know); the rest are sampled by their relative frequency")
+        weights = {c: w / known_total for c, w in weights.items() if c in comparator_token_ids}
+    weight_concepts = list(weights.keys())
+    weight_values   = [weights[c] for c in weight_concepts]
+
+    # 4. Load and filter treated contexts for source patients
+    df = pl.read_parquet(os.path.join(treated_context_path, "*.parquet") if os.path.isdir(treated_context_path) else treated_context_path)
+    df_source = df.filter(pl.col("person_id").is_in(list(source_patients)))
+    print(f"\n{len(df_source):,} source-class treated contexts to swap")
+
+    if max_source_patients is not None and len(df_source) > max_source_patients:
+        df_source = df_source.sample(n=max_source_patients, seed=seed, shuffle=True)
+        print(f"Randomly sampled {max_source_patients:,} source patients (seed={seed})")
+
+    if preference_score_trim is not None:
+        df_source = _apply_overlap_check(
+            df_source=df_source,
+            source_concepts=source_concepts,
+            comparator_concepts=comparator_concepts,
+            model_path=model_path,
+            tokenizer_path=tokenizer_path,
+            trim=preference_score_trim,
+            scores_path=Path(overlap_scores_path),
+            context_length=context_length,
+            batch_size=batch_size,
+        )
+
+    # Both arms end with the index drug: the context stops right after the drug token, and the
+    # model writes the rest of the index visit and everything after it.
+    if also_write_treated_path is not None:
+        Path(also_write_treated_path).parent.mkdir(parents=True, exist_ok=True)
+        actual = [cut_after_index_drug(row, source_concepts) for row in df_source.iter_rows(named=True)]
+        pl.DataFrame([r for r in actual if r is not None], schema=df_source.schema).write_parquet(
+            str(also_write_treated_path)
+        )
+        print(f"Actual treated contexts (up to the index drug) → {also_write_treated_path}")
+
+    # 5. Swap each patient's drug concept with a frequency-sampled comparator
+    swapped_records = []
+    n_swapped = 0
+    n_failed = 0
+
+    for row in df_source.iter_rows(named=True):
+        # Sample comparator ingredient proportional to empirical frequency
+        comparator_str = random.choices(weight_concepts, weights=weight_values, k=1)[0]
+        result = swap_drug_in_concept_ids(
+            list(row["concept_ids"]), source_concepts, comparator_str
+        )
+        if result is None:
+            n_failed += 1
+            continue
+        swap_pos, new_concept_ids = result
+        row = dict(row)
+        row["concept_ids"] = new_concept_ids
+        row["drug_concept_id"] = comparator_str
+        # Keep input_ids in sync: update the token at the swap position so
+        # the model is conditioned on the comparator drug, not the source drug.
+        if "input_ids" in row:
+            input_ids = list(row["input_ids"])
+            input_ids[swap_pos] = comparator_token_ids[comparator_str]
+            row["input_ids"] = input_ids
+        swapped_records.append(cut_after_position(row, swap_pos))
+        n_swapped += 1
+
+    print(f"Swapped {n_swapped:,} | failed {n_failed:,} (source drug not found in context)")
+
+    pl.DataFrame(swapped_records).write_parquet(str(output_path))
+    print(f"Comparator context → {output_path}")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Create an active-comparator context by swapping each source "
+            "patient's drug concept with a frequency-sampled comparator drug "
+            "(LEGEND-HTN active-comparator design)."
+        )
+    )
+    parser.add_argument(
+        "--treated_context_path",
+        required=True,
+        help="treated_context.parquet from extract_drug_initiation_sequences.py",
+    )
+    parser.add_argument(
+        "--drug_info_path",
+        required=True,
+        help="drug_info.parquet from extract_drug_initiation_sequences.py",
+    )
+    parser.add_argument(
+        "--vocab_path",
+        required=True,
+        help="OMOP vocabulary root directory (must contain concept_ancestor/ parquets)",
+    )
+    parser.add_argument(
+        "--tokenizer_path",
+        required=True,
+        help=(
+            "CEHR-GPT tokenizer directory.  Every comparator ingredient must be in its "
+            "vocabulary, otherwise the script stops before reading any data."
+        ),
+    )
+    parser.add_argument(
+        "--source_concept_ids",
+        required=True,
+        help=(
+            "Comma-separated OMOP ingredient concept_ids for the SOURCE drug class. "
+            "ACEi: 1308216,1334456,1341927,1335471,1331235,1340128,1363749,1310756,1373225,1342439  "
+            "Thiazide: 1395058,974166,978555,907013"
+        ),
+    )
+    parser.add_argument(
+        "--comparator_concept_ids",
+        required=True,
+        help=(
+            "Comma-separated OMOP ingredient concept_ids for the COMPARATOR drug class. "
+            "Each source patient's drug is replaced by one of these, sampled proportional "
+            "to their empirical frequency among patients who actually received the comparator class."
+        ),
+    )
+    parser.add_argument(
+        "--output_path",
+        required=True,
+        help="Output path for the comparator context parquet",
+    )
+    parser.add_argument(
+        "--also_write_treated_path",
+        default=None,
+        help=(
+            "Optional: also write the unmodified (actual) treated contexts "
+            "for the filtered source patients to this path"
+        ),
+    )
+    parser.add_argument(
+        "--max_source_patients",
+        type=int,
+        default=None,
+        help=(
+            "Optional: randomly sample this many source-class patients before "
+            "generating contexts (e.g. 10000 for a pilot run). "
+            "Default: use all patients."
+        ),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducible frequency-based sampling (default: 42)",
+    )
+    parser.add_argument(
+        "--model_path",
+        default=None,
+        help="CEHR-GPT model for the overlap check (required with --preference_score_trim)",
+    )
+    parser.add_argument(
+        "--preference_score_trim",
+        type=float,
+        default=None,
+        help=(
+            "Overlap check: keep only patients whose preference score "
+            "P(comparator class) / (P(source class) + P(comparator class)), read from the "
+            "model at the index position, lies in [trim, 1 - trim] (e.g. 0.05). "
+            "Dropped patients are removed from both arms. Default: no check."
+        ),
+    )
+    parser.add_argument(
+        "--overlap_scores_path",
+        default=None,
+        help=(
+            "Where to write the per-patient probabilities, preference score and retained "
+            "flag (required with --preference_score_trim). Pass it to "
+            "hazard_ratio_estimation.py --overlap_scores_path."
+        ),
+    )
+    parser.add_argument(
+        "--context_length",
+        type=int,
+        default=1024,
+        help="Input length of the overlap check; use the generation input length (default: 1024)",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=8,
+        help="Batch size of the overlap check (default: 8)",
+    )
+    parser.add_argument(
+        "--drop_unknown_comparators",
+        action="store_true",
+        help=(
+            "Leave out the comparator ingredients that the tokenizer does not know instead of "
+            "stopping. They are sampled by their frequency among the known ingredients, and the "
+            "share of the real comparator prescriptions that is left out is printed."
+        ),
+    )
+    parser.add_argument(
+        "--list_concepts",
+        action="store_true",
+        help="Print the built-in ACEi and thiazide concept_id lists then exit",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+
+    if args.list_concepts:
+        print("ACEi ingredient concept_ids:")
+        for cid in ACEI_INGREDIENT_CONCEPT_IDS:
+            print(f"  {cid}")
+        print("\nThiazide ingredient concept_ids:")
+        for cid in THIAZIDE_INGREDIENT_CONCEPT_IDS:
+            print(f"  {cid}")
+        return
+
+    source_concept_ids      = [int(x.strip()) for x in args.source_concept_ids.split(",")]
+    comparator_concept_ids  = [int(x.strip()) for x in args.comparator_concept_ids.split(",")]
+
+    create_comparator_context(
+        treated_context_path=args.treated_context_path,
+        drug_info_path=args.drug_info_path,
+        vocab_path=args.vocab_path,
+        tokenizer_path=args.tokenizer_path,
+        source_concept_ids=source_concept_ids,
+        comparator_concept_ids=comparator_concept_ids,
+        output_path=Path(args.output_path),
+        also_write_treated_path=(
+            Path(args.also_write_treated_path) if args.also_write_treated_path else None
+        ),
+        max_source_patients=args.max_source_patients,
+        seed=args.seed,
+        model_path=args.model_path,
+        preference_score_trim=args.preference_score_trim,
+        overlap_scores_path=(
+            Path(args.overlap_scores_path) if args.overlap_scores_path else None
+        ),
+        context_length=args.context_length,
+        batch_size=args.batch_size,
+        drop_unknown_comparators=args.drop_unknown_comparators,
+    )
+
+
+if __name__ == "__main__":
+    main()

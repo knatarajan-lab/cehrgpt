@@ -1,0 +1,1521 @@
+#!/usr/bin/env python3
+"""
+Step 1: Extract patient partial histories up to first drug exposure.
+
+For each patient in the patient_sequence dataset this script:
+  1. Expands the user-supplied drug ingredient concept_ids to all OMOP
+     descendants via the concept_ancestor table.
+  2. Scans each patient's concept_ids list to find the first visit that
+     contains any of these drug concepts.
+  3. Produces two truncated sequence variants:
+
+       non_treated_context  — tokens up to (but NOT including) the ATT
+                              token that precedes the drug-initiation visit,
+                              i.e. the full history ending with [VE] of the
+                              visit immediately before the drug visit.
+                              The model will generate a counterfactual future
+                              *without* the drug.
+
+       treated_context      — tokens up to and INCLUDING [VE] of the
+                              drug-initiation visit.  The model will generate
+                              the future *conditional on* having received the
+                              drug.
+
+  4. Writes chunked parquet files to sub-directories of <output_dir>:
+       non_treated_context/
+       treated_context/
+       drug_info/           (person_id, drug_concept_id, drug_epoch_time, era_end_epoch_time,
+                            last_observed_epoch_time, arm)
+       observed_outcomes/   (person_id, drug_epoch_time, <one col per outcome>)
+
+Usage
+-----
+python extract_drug_initiation_sequences.py \\
+    --patient_sequence_path /path/to/patient_sequence \\
+    --vocab_path            /path/to/omop_vocab_dir \\
+    --source_concept_ids    1308216,1334456 \\
+    --comparator_concept_ids 974166,978555 \\
+    --output_dir            /path/to/output
+"""
+
+import argparse
+import glob as glob_module
+import json
+import math
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
+import os
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import numpy as np
+import polars as pl
+from tqdm import tqdm
+
+from cehrgpt.analysis.counterfactual.outcome_definitions import (
+    definitions_fingerprint,
+    load_outcome_definitions,
+)
+from cehrgpt.models.tokenization_hf_cehrgpt import NONE_BIN, UNKNOWN_BIN, CehrGptTokenizer
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+VISIT_START_TOKEN = "[VS]"
+VISIT_END_TOKEN = "[VE]"
+# Column of observed_outcomes that says whether the outcome occurred before the index date
+PRIOR_PREFIX = "prior__"
+END_TOKEN = "[END]"
+DEATH_TOKEN = "[DEATH]"
+INPATIENT_ER_VISIT_CONCEPTS: Set[str] = {"9201", "9203", "262"}
+
+# All columns that are parallel arrays (length == len(concept_ids))
+SEQUENCE_ARRAY_COLS = [
+    "concept_ids",
+    "input_ids",
+    "value_indicators",
+    "values",
+    "visit_segments",
+    "orders",
+    "dates",
+    "ages",
+    "visit_concept_orders",
+    "concept_value_masks",
+    "number_as_values",
+    "concept_as_values",
+    "is_numeric_types",
+    "concept_values",
+    "mlm_skip_values",
+    "priorities",
+    "visit_concept_ids",
+    "visit_rank_orders",
+    "concept_orders",
+    "record_ranks",
+    "units",
+    "event_group_ids",
+    "epoch_times",
+]
+
+# Columns that contain nulls and must be dropped before writing parquet
+_DROP_BEFORE_WRITE = {"number_as_values", "concept_as_values", "is_numeric_types"}
+
+# Columns the model's data collator requires to be present
+REQUIRED_COLS = {"concept_ids", "input_ids", "ages", "epoch_times", "value_indicators", "values"}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _encode_values(record: Dict[str, Any], tokenizer: CehrGptTokenizer) -> Dict[str, Any]:
+    """
+    Compute value_indicators and values from raw source columns, mirroring
+    the logic in HFCehrGptTokenizationMapping.transform().
+
+    Sets record["value_indicators"] and record["values"] in-place and removes
+    the intermediate columns that contain nulls (not safe for parquet write).
+    """
+    concept_value_masks = _to_list(record.get("concept_value_masks", []))
+    record["value_indicators"] = concept_value_masks
+
+    n = len(concept_value_masks)
+    number_as_values  = _to_list(record.get("number_as_values",  [None] * n))
+    concept_as_values = _to_list(record.get("concept_as_values", [None] * n))
+    is_numeric_types  = _to_list(record.get("is_numeric_types",  [0]    * n))
+    concept_ids       = _to_list(record["concept_ids"])
+    units             = _to_list(record.get("units", [None] * n))
+
+    if any(m == 1 for m in concept_value_masks):
+        values = []
+        for concept_id, unit, mask, num_val, cat_val, is_num in zip(
+            concept_ids, units, concept_value_masks,
+            number_as_values, concept_as_values, is_numeric_types,
+        ):
+            if mask == 1:
+                value = UNKNOWN_BIN
+                if is_num == 1:
+                    if concept_id in tokenizer.numeric_concept_ids:
+                        value = tokenizer.normalize(concept_id, unit, num_val)
+                elif isinstance(cat_val, str):
+                    value = cat_val
+                values.append(value)
+            else:
+                values.append(NONE_BIN)
+    else:
+        values = [NONE_BIN] * n
+
+    record["values"] = tokenizer.encode_value(values)
+
+    for col in _DROP_BEFORE_WRITE:
+        record.pop(col, None)
+
+    return record
+
+
+def build_labels_by_token(outcome_concept_groups: Dict[str, Set[str]]) -> Dict[str, List[str]]:
+    """For each concept the outcome labels it belongs to, so a token is looked up once."""
+    labels_by_token: Dict[str, List[str]] = {}
+    for label, concepts in outcome_concept_groups.items():
+        for concept in concepts:
+            labels_by_token.setdefault(concept, []).append(label)
+    return labels_by_token
+
+
+def find_outcomes_after_drug(
+    concept_ids: List[str],
+    epoch_times: List[float],
+    start_pos: int,
+    outcome_concept_groups: Dict[str, Set[str]],
+    inpatient_outcome_labels: Optional[Set[str]] = None,
+    labels_by_token: Optional[Dict[str, List[str]]] = None,
+    before_time: Optional[float] = None,
+) -> Dict[str, Optional[float]]:
+    """
+    Scan *concept_ids[start_pos:]* for the first occurrence of each outcome
+    concept group.
+
+    Parameters
+    ----------
+    inpatient_outcome_labels
+        Subset of outcome labels that must occur inside an inpatient or ER
+        visit (visit concept immediately following ``[VS]`` must be in
+        ``INPATIENT_ER_VISIT_CONCEPTS``).  If None, no visit-type filter
+        is applied to any outcome.
+    labels_by_token
+        ``build_labels_by_token(outcome_concept_groups)``; pass it when scanning many
+        patients, with many outcomes it saves a pass over every outcome for every token.
+    before_time
+        Stop at the first token with a time of at least *before_time*.  With
+        ``start_pos=0`` this finds the outcomes that occurred before an index date.
+
+    Returns
+    -------
+    Dict mapping each outcome_label to the epoch_time of its first occurrence
+    after *start_pos*, or None if not observed.
+    """
+    result: Dict[str, Optional[float]] = {k: None for k in outcome_concept_groups}
+    remaining = set(outcome_concept_groups.keys())
+    if labels_by_token is None:
+        labels_by_token = build_labels_by_token(outcome_concept_groups)
+    in_qualifying_visit = False  # currently inside an inpatient/ER visit
+
+    for i in range(start_pos, len(concept_ids)):
+        if not remaining:
+            break
+        if before_time is not None and epoch_times[i] >= before_time:
+            break
+        token = concept_ids[i]
+
+        if token == VISIT_START_TOKEN:
+            # Look ahead: if the very next token is an inpatient/ER concept,
+            # this visit qualifies for inpatient-only outcomes.
+            next_pos = i + 1
+            in_qualifying_visit = (
+                next_pos < len(concept_ids)
+                and concept_ids[next_pos] in INPATIENT_ER_VISIT_CONCEPTS
+            )
+            continue
+
+        if token == VISIT_END_TOKEN:
+            in_qualifying_visit = False
+            continue
+
+        for label in labels_by_token.get(token, ()):
+            if label not in remaining:
+                continue
+            # Skip if this outcome requires inpatient context but we are not
+            # currently inside a qualifying (inpatient/ER) visit.
+            if (
+                inpatient_outcome_labels
+                and label in inpatient_outcome_labels
+                and not in_qualifying_visit
+            ):
+                continue
+            result[label] = float(epoch_times[i])
+            remaining.discard(label)
+
+    return result
+
+
+DAY_SECONDS = 86_400
+
+
+def has_record_in_window(
+    concept_ids: List[str],
+    epoch_times: List[float],
+    concepts: Set[str],
+    start_time: float,
+    end_time: float,
+    stop_pos: int,
+) -> bool:
+    """A token of *concepts* before position *stop_pos* with a time in [start_time, end_time]."""
+    for i in range(min(stop_pos, len(concept_ids), len(epoch_times))):
+        if concept_ids[i] in concepts and start_time <= epoch_times[i] <= end_time:
+            return True
+    return False
+
+
+def has_prior_exposure(
+    concept_ids: List[str],
+    epoch_times: List[float],
+    exclusion_concepts: Set[str],
+    index_time: float,
+    drug_pos: int,
+) -> bool:
+    """
+    A token of *exclusion_concepts* on a date before the index date.  Records on the index date
+    belong to the concurrent therapy, which the monotherapy rule judges.
+    """
+    return any(
+        concept_ids[i] in exclusion_concepts and epoch_times[i] < index_time
+        for i in range(min(drug_pos, len(epoch_times)))
+    )
+
+
+def distinct_ingredients(
+    concept_ids: List[str],
+    epoch_times: List[float],
+    ingredients_of: Dict[str, Set[str]],
+    start_pos: int,
+    start_time: float,
+    end_time: float,
+) -> Set[str]:
+    """
+    The ingredients of the drugs recorded from *start_pos* until *end_time*.  A combination
+    product counts for each of its ingredients, as in LEGEND.
+    """
+    found: Set[str] = set()
+    for i in range(start_pos, min(len(concept_ids), len(epoch_times))):
+        if epoch_times[i] > end_time:
+            break
+        if epoch_times[i] >= start_time:
+            found |= ingredients_of.get(concept_ids[i], set())
+    return found
+
+
+def load_ingredient_map(vocab_path: str, ingredient_ids: List[int]) -> Dict[str, Set[str]]:
+    """``{drug concept: {ingredients it contains}}`` for the descendants of *ingredient_ids*."""
+    frame = (
+        pl.scan_parquet(os.path.join(vocab_path, "concept_ancestor", "*.parquet"))
+        .filter(pl.col("ancestor_concept_id").is_in(sorted(set(ingredient_ids))))
+        .select("ancestor_concept_id", "descendant_concept_id")
+        .collect()
+    )
+    mapping: Dict[str, Set[str]] = {str(i): {str(i)} for i in ingredient_ids}
+    for ancestor, descendant in frame.iter_rows():
+        mapping.setdefault(str(descendant), set()).add(str(ancestor))
+    return mapping
+
+
+def _is_att_token(token: str) -> bool:
+    """Return True if *token* is an inter-visit time-delta (ATT) token."""
+    if token in (VISIT_START_TOKEN, VISIT_END_TOKEN):
+        return False
+    # Standard ATT tokens: LT, D1, D7, D30, D154 …
+    if token == "LT":
+        return True
+    if token.startswith("D") and token[1:].isdigit():
+        return True
+    # Inpatient-hour or inpatient-day tokens: i-H5, i-D3, VS-D1-VE …
+    if token.startswith("i-") or token.startswith("VS-"):
+        return True
+    return False
+
+
+def load_drug_descendant_concepts(vocab_path: str, drug_ingredient_ids: List[int]) -> Set[str]:
+    """
+    Return all OMOP concept_ids (as strings) that are descendants of
+    any of the supplied *drug_ingredient_ids*, including the ingredients
+    themselves.  Uses the concept_ancestor table with any separation level.
+    """
+    ancestor_glob = os.path.join(vocab_path, "concept_ancestor", "*.parquet")
+    lf = pl.scan_parquet(ancestor_glob)
+
+    descendant_ids: List[str] = (
+        lf
+        .filter(pl.col("ancestor_concept_id").is_in(drug_ingredient_ids))
+        .select(pl.col("descendant_concept_id").cast(pl.String))
+        .collect()
+        ["descendant_concept_id"]
+        .to_list()
+    )
+
+    result: Set[str] = set(descendant_ids)
+    # Always include the ingredient concepts themselves
+    result.update(str(d) for d in drug_ingredient_ids)
+    return result
+
+
+def find_first_drug_initiation(
+    concept_ids: List[str],
+    drug_concepts: Set[str],
+) -> Tuple[Optional[int], Optional[int], Optional[int], Optional[str]]:
+    """
+    Scan *concept_ids* and find the first occurrence of any concept in
+    *drug_concepts* that appears inside a visit block.
+
+    Returns
+    -------
+    (drug_pos, vs_pos, ve_pos, drug_concept_id)
+      drug_pos        : index of the drug token in concept_ids
+      vs_pos          : index of the [VS] that opens the drug visit
+      ve_pos          : index of the [VE] that closes the drug visit
+                        (None if the sequence ends before [VE])
+      drug_concept_id : the specific drug concept string found
+    Returns (None, None, None, None) when no drug exposure is found.
+    """
+    current_vs_pos: Optional[int] = None
+
+    for i, token in enumerate(concept_ids):
+        if token == VISIT_START_TOKEN:
+            current_vs_pos = i
+        elif token == VISIT_END_TOKEN:
+            current_vs_pos = None
+        elif token in drug_concepts:
+            # Find the closing [VE] for the current visit
+            ve_pos: Optional[int] = None
+            for j in range(i + 1, len(concept_ids)):
+                if concept_ids[j] == VISIT_END_TOKEN:
+                    ve_pos = j
+                    break
+                if concept_ids[j] == VISIT_START_TOKEN:
+                    # Next visit opened before [VE] — guard against malformed seqs
+                    ve_pos = j - 1
+                    break
+            return i, current_vs_pos, ve_pos, token
+
+    return None, None, None, None
+
+
+def compute_last_observed_time(
+    concept_ids: List[str], epoch_times: List[float]
+) -> Optional[float]:
+    """
+    Epoch time (seconds) of the last observation of a record: the earliest of
+    its last event, its ``[END]`` token and its ``[DEATH]`` token.
+
+    Nothing is known about the patient after this time, so follow-up is
+    censored here.  Returns None for an empty record.
+    """
+    if len(epoch_times) == 0:
+        return None
+    last_observed = float(epoch_times[-1])
+    for token, epoch_time in zip(concept_ids, epoch_times):
+        if token in (END_TOKEN, DEATH_TOKEN):
+            last_observed = min(last_observed, float(epoch_time))
+    return last_observed
+
+
+def compute_drug_era_end_time(
+    concept_ids: List[str],
+    epoch_times: List[float],
+    target_concepts: Set[str],
+    competing_concepts: Optional[Set[str]],
+    start_drug_pos: int,
+    era_gap_days: int = 30,
+) -> Optional[float]:
+    """
+    Compute the end epoch_time of the drug era that starts at *start_drug_pos*.
+
+    The era is defined as a continuous period of drug exposure where consecutive
+    drug events occur within *era_gap_days* days.  The index drug starts the chain
+    and the end of the record closes it.  The era ends at the EARLIEST of:
+
+    1. **Era gap**: a gap > *era_gap_days* days between consecutive target drug
+       events, or between the last target event and whatever closes the chain
+       (competing event, ``[END]``/``[DEATH]``, or the last event of the record).
+       Era end = epoch_time of the last target event + era_gap_seconds.
+    2. **Treatment switch**: a concept from *competing_concepts* is encountered in a
+       post-initiation visit.  Era end = epoch_time of the switching event.
+    3. **Death**: the ``[DEATH]`` token.  Era end = epoch_time of that token.
+
+    ``[END]`` and the end of the record are not discontinuations: the patient
+    is simply no longer observed, which is recorded separately as the last
+    observation (``last_observed_epoch_time``, see
+    :func:`compute_last_observed_time`) and censors follow-up there.
+
+    Parameters
+    ----------
+    concept_ids      : token sequence
+    epoch_times      : parallel array of epoch timestamps in **seconds**
+    target_concepts  : OMOP concept_ids (strings) of the patient's current drug
+                       class (source for ACEi patients, comparator for thiazide)
+    competing_concepts : OMOP concept_ids (strings) of any drug that marks a
+                       treatment switch; typically the opposite arm plus all other
+                       first-line antihypertensives from the exclusion list.
+                       Pass ``None`` or an empty set to disable switch detection.
+    start_drug_pos   : index in concept_ids of the first drug event (era start)
+    era_gap_days     : persistence window in days (default: 30)
+
+    Returns
+    -------
+    float  — epoch_time (seconds) at which the era ends, or
+    None   — the drug was not discontinued while the patient was observed
+    """
+    era_gap_seconds = era_gap_days * 86_400
+    if start_drug_pos >= len(epoch_times):
+        return None
+
+    drug_start_time = float(epoch_times[start_drug_pos])
+    last_target_time = drug_start_time
+    competing: Set[str] = competing_concepts or set()
+
+    def _clamp(t: float) -> float:
+        """Era end must be at or after the drug start (guards against timestamp noise)."""
+        return max(t, drug_start_time)
+
+    def _gap_end(t: float) -> Optional[float]:
+        """End of the era if nothing was refilled between the last target event and *t*."""
+        if t - last_target_time > era_gap_seconds:
+            return _clamp(last_target_time + era_gap_seconds)
+        return None
+
+    # Skip through the rest of the sequence tracking visits
+    current_vs_pos: Optional[int] = None
+    in_start_visit = True   # we're still inside the visit that contains the era start
+
+    for i in range(start_drug_pos + 1, len(concept_ids)):
+        token = concept_ids[i]
+
+        if token in (END_TOKEN, DEATH_TOKEN):
+            if i >= len(epoch_times):
+                return None
+            record_end = float(epoch_times[i])
+            gap_end = _gap_end(record_end)
+            if gap_end is not None:
+                return gap_end
+            return _clamp(record_end) if token == DEATH_TOKEN else None
+
+        if token == VISIT_START_TOKEN:
+            current_vs_pos = i
+            in_start_visit = False
+            continue
+
+        if token == VISIT_END_TOKEN:
+            if in_start_visit:
+                in_start_visit = False
+            current_vs_pos = None
+            continue
+
+        # Only process clinical events inside a visit (not ATT tokens between visits)
+        if in_start_visit or current_vs_pos is None:
+            continue
+
+        event_time = float(epoch_times[i]) if i < len(epoch_times) else None
+        if event_time is None:
+            continue
+
+        if token in target_concepts:
+            gap_end = _gap_end(event_time)
+            if gap_end is not None:
+                # Gap exceeded — era ended before this event
+                return gap_end
+            # Still within the era — extend last known target event time
+            last_target_time = event_time
+
+        elif token in competing:
+            # Treatment switch — follow-up ends at the switching event, or earlier
+            # when the era had already lapsed
+            gap_end = _gap_end(event_time)
+            return gap_end if gap_end is not None else _clamp(event_time)
+
+    # End of the record without a discontinuation, unless the last refill lapsed
+    last_observed = compute_last_observed_time(concept_ids, epoch_times)
+    return _gap_end(last_observed) if last_observed is not None else None
+
+
+def _to_list(val: Any) -> List:
+    """Convert a numpy array or other sequence to a plain Python list."""
+    if val is None:
+        return []
+    if isinstance(val, np.ndarray):
+        return val.tolist()
+    return list(val)
+
+
+def _truncate_arrays(
+    row: Dict[str, Any],
+    cut_pos: int,
+    available_cols: List[str],
+) -> Dict[str, Any]:
+    """Return a dict where every array column in *available_cols* is
+    sliced to ``[:cut_pos]``.  Scalar columns are passed through as-is."""
+    result: Dict[str, Any] = {}
+    for col in available_cols:
+        val = row.get(col)
+        if val is None:
+            result[col] = []
+        elif isinstance(val, (str, bytes, int, float, bool)):
+            result[col] = val
+        else:
+            result[col] = _to_list(val)[:cut_pos]
+    return result
+
+
+def build_non_treated_context(
+    row: Dict[str, Any],
+    vs_pos: int,
+    available_cols: List[str],
+) -> Dict[str, Any]:
+    """
+    Truncate the sequence so it ends just *before* the ATT token that
+    precedes the drug-initiation visit (or just before [VS] if there is
+    no ATT token, e.g. the drug visit is the patient's very first visit).
+
+    The resulting context represents the patient's history *before* any
+    exposure to the drug.
+    """
+    concept_ids = _to_list(row["concept_ids"])
+
+    # Walk backwards from vs_pos to find the preceding ATT token
+    cut_pos = vs_pos
+    if cut_pos > 0 and _is_att_token(concept_ids[cut_pos - 1]):
+        cut_pos -= 1  # exclude the ATT token as well
+
+    return _truncate_arrays(row, cut_pos, available_cols)
+
+
+def build_treated_context(
+    row: Dict[str, Any],
+    ve_pos: Optional[int],
+    available_cols: List[str],
+) -> Dict[str, Any]:
+    """
+    Truncate the sequence so it ends just *after* [VE] of the
+    drug-initiation visit (inclusive).
+
+    The resulting context represents the patient's history up to and
+    including the drug administration.
+    """
+    concept_ids = _to_list(row["concept_ids"])
+    if ve_pos is None:
+        cut_pos = len(concept_ids)   # use the full available sequence
+    else:
+        cut_pos = ve_pos + 1         # inclusive of [VE]
+
+    return _truncate_arrays(row, cut_pos, available_cols)
+
+
+# ---------------------------------------------------------------------------
+# Shard processor (top-level for multiprocessing pickling)
+# ---------------------------------------------------------------------------
+
+def _process_shard_star(args: tuple) -> Tuple[int, int]:
+    """Unpack a single tuple so imap_unordered can call _process_shard."""
+    return _process_shard(*args)  # population_concepts passed as keyword via last positional slot
+
+
+def _process_shard(
+    shard_id: int,
+    shard_files: List[str],
+    needed_cols: List[str],
+    source_concepts: Set[str],
+    comparator_concepts: Set[str],
+    drug_concepts: Set[str],
+    available_array_cols: List[str],
+    scalar_cols: List[str],
+    outcome_concept_groups: Dict[str, Set[str]],
+    non_treated_dir: str,
+    treated_dir: str,
+    drug_info_dir: str,
+    observed_outcomes_dir: str,
+    tokenizer_path: Optional[str],
+    min_context_length: int,
+    chunk_size: int,
+    population_concepts: Optional[Set[str]] = None,
+    exclusion_concepts: Optional[Set[str]] = None,
+    era_gap_days: int = 30,
+    inpatient_outcome_labels: Optional[Set[str]] = None,
+    min_prior_observation_days: float = 0.0,
+    ingredients_of: Optional[Dict[str, Set[str]]] = None,
+    monotherapy_window_days: float = 7.0,
+    population_window_days: Optional[float] = None,
+    censor_at_switch: bool = False,
+    show_progress: bool = True,
+) -> Tuple[int, int]:
+    """
+    Process the patients of some parquet files and write chunked parquet files.
+
+    The files are read one at a time.  ``extract`` gives every file to a task of its own, so
+    a task holds the patients of one file and workers take the next file as soon as they are free.
+
+    Chunk files are named ``shard_{shard_id:03d}_chunk_{chunk_idx:05d}.parquet``
+    so that outputs from parallel shards never collide.
+
+    Returns
+    -------
+    (n_found, n_skipped)
+    """
+    # The row count comes from the parquet metadata.  The files are read one at a time while the
+    # rows are processed: a worker never holds more than one file, not its whole shard.
+    n_shard_rows = pl.scan_parquet(shard_files).select(pl.len()).collect().item()
+
+    def _iter_shard_rows():
+        for shard_file in shard_files:
+            yield from pl.read_parquet(shard_file, columns=needed_cols).iter_rows(named=True)
+
+    # Load tokenizer in the worker process (not picklable across processes)
+    tokenizer: Optional[CehrGptTokenizer] = None
+    if tokenizer_path:
+        tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_path)
+
+    non_treated_chunk: List[Dict[str, Any]] = []
+    treated_chunk: List[Dict[str, Any]] = []
+    drug_info_chunk: List[Dict[str, Any]] = []
+    observed_outcomes_chunk: List[Dict[str, Any]] = []
+
+    n_found = 0
+    n_skipped = 0
+    chunk_idx = 0
+
+    def _write_atomic(df: pl.DataFrame, final_path: str) -> None:
+        """Write parquet to a .tmp file then rename — avoids corrupt files on kill."""
+        tmp_path = final_path + ".tmp"
+        df.write_parquet(tmp_path)
+        os.replace(tmp_path, final_path)  # atomic on Linux (same filesystem)
+
+    def _flush_chunks() -> None:
+        nonlocal chunk_idx
+        prefix = f"shard_{shard_id:03d}_chunk_{chunk_idx:05d}"
+        if non_treated_chunk:
+            _write_atomic(
+                pl.DataFrame(non_treated_chunk),
+                os.path.join(non_treated_dir, f"{prefix}.parquet"),
+            )
+        if treated_chunk:
+            _write_atomic(
+                pl.DataFrame(treated_chunk),
+                os.path.join(treated_dir, f"{prefix}.parquet"),
+            )
+        if drug_info_chunk:
+            # Explicit schema: era_end_epoch_time may be None in every row of a
+            # chunk (right-censored patients).  Without an explicit schema Polars
+            # infers Null type, which breaks concatenation across chunks later.
+            di_schema = {
+                "person_id":          pl.Int64,
+                "drug_concept_id":    pl.String,
+                "drug_epoch_time":    pl.Float64,
+                "era_end_epoch_time": pl.Float64,
+                "last_observed_epoch_time": pl.Float64,
+                "arm":                pl.String,
+            }
+            _write_atomic(
+                pl.DataFrame(drug_info_chunk, schema=di_schema),
+                os.path.join(drug_info_dir, f"{prefix}.parquet"),
+            )
+        if observed_outcomes_chunk:
+            # Explicit schema prevents Polars from inferring Null type for
+            # outcome columns when the first rows all have None values.
+            oc_schema = {
+                "person_id": pl.Int64,
+                "drug_epoch_time": pl.Float64,
+                **{k: pl.Float64 for k in outcome_concept_groups},
+                **{f"{PRIOR_PREFIX}{k}": pl.Boolean for k in outcome_concept_groups},
+            }
+            _write_atomic(
+                pl.DataFrame(observed_outcomes_chunk, schema=oc_schema),
+                os.path.join(observed_outcomes_dir, f"{prefix}.parquet"),
+            )
+        non_treated_chunk.clear()
+        treated_chunk.clear()
+        drug_info_chunk.clear()
+        observed_outcomes_chunk.clear()
+        chunk_idx += 1
+
+    # Precompute era-end competing-concept sets (constant across all patients).
+    # Source patients' era ends if they encounter a comparator or exclusion
+    # drug.  Comparator patients' era ends if they encounter a source or
+    # exclusion drug.
+    _excl: Set[str] = exclusion_concepts or set()
+    labels_by_token = build_labels_by_token(outcome_concept_groups)
+    # LEGEND ends the on-treatment window only when the exposure to the patient's own class
+    # ends; starting another drug is not a censoring event unless asked for.
+    competing_for_source: Set[str]     = (comparator_concepts | _excl) if censor_at_switch else set()
+    competing_for_comparator: Set[str] = (source_concepts | _excl) if censor_at_switch else set()
+
+    for row in tqdm(
+        _iter_shard_rows(),
+        total=n_shard_rows,
+        desc=f"[file {shard_id:03d}]",
+        position=1,
+        leave=False,
+        disable=not show_progress,
+    ):
+        concept_ids = _to_list(row["concept_ids"])
+
+        # ---- Find first drug initiation (source or comparator) ----
+        drug_pos, vs_pos, ve_pos, drug_concept_id = find_first_drug_initiation(
+            concept_ids, drug_concepts
+        )
+
+        if drug_pos is None or vs_pos is None:
+            n_skipped += 1
+            continue
+
+        epoch_times = _to_list(row.get("epoch_times", []))
+        if drug_pos >= len(epoch_times):
+            n_skipped += 1
+            continue
+        index_time = float(epoch_times[drug_pos])
+        visit_end = ve_pos if ve_pos is not None else len(concept_ids)
+
+        # ---- Population filter (e.g. require a HTN diagnosis) ----
+        # With a window, as in LEGEND, the diagnosis has to be recorded in the window days up
+        # to and including the index date; without one, anywhere in the pre-drug history.
+        if population_concepts:
+            if population_window_days is None:
+                found = bool(set(concept_ids[:drug_pos]) & population_concepts)
+            else:
+                found = has_record_in_window(
+                    concept_ids, epoch_times, population_concepts,
+                    index_time - population_window_days * DAY_SECONDS, index_time,
+                    visit_end + 1,
+                )
+            if not found:
+                n_skipped += 1
+                continue
+
+        # ---- New-user washout: require observed history before the index drug ----
+        # Without it a patient who simply entered the data on the day of the first
+        # recorded prescription looks like a new user.  The history starts at the
+        # first visit of the record (the leading demographic tokens carry no time).
+        if min_prior_observation_days > 0:
+            first_visit_pos = concept_ids.index(VISIT_START_TOKEN)
+            if first_visit_pos >= len(epoch_times):
+                n_skipped += 1
+                continue
+            prior_days = (index_time - float(epoch_times[first_visit_pos])) / DAY_SECONDS
+            if prior_days < min_prior_observation_days:
+                n_skipped += 1
+                continue
+
+        if ingredients_of is not None:
+            # ---- First line: no exposure to any antihypertensive before the index date ----
+            if exclusion_concepts and has_prior_exposure(
+                concept_ids, epoch_times, exclusion_concepts, index_time, drug_pos
+            ):
+                n_skipped += 1
+                continue
+            # ---- Monotherapy: one ingredient in the days after initiation ----
+            # LEGEND counts the distinct ingredients that start in the window from the index
+            # date; a second ingredient (same class or not) or a combination product leaves
+            # the cohort.
+            started = distinct_ingredients(
+                concept_ids, epoch_times, ingredients_of,
+                vs_pos, index_time, index_time + monotherapy_window_days * DAY_SECONDS,
+            )
+            if len(started) != 1:
+                n_skipped += 1
+                continue
+        else:
+            # ---- Exclusion drug check (prior exposure to other antihypertensives) ----
+            # Patients with any exclusion drug in their pre-index history, or in the
+            # rest of the index visit, are dropped to enforce the "new users"
+            # eligibility criterion.  An exclusion drug prescribed at the index visit
+            # is concurrent therapy and cannot be told apart from prior exposure.
+            if exclusion_concepts:
+                index_exposure_set = set(concept_ids[:drug_pos]) | set(
+                    concept_ids[drug_pos + 1:visit_end + 1]
+                )
+                if index_exposure_set & exclusion_concepts:
+                    n_skipped += 1
+                    continue
+
+            # ---- Same-visit co-prescription check ----
+            # Patients whose INDEX VISIT contains both source and comparator drugs
+            # (concurrent prescription) cannot be cleanly assigned to one arm — exclude.
+            # Post-initiation crossovers are NOT excluded here; compute_drug_era_end_time
+            # detects them and stores the switch time as era_end_epoch_time, which is
+            # used downstream to censor follow-up at the moment of the switch.
+            # Note: pre-index contamination by the opposite arm is structurally impossible
+            # here — find_first_drug_initiation returns the FIRST drug event, so if the
+            # opposite arm had appeared earlier it would have been the index event instead.
+            index_visit_tokens = set(concept_ids[vs_pos:visit_end + 1])
+            if index_visit_tokens & source_concepts and index_visit_tokens & comparator_concepts:
+                n_skipped += 1
+                continue
+
+        # ---- Build truncated context rows ----
+        non_treated_row = build_non_treated_context(row, vs_pos, available_array_cols)
+        treated_row     = build_treated_context(row, ve_pos, available_array_cols)
+
+        # Skip if non-treated context is too short
+        if len(_to_list(non_treated_row.get("concept_ids", []))) < min_context_length:
+            n_skipped += 1
+            continue
+
+        # ---- Copy scalar metadata into context rows ----
+        for col in scalar_cols:
+            val = row.get(col)
+            non_treated_row[col] = val
+            treated_row[col] = val
+
+        # ---- Encode values and input_ids via tokenizer ----
+        drug_epoch_time = float(epoch_times[drug_pos]) if drug_pos < len(epoch_times) else None
+
+        if tokenizer is not None:
+            non_treated_row = _encode_values(non_treated_row, tokenizer)
+            treated_row     = _encode_values(treated_row, tokenizer)
+
+            non_treated_row["input_ids"] = tokenizer.encode(
+                _to_list(non_treated_row["concept_ids"])
+            )
+            treated_row["input_ids"] = tokenizer.encode(
+                _to_list(treated_row["concept_ids"])
+            )
+
+        # ---- Attach drug metadata to context rows ----
+        person_id = row.get("person_id")
+        for ctx_row in (non_treated_row, treated_row):
+            ctx_row["person_id"]       = person_id
+            ctx_row["drug_epoch_time"] = drug_epoch_time
+            ctx_row["drug_concept_id"] = str(drug_concept_id)
+
+        non_treated_chunk.append(non_treated_row)
+        treated_chunk.append(treated_row)
+
+        # ---- Drug info row ----
+        arm_label = "source" if drug_concept_id in source_concepts else "comparator"
+
+        # Compute drug era end time.
+        # Target concepts = the patient's own drug class.
+        # Competing concepts = opposite arm + any exclusion drugs (treatment switch).
+        if arm_label == "source":
+            target_concepts_era = source_concepts
+            competing_for_era   = competing_for_source
+        else:
+            target_concepts_era = comparator_concepts
+            competing_for_era   = competing_for_comparator
+
+        era_end_epoch_time = compute_drug_era_end_time(
+            concept_ids=concept_ids,
+            epoch_times=epoch_times,
+            target_concepts=target_concepts_era,
+            competing_concepts=competing_for_era,
+            start_drug_pos=drug_pos,
+            era_gap_days=era_gap_days,
+        )
+
+        drug_info_chunk.append({
+            "person_id":          person_id,
+            "drug_concept_id":    str(drug_concept_id),
+            "drug_epoch_time":    drug_epoch_time,
+            "era_end_epoch_time": era_end_epoch_time,
+            "last_observed_epoch_time": compute_last_observed_time(concept_ids, epoch_times),
+            "arm":                arm_label,
+        })
+
+        # ---- Observed outcomes (post-initiation) ----
+        if outcome_concept_groups:
+            oc_times = find_outcomes_after_drug(
+                concept_ids, epoch_times, drug_pos + 1, outcome_concept_groups,
+                inpatient_outcome_labels=inpatient_outcome_labels,
+                labels_by_token=labels_by_token,
+            )
+            # LEGEND removes, outcome by outcome, the patients that had the outcome before
+            # the index date; the flags let the analysis do the same.
+            earlier = find_outcomes_after_drug(
+                concept_ids, epoch_times, 0, outcome_concept_groups,
+                inpatient_outcome_labels=inpatient_outcome_labels,
+                labels_by_token=labels_by_token,
+                before_time=index_time,
+            )
+            observed_outcomes_chunk.append(
+                {
+                    "person_id": person_id,
+                    "drug_epoch_time": drug_epoch_time,
+                    **oc_times,
+                    **{f"{PRIOR_PREFIX}{k}": t is not None for k, t in earlier.items()},
+                }
+            )
+
+        n_found += 1
+
+        # Flush accumulated records to disk to avoid OOM
+        if n_found % chunk_size == 0:
+            _flush_chunks()
+
+    # Final flush of any remaining records
+    if non_treated_chunk or treated_chunk or drug_info_chunk or observed_outcomes_chunk:
+        _flush_chunks()
+
+    return n_found, n_skipped
+
+
+# ---------------------------------------------------------------------------
+# Main processing
+# ---------------------------------------------------------------------------
+
+def process(
+    patient_sequence_path: str,
+    vocab_path: str,
+    source_ingredient_ids: List[int],
+    comparator_ingredient_ids: List[int],
+    output_dir: Path,
+    tokenizer_path: Optional[str] = None,
+    outcome_concept_ids: Optional[List[int]] = None,
+    population_concept_ids: Optional[List[int]] = None,
+    exclusion_concept_ids: Optional[List[int]] = None,
+    inpatient_outcome_concept_ids: Optional[List[int]] = None,
+    outcome_definitions_path: Optional[str] = None,
+    min_prior_observation_days: float = 0.0,
+    monotherapy_window_days: Optional[float] = None,
+    population_window_days: Optional[float] = None,
+    censor_at_switch: bool = False,
+    era_gap_days: int = 30,
+    min_context_length: int = 4,
+    overwrite: bool = False,
+    num_workers: int = 1,
+) -> None:
+    """
+    Full pipeline: load sequences → find drug initiation → write outputs.
+
+    Parameters
+    ----------
+    patient_sequence_path
+        Path to a parquet file *or* a folder of parquet files containing
+        pre-tokenised patient sequences (patient_sequence.parquet format).
+    vocab_path
+        Root directory of the OMOP vocabulary download (must contain
+        ``concept_ancestor/`` sub-directory with parquet files).
+    source_ingredient_ids
+        OMOP concept_ids for the source drug *ingredients* (e.g. duloxetine).
+        All descendants are automatically expanded.
+    comparator_ingredient_ids
+        OMOP concept_ids for the comparator drug *ingredients* (e.g. amitriptyline).
+        All descendants are automatically expanded.
+    output_dir
+        Directory where chunked output parquets will be written.
+    tokenizer_path
+        Optional path to a CehrGptTokenizer.  When provided, ``input_ids``,
+        ``value_indicators``, and ``values`` are computed and written.
+    outcome_concept_ids
+        Optional list of OMOP concept_ids for outcomes to scan for after
+        drug initiation.  Each is expanded to descendants.
+    population_concept_ids
+        Optional list of OMOP concept_ids defining the eligible population
+        (e.g. HTN diagnosis concepts).  Each is expanded to descendants.
+        Only patients who have at least one of these concepts in their
+        pre-drug history are kept.  If None, no population filter is applied.
+    exclusion_concept_ids
+        Optional list of OMOP ingredient concept_ids for drugs that disqualify
+        a patient from the "new users" cohort.  Each is expanded to all
+        descendants via concept_ancestor.  Any patient whose pre-drug history
+        contains at least one of these concepts is excluded.  Typical use:
+        list all other first-line antihypertensive classes (ARBs, CCBs,
+        second-line agents) so that only treatment-naive patients are kept.
+        If None, no exclusion filter is applied.
+    inpatient_outcome_concept_ids
+        Optional list of outcome OMOP concept_ids that must occur inside an
+        inpatient or ER visit (visit concept in {9201, 9203, 262}) to be
+        counted.  Typical use: heart failure, AMI, stroke hospitalisations.
+        Each id is expanded to descendants before matching.
+    outcome_definitions_path
+        ``outcome_definitions.json`` written by ``outcome_definitions.py``: outcomes defined by a
+        concept set (descendants and exclusions already resolved) and whether they must occur
+        in an inpatient or ER visit.  They are extracted next to *outcome_concept_ids*, each
+        under its label.
+    min_prior_observation_days
+        Washout: patients need at least this many days between the start of
+        their first visit and the index drug to count as new users (default 0,
+        no requirement).  LEGEND-style new-user designs use 365.
+    monotherapy_window_days
+        LEGEND's monotherapy rule: exactly one ingredient may start in the days from the index
+        date (LEGEND uses 7); a second ingredient or a combination product leaves the cohort.
+        The ingredients are the source, comparator and exclusion drugs.  Prior exposure is
+        then judged on dates strictly before the index date.  Default: the older same-visit
+        checks.
+    population_window_days
+        Window, ending on the index date, in which a ``population_concept_ids`` diagnosis has
+        to be recorded (LEGEND: 365 for hypertension).  Default: anywhere in the history.
+    censor_at_switch
+        End the follow-up when the patient starts the other arm's drug or an exclusion drug.
+        LEGEND does not: its on-treatment window ends with the continuous exposure to the
+        patient's own class.
+    era_gap_days
+        Persistence window in days for drug era computation (default: 30).
+        Consecutive drug events separated by more than this many days belong
+        to different eras.  A treatment switch (concept from the opposing arm
+        or exclusion list) also terminates the era.  The computed
+        ``era_end_epoch_time`` is written to ``drug_info/`` and used by
+        ``hazard_ratio_estimation.py`` as an additional censoring time.
+    min_context_length
+        Minimum number of tokens required in the non-treated context
+        (patients with fewer tokens are skipped).  Default 4.
+    overwrite
+        If False (default), skip extraction when the outputs already exist and were
+        made with the same parameters (``extraction_params.json``); different
+        parameters raise an error instead of silently reusing stale outputs.
+        If True, the existing outputs are deleted first.
+    num_workers
+        Number of parallel worker processes.  Default 1 (single-process).
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------ #
+    # 0. Skip if outputs already exist                                    #
+    # ------------------------------------------------------------------ #
+    non_treated_dir      = output_dir / "non_treated_context"
+    treated_dir          = output_dir / "treated_context"
+    drug_info_dir        = output_dir / "drug_info"
+    observed_outcomes_dir = output_dir / "observed_outcomes"
+
+    def _dir_has_parquets(d: Path) -> bool:
+        return d.is_dir() and any(d.glob("*.parquet"))
+
+    params_path = output_dir / "extraction_params.json"
+    params = {
+        "patient_sequence_path": str(patient_sequence_path),
+        "vocab_path": str(vocab_path),
+        "source_ingredient_ids": sorted(source_ingredient_ids),
+        "comparator_ingredient_ids": sorted(comparator_ingredient_ids),
+        "tokenizer_path": tokenizer_path,
+        "outcome_concept_ids": sorted(outcome_concept_ids or []),
+        "population_concept_ids": sorted(population_concept_ids or []),
+        "exclusion_concept_ids": sorted(exclusion_concept_ids or []),
+        "inpatient_outcome_concept_ids": sorted(inpatient_outcome_concept_ids or []),
+        "outcome_definitions": (
+            definitions_fingerprint(outcome_definitions_path) if outcome_definitions_path else None
+        ),
+        "min_prior_observation_days": min_prior_observation_days,
+        "monotherapy_window_days": monotherapy_window_days,
+        "population_window_days": population_window_days,
+        "censor_at_switch": censor_at_switch,
+        "era_gap_days": era_gap_days,
+        "min_context_length": min_context_length,
+    }
+
+    if overwrite:
+        # Chunk names depend on the shard layout, so a rerun with fewer shards
+        # would leave the old chunks behind and mix two cohorts.
+        for d in (non_treated_dir, treated_dir, drug_info_dir, observed_outcomes_dir):
+            if d.is_dir():
+                for stale in [*d.glob("*.parquet"), *d.glob("*.parquet.tmp")]:
+                    stale.unlink()
+        if params_path.exists():
+            params_path.unlink()
+    elif _dir_has_parquets(non_treated_dir) and _dir_has_parquets(treated_dir) and _dir_has_parquets(drug_info_dir):
+        previous = json.loads(params_path.read_text()) if params_path.exists() else None
+        if previous != params:
+            changed = (
+                "were made without a parameter record (or the run did not finish)"
+                if previous is None
+                else "were made with different parameters: "
+                + ", ".join(sorted(k for k in params if previous.get(k) != params[k]))
+            )
+            raise RuntimeError(
+                f"Outputs in {output_dir} {changed}. Use --overwrite to extract again, or a "
+                f"different --output_dir."
+            )
+        if (outcome_concept_ids or outcome_definitions_path) and not _dir_has_parquets(
+            observed_outcomes_dir
+        ):
+            raise RuntimeError(
+                f"{observed_outcomes_dir} has no parquets although outcomes were requested. "
+                f"Use --overwrite to extract again."
+            )
+        print("Outputs already exist with the same parameters — skipping extraction (use --overwrite to force).")
+        print(f"  {non_treated_dir}/")
+        print(f"  {treated_dir}/")
+        print(f"  {drug_info_dir}/")
+        return
+
+    non_treated_dir.mkdir(exist_ok=True)
+    treated_dir.mkdir(exist_ok=True)
+    drug_info_dir.mkdir(exist_ok=True)
+    observed_outcomes_dir.mkdir(exist_ok=True)
+
+    # ------------------------------------------------------------------ #
+    # 1. Expand source and comparator drug concepts to descendants        #
+    # ------------------------------------------------------------------ #
+    print(f"Source ingredient concept_ids:     {source_ingredient_ids}")
+    print(f"Comparator ingredient concept_ids: {comparator_ingredient_ids}")
+    print("Expanding to descendants via concept_ancestor …")
+    source_concepts     = load_drug_descendant_concepts(vocab_path, source_ingredient_ids)
+    comparator_concepts = load_drug_descendant_concepts(vocab_path, comparator_ingredient_ids)
+    drug_concepts       = source_concepts | comparator_concepts
+    print(
+        f"  → {len(source_concepts):,} source concepts, "
+        f"{len(comparator_concepts):,} comparator concepts, "
+        f"{len(drug_concepts):,} combined"
+    )
+
+    # ------------------------------------------------------------------ #
+    # 2. Expand outcome concept IDs to descendants                        #
+    # ------------------------------------------------------------------ #
+    outcome_concept_groups: Dict[str, Set[str]] = {}
+    if outcome_concept_ids:
+        print(f"Expanding {len(outcome_concept_ids)} outcome concept(s) to descendants …")
+        for oc_id in outcome_concept_ids:
+            descendants = load_drug_descendant_concepts(vocab_path, [oc_id])
+            outcome_concept_groups[str(oc_id)] = descendants
+            print(f"  → outcome {oc_id}: {len(descendants):,} descendants")
+    definition_inpatient_labels: Set[str] = set()
+    if outcome_definitions_path:
+        for entry in load_outcome_definitions(outcome_definitions_path):
+            if entry["label"] in outcome_concept_groups:
+                raise ValueError(
+                    f"outcome label {entry['label']} is both in --outcome_concept_ids and in "
+                    f"{outcome_definitions_path}"
+                )
+            outcome_concept_groups[entry["label"]] = set(entry["concepts"])
+            if entry["inpatient_only"]:
+                definition_inpatient_labels.add(entry["label"])
+        print(
+            f"  → {len(outcome_concept_groups)} outcomes in total, "
+            f"{len(definition_inpatient_labels)} of the defined ones inpatient-only"
+        )
+
+    # ------------------------------------------------------------------ #
+    # 2b. Expand population concept IDs to descendants (optional filter)  #
+    # ------------------------------------------------------------------ #
+    population_concepts: Optional[Set[str]] = None
+    if population_concept_ids:
+        print(f"Expanding {len(population_concept_ids)} population concept(s) to descendants …")
+        population_concepts = load_drug_descendant_concepts(vocab_path, population_concept_ids)
+        print(f"  → {len(population_concepts):,} population concepts (patients must have ≥1 in pre-drug history)")
+
+    # ------------------------------------------------------------------ #
+    # 2c. Expand exclusion concept IDs to descendants (new-user filter)   #
+    # ------------------------------------------------------------------ #
+    exclusion_concepts: Optional[Set[str]] = None
+    if exclusion_concept_ids:
+        print(f"Expanding {len(exclusion_concept_ids)} exclusion concept(s) to descendants …")
+        exclusion_concepts = load_drug_descendant_concepts(vocab_path, exclusion_concept_ids)
+        print(f"  → {len(exclusion_concepts):,} exclusion concepts (patients with ≥1 in pre-drug history are dropped)")
+
+    # ------------------------------------------------------------------ #
+    # 2d. Build inpatient-only outcome label set                         #
+    # ------------------------------------------------------------------ #
+    inpatient_outcome_labels: Optional[Set[str]] = None
+    if inpatient_outcome_concept_ids and outcome_concept_groups:
+        # The inpatient filter is keyed on outcome labels (str(concept_id)),
+        # not on the raw integer ids, since outcome_concept_groups uses str keys.
+        inpatient_outcome_labels = {
+            str(oc_id) for oc_id in inpatient_outcome_concept_ids
+            if str(oc_id) in outcome_concept_groups
+        }
+        print(f"  Inpatient-only outcome labels: {sorted(inpatient_outcome_labels)}")
+    if definition_inpatient_labels:
+        inpatient_outcome_labels = (inpatient_outcome_labels or set()) | definition_inpatient_labels
+
+    # ------------------------------------------------------------------ #
+    # 3. Enumerate parquet files and inspect schema without loading data  #
+    # ------------------------------------------------------------------ #
+    if os.path.isdir(patient_sequence_path):
+        all_files = sorted(glob_module.glob(os.path.join(patient_sequence_path, "*.parquet")))
+    else:
+        all_files = [patient_sequence_path]
+
+    if not all_files:
+        raise FileNotFoundError(f"No parquet files found in {patient_sequence_path}")
+
+    print(f"Scanning patient sequences ({len(all_files)} parquet file(s)) …")
+    lf = pl.scan_parquet(all_files)
+    schema = lf.collect_schema()
+    all_cols = list(schema.keys())
+    n_rows = lf.select(pl.len()).collect().item()
+    print(f"  → {n_rows:,} patient sequences found")
+
+    available_array_cols = [c for c in SEQUENCE_ARRAY_COLS if c in all_cols]
+    scalar_cols = [c for c in all_cols if c not in SEQUENCE_ARRAY_COLS]
+
+    missing_required = REQUIRED_COLS - {"input_ids"} - set(all_cols)
+    if missing_required:
+        print(f"  WARNING: required columns missing from source data: {sorted(missing_required)}")
+
+    # ------------------------------------------------------------------ #
+    # 4. Dispatch shards to worker processes                              #
+    #    Files are distributed round-robin so each worker reads only     #
+    #    its assigned files — no I/O contention, no data serialisation   #
+    #    through the Pool queue.                                         #
+    # ------------------------------------------------------------------ #
+    CHUNK_SIZE = 25_000
+    effective_workers = min(num_workers, len(all_files))
+
+    # One task per file: a worker holds the patients of one file, and takes the next file when done
+    file_groups = [[f] for f in all_files]
+
+    print(
+        f"Processing {n_rows:,} patients of {len(all_files)} file(s) with {effective_workers} worker(s), "
+        "one file at a time each …"
+    )
+
+    # Only read the columns we actually need — skip unrelated columns
+    needed_cols = list(dict.fromkeys(available_array_cols + scalar_cols))
+
+    ingredients_of: Optional[Dict[str, Set[str]]] = None
+    if monotherapy_window_days is not None:
+        ingredients_of = load_ingredient_map(
+            vocab_path,
+            list(source_ingredient_ids) + list(comparator_ingredient_ids) + list(exclusion_concept_ids or []),
+        )
+        print(f"Monotherapy within {monotherapy_window_days:g} days: {len(ingredients_of):,} drug concepts of "
+              f"{len({i for v in ingredients_of.values() for i in v}):,} ingredients")
+
+    shard_args = [
+        (
+            shard_id,
+            file_groups[shard_id],   # list of parquet files for this worker
+            needed_cols,
+            source_concepts,
+            comparator_concepts,
+            drug_concepts,
+            available_array_cols,
+            scalar_cols,
+            outcome_concept_groups,
+            str(non_treated_dir),
+            str(treated_dir),
+            str(drug_info_dir),
+            str(observed_outcomes_dir),
+            tokenizer_path,
+            min_context_length,
+            CHUNK_SIZE,
+            population_concepts,
+            exclusion_concepts,
+            era_gap_days,
+            inpatient_outcome_labels,
+            min_prior_observation_days,
+            ingredients_of,
+            monotherapy_window_days if monotherapy_window_days is not None else 7.0,
+            population_window_days,
+            censor_at_switch,
+            effective_workers == 1,
+        )
+        for shard_id in range(len(file_groups))
+    ]
+
+    if effective_workers == 1:
+        results = [
+            _process_shard(*args)
+            for args in tqdm(shard_args, desc="[overall] files done", unit="file", position=0, leave=True)
+        ]
+        total_found = sum(r[0] for r in results)
+        total_skipped = sum(r[1] for r in results)
+    else:
+        # Use 'spawn' (not the default 'fork') to avoid deadlocks caused by
+        # forking a process that already has background threads from Polars /
+        # NumPy / HuggingFace.  With spawn each worker starts clean.
+        # A ProcessPoolExecutor raises BrokenProcessPool when a worker dies (for example when the
+        # kernel kills it for memory); a multiprocessing Pool would wait for its result forever.
+        ctx = mp.get_context("spawn")
+        try:
+            with ProcessPoolExecutor(max_workers=effective_workers, mp_context=ctx) as executor:
+                futures = [executor.submit(_process_shard_star, args) for args in shard_args]
+                results = [
+                    future.result()
+                    for future in tqdm(
+                        as_completed(futures),
+                        total=len(shard_args),
+                        desc="[overall] files done",
+                        unit="file",
+                        position=0,
+                        leave=True,
+                    )
+                ]
+        except BrokenProcessPool as error:
+            raise RuntimeError(
+                "a worker process died, most likely killed for lack of memory (see dmesg); "
+                "rerun with fewer workers"
+            ) from error
+        total_found   = sum(r[0] for r in results)
+        total_skipped = sum(r[1] for r in results)
+
+    print(f"  → {total_found:,} patients kept  |  {total_skipped:,} skipped")
+    # Written last: a run that stopped early leaves no record and is not mistaken for finished.
+    params_path.write_text(json.dumps(params, indent=2, sort_keys=True))
+    print(f"Done.  Outputs written to {output_dir}")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Extract partial patient sequences up to first drug exposure"
+    )
+    parser.add_argument(
+        "--patient_sequence_path",
+        required=True,
+        help="Path to patient_sequence parquet file or folder of parquet files",
+    )
+    parser.add_argument(
+        "--vocab_path",
+        required=True,
+        help="Root directory of the OMOP vocabulary download "
+             "(must contain concept_ancestor/ sub-folder with parquet files)",
+    )
+    parser.add_argument(
+        "--source_concept_ids",
+        required=True,
+        help="Comma-separated OMOP ingredient concept_ids for the source drug class (e.g. ACEi)",
+    )
+    parser.add_argument(
+        "--comparator_concept_ids",
+        required=True,
+        help="Comma-separated OMOP ingredient concept_ids for the comparator drug class (e.g. thiazide)",
+    )
+    parser.add_argument(
+        "--output_dir",
+        required=True,
+        help="Directory where output parquets will be written",
+    )
+    parser.add_argument(
+        "--tokenizer_path",
+        default=None,
+        help="Path to a CehrGptTokenizer directory. When provided, input_ids are "
+             "generated from concept_ids and written into the output parquets.",
+    )
+    parser.add_argument(
+        "--outcome_concept_ids",
+        default=None,
+        help="Comma-separated OMOP concept_ids for outcomes to extract from the "
+             "post-initiation sequence (e.g. 4329847,316139,4110192,376713). "
+             "Each is expanded to descendants. Writes observed_outcomes/ chunks.",
+    )
+    parser.add_argument(
+        "--outcome_definitions_path",
+        default=None,
+        help="outcome_definitions.json from outcome_definitions.py: outcomes defined by concept "
+             "sets (exclusions, no-descendant members, inpatient/ER restriction), extracted "
+             "next to --outcome_concept_ids. Pass the same file to hazard_ratio_estimation.py.",
+    )
+    parser.add_argument(
+        "--population_concept_ids",
+        default=None,
+        help="Comma-separated OMOP concept_ids defining the eligible population "
+             "(e.g. hypertension diagnosis concepts). Each is expanded to "
+             "descendants via concept_ancestor. Only patients whose pre-drug history "
+             "contains at least one matching concept are kept. Default: no filter.",
+    )
+    parser.add_argument(
+        "--exclusion_concept_ids",
+        default=None,
+        help="Comma-separated OMOP ingredient concept_ids for drugs that disqualify "
+             "a patient from the 'new users' cohort. Each is expanded to all descendants "
+             "via concept_ancestor. Patients whose pre-drug history contains any of these "
+             "concepts are excluded. Use to enforce treatment-naive eligibility (e.g. list "
+             "all other first-line antihypertensive classes for LEGEND-HTN). A later "
+             "occurrence also censors follow-up, like a switch to the opposite arm. "
+             "Default: no filter.",
+    )
+    parser.add_argument(
+        "--monotherapy_window_days",
+        type=float,
+        default=None,
+        help="LEGEND's monotherapy rule: exactly one ingredient (of the source, comparator and "
+             "exclusion drugs) may start within this many days from the index date, e.g. 7. A "
+             "second ingredient or a combination product leaves the cohort. Prior exposure is "
+             "then judged on dates before the index date. Default: off (same-visit checks).",
+    )
+    parser.add_argument(
+        "--population_window_days",
+        type=float,
+        default=None,
+        help="A --population_concept_ids diagnosis has to be recorded in this many days up to "
+             "and including the index date (LEGEND hypertension: 365). Default: anywhere in the "
+             "history before the index drug.",
+    )
+    parser.add_argument(
+        "--censor_at_switch",
+        action="store_true",
+        help="End follow-up when the patient starts the other arm's drug or an exclusion drug. "
+             "LEGEND does not (its on-treatment window ends with the exposure to the patient's "
+             "own class), so this is off by default.",
+    )
+    parser.add_argument(
+        "--min_prior_observation_days",
+        type=float,
+        default=0.0,
+        help="New-user washout: require at least this many days between the start of the "
+             "first visit and the index drug (default: 0, no requirement; LEGEND uses 365).",
+    )
+    parser.add_argument(
+        "--era_gap_days",
+        type=int,
+        default=30,
+        help="Persistence window in days for drug era computation (default: 30). "
+             "Consecutive drug events separated by more than this many days belong to "
+             "different eras; a treatment switch also terminates the era. The computed "
+             "era_end_epoch_time is written to drug_info/ for use in hazard ratio "
+             "estimation as an additional censoring time.",
+    )
+    parser.add_argument(
+        "--inpatient_outcome_concept_ids",
+        default=None,
+        help="Comma-separated OMOP concept_ids for outcomes that must occur inside "
+             "an inpatient or ER visit (9201, 9203, 262) to be counted. Each id is "
+             "expanded to descendants. Example: 316139 (heart failure), 312327 (AMI).",
+    )
+    parser.add_argument(
+        "--min_context_length",
+        type=int,
+        default=4,
+        help="Minimum token count required in the non-treated context (default: 4)",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        default=False,
+        help="Delete the existing outputs and extract again. Without it, outputs made "
+             "with the same parameters are reused and outputs made with different "
+             "parameters raise an error.",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=1,
+        help="Number of parallel worker processes for shard processing (default: 1)",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+    source_ingredient_ids     = [int(x.strip()) for x in args.source_concept_ids.split(",")]
+    comparator_ingredient_ids = [int(x.strip()) for x in args.comparator_concept_ids.split(",")]
+    outcome_concept_ids = (
+        [int(x.strip()) for x in args.outcome_concept_ids.split(",")]
+        if args.outcome_concept_ids else None
+    )
+    population_concept_ids = (
+        [int(x.strip()) for x in args.population_concept_ids.split(",")]
+        if args.population_concept_ids else None
+    )
+    exclusion_concept_ids = (
+        [int(x.strip()) for x in args.exclusion_concept_ids.split(",")]
+        if args.exclusion_concept_ids else None
+    )
+    inpatient_outcome_concept_ids = (
+        [int(x.strip()) for x in args.inpatient_outcome_concept_ids.split(",")]
+        if args.inpatient_outcome_concept_ids else None
+    )
+    process(
+        patient_sequence_path=args.patient_sequence_path,
+        vocab_path=args.vocab_path,
+        source_ingredient_ids=source_ingredient_ids,
+        comparator_ingredient_ids=comparator_ingredient_ids,
+        output_dir=Path(args.output_dir),
+        tokenizer_path=args.tokenizer_path,
+        outcome_concept_ids=outcome_concept_ids,
+        population_concept_ids=population_concept_ids,
+        exclusion_concept_ids=exclusion_concept_ids,
+        inpatient_outcome_concept_ids=inpatient_outcome_concept_ids,
+        outcome_definitions_path=args.outcome_definitions_path,
+        min_prior_observation_days=args.min_prior_observation_days,
+        monotherapy_window_days=args.monotherapy_window_days,
+        population_window_days=args.population_window_days,
+        censor_at_switch=args.censor_at_switch,
+        era_gap_days=args.era_gap_days,
+        min_context_length=args.min_context_length,
+        overwrite=args.overwrite,
+        num_workers=args.num_workers,
+    )
+
+
+if __name__ == "__main__":
+    main()
