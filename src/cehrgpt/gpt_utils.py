@@ -1,7 +1,8 @@
+import bisect
 import random
 import re
 from datetime import date, datetime, timedelta, timezone
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from cehrbert_data.const.artificial_tokens import DEATH_TOKEN
@@ -155,6 +156,9 @@ def construct_time_sequence(
     return epoch_times
 
 
+_warned_about_missing_age_token = False
+
+
 def construct_age_sequence(
     concept_ids: List[str], ages: Optional[List[int]] = None
 ) -> List[int]:
@@ -177,14 +181,119 @@ def construct_age_sequence(
             ages.append(age + time_delta // 365)
         return ages
     else:
-        logger.warning(
-            "The second token is not a valid age token. The first 4 tokens are: %s. "
-            "Trying to fall back to ages, but it is not valid either %s. "
-            "Fall back to a zero vector [0, 0, 0, ...., 0]",
-            concept_ids[:4],
-            ages,
-        )
+        # Generation calls this once per sequence in every batch, so only warn the first time
+        global _warned_about_missing_age_token
+        if not _warned_about_missing_age_token:
+            _warned_about_missing_age_token = True
+            logger.warning(
+                "The second token is not a valid age token. The first 4 tokens are: %s. "
+                "Trying to fall back to ages, but it is not valid either %s. "
+                "Fall back to a zero vector [0, 0, 0, ...., 0]. "
+                "This warning is only shown once per process.",
+                concept_ids[:4],
+                ages,
+            )
         return np.zeros_like(concept_ids, dtype=int).tolist()
+
+
+def index_numeric_tokens(
+    vocab: Iterable[str], prefixes: Sequence[str] = ("year", "age")
+) -> Dict[str, List[int]]:
+    """
+    Collect the sorted numeric values of the "<prefix>:<int>" tokens (year:2020, age:45) in a vocab.
+
+    :param vocab: The tokenizer vocabulary (the tokens, e.g. the keys of get_vocab()).
+    :param prefixes: The token prefixes to index.
+    :return: For each prefix, the sorted list of integers that exist as tokens.
+    """
+    values: Dict[str, List[int]] = {prefix: [] for prefix in prefixes}
+    for token in vocab:
+        prefix, separator, number = token.partition(":")
+        if separator and prefix in values:
+            try:
+                values[prefix].append(int(number))
+            except ValueError:
+                continue
+    return {prefix: sorted(numbers) for prefix, numbers in values.items()}
+
+
+def nearest_known_value(value: int, known_values: Sequence[int]) -> int:
+    """The element of the sorted `known_values` closest to `value`; ties go to the smaller one."""
+    if not known_values:
+        return value
+    position = bisect.bisect_left(known_values, value)
+    if position == 0:
+        return known_values[0]
+    if position == len(known_values):
+        return known_values[-1]
+    before, after = known_values[position - 1], known_values[position]
+    return after if after - value < value - before else before
+
+
+def truncate_history_keeping_demographics(
+    concept_ids: List[str],
+    max_tokens: int,
+    known_numeric_tokens: Optional[Dict[str, List[int]]] = None,
+) -> List[str]:
+    """
+    Keep the most recent part of a patient history that fits in `max_tokens`, starting on a [VS].
+
+    The token budget `max_tokens` only counts the history itself: a history that starts with the
+    demographic header (year:YYYY, age:NN, gender, race) keeps it on top of the budget, so the
+    result can have up to DEMOGRAPHIC_PROMPT_SIZE more tokens than `max_tokens`. The header is
+    re-attached with the year and age moved forward by the time elapsed in the dropped part of
+    the history, so the model still sees the patient's demographics and construct_age_sequence
+    reproduces the right ages. That elapsed time is the sum of the dropped ATT tokens, the same
+    bookkeeping construct_age_sequence uses, so it is exact up to the resolution of the ATT
+    tokens (and to rounding down to whole years). Histories without a valid header are just
+    truncated to `max_tokens`.
+
+    If `known_numeric_tokens` (from index_numeric_tokens) is given and the rebuilt year or age is
+    not a token in the vocabulary, the closest year or age that is one is used instead; ties go to
+    the smaller value.
+
+    :param concept_ids: The patient history as concept ids/tokens.
+    :param max_tokens: The maximum number of history tokens, not counting the demographic header.
+    :param known_numeric_tokens: The year/age values that exist in the vocabulary, if known.
+    :return: The history unchanged if it fits, otherwise the truncated history.
+    """
+    header = concept_ids[:DEMOGRAPHIC_PROMPT_SIZE]
+    try:
+        has_header = (
+            len(header) == DEMOGRAPHIC_PROMPT_SIZE
+            and header[0].lower().startswith("year")
+            and header[1].lower().startswith("age")
+        )
+        year = int(header[0].split(":")[1]) if has_header else None
+        age = int(header[1].split(":")[1]) if has_header else None
+    except (IndexError, ValueError):
+        has_header = False
+
+    num_header_tokens = DEMOGRAPHIC_PROMPT_SIZE if has_header else 0
+    if len(concept_ids) - num_header_tokens <= max_tokens:
+        return concept_ids
+
+    start_index = len(concept_ids) - max_tokens
+    # Make sure the history starts on a visit start
+    for offset, token in enumerate(concept_ids[start_index:]):
+        if is_visit_start(token):
+            start_index += offset
+            break
+    recent_history = concept_ids[start_index:]
+    if not has_header:
+        return recent_history
+
+    dropped_days = sum(
+        extract_time_interval_in_days(token)
+        for token in concept_ids[DEMOGRAPHIC_PROMPT_SIZE:start_index]
+        if is_att_token(token)
+    )
+    elapsed_years = dropped_days // 365
+    new_year, new_age = year + elapsed_years, age + elapsed_years
+    if known_numeric_tokens:
+        new_year = nearest_known_value(new_year, known_numeric_tokens.get("year", []))
+        new_age = nearest_known_value(new_age, known_numeric_tokens.get("age", []))
+    return [f"year:{new_year}", f"age:{new_age}", header[2], header[3]] + recent_history
 
 
 def multiple_of_10(n: int) -> int:

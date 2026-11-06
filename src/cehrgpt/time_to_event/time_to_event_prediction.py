@@ -12,7 +12,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import pandas as pd
 import torch
 import yaml
-from cehrbert.data_generators.hf_data_generator.cache_util import CacheFileCollector
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from cehrbert.runners.runner_util import load_parquet_as_dataset
 from datasets import Dataset, concatenate_datasets, load_from_disk
@@ -20,7 +19,13 @@ from tqdm import tqdm
 from transformers.utils import is_flash_attn_2_available, logging
 
 from cehrgpt.cehrgpt_args import create_inference_base_arg_parser
-from cehrgpt.gpt_utils import get_cehrgpt_output_folder, is_visit_end, is_visit_start
+from cehrgpt.gpt_utils import (
+    get_cehrgpt_output_folder,
+    index_numeric_tokens,
+    is_visit_end,
+    is_visit_start,
+    truncate_history_keeping_demographics,
+)
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.data_utils import extract_cohort_sequences
@@ -53,7 +58,7 @@ def load_task_config_from_yaml(task_config_yaml_file_path: str) -> TaskConfig:
         with open(task_config_yaml_file_path, "r") as stream:
             task_definition = yaml.safe_load(stream)
             return TaskConfig(**task_definition)
-    except yaml.YAMLError | OSError as e:
+    except (yaml.YAMLError, OSError) as e:
         raise ValueError(
             f"Could not open the task_config yaml file from {task_config_yaml_file_path}"
         ) from e
@@ -61,6 +66,20 @@ def load_task_config_from_yaml(task_config_yaml_file_path: str) -> TaskConfig:
 
 def get_device():
     return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
+
+def get_max_input_length(
+    context_window: int, model_max_length: int, max_new_tokens: int
+) -> int:
+    """Resolve the input cap while reserving model capacity for generation."""
+    if context_window <= 0:
+        raise ValueError("--context_window must be greater than zero.")
+    model_input_capacity = model_max_length - max_new_tokens
+    if model_input_capacity <= 0:
+        raise ValueError(
+            "max_new_tokens must be smaller than the model's maximum sequence length."
+        )
+    return min(context_window, model_input_capacity)
 
 
 def resolve_gpu_ids(gpu_ids: str) -> List[str]:
@@ -122,9 +141,9 @@ def load_time_to_event_dataset(args) -> Dataset:
             tokenized_full_dataset_path=args.tokenized_full_dataset_path,
             allow_missing_tokenized_persons=args.allow_missing_tokenized_persons,
         )
-        processed_dataset = extract_cohort_sequences(
-            data_args, cehrgpt_args, CacheFileCollector()
-        )
+        # The tokenizer re-encodes the demographics after the observation window slicing
+        tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer_folder)
+        processed_dataset = extract_cohort_sequences(data_args, cehrgpt_args, tokenizer)
         dataset = concatenate_datasets(list(processed_dataset.values()))
         dataset = dataset.rename_column("classifier_label", "label")
         # num_of_concepts (if present) reflects the patient's full history length before
@@ -344,6 +363,7 @@ def main(args):
             _ for _ in descendant_concept_ids if _ not in outcome_events
         ]
         outcome_events += descendant_concept_ids
+        LOG.info("Outcome events after including descendants: %s", outcome_events)
 
     if tokens:
         outcome_events = tokens
@@ -363,19 +383,24 @@ def main(args):
         temp_folder = os.path.join(args.output_folder, folder_name, "temp")
     os.makedirs(prediction_output_folder_name, exist_ok=True)
     os.makedirs(temp_folder, exist_ok=True)
+    # An interrupted worker can leave a lock for a record whose buffered result
+    # never reached parquet.  This worker owns its temp folder, so those locks
+    # are safe to retry; durable .done flags are created only after a flush.
+    for stale_lock in glob.glob(os.path.join(temp_folder, "*.lock")):
+        os.remove(stale_lock)
 
-    LOG.info(f"Loading tokenizer at {args.model_folder}")
-    LOG.info(f"Loading model at {args.model_folder}")
-    LOG.info(f"Loading dataset_folder at {args.dataset_folder}")
-    LOG.info(f"Write time sensitive predictions to {prediction_output_folder_name}")
-    LOG.info(f"Context window {args.context_window}")
-    LOG.info(f"Number of new tokens {task_config.max_new_tokens}")
-    LOG.info(f"Temperature {args.temperature}")
-    LOG.info(f"Repetition Penalty {args.repetition_penalty}")
-    LOG.info(f"Sampling Strategy {args.sampling_strategy}")
-    LOG.info(f"Epsilon cutoff {args.epsilon_cutoff}")
-    LOG.info(f"Top P {args.top_p}")
-    LOG.info(f"Top K {args.top_k}")
+    LOG.info("Loading tokenizer at %s", args.model_folder)
+    LOG.info("Loading model at %s", args.model_folder)
+    LOG.info("Loading dataset_folder at %s", args.dataset_folder)
+    LOG.info("Write time sensitive predictions to %s", prediction_output_folder_name)
+    LOG.info("Context window %s", args.context_window)
+    LOG.info("Number of new tokens %s", task_config.max_new_tokens)
+    LOG.info("Temperature %s", args.temperature)
+    LOG.info("Repetition Penalty %s", args.repetition_penalty)
+    LOG.info("Sampling Strategy %s", args.sampling_strategy)
+    LOG.info("Epsilon cutoff %s", args.epsilon_cutoff)
+    LOG.info("Top P %s", args.top_p)
+    LOG.info("Top K %s", args.top_k)
 
     # cehrgpt_model.resize_position_embeddings(
     #     cehrgpt_model.config.max_position_embeddings + task_config.max_new_tokens
@@ -392,6 +417,12 @@ def main(args):
         epsilon_cutoff=args.epsilon_cutoff,
         max_new_tokens=task_config.max_new_tokens,
     )
+    max_input_length = get_max_input_length(
+        context_window=args.context_window,
+        model_max_length=generation_config.max_length,
+        max_new_tokens=generation_config.max_new_tokens,
+    )
+    LOG.info(f"Maximum encoded input length {max_input_length}")
     ts_pred_model = TimeToEventModel(
         tokenizer=cehrgpt_tokenizer,
         model=cehrgpt_model,
@@ -399,12 +430,16 @@ def main(args):
         generation_config=generation_config,
         batch_size=args.batch_size,
         device=get_device(),
+        store_generated_trajectories=args.store_generated_trajectories,
+        max_input_length=max_input_length,
     )
     if args.prepared_dataset_path:
         test_dataset = load_from_disk(args.prepared_dataset_path)
     else:
         test_dataset = prepare_test_dataset(args, prediction_output_folder_name)
     vocab = cehrgpt_tokenizer.get_vocab()
+    # The year/age values that exist as tokens, for the rebuilt demographic header
+    known_numeric_tokens = index_numeric_tokens(vocab)
     tte_outputs = []
     for record in tqdm(test_dataset, total=len(test_dataset)):
         index_date = record["index_date"]
@@ -427,20 +462,15 @@ def main(args):
         ]
         label = record["label"]
         time_to_event = record["time_to_event"] if "time_to_event" in record else None
-        seq_length = len(partial_history)
-        if (
-            generation_config.max_length
-            <= seq_length + generation_config.max_new_tokens
-        ):
-            start_index = seq_length - (
-                generation_config.max_length - generation_config.max_new_tokens
-            )
-            # Make sure the first token starts on VS
-            for i, token in enumerate(partial_history[start_index:]):
-                if is_visit_start(token):
-                    start_index += i
-                    break
-            partial_history = partial_history[start_index:]
+        # Keep the most recent history and move the demographic header forward in time.
+        # prepare_prompt then enforces the exact encoded-token cap, including the header and
+        # any tokenizer-added special tokens.
+        partial_history = truncate_history_keeping_demographics(
+            partial_history,
+            max_input_length,
+            known_numeric_tokens,
+        )
+        partial_history = ts_pred_model.prepare_prompt(partial_history)
 
         concept_time_to_event = ts_pred_model.predict_time_to_events(
             partial_history,
@@ -460,6 +490,7 @@ def main(args):
         )
         tte_outputs.append(
             {
+                "_sample_identifier": sample_identifier,
                 "subject_id": record["person_id"],
                 "prediction_time": index_date,
                 "visit_counter": visit_counter,
@@ -470,17 +501,24 @@ def main(args):
                 "trials": (
                     asdict(concept_time_to_event) if concept_time_to_event else None
                 ),
+                "prefix": list(partial_history),
             }
         )
-        delete_lock_create_processed_flag(
-            output_folder=temp_folder, sample_id=sample_identifier
-        )
         flush_to_disk_if_full(
-            tte_outputs, prediction_output_folder_name, args.buffer_size
+            tte_outputs,
+            prediction_output_folder_name,
+            args.buffer_size,
+            temp_folder,
         )
 
     # Final flush
-    flush_to_disk_if_full(tte_outputs, prediction_output_folder_name, args.buffer_size)
+    flush_to_disk_if_full(
+        tte_outputs,
+        prediction_output_folder_name,
+        args.buffer_size,
+        temp_folder,
+        force=True,
+    )
     # Remove the temp folder
     shutil.rmtree(temp_folder)
 
@@ -509,11 +547,11 @@ def delete_lock_create_processed_flag(output_folder: str, sample_id: str):
 def acquire_lock_or_skip_if_already_exist(output_folder: str, sample_id: str):
     lock_file = os.path.join(output_folder, f"{sample_id}.lock")
     if os.path.exists(lock_file):
-        LOG.info(f"Other process acquired the lock --> %s. Skipping...", sample_id)
+        LOG.info("Other process acquired the lock --> %s. Skipping...", sample_id)
         return True
     processed_flag_file = os.path.join(output_folder, f"{sample_id}.done")
     if os.path.exists(processed_flag_file):
-        LOG.info(f"The sample has been processed --> %s. Skipping...", sample_id)
+        LOG.info("The sample has been processed --> %s. Skipping...", sample_id)
         return True
 
     # Obtain the lock for this example by creating an empty lock file
@@ -522,7 +560,7 @@ def acquire_lock_or_skip_if_already_exist(output_folder: str, sample_id: str):
         with open(lock_file, "x"):
             pass  # The file is created; nothing is written to it
     except FileExistsError:
-        LOG.info(f"Other process acquired the lock --> %s. Skipping...", sample_id)
+        LOG.info("Other process acquired the lock --> %s. Skipping...", sample_id)
         return True
     return False
 
@@ -563,11 +601,15 @@ def filter_out_existing_results(
 
 
 def flush_to_disk_if_full(
-    tte_outputs: List[Dict[str, Any]], prediction_output_folder_name, buffer_size: int
+    tte_outputs: List[Dict[str, Any]],
+    prediction_output_folder_name: str,
+    buffer_size: int,
+    temp_folder: str,
+    force: bool = False,
 ) -> None:
-    if len(tte_outputs) >= buffer_size:
+    if tte_outputs and (force or len(tte_outputs) >= buffer_size):
         LOG.info(
-            f"{datetime.datetime.now()}: Flushing time to visit predictions to disk"
+            "%s: Flushing time to visit predictions to disk", datetime.datetime.now()
         )
         output_parquet_file = os.path.join(
             prediction_output_folder_name, f"{uuid.uuid4()}.parquet"
@@ -583,8 +625,14 @@ def flush_to_disk_if_full(
                 "predicted_boolean_value",
                 "time_to_event",
                 "trials",
+                "prefix",
             ],
         ).to_parquet(output_parquet_file)
+        for output in tte_outputs:
+            delete_lock_create_processed_flag(
+                output_folder=temp_folder,
+                sample_id=output["_sample_identifier"],
+            )
         tte_outputs.clear()
 
 
@@ -676,6 +724,11 @@ def create_arg_parser():
         "--debug",
         dest="debug",
         action="store_true",
+    )
+    base_arg_parser.add_argument(
+        "--store_generated_trajectories",
+        action="store_true",
+        help="Persist raw generated token trajectories in the prediction parquet files.",
     )
     base_arg_parser.add_argument(
         "--max_n_trial",

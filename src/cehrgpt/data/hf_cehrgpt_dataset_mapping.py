@@ -1,4 +1,7 @@
 import datetime
+import functools
+import hashlib
+import pickle
 from collections import defaultdict
 from typing import Any, Dict, Generator, List, Optional, Union
 
@@ -29,11 +32,14 @@ from dateutil.relativedelta import relativedelta
 from pandas import Series
 
 from cehrgpt.gpt_utils import (
+    DEMOGRAPHIC_PROMPT_SIZE,
     construct_age_sequence,
     construct_time_sequence,
     encode_demographics,
+    is_att_token,
     multiple_of_10,
 )
+from cehrgpt.tokenization.special_tokens import OUT_OF_VOCABULARY_TOKEN
 from cehrgpt.models.tokenization_hf_cehrgpt import (
     NONE_BIN,
     UNKNOWN_BIN,
@@ -413,14 +419,68 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         self,
         concept_tokenizer: CehrGptTokenizer,
     ):
-        self._concept_tokenizer = concept_tokenizer
-        self._lab_token_ids = self._concept_tokenizer.lab_token_ids
+        self._concept_tokenizer = concept_tokenizer.create_lightweight_tokenizer()
+        concept_tokenizer.release_lazy_data()
+        tokenizer_payload = pickle.dumps(
+            self._concept_tokenizer, protocol=pickle.HIGHEST_PROTOCOL
+        )
+        self._tokenization_fingerprint = hashlib.sha256(
+            b"cehrgpt-tokenization-v2:" + tokenizer_payload
+        ).hexdigest()
+
+    def cache_fingerprint(self, dataset_fingerprint: str) -> str:
+        """Return a stable cache key without hashing the tokenizer object graph."""
+        return hashlib.sha256(
+            f"{dataset_fingerprint}:{type(self).__qualname__}:"
+            f"{self._tokenization_fingerprint}".encode()
+        ).hexdigest()[:16]
 
     def remove_columns(self):
         return [
             "concept_value_masks",
             "is_numeric_types",
         ]
+
+    def _valid_concept_ids(self) -> Dict[str, int]:
+        """
+        The vocabulary of the tokenizer, {token: id}, built once per process.
+
+        get_vocab() of a Hugging Face tokenizer builds a new dict of the whole vocabulary on every
+        call (6 ms at 50,000 tokens). Calling it for every token of every patient made a single
+        patient with 3,000 tokens take 20 seconds, and the first batch of a dataset.map never ends.
+        Built on first use, so it is not part of what is pickled to the workers.
+        """
+        valid = self.__dict__.get("_valid_concept_ids_cache")
+        if valid is None:
+            valid = dict(self._concept_tokenizer.get_vocab())
+            self._valid_concept_ids_cache = valid
+        return valid
+
+    def _value_ids(self) -> Dict[str, int]:
+        value_ids = self.__dict__.get("_value_ids_cache")
+        if value_ids is None:
+            value_ids = dict(self._concept_tokenizer.get_value_vocab())
+            self._value_ids_cache = value_ids
+        return value_ids
+
+    def encode_concepts(self, concept_ids: List[str]) -> List[int]:
+        """
+        Look the tokens up in the vocabulary directly.
+
+        The tokenizer is a word level model, so this returns the ids of tokenizer.encode(), about 70
+        times faster, which was the largest single cost of tokenizing a patient. Tokens outside the
+        vocabulary map to [OOV], as they do in the tokenizer. The one difference is a token that
+        contains whitespace: the tokenizer splits it into several ids, which no longer line up with
+        the other columns; here it is one [OOV].
+        """
+        vocabulary = self._valid_concept_ids()
+        oov = vocabulary[OUT_OF_VOCABULARY_TOKEN]
+        return [vocabulary.get(token, oov) for token in concept_ids]
+
+    def encode_values(self, values: List[str]) -> List[int]:
+        value_ids = self._value_ids()
+        oov = value_ids[OUT_OF_VOCABULARY_TOKEN]
+        return [value_ids.get(value, oov) for value in values]
 
     def filter_out_invalid_tokens(self, record: Dict[str, Any]) -> Dict[str, Any]:
         column_names = []
@@ -441,7 +501,7 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
                 continue
             if isinstance(v, (list, np.ndarray)) and len(v) == seq_length:
                 column_names.append(k)
-        valid_concept_ids = self._concept_tokenizer.get_vocab().keys()
+        valid_concept_ids = self._valid_concept_ids()
         valid_indices = [
             idx
             for idx, concept_id in enumerate(record["concept_ids"])
@@ -464,10 +524,9 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
         # Remove the tokens from patient sequences that do not exist in the tokenizer
         record = self.filter_out_invalid_tokens(record)
         # If any concept has a value associated with it, we normalize the value
-        record["input_ids"] = self._concept_tokenizer.encode(record["concept_ids"])
+        record["input_ids"] = self.encode_concepts(record["concept_ids"])
         assert len(record["input_ids"]) == len(record["concept_ids"]), (
-            "The number of tokens must equal to the number of concepts\n"
-            f"decoded concept_ids: {self._concept_tokenizer.decode(record['input_ids'], skip_special_tokens=False)}"
+            "The number of tokens must equal to the number of concepts"
         )
         record["value_indicators"] = record["concept_value_masks"]
         if "number_as_values" not in record or "concept_as_values" not in record:
@@ -504,19 +563,18 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
                 if concept_value_mask == 1:
                     value = UNKNOWN_BIN
                     if is_numeric_type == 1:
-                        if concept_id in self._concept_tokenizer.numeric_concept_ids:
-                            value = self._concept_tokenizer.normalize(
-                                concept_id, unit, number_as_value
-                            )
+                        value = self._concept_tokenizer.normalize(
+                            concept_id, unit, number_as_value
+                        )
                     elif isinstance(concept_as_value, str):
                         value = concept_as_value
                     values.append(value)
                 else:
                     values.append(NONE_BIN)
             assert len(values) == len(record["input_ids"])
-            record["values"] = self._concept_tokenizer.encode_value(values)
+            record["values"] = self.encode_values(values)
         else:
-            record["values"] = self._concept_tokenizer.encode_value(
+            record["values"] = self.encode_values(
                 [NONE_BIN for _ in range(len(record["concept_value_masks"]))]
             )
         # Delete these features because they contain null values and pyarrow cannot concatenate multiple records
@@ -604,79 +662,172 @@ class _PredictionTimeIndex:
         )
 
 
+@functools.lru_cache(maxsize=None)
+def _is_att_code(code: str) -> bool:
+    """is_att_token of a code, once per code for the whole run of a worker."""
+    return is_att_token(code)
+
+
+def _is_att_mask(concept_ids: np.ndarray) -> np.ndarray:
+    """
+    Which of the tokens are time tokens, as [is_att_token(c) for c in concept_ids].
+
+    is_att_token matches several regular expressions, and a patient has tens of thousands of tokens that are a few
+    thousand different codes (the same ones for every patient), so each code is tested once and the answer is looked
+    up for every token.
+    """
+    codes, uniques = pd.factorize(concept_ids)
+    flags = np.fromiter((_is_att_code(code) for code in uniques), dtype=bool, count=len(uniques))
+    # a token that is missing (code -1) is not a time token; the extra False at the end is where -1 points
+    return np.append(flags, False)[codes]
+
+
 class ExtractTokenizedSequenceDataMapping:
     def __init__(
         self,
         person_index_date_map: Dict[int, List[Dict[str, Any]]],
         observation_window: int = 0,
+        tokenizer: Optional["CehrGptTokenizer"] = None,
     ):
         # datasets pickles this object once per Map job and hashes it for the cache fingerprint.
         # A dict of 1M persons, each holding a list of dicts with datetimes, takes tens of seconds
         # to pickle, so the prediction times are stored as flat numpy arrays instead (see
         # _PredictionTimeIndex), which pickle in milliseconds.
         self._prediction_times = _PredictionTimeIndex(person_index_date_map)
-        self.observation_window = observation_window
-
-    def _calculate_prediction_start_time(self, prediction_time: float):
-        if self.observation_window and self.observation_window > 0:
-            return max(prediction_time - self.observation_window * 24 * 3600, 0)
-        return 0
+        # Pre-compute the offset once so the inner loop does no arithmetic.
+        self._obs_window_seconds = (
+            observation_window * 24 * 3600
+            if observation_window and observation_window > 0
+            else 0
+        )
+        self._tokenizer = tokenizer
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
         person_id = record["person_id"]
         index_date_timestamps, labels = self._prediction_times.get(person_id)
-        prediction_start_end_times = [
-            (
-                self._calculate_prediction_start_time(index_date_ts),
-                index_date_ts,
-                label,
-            )
-            for index_date_ts, label in zip(index_date_timestamps, labels)
-        ]
-        observation_window_indices = np.zeros(
-            (len(prediction_start_end_times), len(record["epoch_times"])), dtype=bool
-        )
-        for i, epoch_time in enumerate(record["epoch_times"]):
-            for sample_n, (
-                feature_extraction_time_start,
-                feature_extraction_end_end,
-                _,
-            ) in enumerate(prediction_start_end_times):
-                if (
-                    feature_extraction_time_start
-                    <= epoch_time
-                    <= feature_extraction_end_end
-                ):
-                    observation_window_indices[sample_n][i] = True
 
-        seq_length = len(record["epoch_times"])
-        time_series_columns = ["concept_ids", "input_ids"]
-        static_inputs = dict()
+        obs_window_seconds = self._obs_window_seconds
+        prediction_start_end_times = []
+        for index_date_ts, label in zip(index_date_timestamps, labels):
+            feature_start = (
+                max(index_date_ts - obs_window_seconds, 0)
+                if obs_window_seconds > 0
+                else 0
+            )
+            prediction_start_end_times.append((feature_start, index_date_ts, label))
+
+        concept_ids = record["concept_ids"]
+        epoch_times = np.asarray(record["epoch_times"], dtype=float)
+        seq_length = len(epoch_times)
+
+        # The first DEMOGRAPHIC_PROMPT_SIZE tokens are always: year:YYYY, age:NN, gender, race.
+        # Derive birth_year so we can recalculate age at any observation window start.
+        try:
+            birth_year = int(concept_ids[0].split(":")[1]) - int(concept_ids[1].split(":")[1])
+        except Exception:
+            birth_year = None
+        original_gender = concept_ids[2]
+        original_race = concept_ids[3]
+
+        # Convert all time-series columns to numpy arrays once, before the prediction-time loop.
+        extra_ts_cols: List[str] = []
+        static_inputs: Dict[str, Any] = {}
+        col_arrays: Dict[str, np.ndarray] = {}
         for k, v in record.items():
-            if k in ["concept_ids", "input_ids"]:
+            if k in ("concept_ids", "input_ids"):
                 continue
             if isinstance(v, (list, np.ndarray)) and len(v) == seq_length:
-                time_series_columns.append(k)
+                extra_ts_cols.append(k)
+                col_arrays[k] = np.asarray(v)
             else:
                 static_inputs[k] = v
 
-        batched_samples = defaultdict(list)
-        for (_, index_date, label), observation_window_index in zip(
-            prediction_start_end_times, observation_window_indices
-        ):
+        concept_ids_arr = np.asarray(concept_ids)  # object array for string slicing
+        input_ids_arr = np.asarray(record["input_ids"]) if "input_ids" in record else None
+
+        # Precompute a boolean ATT mask and the sorted array of [VS] positions
+        # so each prediction window needs only O(log n) work.
+        is_att_mask = _is_att_mask(concept_ids_arr)
+        vs_indices = np.where(concept_ids_arr == "[VS]")[0]
+        vs_indices = vs_indices[vs_indices >= DEMOGRAPHIC_PROMPT_SIZE]
+        vs_epoch_times = epoch_times[vs_indices]  # sorted because epoch_times is sorted
+        has_vs_tokens = len(vs_indices) > 0
+
+        # epoch_times for non-demographic tokens, used as fallback when [VS] is absent.
+        non_demo_epoch_times = epoch_times[DEMOGRAPHIC_PROMPT_SIZE:]
+
+        batched_samples: Dict[str, list] = defaultdict(list)
+        for feature_extraction_start, index_date, label in prediction_start_end_times:
+            if has_vs_tokens:
+                # O(log k): find the first [VS] whose epoch_time >= feature_extraction_start.
+                vs_pos = int(np.searchsorted(vs_epoch_times, feature_extraction_start, side="left"))
+                if vs_pos >= len(vs_indices):
+                    continue  # No visit starts within the observation window.
+                obs_start_idx = int(vs_indices[vs_pos])
+            else:
+                # No [VS] tokens in the sequence — fall back to epoch_times to locate
+                # the first token within the observation window.
+                obs_start_idx = (
+                    int(np.searchsorted(non_demo_epoch_times, feature_extraction_start, side="left"))
+                    + DEMOGRAPHIC_PROMPT_SIZE
+                )
+                if obs_start_idx >= seq_length:
+                    continue  # No tokens within the observation window.
+
+            # O(log n): find the last token whose epoch_time <= index_date.
+            obs_end_idx = int(np.searchsorted(epoch_times, index_date, side="right")) - 1
+            if obs_end_idx < DEMOGRAPHIC_PROMPT_SIZE:
+                continue
+
+            # If obs_end_idx landed on an ATT/time token (prediction time mid-visit),
+            # find the last non-ATT token in [obs_start_idx, obs_end_idx] via numpy.
+            if is_att_mask[obs_end_idx]:
+                non_att = np.where(~is_att_mask[obs_start_idx: obs_end_idx + 1])[0]
+                if len(non_att) == 0:
+                    continue
+                obs_end_idx = obs_start_idx + int(non_att[-1])
+
+            if obs_end_idx < obs_start_idx:
+                continue
+
+            # Recalculate year and age at the start of the observation window.
+            obs_epoch_time = float(epoch_times[obs_start_idx])
+            new_year = datetime.datetime.utcfromtimestamp(obs_epoch_time).year
+            new_age = (new_year - birth_year) if birth_year is not None else -1
+            new_demographic_concept_ids = [
+                f"year:{new_year}", f"age:{new_age}", original_gender, original_race
+            ]
+
             for k, v in static_inputs.items():
                 batched_samples[k].append(v)
             batched_samples["classifier_label"].append(label)
             batched_samples["index_date"].append(index_date)
-            try:
-                start_age = int(record["concept_ids"][1].split(":")[1])
-            except Exception:
-                start_age = -1
-            batched_samples["age_at_index"].append(start_age)
-            for time_series_column in time_series_columns:
-                batched_samples[time_series_column].append(
-                    np.asarray(record[time_series_column])[observation_window_index]
-                )
+            batched_samples["age_at_index"].append(new_age)
+
+            sliced_concept_ids = concept_ids_arr[obs_start_idx: obs_end_idx + 1]
+            batched_samples["concept_ids"].append(
+                np.concatenate([np.array(new_demographic_concept_ids), sliced_concept_ids])
+            )
+
+            if input_ids_arr is not None:
+                sliced_input_ids = input_ids_arr[obs_start_idx: obs_end_idx + 1]
+                if self._tokenizer is not None:
+                    demo_ids = np.array(self._tokenizer.encode(new_demographic_concept_ids))
+                else:
+                    demo_ids = input_ids_arr[:DEMOGRAPHIC_PROMPT_SIZE]
+                batched_samples["input_ids"].append(np.concatenate([demo_ids, sliced_input_ids]))
+
+            for col in extra_ts_cols:
+                values = col_arrays[col]
+                sliced = values[obs_start_idx: obs_end_idx + 1]
+                if col == "epoch_times":
+                    demo = np.full(DEMOGRAPHIC_PROMPT_SIZE, obs_epoch_time)
+                elif col == "ages":
+                    demo = np.full(DEMOGRAPHIC_PROMPT_SIZE, new_age)
+                else:
+                    demo = values[:DEMOGRAPHIC_PROMPT_SIZE]
+                batched_samples[col].append(np.concatenate([demo, sliced]))
+
         return batched_samples
 
     def batch_transform(self, record: Dict[str, Any]) -> Dict[str, Any]:

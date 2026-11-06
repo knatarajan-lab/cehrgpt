@@ -1,4 +1,4 @@
-from typing import Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 from datasets import Dataset
@@ -13,8 +13,139 @@ DEFAULT_MAX_TOKENS_PER_BATCH = 16384
 
 LOG = logging.get_logger("transformers")
 
+# Loss fields exposed by CehrGptCausalLMOutput that we want to log separately.
+_CEHRGPT_SUB_LOSSES = [
+    "token_loss",
+    "time_token_loss",
+    "time_to_visit_loss",
+    "token_value_loss",
+    "motor_tte_loss",
+    "age_at_vs_loss",
+    "year_at_vs_loss",
+]
 
-class SamplePackingTrainer(Trainer):
+
+class CehrGptTrainer(Trainer):
+    """Trainer that logs individual CEHR-GPT loss components in addition to the total loss."""
+
+    def __init__(self, *args, **kwargs):
+        self.aux_loss_start_step = kwargs.pop("aux_loss_start_step", 0)
+        self.aux_loss_warmup_steps = kwargs.pop("aux_loss_warmup_steps", 0)
+        self._sub_loss_accumulators = {
+            "train": {"sums": {}, "counts": {}},
+            "eval": {"sums": {}, "counts": {}},
+        }
+        self._sub_loss_context = "train"
+        if self.aux_loss_start_step > 0:
+            LOG.info("aux_loss_start_step: %s (overrides warmup)", self.aux_loss_start_step)
+        elif self.aux_loss_warmup_steps > 0:
+            LOG.info("aux_loss_warmup_steps: %s", self.aux_loss_warmup_steps)
+        super().__init__(*args, **kwargs)
+
+    def _aux_weight(self) -> float:
+        """
+        Returns the weight [0, 1] applied to auxiliary losses at the current step.
+
+        - If aux_loss_start_step > 0: step function — 0 before the step, 1 at/after.
+          This overrides aux_loss_warmup_steps.
+        - Elif aux_loss_warmup_steps > 0: linear ramp from 0 → 1 over that many steps.
+        - Otherwise: always 1 (no warmup).
+        """
+        if self.aux_loss_start_step > 0:
+            return 1.0 if self.state.global_step >= self.aux_loss_start_step else 0.0
+        if self.aux_loss_warmup_steps > 0:
+            return min(1.0, self.state.global_step / self.aux_loss_warmup_steps)
+        return 1.0
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        outputs = model(**inputs)
+        loss = outputs.loss
+
+        # During aux-loss warmup: keep only the token_loss contribution at step 0,
+        # then linearly ramp in all auxiliary losses over aux_loss_warmup_steps.
+        aux_weight = self._aux_weight()
+        if aux_weight < 1.0 and outputs.token_loss is not None:
+            model_config = self.model.config
+            ntp_weight = getattr(model_config, "next_token_prediction_loss_weight", 1.0)
+            freeze = getattr(model_config, "freeze_cehrgpt_generation_model", False)
+            token_contribution = outputs.token_loss * ntp_weight * float(not freeze)
+            aux_contribution = loss - token_contribution
+            loss = token_contribution + aux_weight * aux_contribution
+
+        # Training and evaluation have independent accumulators. In particular, an
+        # unfinished training logging interval must never contaminate validation.
+        accumulator = self._sub_loss_accumulators[self._sub_loss_context]
+        for name in _CEHRGPT_SUB_LOSSES:
+            value = getattr(outputs, name, None)
+            if value is not None:
+                accumulator["sums"][name] = (
+                    accumulator["sums"].get(name, 0.0) + value.detach().item()
+                )
+                accumulator["counts"][name] = accumulator["counts"].get(name, 0) + 1
+
+        return (loss, outputs) if return_outputs else loss
+
+    # Defensive guard: HuggingFace find_labels() detects any forward parameter
+    # ending in "_labels" and adds it to self.label_names.  When those tensors
+    # are absent from the batch, has_labels=False → loss skipped → eval_loss
+    # missing.  We renamed age_reconstruction_labels → age_reconstruction and
+    # year_reconstruction_labels → year_reconstruction to avoid this, but keep
+    # this override as a safety net for any future auxiliary label parameters.
+    # Fix: strip any label_names entries that are absent from the batch so that
+    # has_labels only requires the primary "labels" tensor to be present.
+    def prediction_step(
+        self,
+        model,
+        inputs: Dict[str, Union[torch.Tensor, any]],
+        prediction_loss_only: bool,
+        ignore_keys: Optional[List[str]] = None,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        # Temporarily narrow label_names to only those keys present in this batch.
+        saved_label_names = self.label_names
+        self.label_names = [k for k in self.label_names if inputs.get(k) is not None]
+        try:
+            return super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
+        finally:
+            self.label_names = saved_label_names
+
+    def _reset_sub_losses(self, context: str) -> None:
+        self._sub_loss_accumulators[context] = {"sums": {}, "counts": {}}
+
+    def _flush_sub_losses(self, logs, context: str) -> None:
+        accumulator = self._sub_loss_accumulators[context]
+        if accumulator["sums"]:
+            for name, total in accumulator["sums"].items():
+                count = accumulator["counts"].get(name, 1)
+                logs[name] = round(total / count, 6)
+        self._reset_sub_losses(context)
+
+    def evaluate(
+        self,
+        eval_dataset=None,
+        ignore_keys=None,
+        metric_key_prefix: str = "eval",
+    ):
+        """Evaluate with a fresh, evaluation-only set of loss accumulators."""
+        self._sub_loss_context = "eval"
+        self._reset_sub_losses("eval")
+        try:
+            return super().evaluate(
+                eval_dataset=eval_dataset,
+                ignore_keys=ignore_keys,
+                metric_key_prefix=metric_key_prefix,
+            )
+        finally:
+            self._sub_loss_context = "train"
+
+    def log(self, logs, *args, **kwargs):
+        self._flush_sub_losses(logs, self._sub_loss_context)
+        # Log the current aux weight so progress is visible in training logs.
+        if self.aux_loss_start_step > 0 or self.aux_loss_warmup_steps > 0:
+            logs["aux_loss_weight"] = round(self._aux_weight(), 4)
+        super().log(logs, *args, **kwargs)
+
+
+class SamplePackingTrainer(CehrGptTrainer):
     def __init__(self, *args, **kwargs):
         if "max_tokens_per_batch" in kwargs:
             self.max_tokens_per_batch = kwargs.pop("max_tokens_per_batch")
@@ -174,6 +305,7 @@ class SamplePackingTrainer(Trainer):
             max_position_embeddings=self.max_position_embeddings,
             drop_last=self.args.dataloader_drop_last,
             seed=self.args.seed,
+            shuffle=False,
         )
         dataloader_params = {
             "collate_fn": data_collator,
