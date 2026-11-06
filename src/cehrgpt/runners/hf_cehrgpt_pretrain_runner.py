@@ -261,6 +261,7 @@ def load_and_create_model(
                 cehrgpt_args.motor_num_time_pieces
             ),
             motor_task_prevalence_rates=tokenizer.get_motor_task_prevalence_rates(),
+            motor_max_log2_cumulative_hazard=cehrgpt_args.motor_max_log2_cumulative_hazard,
             linear_prob_n_layer=cehrgpt_args.linear_prob_n_layer,
             ve_token_id=tokenizer.ve_token_id,
             vs_token_id=tokenizer.vs_token_id,

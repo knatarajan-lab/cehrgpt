@@ -311,6 +311,13 @@ class CehrGPTArguments:
             "help": "The number of times each motor_num_time_pieces piece has to be"
         },
     )
+    motor_max_log2_cumulative_hazard: Optional[float] = dataclasses.field(
+        default=10.0,
+        metadata={
+            "help": "Above this log2(hazard * time), the MOTOR survival loss grows linearly "
+            "instead of exponentially to prevent loss spikes. Set to None to disable."
+        },
+    )
     motor_use_ontology: Optional[bool] = dataclasses.field(
         default=False,
         metadata={

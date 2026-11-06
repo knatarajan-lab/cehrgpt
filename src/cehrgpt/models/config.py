@@ -172,6 +172,7 @@ class CEHRGPTConfig(PretrainedConfig):
         motor_num_time_pieces=16,
         motor_time_bins: Optional[List[float]] = None,
         motor_task_prevalence_rates: Optional[List[float]] = None,
+        motor_max_log2_cumulative_hazard: Optional[float] = 10.0,
         linear_prob_token_id=None,
         token_to_time_token_mapping: Dict[int, List] = None,
         use_pretrained_embeddings=False,
@@ -323,6 +324,9 @@ class CEHRGPTConfig(PretrainedConfig):
         self.linear_prob_token_id = linear_prob_token_id
         self.motor_time_bins = motor_time_bins
         self.motor_task_prevalence_rates = motor_task_prevalence_rates
+        # Above this log2(hazard * time) the MOTOR survival term grows linearly instead
+        # of exponentially, so one outlier cannot blow up the loss; None disables it
+        self.motor_max_log2_cumulative_hazard = motor_max_log2_cumulative_hazard
 
         self.causal_sfm = causal_sfm
         self.demographics_size = demographics_size
