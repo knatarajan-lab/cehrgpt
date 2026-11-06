@@ -71,10 +71,12 @@ def shifted_value_logits(model, output, batch):
 
 
 def expected_value_loss(shift_value_logits, batch):
+    # Summed over the values and divided by the number of labelled tokens, like every loss term
     mask = batch["true_value_indicators"][0, 1:]
     logits = shift_value_logits[0][mask]
     targets = batch["true_values"][0, 1:][mask]
-    return F.cross_entropy(logits, targets)
+    num_tokens = (batch["labels"][0, 1:] != -100).sum()
+    return F.cross_entropy(logits, targets, reduction="sum") / num_tokens
 
 
 class TestValueLossAlignment(unittest.TestCase):
@@ -86,7 +88,7 @@ class TestValueLossAlignment(unittest.TestCase):
         output = model(**batch)
         self.assertGreater(output.token_value_loss.item(), 0.0)
 
-    def test_value_loss_is_the_mean_over_values(self):
+    def test_value_loss_is_the_sum_over_values_per_token(self):
         model = build_model()
         batch = make_batch(value_positions=[3, 4, 7])
         with torch.no_grad():
@@ -96,20 +98,20 @@ class TestValueLossAlignment(unittest.TestCase):
             expected_value_loss(shifted_value_logits(model, output, batch), batch),
         )
 
-    def test_value_loss_does_not_depend_on_the_number_of_other_tokens(self):
-        model = build_model()
+    def test_value_loss_is_not_scaled_by_the_lab_penalty(self):
+        # Values used to be multiplied by lab_token_loss_weight on top of
+        # value_prediction_loss_weight
         batch = make_batch(value_positions=[3, 4])
         with torch.no_grad():
-            full = model(**batch).token_value_loss
-            # Masking the labels of non-value tokens out of the token loss used to change the
-            # value loss too, because both were divided by the number of labelled tokens
-            batch["labels"][0, 6:] = -100
-            fewer_labels = model(**batch).token_value_loss
-        torch.testing.assert_close(full, fewer_labels)
+            penalized = build_model(lab_token_penalty=True, lab_token_loss_weight=0.25)(
+                **batch
+            ).token_value_loss
+            plain = build_model(lab_token_penalty=False)(**batch).token_value_loss
+        torch.testing.assert_close(penalized, plain)
 
 
 class TestLabTokenPenalty(unittest.TestCase):
-    def test_token_loss_is_a_weighted_mean(self):
+    def test_lab_tokens_are_down_weighted_in_the_sum(self):
         weight = 0.25
         model = build_model(lab_token_penalty=True, lab_token_loss_weight=weight)
         batch = make_batch(value_positions=[2, 3, 4, 5])
@@ -121,7 +123,7 @@ class TestLabTokenPenalty(unittest.TestCase):
             torch.isin(labels, torch.tensor(LAB_TOKEN_IDS)), weight, 1.0
         )
         torch.testing.assert_close(
-            output.token_loss, (ce * weights).sum() / weights.sum()
+            output.token_loss, (ce * weights).sum() / labels.numel()
         )
 
     def test_weight_one_matches_the_plain_mean(self):

@@ -2038,6 +2038,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             shift_logits = lm_logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             valid_tokens: torch.BoolTensor = shift_labels != -100
+            # Every loss term is a sum over its own predictions divided by this one count, so the
+            # total is a per-token negative log-likelihood of the sequence and every prediction of a
+            # kind carries the same weight (its *_loss_weight). Dividing a term by its own count
+            # instead would up-weight rare predictions such as time tokens by 1 / their frequency.
             total_num_tokens = valid_tokens.sum()
             if (
                 self.cehrgpt.config.lab_token_penalty
@@ -2054,16 +2058,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 token_loss = loss_fct(
                     shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
                 )
-                # A weighted mean, so lab_token_loss_weight sets how much a lab token counts relative
-                # to any other token; dividing by the token count would only shrink the whole loss
-                token_weights = torch.where(
+                token_loss = torch.where(
                     lab_index,
-                    self.cehrgpt.config.lab_token_loss_weight,
-                    1.0,
-                ) * valid_tokens.view(-1)
-                token_loss = (token_loss * token_weights).sum() / token_weights.sum().clamp(
-                    min=torch.finfo(token_weights.dtype).tiny
+                    token_loss * self.cehrgpt.config.lab_token_loss_weight,
+                    token_loss,
                 )
+                token_loss = token_loss.sum() / total_num_tokens
             else:
                 # Flatten the tokens
                 loss_fct = CrossEntropyLoss(reduction="none")
@@ -2227,11 +2227,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 token_value_loss = torch.where(
                     shift_value_indicators.view(-1), token_value_loss, 0
                 )
-                # Average over the tokens that have a value. Dividing by every token would make
-                # the weight of this loss grow and shrink with how many labs a batch has.
-                token_value_loss = token_value_loss.sum() / shift_value_indicators.sum().clamp(
-                    min=1
-                )
+                token_value_loss = token_value_loss.sum() / total_num_tokens
                 loss += (
                     token_value_loss
                     * self.config.value_prediction_loss_weight
