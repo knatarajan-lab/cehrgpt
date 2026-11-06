@@ -43,6 +43,9 @@ dependencies = [
 
 [tool.setuptools_scm]
 
+[tool.setuptools.package-data]
+"cehrgpt.data" = ["visit_rules/*.yaml"]
+
 [project.optional-dependencies]
 dev = [
     "pre-commit", "pytest", "pytest-cov", "pytest-subtests", "rootutils", "hypothesis", "black"

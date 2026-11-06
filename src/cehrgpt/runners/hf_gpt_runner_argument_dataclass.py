@@ -236,6 +236,14 @@ class CehrGPTArguments:
             "help": "The number of feed forward layers for transforming pretrained embeddings to internal embeddings"
         },
     )
+    meds_visit_rules_file: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "A yaml file of your own with the rules that make the visits of a MEDS dataset (which events are a "
+            "visit, an admission, an ED admission and a discharge), applied on top of the packaged defaults "
+            "(src/cehrgpt/data/visit_rules/defaults.yaml). See cehrgpt.data.meds_visit_rules."
+        },
+    )
     meds_repartition: Optional[bool] = dataclasses.field(
         default=False,
         metadata={
