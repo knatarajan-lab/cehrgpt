@@ -968,6 +968,20 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
     def set_value_input_embeddings(self, value: nn.Module):
         self.vte = value
 
+    def concept_embeddings(self, input_ids: torch.LongTensor) -> torch.Tensor:
+        """Embeddings of the concept tokens, from the pretrained embeddings where a token has one."""
+        if self.config.use_pretrained_embeddings:
+            pretrained_token_id_indicators = torch.isin(
+                input_ids,
+                torch.tensor(self.config.pretrained_token_ids).to(input_ids.device),
+            )
+            return torch.where(
+                pretrained_token_id_indicators.unsqueeze(-1),
+                self.pretrained_wte(input_ids),
+                self.wte(input_ids),
+            )
+        return self.wte(input_ids)
+
     def get_input_embeddings(self):
         return self.wte
 
@@ -1128,18 +1142,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         # head_mask has shape n_layer x batch x n_heads x N x N
         head_mask = self.get_head_mask(head_mask, self.config.n_layer)
 
-        if self.config.use_pretrained_embeddings:
-            pretrained_token_id_indicators = torch.isin(
-                input_ids,
-                torch.tensor(self.config.pretrained_token_ids).to(input_ids.device),
-            )
-            input_embeddings = torch.where(
-                pretrained_token_id_indicators.unsqueeze(-1),
-                self.pretrained_wte(input_ids),
-                self.wte(input_ids),
-            )
-        else:
-            input_embeddings = self.wte(input_ids)
+        input_embeddings = self.concept_embeddings(input_ids)
 
         if self.config.causal_sfm and input_shape[1] >= self.config.demographics_size:
             demographic_embeddings = input_embeddings[
@@ -1477,6 +1480,13 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             self.value_head = nn.Linear(
                 config.n_embd, config.value_vocab_size, bias=False
             )
+            # Combines h_t with the embedding of token t+1, so the value bin is predicted
+            # for a known lab instead of averaged over every token that could come next
+            self.value_condition_layer = nn.Sequential(
+                nn.Linear(2 * config.n_embd, config.n_embd),
+                nn.GELU(approximate="tanh"),
+                nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon),
+            )
         if self.config.include_age_at_vs_prediction:
             self.age_at_vs_head = nn.Linear(
                 config.n_embd, config.age_at_vs_vocab_size, bias=False
@@ -1564,6 +1574,25 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
     def set_output_embeddings(self, new_embeddings):
         self.lm_head = new_embeddings
+
+    def compute_next_value_logits(
+        self, hidden_states: torch.Tensor, next_token_ids: torch.LongTensor
+    ) -> torch.Tensor:
+        """
+        Value logits of the tokens in `next_token_ids`, predicted from the hidden states one step earlier.
+
+        hidden_states is (..., n_embd) and next_token_ids has the same leading shape; position i of
+        hidden_states is the state just before next_token_ids[i] is consumed.
+        """
+        # The same concept embeddings the model reads as input, so a token with a pretrained
+        # embedding is described to the value head the same way
+        next_token_embeddings = self.cehrgpt.concept_embeddings(
+            next_token_ids.to(self.cehrgpt.wte.weight.device)
+        ).to(device=hidden_states.device, dtype=hidden_states.dtype)
+        value_hidden_states = self.value_condition_layer(
+            torch.cat([hidden_states, next_token_embeddings], dim=-1)
+        )
+        return self.value_head(value_hidden_states)
 
     def get_value_output_embeddings(self):
         if self.config.include_values:
@@ -1927,10 +1956,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             logits_hidden_states = hidden_states
 
         lm_logits = self.lm_head(logits_hidden_states)
-        if self.cehrgpt.include_values:
-            value_logits = self.value_head(logits_hidden_states)
-        else:
-            value_logits = None
 
         linear_prob_hidden_states = None
         # We don't process this during the generation phase, indicated by
@@ -2029,13 +2054,16 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 token_loss = loss_fct(
                     shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
                 )
-                token_loss = torch.where(
+                # A weighted mean, so lab_token_loss_weight sets how much a lab token counts relative
+                # to any other token; dividing by the token count would only shrink the whole loss
+                token_weights = torch.where(
                     lab_index,
-                    token_loss * self.cehrgpt.config.lab_token_loss_weight,
-                    token_loss,
+                    self.cehrgpt.config.lab_token_loss_weight,
+                    1.0,
+                ) * valid_tokens.view(-1)
+                token_loss = (token_loss * token_weights).sum() / token_weights.sum().clamp(
+                    min=torch.finfo(token_weights.dtype).tiny
                 )
-
-                token_loss = token_loss.sum() / total_num_tokens
             else:
                 # Flatten the tokens
                 loss_fct = CrossEntropyLoss(reduction="none")
@@ -2175,27 +2203,35 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     * float(not self.config.freeze_cehrgpt_generation_model)
                 )
 
-            if true_values is not None and true_value_indicators is not None:
-                true_values = true_values.to(value_logits.device)
-                shift_value_logits = value_logits[..., :-1, :].contiguous()
-                shift_value_indicators = true_value_indicators[..., :-1].contiguous()
+            if (
+                self.cehrgpt.include_values
+                and true_values is not None
+                and true_value_indicators is not None
+            ):
+                true_values = true_values.to(lm_logits.device)
+                shift_value_logits = self.compute_next_value_logits(
+                    hidden_states[:, :-1, :], input_ids[:, 1:]
+                )
+                # Position t predicts the value of token t+1, so the mask comes from t+1 as well.
+                # Taking it from t would skip every value whose previous token has none, such as
+                # the first lab of a panel.
+                shift_value_indicators = (
+                    true_value_indicators[..., 1:].contiguous().to(lm_logits.device)
+                )
                 shift_next_values = true_values[..., 1:].contiguous()
                 value_loss_fct = CrossEntropyLoss(reduction="none")
                 token_value_loss = value_loss_fct(
-                    shift_value_logits.view(-1, shift_value_logits.size(-1)),
+                    shift_value_logits.reshape(-1, shift_value_logits.size(-1)),
                     shift_next_values.view(-1),
                 )
                 token_value_loss = torch.where(
                     shift_value_indicators.view(-1), token_value_loss, 0
                 )
-                token_value_loss = token_value_loss.sum() / total_num_tokens
-                if (
-                    self.cehrgpt.config.lab_token_penalty
-                    and self.cehrgpt.config.lab_token_exists
-                ):
-                    token_value_loss = (
-                        token_value_loss * self.config.lab_token_loss_weight
-                    )
+                # Average over the tokens that have a value. Dividing by every token would make
+                # the weight of this loss grow and shrink with how many labs a batch has.
+                token_value_loss = token_value_loss.sum() / shift_value_indicators.sum().clamp(
+                    min=1
+                )
                 loss += (
                     token_value_loss
                     * self.config.value_prediction_loss_weight
@@ -2246,7 +2282,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             loss=loss,
             logits=lm_logits,
             value_indicators=value_indicators,
-            next_value_logits=value_logits,
+            # The value head needs the next token, which is only known once it is sampled,
+            # so generation calls compute_next_value_logits on these hidden states
+            value_hidden_states=(
+                logits_hidden_states if self.cehrgpt.include_values else None
+            ),
             past_key_values=transformer_outputs.past_key_values,
             hidden_states=transformer_outputs.hidden_states,
             linear_prob_hidden_states=linear_prob_hidden_states,
@@ -2478,8 +2518,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     output_hidden_states=output_hidden_states,
                 )
                 outputs.logits = outputs.logits.expand(batch_size, -1, -1)
-                if outputs.next_value_logits is not None:
-                    outputs.next_value_logits = outputs.next_value_logits.expand(
+                if outputs.value_hidden_states is not None:
+                    outputs.value_hidden_states = outputs.value_hidden_states.expand(
                         batch_size, -1, -1
                     )
                 outputs.past_key_values = tuple(
@@ -2569,7 +2609,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 next_value_indicators = torch.isin(
                     next_tokens, lab_token_ids
                 )
-                next_value_logits = outputs.next_value_logits[:, -1]
+                next_value_logits = self.compute_next_value_logits(
+                    outputs.value_hidden_states[:, -1], next_tokens
+                )
                 # sample
                 next_value_probs = nn.functional.softmax(next_value_logits, dim=-1)
                 next_value_tokens = torch.multinomial(next_value_probs, num_samples=1)

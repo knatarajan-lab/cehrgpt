@@ -77,7 +77,8 @@ class CehrGptCausalLMOutput(ModelOutput):
     loss: Optional[torch.FloatTensor] = None
     logits: torch.FloatTensor = None
     value_indicators: torch.BoolTensor = None
-    next_value_logits: torch.FloatTensor = None
+    # Final hidden states at the logit positions, for the value head conditioned on the next token
+    value_hidden_states: Optional[torch.FloatTensor] = None
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     linear_prob_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
