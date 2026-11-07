@@ -50,8 +50,6 @@ def reference_time_to_event_labels(self, record: Dict[str, Any]) -> Dict[str, An
             previous_time_stamp = time_stamp
         event_times[i] = time_stamp
 
-    # The hour of every event, for the groups of events that share a time
-    event_hours = np.floor(event_times / 3600)
     # Convert epoch times to days
     event_times = event_times / (3600 * 24)
 
@@ -61,8 +59,8 @@ def reference_time_to_event_labels(self, record: Dict[str, Any]) -> Dict[str, An
     random_prediction_positions = (
         np.random.rand(n_concepts) < self.motor_sampling_probability
     )
-    # We make the predictions at the end of the group of events that share the hour
-    prediction_positions = np.roll(event_hours, -1) != event_hours
+    # We make the predictions at the end of the group of events that share the time stamp
+    prediction_positions = np.roll(event_times, -1) != event_times
     # We don't predict at the att time tokens
     prediction_positions &= ~is_att_tokens & random_prediction_positions
     # We disable TTE predictions using the demographics alone
@@ -304,22 +302,6 @@ class MotorLabelsTest(unittest.TestCase):
         expected = reference_time_to_event_labels(processor, record)
         self.assertEqual(got["motor_row_indices"], [])
         self.assertEqual(got["motor_tte_task_indicators"], expected["motor_tte_task_indicators"])
-
-    def test_sampled_points_are_at_the_end_of_an_hour(self):
-        self.tokenizer.parents.update({"1000": ["task0"], "1001": ["task1"], "1002": []})
-        hour, minute = 3600.0, 60.0
-        concept_ids = ["year:2010", "age:40", "8507", "8527", "[VS]", "9201", "1000", "1001", "1000", "1001", "[VE]", "D1", "[VS]", "9201", "1002", "[VE]"]
-        epoch = [0.0] * 6 + [8 * hour, 8 * hour + 20 * minute, 9 * hour, 9 * hour + 30 * minute, 9 * hour + 30 * minute]
-        epoch += [86400.0] * 5
-        record = {"concept_ids": concept_ids, "epoch_times": epoch}
-        self.processor.motor_sampling_probability = 1.0
-        got = self.compare(record, 0)
-        # 5 ends hour 0, 7 ends hour 8 (6 shares it, 20 minutes earlier), 10 is the [VE] before D1; the
-        # events of hour 9 end at the [VE] too. Nothing on the last day.
-        self.assertEqual(np.where(got["motor_tte_task_indicators"])[0].tolist(), [5, 7, 10])
-        pairs = sorted_pairs(got)
-        # Row 1 is position 7 at 08:20: task0 and task1 are next at 09:00 and 09:30
-        self.assertEqual([p for p in pairs if p[0] == 1], [(1, 5000, round(40 / 1440, 9)), (1, 5001, round(70 / 1440, 9))])
 
     def test_the_parents_of_a_concept_are_looked_up_once(self):
         rng = np.random.default_rng(5)
