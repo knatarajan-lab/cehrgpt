@@ -449,6 +449,8 @@ class CehrGptDataProcessor(DatasetMapping):
             np.asarray(record["epoch_times"], dtype=float)
         )
 
+        # The hour of every event, for the groups of events that share a time
+        event_hours = np.floor(event_times / 3600)
         # Convert epoch times to days
         event_times = event_times / (3600 * 24)
 
@@ -458,8 +460,8 @@ class CehrGptDataProcessor(DatasetMapping):
         random_prediction_positions = (
             np.random.rand(n_concepts) < self.motor_sampling_probability
         )
-        # We make the predictions at the end of the group of events that share the time stamp
-        prediction_positions = np.roll(event_times, -1) != event_times
+        # We make the predictions at the end of the group of events that share the hour
+        prediction_positions = np.roll(event_hours, -1) != event_hours
         # We don't predict at the att time tokens
         prediction_positions &= ~is_att_tokens & random_prediction_positions
         # We disable TTE predictions using the demographics alone
