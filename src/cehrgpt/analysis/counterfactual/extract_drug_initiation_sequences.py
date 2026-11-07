@@ -634,6 +634,9 @@ def _process_shard(
     monotherapy_window_days: float = 7.0,
     population_window_days: Optional[float] = None,
     censor_at_switch: bool = False,
+    min_age: Optional[float] = None,
+    inclusion_concepts: Optional[Set[str]] = None,
+    inclusion_window_days: Optional[float] = None,
     show_progress: bool = True,
 ) -> Tuple[int, int]:
     """
@@ -772,6 +775,29 @@ def _process_shard(
                 found = has_record_in_window(
                     concept_ids, epoch_times, population_concepts,
                     index_time - population_window_days * DAY_SECONDS, index_time,
+                    visit_end + 1,
+                )
+            if not found:
+                n_skipped += 1
+                continue
+
+        # ---- Age on the index date (e.g. ORAL Surveillance: 50 or older) ----
+        if min_age is not None:
+            ages = _to_list(row.get("ages", []))
+            if drug_pos >= len(ages) or ages[drug_pos] is None or ages[drug_pos] < min_age:
+                n_skipped += 1
+                continue
+
+        # ---- A second required condition (e.g. a cardiovascular risk factor) ----
+        # Same rule as the population filter: in the window days up to and including the index
+        # date, or without a window anywhere in the pre-drug history.
+        if inclusion_concepts:
+            if inclusion_window_days is None:
+                found = bool(set(concept_ids[:drug_pos]) & inclusion_concepts)
+            else:
+                found = has_record_in_window(
+                    concept_ids, epoch_times, inclusion_concepts,
+                    index_time - inclusion_window_days * DAY_SECONDS, index_time,
                     visit_end + 1,
                 )
             if not found:
@@ -965,6 +991,9 @@ def process(
     monotherapy_window_days: Optional[float] = None,
     population_window_days: Optional[float] = None,
     censor_at_switch: bool = False,
+    min_age: Optional[float] = None,
+    inclusion_concept_ids: Optional[List[int]] = None,
+    inclusion_window_days: Optional[float] = None,
     era_gap_days: int = 30,
     min_context_length: int = 4,
     overwrite: bool = False,
@@ -1035,6 +1064,16 @@ def process(
         End the follow-up when the patient starts the other arm's drug or an exclusion drug.
         LEGEND does not: its on-treatment window ends with the continuous exposure to the
         patient's own class.
+    min_age
+        Patients younger than this many years on the index date (the ``ages`` value of the
+        index drug) are left out.  Default: no age rule.
+    inclusion_concept_ids
+        A second required condition next to ``population_concept_ids``: the patient also needs a
+        record of one of these concepts (descendants count), for example a cardiovascular risk
+        factor.  Default: none.
+    inclusion_window_days
+        Window, ending on the index date, for ``inclusion_concept_ids``.  Default: anywhere in
+        the history before the index drug.
     era_gap_days
         Persistence window in days for drug era computation (default: 30).
         Consecutive drug events separated by more than this many days belong
@@ -1087,6 +1126,12 @@ def process(
         "era_gap_days": era_gap_days,
         "min_context_length": min_context_length,
     }
+    # Recorded only when used, so outputs extracted before these rules existed still match.
+    if min_age is not None:
+        params["min_age"] = min_age
+    if inclusion_concept_ids:
+        params["inclusion_concept_ids"] = sorted(inclusion_concept_ids)
+        params["inclusion_window_days"] = inclusion_window_days
 
     if overwrite:
         # Chunk names depend on the shard layout, so a rerun with fewer shards
@@ -1177,6 +1222,11 @@ def process(
         print(f"Expanding {len(population_concept_ids)} population concept(s) to descendants …")
         population_concepts = load_drug_descendant_concepts(vocab_path, population_concept_ids)
         print(f"  → {len(population_concepts):,} population concepts (patients must have ≥1 in pre-drug history)")
+    inclusion_concepts: Optional[Set[str]] = None
+    if inclusion_concept_ids:
+        print(f"Expanding {len(inclusion_concept_ids)} inclusion concept(s) to descendants …")
+        inclusion_concepts = load_drug_descendant_concepts(vocab_path, inclusion_concept_ids)
+        print(f"  → {len(inclusion_concepts):,} inclusion concepts (patients must also have ≥1 of them)")
 
     # ------------------------------------------------------------------ #
     # 2c. Expand exclusion concept IDs to descendants (new-user filter)   #
@@ -1226,6 +1276,8 @@ def process(
     missing_required = REQUIRED_COLS - {"input_ids"} - set(all_cols)
     if missing_required:
         print(f"  WARNING: required columns missing from source data: {sorted(missing_required)}")
+    if min_age is not None and "ages" not in all_cols:
+        raise ValueError(f"min_age needs the ages column, which {patient_sequence_path} does not have")
 
     # ------------------------------------------------------------------ #
     # 4. Dispatch shards to worker processes                              #
@@ -1283,6 +1335,9 @@ def process(
             monotherapy_window_days if monotherapy_window_days is not None else 7.0,
             population_window_days,
             censor_at_switch,
+            min_age,
+            inclusion_concepts,
+            inclusion_window_days,
             effective_workers == 1,
         )
         for shard_id in range(len(file_groups))
@@ -1421,6 +1476,26 @@ def _parse_args() -> argparse.Namespace:
              "history before the index drug.",
     )
     parser.add_argument(
+        "--min_age",
+        type=float,
+        default=None,
+        help="Leave out patients younger than this many years on the index date "
+             "(ORAL Surveillance: 50). Default: no age rule.",
+    )
+    parser.add_argument(
+        "--inclusion_concept_ids",
+        default=None,
+        help="Comma-separated OMOP concept_ids of a second required condition, next to "
+             "--population_concept_ids (e.g. cardiovascular risk factors); descendants count.",
+    )
+    parser.add_argument(
+        "--inclusion_window_days",
+        type=float,
+        default=None,
+        help="An --inclusion_concept_ids record has to be in this many days up to and including "
+             "the index date. Default: anywhere in the history before the index drug.",
+    )
+    parser.add_argument(
         "--censor_at_switch",
         action="store_true",
         help="End follow-up when the patient starts the other arm's drug or an exclusion drug. "
@@ -1494,6 +1569,10 @@ def main() -> None:
         [int(x.strip()) for x in args.inpatient_outcome_concept_ids.split(",")]
         if args.inpatient_outcome_concept_ids else None
     )
+    inclusion_concept_ids = (
+        [int(x.strip()) for x in args.inclusion_concept_ids.split(",")]
+        if args.inclusion_concept_ids else None
+    )
     process(
         patient_sequence_path=args.patient_sequence_path,
         vocab_path=args.vocab_path,
@@ -1510,6 +1589,9 @@ def main() -> None:
         monotherapy_window_days=args.monotherapy_window_days,
         population_window_days=args.population_window_days,
         censor_at_switch=args.censor_at_switch,
+        min_age=args.min_age,
+        inclusion_concept_ids=inclusion_concept_ids,
+        inclusion_window_days=args.inclusion_window_days,
         era_gap_days=args.era_gap_days,
         min_context_length=args.min_context_length,
         overwrite=args.overwrite,

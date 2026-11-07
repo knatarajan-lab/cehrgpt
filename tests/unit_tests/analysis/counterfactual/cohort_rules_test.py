@@ -18,7 +18,7 @@ SOURCE, SOURCE_2, COMPARATOR, EXCLUDED, COMBINATION, HYPERTENSION, OUTCOME = (
 )  # fmt: skip
 
 
-def patient(person_id, visits):
+def patient(person_id, visits, age=50):
     """visits: list of (day, [tokens]) in the order given; every visit is an outpatient visit."""
     concept_ids = ["year:2020", "age:50", "8507", "0"]
     epoch_times = [0.0] * 4
@@ -31,7 +31,7 @@ def patient(person_id, visits):
         "person_id": person_id,
         "concept_ids": concept_ids,
         "epoch_times": epoch_times,
-        "ages": [50] * n,
+        "ages": [age] * n,
         "input_ids": list(range(n)),
         "value_indicators": [0] * n,
         "values": [0] * n,
@@ -115,6 +115,39 @@ class CohortRulesTest(unittest.TestCase):
         self.assertEqual(windowed, [1, 3])
         anywhere = self.kept(patients, population_concept_ids=[HYPERTENSION])
         self.assertEqual(anywhere, [1, 2, 3])
+
+    def test_patients_younger_than_the_minimum_age_on_the_index_date_are_left_out(self):
+        patients = [
+            patient(1, [(0, [str(SOURCE)])], age=49),
+            patient(2, [(0, [str(SOURCE)])], age=50),
+            patient(3, [(0, [str(COMPARATOR)])], age=72),
+        ]
+        self.assertEqual(self.kept(patients, min_age=50), [2, 3])
+        self.assertEqual(self.kept(patients), [1, 2, 3])
+
+    def test_the_second_required_condition_is_needed_next_to_the_indication(self):
+        RISK_FACTOR = HYPERTENSION  # any concept of the vocabulary
+        patients = [
+            patient(1, [(-800, [str(RISK_FACTOR)]), (0, [str(SOURCE)])]),
+            patient(2, [(-100, [str(RISK_FACTOR)]), (0, [str(SOURCE)])]),
+            patient(3, [(0, [str(SOURCE)])]),
+            patient(4, [(0, [str(SOURCE)]), (5, [str(RISK_FACTOR)])]),
+        ]
+        anywhere = self.kept(patients, inclusion_concept_ids=[RISK_FACTOR])
+        self.assertEqual(anywhere, [1, 2])
+        windowed = self.kept(patients, inclusion_concept_ids=[RISK_FACTOR], inclusion_window_days=365)
+        self.assertEqual(windowed, [2])
+
+    def test_the_new_rules_are_recorded_only_when_used(self):
+        patients = [patient(1, [(-10, [str(HYPERTENSION)]), (0, [str(SOURCE)])])]
+        self.kept(patients)
+        params = json.loads((self.output / "extraction_params.json").read_text())
+        self.assertNotIn("min_age", params)
+        self.assertNotIn("inclusion_concept_ids", params)
+        self.kept(patients, min_age=50, inclusion_concept_ids=[HYPERTENSION])
+        params = json.loads((self.output / "extraction_params.json").read_text())
+        self.assertEqual(params["min_age"], 50)
+        self.assertEqual(params["inclusion_concept_ids"], [HYPERTENSION])
 
     def test_the_outcome_before_the_index_date_is_flagged(self):
         patients = [

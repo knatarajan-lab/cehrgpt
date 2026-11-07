@@ -240,6 +240,7 @@ def environment(
     definition = load_study(study)
     pair = resolve_pair(target, comparator, level, study)
     indication = definition.get("indication") or {}
+    inclusion = definition.get("inclusion") or {}
 
     def ids(values: List[int]) -> str:
         return ",".join(str(v) for v in values)
@@ -267,6 +268,10 @@ def environment(
         keep("EXCLUSION_CONCEPT_IDS", ids(pair["exclusion"]), colon=False),
         keep("POPULATION_CONCEPT_IDS", ids(indication.get("concept_ids", [])), colon=False),
         keep("POPULATION_WINDOW_DAYS", indication.get("window_days", "")),
+        # optional rules: an empty value turns them off
+        keep("MIN_AGE", definition.get("min_age", ""), colon=False),
+        keep("INCLUSION_CONCEPT_IDS", ids(inclusion.get("concept_ids", [])), colon=False),
+        keep("INCLUSION_WINDOW_DAYS", inclusion.get("window_days") or "", colon=False),
         keep("MIN_PRIOR_OBSERVATION_DAYS", definition.get("washout_days", 0)),
         keep("ERA_GAP_DAYS", definition.get("era_gap_days", 30)),
         keep("MONOTHERAPY_WINDOW_DAYS", definition.get("monotherapy_window_days") or "", colon=False),

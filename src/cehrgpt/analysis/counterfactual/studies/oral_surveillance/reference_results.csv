@@ -1,0 +1,3 @@
+target,comparator,outcome,time_at_risk,adjustment,source,hr,ci_lower,ci_upper,note
+Tofacitinib,TNF inhibitors (adalimumab or etanercept),Major adverse cardiovascular events,intent_to_treat,randomized,ORAL Surveillance,1.33,0.91,1.94,"Ytterberg et al., NEJM 2022; both tofacitinib doses combined; here MI or stroke; the trial MACE also counts cardiovascular death"
+Tofacitinib,TNF inhibitors (adalimumab or etanercept),Malignancy excluding non-melanoma skin cancer,intent_to_treat,randomized,ORAL Surveillance,1.48,1.04,2.09,"Ytterberg et al., NEJM 2022; both tofacitinib doses combined"
