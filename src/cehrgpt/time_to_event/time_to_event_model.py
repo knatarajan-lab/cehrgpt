@@ -1,6 +1,6 @@
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -30,8 +30,6 @@ class TimeToEvent:
     # The raw generated continuation for every simulated trial (not just the ones that
     # satisfied the stopping criteria), kept for manual investigation of model behavior.
     generated_trajectories: List[List[str]] = field(default_factory=list)
-    # The decoded value of every token of generated_trajectories, when the model includes values
-    generated_value_trajectories: List[List[str]] = field(default_factory=list)
 
 
 class TimeToEventStoppingCriteria(StoppingCriteria):
@@ -113,7 +111,6 @@ def create_time_to_event(
     time_event_tuples: List[Tuple[str, int]],
     num_of_simulations: int,
     generated_trajectories: Optional[List[List[str]]] = None,
-    generated_value_trajectories: Optional[List[List[str]]] = None,
 ) -> TimeToEvent:
     outcome_events, time_intervals = zip(*time_event_tuples)
     time_buckets = [time_month_token(_) for _ in time_intervals]
@@ -138,7 +135,6 @@ def create_time_to_event(
         num_of_simulations=num_of_simulations,
         time_interval_probability_table=sorted_probability_table,
         generated_trajectories=generated_trajectories or [],
-        generated_value_trajectories=generated_value_trajectories or [],
     )
 
 
@@ -172,26 +168,9 @@ class TimeToEventModel:
     def is_outcome_event(self, token: str) -> bool:
         return token in self.outcome_events
 
-    @property
-    def include_values(self) -> bool:
-        """Whether the model reads and generates a value bin for every lab token."""
-        return bool(getattr(self.model.config, "include_values", False))
-
     def prepare_prompt(self, partial_history: Union[np.ndarray, List[str]]) -> List[str]:
         """Fit a history to the encoded context while preserving demographics."""
-        return self.prepare_prompt_with_indices(partial_history)[0]
-
-    def prepare_prompt_with_indices(
-        self, partial_history: Union[np.ndarray, List[str]]
-    ) -> Tuple[List[str], List[int]]:
-        """
-        Fit a history to the encoded context while preserving demographics.
-
-        Also returns, for every token of the prompt, its index in partial_history, so per-token
-        columns such as the values can follow the tokens that are kept.
-        """
         history = list(partial_history)
-        indices = list(range(len(history)))
         max_prompt_tokens = (
             self.generation_config.max_length
             - self.generation_config.max_new_tokens
@@ -201,7 +180,7 @@ class TimeToEventModel:
                 raise ValueError("max_input_length must be greater than zero")
             max_prompt_tokens = min(max_prompt_tokens, self.max_input_length)
         if len(self.tokenizer.encode(history)) <= max_prompt_tokens:
-            return history, indices
+            return history
 
         demographics = history[:4]
         if len(self.tokenizer.encode(demographics)) > max_prompt_tokens:
@@ -222,33 +201,9 @@ class TimeToEventModel:
             if next_visit is None:
                 remove_index = 5 if len(prompt) > 5 and is_visit_start(prompt[4]) else 4
                 prompt.pop(remove_index)
-                indices.pop(remove_index)
             else:
                 prompt = demographics + prompt[next_visit:]
-                indices = indices[:4] + indices[next_visit:]
-        return prompt, indices
-
-    def _decode_values(
-        self,
-        generated_ids: np.ndarray,
-        tokens: List[str],
-        generated_values: Optional[np.ndarray],
-    ) -> List[str]:
-        """The decoded value of every token of `tokens`, the decoded generated_ids."""
-        if generated_values is None:
-            return []
-        # decode drops the special tokens such as the padding after a trajectory stopped, so
-        # the values of those positions are dropped too to keep one value per token
-        all_tokens = self.tokenizer.decode(generated_ids, skip_special_tokens=False)
-        all_values = self.tokenizer.decode_value(
-            generated_values, skip_special_tokens=False
-        )
-        skipped = set(all_tokens) - set(tokens)
-        return [
-            value
-            for token, value in zip(all_tokens, all_values)
-            if token not in skipped
-        ]
+        return prompt
 
     def simulate(
         self,
@@ -257,46 +212,12 @@ class TimeToEventModel:
         future_visit_end: int = -1,
         prediction_window_start: int = 0,
         prediction_window_end: int = 365,
-        value_indicators: Optional[Sequence[bool]] = None,
-        values: Optional[Sequence[int]] = None,
-        return_values: bool = False,
-    ) -> Union[List[List[str]], Tuple[List[List[str]], List[List[str]]]]:
-        """
-        Generate continuations of partial_history.
-
-        When the model includes values, value_indicators and values (the value token ids, as
-        in training) give the values of the lab tokens of partial_history, which the model
-        reads like in training; a prompt without them is read as if no lab had a value. With
-        return_values, the decoded values generated with every continuation are also returned.
-        """
-        if self.include_values and (value_indicators is None) != (values is None):
-            raise ValueError("value_indicators and values must be given together")
-        partial_history, prompt_indices = self.prepare_prompt_with_indices(
-            partial_history
-        )
+    ) -> List[List[str]]:
+        partial_history = self.prepare_prompt(partial_history)
         token_ids = self.tokenizer.encode(partial_history)
         prompt = torch.tensor(token_ids).unsqueeze(0).to(self.device)
 
-        value_kwargs = {}
-        if self.include_values and values is not None:
-            if len(value_indicators) != len(values):
-                raise ValueError("value_indicators and values must have the same length")
-            if len(token_ids) != len(partial_history):
-                raise ValueError(
-                    "The values follow the tokens, so the tokenizer must not add tokens to the prompt"
-                )
-            value_kwargs = {
-                "value_indicators": torch.tensor(
-                    [bool(value_indicators[i]) for i in prompt_indices],
-                    dtype=torch.bool,
-                ).unsqueeze(0).to(self.device),
-                "values": torch.tensor(
-                    [int(values[i]) for i in prompt_indices], dtype=torch.long
-                ).unsqueeze(0).to(self.device),
-            }
-
         simulated_sequences = []
-        simulated_values = []
         old_num_return_sequences = self.generation_config.num_return_sequences
         with torch.inference_mode():
             while len(simulated_sequences) < old_num_return_sequences:
@@ -304,7 +225,7 @@ class TimeToEventModel:
                     self.batch_size,
                     old_num_return_sequences - len(simulated_sequences),
                 )
-                generation_kwargs = dict(value_kwargs)
+                generation_kwargs = {}
                 if self.enable_early_stopping:
                     generation_kwargs["stopping_criteria"] = StoppingCriteriaList(
                         [
@@ -324,27 +245,15 @@ class TimeToEventModel:
                     cehrgpt_tokenizer=self.tokenizer,
                     **generation_kwargs,
                 )
-                sequence_vals = getattr(results, "sequence_vals", None)
-                for i, seq in enumerate(results.sequences):
-                    generated_ids = seq[len(token_ids) :].cpu().numpy()
-                    tokens = self.tokenizer.decode(generated_ids)
-                    simulated_sequences.append(tokens)
-                    if return_values:
-                        simulated_values.append(
-                            self._decode_values(
-                                generated_ids,
-                                tokens,
-                                (
-                                    sequence_vals[i, len(token_ids) :].cpu().numpy()
-                                    if sequence_vals is not None
-                                    else None
-                                ),
-                            )
-                        )
+                # Add the sequences to the result array
+                simulated_sequences.extend(
+                    [
+                        self.tokenizer.decode(seq[len(token_ids) :].cpu().numpy())
+                        for seq in results.sequences
+                    ]
+                )
 
         self.generation_config.num_return_sequences = old_num_return_sequences
-        if return_values:
-            return simulated_sequences, simulated_values
         return simulated_sequences
 
     def predict_time_to_events(
@@ -356,14 +265,10 @@ class TimeToEventModel:
         prediction_window_end: int = 365,
         debug: bool = False,
         max_n_trial: int = 2,
-        value_indicators: Optional[Sequence[bool]] = None,
-        values: Optional[Sequence[int]] = None,
     ) -> Optional[TimeToEvent]:
         time_event_tuples = []
         seqs_failed_to_convert = []
         generated_trajectories = []
-        generated_value_trajectories = []
-        store_values = self.store_generated_trajectories and self.include_values
         n_trial = 0
         num_return_sequences = self.generation_config.num_return_sequences
         max_new_tokens = self.generation_config.max_new_tokens
@@ -375,21 +280,13 @@ class TimeToEventModel:
                 time_event_tuples
             )
             # self.generation_config.max_new_tokens = max_new_tokens * (n_trial + 1)
-            simulated = self.simulate(
+            simulated_seqs = self.simulate(
                 partial_history,
                 future_visit_start,
                 future_visit_end,
                 prediction_window_start,
                 prediction_window_end,
-                value_indicators=value_indicators,
-                values=values,
-                return_values=store_values,
             )
-            if store_values:
-                simulated_seqs, simulated_values = simulated
-                generated_value_trajectories.extend(simulated_values)
-            else:
-                simulated_seqs = simulated
             n_trial += 1
             for seq in simulated_seqs:
                 visit_counter = 0
@@ -433,10 +330,7 @@ class TimeToEventModel:
         # Count the occurrences of each time tokens for each concept
         return (
             create_time_to_event(
-                time_event_tuples,
-                len(time_event_tuples),
-                generated_trajectories,
-                generated_value_trajectories,
+                time_event_tuples, len(time_event_tuples), generated_trajectories
             )
             if len(time_event_tuples) > 0
             else None

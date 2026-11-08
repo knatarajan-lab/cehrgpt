@@ -238,22 +238,6 @@ def truncate_history_keeping_demographics(
     """
     Keep the most recent part of a patient history that fits in `max_tokens`, starting on a [VS].
 
-    See truncate_history_keeping_demographics_with_indices, which also says where every kept
-    token comes from.
-    """
-    return truncate_history_keeping_demographics_with_indices(
-        concept_ids, max_tokens, known_numeric_tokens
-    )[0]
-
-
-def truncate_history_keeping_demographics_with_indices(
-    concept_ids: List[str],
-    max_tokens: int,
-    known_numeric_tokens: Optional[Dict[str, List[int]]] = None,
-) -> Tuple[List[str], List[int]]:
-    """
-    Keep the most recent part of a patient history that fits in `max_tokens`, starting on a [VS].
-
     The token budget `max_tokens` only counts the history itself: a history that starts with the
     demographic header (year:YYYY, age:NN, gender, race) keeps it on top of the budget, so the
     result can have up to DEMOGRAPHIC_PROMPT_SIZE more tokens than `max_tokens`. The header is
@@ -271,9 +255,7 @@ def truncate_history_keeping_demographics_with_indices(
     :param concept_ids: The patient history as concept ids/tokens.
     :param max_tokens: The maximum number of history tokens, not counting the demographic header.
     :param known_numeric_tokens: The year/age values that exist in the vocabulary, if known.
-    :return: The history unchanged if it fits, otherwise the truncated history, and for every
-        token of it the index of the token of `concept_ids` it comes from (the rebuilt header
-        comes from the original header), to carry per-token columns such as values along.
+    :return: The history unchanged if it fits, otherwise the truncated history.
     """
     header = concept_ids[:DEMOGRAPHIC_PROMPT_SIZE]
     try:
@@ -289,7 +271,7 @@ def truncate_history_keeping_demographics_with_indices(
 
     num_header_tokens = DEMOGRAPHIC_PROMPT_SIZE if has_header else 0
     if len(concept_ids) - num_header_tokens <= max_tokens:
-        return concept_ids, list(range(len(concept_ids)))
+        return concept_ids
 
     start_index = len(concept_ids) - max_tokens
     # Make sure the history starts on a visit start
@@ -298,9 +280,8 @@ def truncate_history_keeping_demographics_with_indices(
             start_index += offset
             break
     recent_history = concept_ids[start_index:]
-    recent_indices = list(range(start_index, len(concept_ids)))
     if not has_header:
-        return recent_history, recent_indices
+        return recent_history
 
     dropped_days = sum(
         extract_time_interval_in_days(token)
@@ -312,10 +293,7 @@ def truncate_history_keeping_demographics_with_indices(
     if known_numeric_tokens:
         new_year = nearest_known_value(new_year, known_numeric_tokens.get("year", []))
         new_age = nearest_known_value(new_age, known_numeric_tokens.get("age", []))
-    return (
-        [f"year:{new_year}", f"age:{new_age}", header[2], header[3]] + recent_history,
-        list(range(DEMOGRAPHIC_PROMPT_SIZE)) + recent_indices,
-    )
+    return [f"year:{new_year}", f"age:{new_age}", header[2], header[3]] + recent_history
 
 
 def multiple_of_10(n: int) -> int:
