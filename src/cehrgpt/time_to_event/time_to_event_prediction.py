@@ -24,8 +24,9 @@ from cehrgpt.gpt_utils import (
     index_numeric_tokens,
     is_visit_end,
     is_visit_start,
-    truncate_history_keeping_demographics,
+    truncate_history_keeping_demographics_with_indices,
 )
+from cehrgpt.data.hf_cehrgpt_dataset_mapping import concept_value_bins
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.data_utils import extract_cohort_sequences
@@ -35,6 +36,7 @@ from cehrgpt.runners.gpt_runner_util import (
 )
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.time_to_event.time_to_event_model import TimeToEventModel
+from cehrgpt.tokenization.special_tokens import OUT_OF_VOCABULARY_TOKEN
 
 LOG = logging.get_logger("transformers")
 
@@ -62,6 +64,32 @@ def load_task_config_from_yaml(task_config_yaml_file_path: str) -> TaskConfig:
         raise ValueError(
             f"Could not open the task_config yaml file from {task_config_yaml_file_path}"
         ) from e
+
+
+def encode_prompt_values(
+    record: Dict[str, Any], tokenizer: CehrGptTokenizer
+) -> Optional[Tuple[List[bool], List[int]]]:
+    """
+    The value indicators and value token ids of every concept of a record, as in training.
+
+    A tokenized record (from --tokenized_full_dataset_path) has them as value_indicators and
+    values; the concept_values of a raw record are put in bins with the tokenizer like the
+    training tokenization does. None when the record has no values.
+    """
+    if record.get("value_indicators") is not None and record.get("values") is not None:
+        return (
+            [bool(indicator) for indicator in record["value_indicators"]],
+            [int(value) for value in record["values"]],
+        )
+    if record.get("concept_value_masks") is None:
+        return None
+    value_bins = concept_value_bins(tokenizer, dict(record))
+    value_vocab = tokenizer.get_value_vocab()
+    oov = value_vocab[OUT_OF_VOCABULARY_TOKEN]
+    return (
+        [bool(mask) for mask in record["concept_value_masks"]],
+        [value_vocab.get(value_bin, oov) for value_bin in value_bins],
+    )
 
 
 def get_device():
@@ -441,6 +469,7 @@ def main(args):
     # The year/age values that exist as tokens, for the rebuilt demographic header
     known_numeric_tokens = index_numeric_tokens(vocab)
     tte_outputs = []
+    warned_missing_values = False
     for record in tqdm(test_dataset, total=len(test_dataset)):
         index_date = record["index_date"]
         # extract_cohort_sequences produces index_date as a POSIX timestamp rather than
@@ -454,23 +483,46 @@ def main(args):
             output_folder=temp_folder, sample_id=sample_identifier
         ):
             continue
-        partial_history = record["concept_ids"]
-        # Filter out the tokens that are not in the vocabulary
-        partial_history = [
-            concept_id for concept_id in partial_history
+        concept_ids = record["concept_ids"]
+        # Filter out the tokens that are not in the vocabulary. source_indices[i] is the index
+        # in concept_ids of the i-th prompt token, so the values can follow the tokens kept.
+        source_indices = [
+            index for index, concept_id in enumerate(concept_ids)
             if concept_id in vocab
         ]
+        partial_history = [concept_ids[index] for index in source_indices]
         label = record["label"]
         time_to_event = record["time_to_event"] if "time_to_event" in record else None
         # Keep the most recent history and move the demographic header forward in time.
         # prepare_prompt then enforces the exact encoded-token cap, including the header and
         # any tokenizer-added special tokens.
-        partial_history = truncate_history_keeping_demographics(
+        partial_history, kept = truncate_history_keeping_demographics_with_indices(
             partial_history,
             max_input_length,
             known_numeric_tokens,
         )
-        partial_history = ts_pred_model.prepare_prompt(partial_history)
+        source_indices = [source_indices[index] for index in kept]
+        partial_history, kept = ts_pred_model.prepare_prompt_with_indices(
+            partial_history
+        )
+        source_indices = [source_indices[index] for index in kept]
+        prompt_value_indicators, prompt_values = None, None
+        if ts_pred_model.include_values:
+            # The model reads the value of every lab token like in training; without them
+            # the labs of the history would be read as if they had no value
+            encoded_values = encode_prompt_values(record, cehrgpt_tokenizer)
+            if encoded_values is None:
+                if not warned_missing_values:
+                    LOG.warning(
+                        "The model includes values but the dataset has no values, the labs "
+                        "of the histories are read as if they had no value"
+                    )
+                    warned_missing_values = True
+            else:
+                prompt_value_indicators = [
+                    encoded_values[0][index] for index in source_indices
+                ]
+                prompt_values = [encoded_values[1][index] for index in source_indices]
 
         concept_time_to_event = ts_pred_model.predict_time_to_events(
             partial_history,
@@ -480,6 +532,8 @@ def main(args):
             task_config.prediction_window_end,
             args.debug,
             args.max_n_trial,
+            value_indicators=prompt_value_indicators,
+            values=prompt_values,
         )
         visit_counter = sum([int(is_visit_end(_)) for _ in partial_history])
         predicted_boolean_probability = (
