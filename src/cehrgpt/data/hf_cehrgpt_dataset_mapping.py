@@ -414,6 +414,57 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
         return cehrgpt_record
 
 
+def concept_value_bins(concept_tokenizer, record: Dict[str, Any]) -> List[str]:
+    """
+    The value bin of every concept of a record, as the model reads it.
+
+    A concept with a value (concept_value_masks is 1) gets the bin of its number for its unit, its
+    categorical value, or UNKNOWN_BIN when neither is usable; every other concept gets NONE_BIN.
+    number_as_values, concept_as_values and is_numeric_types are derived from concept_values
+    when the record does not have them, and are left in the record.
+    """
+    if "number_as_values" not in record or "concept_as_values" not in record:
+        record["number_as_values"] = [
+            float(value) if isinstance(value, float) else None
+            for value in record["concept_values"]
+        ]
+        record["is_numeric_types"] = [
+            int(isinstance(value, float)) for value in record["concept_values"]
+        ]
+        record["concept_as_values"] = [
+            value if isinstance(value, str) else None
+            for value in record["concept_values"]
+        ]
+    if not np.any(np.asarray(record["concept_value_masks"]) > 0):
+        return [NONE_BIN for _ in range(len(record["concept_value_masks"]))]
+    values = []
+    for (
+        concept_id,
+        unit,
+        concept_value_mask,
+        number_as_value,
+        concept_as_value,
+        is_numeric_type,
+    ) in zip(
+        record["concept_ids"],
+        record["units"],
+        record["concept_value_masks"],
+        record["number_as_values"],
+        record["concept_as_values"],
+        record["is_numeric_types"],
+    ):
+        if concept_value_mask == 1:
+            value = UNKNOWN_BIN
+            if is_numeric_type == 1:
+                value = concept_tokenizer.normalize(concept_id, unit, number_as_value)
+            elif isinstance(concept_as_value, str):
+                value = concept_as_value
+            values.append(value)
+        else:
+            values.append(NONE_BIN)
+    return values
+
+
 class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
     def __init__(
         self,
@@ -529,54 +580,9 @@ class HFCehrGptTokenizationMapping(DatasetMappingDecorator):
             "The number of tokens must equal to the number of concepts"
         )
         record["value_indicators"] = record["concept_value_masks"]
-        if "number_as_values" not in record or "concept_as_values" not in record:
-            record["number_as_values"] = [
-                float(value) if isinstance(value, float) else None
-                for value in record["concept_values"]
-            ]
-            record["is_numeric_types"] = [
-                int(isinstance(value, float)) for value in record["concept_values"]
-            ]
-            record["concept_as_values"] = [
-                value if isinstance(value, str) else None
-                for value in record["concept_values"]
-            ]
-        if np.any(np.asarray(record["concept_value_masks"]) > 0):
-            values = []
-            for i, (
-                concept_id,
-                unit,
-                concept_value_mask,
-                number_as_value,
-                concept_as_value,
-                is_numeric_type,
-            ) in enumerate(
-                zip(
-                    record["concept_ids"],
-                    record["units"],
-                    record["concept_value_masks"],
-                    record["number_as_values"],
-                    record["concept_as_values"],
-                    record["is_numeric_types"],
-                )
-            ):
-                if concept_value_mask == 1:
-                    value = UNKNOWN_BIN
-                    if is_numeric_type == 1:
-                        value = self._concept_tokenizer.normalize(
-                            concept_id, unit, number_as_value
-                        )
-                    elif isinstance(concept_as_value, str):
-                        value = concept_as_value
-                    values.append(value)
-                else:
-                    values.append(NONE_BIN)
-            assert len(values) == len(record["input_ids"])
-            record["values"] = self.encode_values(values)
-        else:
-            record["values"] = self.encode_values(
-                [NONE_BIN for _ in range(len(record["concept_value_masks"]))]
-            )
+        values = concept_value_bins(self._concept_tokenizer, record)
+        assert len(values) == len(record["input_ids"])
+        record["values"] = self.encode_values(values)
         # Delete these features because they contain null values and pyarrow cannot concatenate multiple records
         del record["number_as_values"]
         del record["concept_as_values"]
