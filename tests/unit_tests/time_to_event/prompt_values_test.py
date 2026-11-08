@@ -1,6 +1,10 @@
+import datetime
+import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 
+import pandas as pd
 import torch
 from transformers import GenerationConfig
 
@@ -9,11 +13,14 @@ from cehrgpt.gpt_utils import (
     truncate_history_keeping_demographics_with_indices,
 )
 from cehrgpt.time_to_event.time_to_event_model import TimeToEventModel
-from cehrgpt.time_to_event.time_to_event_prediction import encode_prompt_values
+from cehrgpt.time_to_event.time_to_event_prediction import (
+    encode_prompt_values,
+    flush_to_disk_if_full,
+)
 from cehrgpt.tokenization.tokenization_constants import NONE_BIN, UNKNOWN_BIN
 
 TOKENS = ["year:2000", "age:20", "Gender/1", "Race/1", "[VS]", "LAB", "X", "[VE]", "D7", "[PAD]"]
-VALUES = ["BIN:NONE", "BIN:1", "BIN:2", "BIN:unknown", "[OOV]", "positive"]
+VALUES = ["BIN:NONE", "BIN:1", "BIN:2", "BIN:unknown", "[OOV]", "positive", "very high"]
 
 
 class Tokenizer:
@@ -165,6 +172,43 @@ class TestSimulateWithValues(unittest.TestCase):
         )
         self.assertEqual(result.generated_trajectories, [["LAB", "X"]] * 2)
         self.assertEqual(result.generated_value_trajectories, [["BIN:2", "BIN:NONE"]] * 2)
+
+
+class TestSavedValues(unittest.TestCase):
+    def test_a_value_with_a_space_keeps_its_position(self):
+        tte = predictor(ValueModel())
+        vocab = Tokenizer().value_vocab
+        # [VS] LAB LAB [PAD], the first lab is "very high"
+        values = tte._decode_values(
+            [4, 5, 5, 9], ["[VS]", "LAB", "LAB"], [vocab["BIN:NONE"], vocab["very high"], vocab["BIN:1"], 0]
+        )
+        self.assertEqual(values, ["BIN:NONE", "very high", "BIN:1"])
+
+    def test_the_prefix_values_are_saved_next_to_the_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outputs = [
+                {
+                    "_sample_identifier": f"{i}_2020_01_01",
+                    "subject_id": i,
+                    "prediction_time": datetime.datetime(2020, 1, 1),
+                    "visit_counter": 1,
+                    "boolean_value": False,
+                    "predicted_boolean_probability": 0.0,
+                    "predicted_boolean_value": None,
+                    "time_to_event": None,
+                    "trials": None,
+                    "prefix": ["[VS]", "LAB", "[VE]"],
+                    "prefix_values": prefix_values,
+                }
+                for i, prefix_values in enumerate([["BIN:NONE", "very high", "BIN:NONE"], None])
+            ]
+            for output in outputs:  # the locks the prediction loop takes
+                open(os.path.join(tmp, f"{output['_sample_identifier']}.lock"), "w").close()
+            flush_to_disk_if_full(outputs, tmp, 16, tmp, force=True)
+            parquet = [f for f in os.listdir(tmp) if f.endswith(".parquet")]
+            result = pd.read_parquet(os.path.join(tmp, parquet[0])).sort_values("subject_id")
+            self.assertEqual(list(result["prefix_values"].iloc[0]), ["BIN:NONE", "very high", "BIN:NONE"])
+            self.assertIsNone(result["prefix_values"].iloc[1])
 
 
 class TestEncodePromptValues(unittest.TestCase):
