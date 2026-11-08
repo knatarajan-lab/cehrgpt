@@ -75,6 +75,77 @@ scripts/run_linear_prob.sh \
 - `--observation_window`: days of history before the index date to include;
   omit it to use each patient's full history up to the index date
 
+### Global, Local and Concatenated Features
+
+The feature extraction saves, for every sample, the **global** features (the state of the linear probe token, which
+sees the whole history) followed by the **local** features (the hidden state of the last token), so a saved vector is
+twice the hidden size: `[global | local]`. This is the default (`--disable_combine_global_local` turns it off, and then
+only the global features are saved). The extraction records the layout in `feature_info.json` next to the features.
+
+`train_with_cehrgpt_features` trains one logistic regression for each of three feature sets, from the same
+extraction:
+
+| Feature set | Features used | Results in |
+|---|---|---|
+| `concatenated` | the saved vectors, global then local | `<cohort>/<model_name>/logistic/` |
+| `global` | the first half of the vectors | `<cohort>/<model_name>/logistic_global/` |
+| `local` | the second half of the vectors | `<cohort>/<model_name>/logistic_local/` |
+
+All three are trained by default. Choose some of them with `--feature_sets`, which `run_linear_prob.sh` passes on:
+
+```bash
+scripts/run_linear_prob.sh ... --feature_sets=global,local
+```
+
+- The global and local features can only be told apart in vectors extracted combined; asking for `local` or
+  `concatenated` with `--disable_combine_global_local` is an error. Features extracted before `feature_info.json`
+  existed are trained as one model (`logistic/`), unless `--hidden_size` tells where to cut them.
+- A model trained without the MOTOR head has no linear probe state, so its global and local features are the same
+  hidden state: the local set is then left out of `all`.
+- `logistic/` keeps the path of a single model, so earlier results and tools that read it are unchanged. With
+  `--report_to wandb` each feature set is its own run, `<cohort>/<model_name>` for `concatenated` and
+  `<cohort>/<model_name>/<set>` for the others, in the same group.
+
+### Training on Features That Are Already Extracted
+
+The extraction (the pass through the model) is the expensive step. To train the logistic regressions again on the
+features of an earlier run, for example for another `--feature_sets` or after a failed training, skip it:
+
+```bash
+scripts/run_linear_prob.sh --skip_feature_extraction \
+    --output_dir /path/to/results --model_name my_model --feature_sets=all
+```
+
+Only `--output_dir` is needed (and `--model_name` if it is not the default): no model, dataset or batch size. The cohorts
+are the folders of `--output_dir` that have `<cohort>/<model_name>/features_with_label/{train,test}_features`; the others
+are left out with a message. Cohorts whose results exist are skipped as usual, and the trained models are evaluated with
+`meds-evaluation`. Without the script, `python -m cehrgpt.tools.linear_prob.train_with_cehrgpt_features
+--features_data_dir <cohort>/<model_name> --output_dir <cohort>/<model_name>` does the training for one cohort.
+
+### Reproducible Results
+
+Before the logistic regressions are trained, the training and the test samples are ordered by `subject_id` and
+`prediction_time` and then shuffled with a seed (`--seed`, default 42), so the order of the samples does not depend on
+the feature files, whose names are random. Training twice on the same features gives the same models and predictions.
+
+The results still differ if the features themselves differ. Each run of the extraction writes new files into
+`features_with_label/`, and the old ones are not removed, so extracting again into the same
+`<cohort>/<model_name>/` folder leaves every sample in the data twice. Use a new output folder, or remove
+`features_with_label/`, `feature_processor*.pickle` and `logistic*/` before extracting again.
+
+### Evaluating Any Predictions Folder
+
+`run_linear_prob.sh` runs `meds-evaluation` on each feature set with `scripts/run_meds_evaluation.sh`, which works on
+any folder of predictions (a folder with `*.parquet` files, or a folder that has a `test_predictions/` in it):
+
+```bash
+scripts/run_meds_evaluation.sh /path/to/results/readmission/my_model/logistic_global
+scripts/run_meds_evaluation.sh --recursive /path/to/results   # every predictions folder below
+```
+
+The results go next to the predictions (the parent of a `test_predictions` folder, otherwise `<folder>_evaluation`),
+or to `--output_dir` for a single folder. If an evaluation fails the others still run and the exit status is 1.
+
 ### Building an Example Cohort
 
 This repo has no prebuilt example cohort, but one can be made up from the same

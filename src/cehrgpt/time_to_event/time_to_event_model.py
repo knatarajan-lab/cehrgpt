@@ -1,12 +1,11 @@
-import math
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
 from cehrbert_data.decorators.patient_event_decorator_base import time_month_token
-from transformers import GenerationConfig
+from transformers import GenerationConfig, StoppingCriteria, StoppingCriteriaList
 
 from cehrgpt.gpt_utils import (
     extract_time_interval_in_days,
@@ -31,12 +30,90 @@ class TimeToEvent:
     # The raw generated continuation for every simulated trial (not just the ones that
     # satisfied the stopping criteria), kept for manual investigation of model behavior.
     generated_trajectories: List[List[str]] = field(default_factory=list)
+    # The decoded value of every token of generated_trajectories, when the model includes values
+    generated_value_trajectories: List[List[str]] = field(default_factory=list)
+
+
+class TimeToEventStoppingCriteria(StoppingCriteria):
+    """Stop each sampled trajectory once its task outcome is determined."""
+
+    def __init__(
+        self,
+        tokenizer: CehrGptTokenizer,
+        outcome_events: List[str],
+        future_visit_start: int,
+        future_visit_end: int,
+        prediction_window_start: int,
+        prediction_window_end: int,
+    ):
+        vocab = tokenizer.get_vocab()
+        vocab_size = max(vocab.values(), default=-1) + 1
+        self._time_days = torch.zeros(vocab_size, dtype=torch.float32)
+        self._is_time = torch.zeros(vocab_size, dtype=torch.bool)
+        self._is_visit_start = torch.zeros(vocab_size, dtype=torch.bool)
+        self._is_outcome = torch.zeros(vocab_size, dtype=torch.bool)
+        for token, token_id in vocab.items():
+            if is_att_token(token):
+                self._is_time[token_id] = True
+                self._time_days[token_id] = extract_time_interval_in_days(token)
+            if is_visit_start(token):
+                self._is_visit_start[token_id] = True
+        outcome_ids = [vocab[event] for event in outcome_events if event in vocab]
+        if outcome_ids:
+            self._is_outcome[outcome_ids] = True
+        self.future_visit_start = future_visit_start
+        self.future_visit_end = future_visit_end
+        self.prediction_window_start = prediction_window_start
+        self.prediction_window_end = prediction_window_end
+        self._device = None
+        self._time_delta = None
+        self._visit_count = None
+        self._finished = None
+
+    def _move_to(self, device: torch.device, batch_size: int) -> None:
+        if self._device != device:
+            self._time_days = self._time_days.to(device)
+            self._is_time = self._is_time.to(device)
+            self._is_visit_start = self._is_visit_start.to(device)
+            self._is_outcome = self._is_outcome.to(device)
+            self._device = device
+        self._time_delta = torch.zeros(batch_size, dtype=torch.float32, device=device)
+        self._visit_count = torch.zeros(batch_size, dtype=torch.long, device=device)
+        self._finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+    def __call__(self, input_ids, scores, **kwargs) -> torch.BoolTensor:
+        batch_size = input_ids.shape[0]
+        if self._finished is None or self._finished.shape[0] != batch_size:
+            self._move_to(input_ids.device, batch_size)
+
+        next_tokens = input_ids[:, -1]
+        self._visit_count.add_(self._is_visit_start[next_tokens].long())
+        crossed_visit_limit = (
+            self._visit_count > self.future_visit_end
+            if self.future_visit_end != -1
+            else torch.zeros_like(self._finished)
+        )
+        crossed_time_limit = (
+            self._time_delta > self.prediction_window_end
+            if self.prediction_window_end != -1
+            else torch.zeros_like(self._finished)
+        )
+        eligible_outcome = (
+            (self._visit_count >= self.future_visit_start)
+            & (self._time_delta >= self.prediction_window_start)
+            & ~self._is_time[next_tokens]
+            & self._is_outcome[next_tokens]
+        )
+        self._finished |= crossed_visit_limit | crossed_time_limit | eligible_outcome
+        self._time_delta.add_(self._time_days[next_tokens])
+        return self._finished
 
 
 def create_time_to_event(
     time_event_tuples: List[Tuple[str, int]],
     num_of_simulations: int,
     generated_trajectories: Optional[List[List[str]]] = None,
+    generated_value_trajectories: Optional[List[List[str]]] = None,
 ) -> TimeToEvent:
     outcome_events, time_intervals = zip(*time_event_tuples)
     time_buckets = [time_month_token(_) for _ in time_intervals]
@@ -61,6 +138,7 @@ def create_time_to_event(
         num_of_simulations=num_of_simulations,
         time_interval_probability_table=sorted_probability_table,
         generated_trajectories=generated_trajectories or [],
+        generated_value_trajectories=generated_value_trajectories or [],
     )
 
 
@@ -73,6 +151,9 @@ class TimeToEventModel:
         generation_config: GenerationConfig,
         device: torch.device = torch.device("cpu"),
         batch_size: int = 32,
+        store_generated_trajectories: bool = False,
+        enable_early_stopping: bool = True,
+        max_input_length: Optional[int] = None,
     ):
         self.tokenizer = tokenizer
         self.model = model.eval()
@@ -83,44 +164,194 @@ class TimeToEventModel:
         self.outcome_events = [str(event) for event in outcome_events]
         self.device = device
         self.batch_size = batch_size
+        self.max_input_length = max_input_length
+        self.store_generated_trajectories = store_generated_trajectories
+        self.enable_early_stopping = enable_early_stopping
         self.max_sequence = model.config.n_positions
 
     def is_outcome_event(self, token: str) -> bool:
         return token in self.outcome_events
 
+    @property
+    def include_values(self) -> bool:
+        """Whether the model reads and generates a value bin for every lab token."""
+        return bool(getattr(self.model.config, "include_values", False))
+
+    def prepare_prompt(self, partial_history: Union[np.ndarray, List[str]]) -> List[str]:
+        """Fit a history to the encoded context while preserving demographics."""
+        return self.prepare_prompt_with_indices(partial_history)[0]
+
+    def prepare_prompt_with_indices(
+        self, partial_history: Union[np.ndarray, List[str]]
+    ) -> Tuple[List[str], List[int]]:
+        """
+        Fit a history to the encoded context while preserving demographics.
+
+        Also returns, for every token of the prompt, its index in partial_history, so per-token
+        columns such as the values can follow the tokens that are kept.
+        """
+        history = list(partial_history)
+        indices = list(range(len(history)))
+        max_prompt_tokens = (
+            self.generation_config.max_length
+            - self.generation_config.max_new_tokens
+        )
+        if self.max_input_length is not None:
+            if self.max_input_length <= 0:
+                raise ValueError("max_input_length must be greater than zero")
+            max_prompt_tokens = min(max_prompt_tokens, self.max_input_length)
+        if len(self.tokenizer.encode(history)) <= max_prompt_tokens:
+            return history, indices
+
+        demographics = history[:4]
+        if len(self.tokenizer.encode(demographics)) > max_prompt_tokens:
+            raise ValueError("The demographic prompt does not fit in the model context")
+
+        # Drop old visits, not the year/age/gender/race header. Verify encoded
+        # length so tokenizer-added special tokens count toward the context.
+        prompt = history
+        while len(self.tokenizer.encode(prompt)) > max_prompt_tokens and len(prompt) > 4:
+            next_visit = next(
+                (
+                    index
+                    for index in range(5, len(prompt))
+                    if is_visit_start(prompt[index])
+                ),
+                None,
+            )
+            if next_visit is None:
+                remove_index = 5 if len(prompt) > 5 and is_visit_start(prompt[4]) else 4
+                prompt.pop(remove_index)
+                indices.pop(remove_index)
+            else:
+                prompt = demographics + prompt[next_visit:]
+                indices = indices[:4] + indices[next_visit:]
+        return prompt, indices
+
+    def _decode_values(
+        self,
+        generated_ids: np.ndarray,
+        tokens: List[str],
+        generated_values: Optional[np.ndarray],
+    ) -> List[str]:
+        """The decoded value of every token of `tokens`, the decoded generated_ids."""
+        if generated_values is None:
+            return []
+        # decode drops the special tokens such as the padding after a trajectory stopped, so
+        # the values of those positions are dropped too to keep one value per token
+        all_tokens = self.tokenizer.decode(generated_ids, skip_special_tokens=False)
+        # Look the bins up one by one: decode_value joins them with spaces and splits them
+        # again, which breaks on a categorical value with a space in it
+        value_bins = self.__dict__.get("_value_bins")
+        if value_bins is None:
+            value_bins = {
+                value_id: value_bin
+                for value_bin, value_id in self.tokenizer.get_value_vocab().items()
+            }
+            self._value_bins = value_bins
+        all_values = [value_bins.get(int(value_id)) for value_id in generated_values]
+        skipped = set(all_tokens) - set(tokens)
+        return [
+            value
+            for token, value in zip(all_tokens, all_values)
+            if token not in skipped
+        ]
+
     def simulate(
         self,
         partial_history: Union[np.ndarray, List[str]],
-    ) -> List[List[str]]:
+        future_visit_start: int = 0,
+        future_visit_end: int = -1,
+        prediction_window_start: int = 0,
+        prediction_window_end: int = 365,
+        value_indicators: Optional[Sequence[bool]] = None,
+        values: Optional[Sequence[int]] = None,
+        return_values: bool = False,
+    ) -> Union[List[List[str]], Tuple[List[List[str]], List[List[str]]]]:
+        """
+        Generate continuations of partial_history.
+
+        When the model includes values, value_indicators and values (the value token ids, as
+        in training) give the values of the lab tokens of partial_history, which the model
+        reads like in training; a prompt without them is read as if no lab had a value. With
+        return_values, the decoded values generated with every continuation are also returned.
+        """
+        if self.include_values and (value_indicators is None) != (values is None):
+            raise ValueError("value_indicators and values must be given together")
+        partial_history, prompt_indices = self.prepare_prompt_with_indices(
+            partial_history
+        )
         token_ids = self.tokenizer.encode(partial_history)
         prompt = torch.tensor(token_ids).unsqueeze(0).to(self.device)
 
+        value_kwargs = {}
+        if self.include_values and values is not None:
+            if len(value_indicators) != len(values):
+                raise ValueError("value_indicators and values must have the same length")
+            if len(token_ids) != len(partial_history):
+                raise ValueError(
+                    "The values follow the tokens, so the tokenizer must not add tokens to the prompt"
+                )
+            value_kwargs = {
+                "value_indicators": torch.tensor(
+                    [bool(value_indicators[i]) for i in prompt_indices],
+                    dtype=torch.bool,
+                ).unsqueeze(0).to(self.device),
+                "values": torch.tensor(
+                    [int(values[i]) for i in prompt_indices], dtype=torch.long
+                ).unsqueeze(0).to(self.device),
+            }
+
         simulated_sequences = []
-        num_iters = max(
-            math.ceil(self.generation_config.num_return_sequences / self.batch_size), 1
-        )
+        simulated_values = []
         old_num_return_sequences = self.generation_config.num_return_sequences
-        self.generation_config.num_return_sequences = min(
-            self.batch_size, old_num_return_sequences
-        )
-        with torch.no_grad():
-            for _ in range(num_iters):
+        with torch.inference_mode():
+            while len(simulated_sequences) < old_num_return_sequences:
+                self.generation_config.num_return_sequences = min(
+                    self.batch_size,
+                    old_num_return_sequences - len(simulated_sequences),
+                )
+                generation_kwargs = dict(value_kwargs)
+                if self.enable_early_stopping:
+                    generation_kwargs["stopping_criteria"] = StoppingCriteriaList(
+                        [
+                            TimeToEventStoppingCriteria(
+                                tokenizer=self.tokenizer,
+                                outcome_events=self.outcome_events,
+                                future_visit_start=future_visit_start,
+                                future_visit_end=future_visit_end,
+                                prediction_window_start=prediction_window_start,
+                                prediction_window_end=prediction_window_end,
+                            )
+                        ]
+                    )
                 results = self.model.generate(
                     inputs=prompt,
                     generation_config=self.generation_config,
                     cehrgpt_tokenizer=self.tokenizer,
+                    **generation_kwargs,
                 )
-                # Clear the cache
-                torch.cuda.empty_cache()
-                # Add the sequences to the result array
-                simulated_sequences.extend(
-                    [
-                        self.tokenizer.decode(seq.cpu().numpy())
-                        for seq in results.sequences
-                    ]
-                )
+                sequence_vals = getattr(results, "sequence_vals", None)
+                for i, seq in enumerate(results.sequences):
+                    generated_ids = seq[len(token_ids) :].cpu().numpy()
+                    tokens = self.tokenizer.decode(generated_ids)
+                    simulated_sequences.append(tokens)
+                    if return_values:
+                        simulated_values.append(
+                            self._decode_values(
+                                generated_ids,
+                                tokens,
+                                (
+                                    sequence_vals[i, len(token_ids) :].cpu().numpy()
+                                    if sequence_vals is not None
+                                    else None
+                                ),
+                            )
+                        )
 
         self.generation_config.num_return_sequences = old_num_return_sequences
+        if return_values:
+            return simulated_sequences, simulated_values
         return simulated_sequences
 
     def predict_time_to_events(
@@ -132,11 +363,14 @@ class TimeToEventModel:
         prediction_window_end: int = 365,
         debug: bool = False,
         max_n_trial: int = 2,
+        value_indicators: Optional[Sequence[bool]] = None,
+        values: Optional[Sequence[int]] = None,
     ) -> Optional[TimeToEvent]:
-        patient_history_length = len(partial_history)
         time_event_tuples = []
         seqs_failed_to_convert = []
         generated_trajectories = []
+        generated_value_trajectories = []
+        store_values = self.store_generated_trajectories and self.include_values
         n_trial = 0
         num_return_sequences = self.generation_config.num_return_sequences
         max_new_tokens = self.generation_config.max_new_tokens
@@ -148,14 +382,29 @@ class TimeToEventModel:
                 time_event_tuples
             )
             # self.generation_config.max_new_tokens = max_new_tokens * (n_trial + 1)
-            simulated_seqs = self.simulate(partial_history)
+            simulated = self.simulate(
+                partial_history,
+                future_visit_start,
+                future_visit_end,
+                prediction_window_start,
+                prediction_window_end,
+                value_indicators=value_indicators,
+                values=values,
+                return_values=store_values,
+            )
+            if store_values:
+                simulated_seqs, simulated_values = simulated
+                generated_value_trajectories.extend(simulated_values)
+            else:
+                simulated_seqs = simulated
             n_trial += 1
             for seq in simulated_seqs:
                 visit_counter = 0
                 time_delta = 0
                 success = False
-                generated_trajectory = seq[patient_history_length:]
-                generated_trajectories.append(generated_trajectory)
+                generated_trajectory = seq
+                if self.store_generated_trajectories:
+                    generated_trajectories.append(generated_trajectory)
                 for next_token in generated_trajectory:
                     visit_counter += int(is_visit_start(next_token))
                     if (
@@ -178,7 +427,7 @@ class TimeToEventModel:
                 if not success:
                     # This indicates the generated sequence did not satisfy the criteria
                     if future_visit_end != -1 or prediction_window_end != -1:
-                        seqs_failed_to_convert.append(seq[patient_history_length:])
+                        seqs_failed_to_convert.append(generated_trajectory)
                     else:
                         time_event_tuples.append(("0", time_delta))
 
@@ -191,7 +440,10 @@ class TimeToEventModel:
         # Count the occurrences of each time tokens for each concept
         return (
             create_time_to_event(
-                time_event_tuples, len(time_event_tuples), generated_trajectories
+                time_event_tuples,
+                len(time_event_tuples),
+                generated_trajectories,
+                generated_value_trajectories,
             )
             if len(time_event_tuples) > 0
             else None
