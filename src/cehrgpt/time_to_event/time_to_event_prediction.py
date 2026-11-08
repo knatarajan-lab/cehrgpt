@@ -6,7 +6,7 @@ import signal
 import subprocess
 import sys
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, replace
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
@@ -52,16 +52,45 @@ class TaskConfig:
     max_new_tokens: int = 128
 
 
-def load_task_config_from_yaml(task_config_yaml_file_path: str) -> TaskConfig:
+def load_task_config_from_yaml(
+    task_config_yaml_file_path: str, overrides: Optional[List[str]] = None
+) -> TaskConfig:
     # Read YAML file
     try:
         with open(task_config_yaml_file_path, "r") as stream:
             task_definition = yaml.safe_load(stream)
-            return TaskConfig(**task_definition)
+            task_config = TaskConfig(**task_definition)
     except (yaml.YAMLError, OSError) as e:
         raise ValueError(
             f"Could not open the task_config yaml file from {task_config_yaml_file_path}"
         ) from e
+    return apply_task_config_overrides(task_config, overrides or [])
+
+
+def apply_task_config_overrides(
+    task_config: TaskConfig, overrides: List[str]
+) -> TaskConfig:
+    """Replace the fields of the task config given as field=value, the value parsed as YAML."""
+    field_names = {field.name for field in fields(TaskConfig)}
+    changes = {}
+    for override in overrides:
+        name, separator, value = override.partition("=")
+        name = name.strip()
+        if not separator or not name:
+            raise ValueError(
+                f"A task config override must look like field=value, got {override!r}"
+            )
+        if name not in field_names:
+            raise ValueError(
+                f"{name!r} is not a task config field, the fields are {sorted(field_names)}"
+            )
+        try:
+            changes[name] = yaml.safe_load(value)
+        except yaml.YAMLError as e:
+            raise ValueError(f"Could not parse the value of {override!r}") from e
+    if changes:
+        LOG.info("Overriding the task config with %s", changes)
+    return replace(task_config, **changes)
 
 
 def get_device():
@@ -183,7 +212,9 @@ def run_on_multiple_gpus(args, gpu_ids: List[str]) -> int:
     """
     cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer_folder)
     folder_name = get_cehrgpt_output_folder(args, cehrgpt_tokenizer)
-    task_name = load_task_config_from_yaml(args.task_config).task_name
+    task_name = load_task_config_from_yaml(
+        args.task_config, args.task_config_override
+    ).task_name
     prediction_output_folder_name = os.path.join(
         args.output_folder, folder_name, task_name
     )
@@ -337,7 +368,9 @@ def main(args):
 
     folder_name = get_cehrgpt_output_folder(args, cehrgpt_tokenizer)
 
-    task_config = load_task_config_from_yaml(args.task_config)
+    task_config = load_task_config_from_yaml(
+        args.task_config, args.task_config_override
+    )
     task_name = task_config.task_name
     outcome_events, tokens = split_outcome_events(task_config.outcome_events)
     if tokens and task_config.include_descendants:
@@ -716,6 +749,16 @@ def create_arg_parser():
     )
     base_arg_parser.add_argument(
         "--task_config", dest="task_config", action="store", required=True
+    )
+    base_arg_parser.add_argument(
+        "--task_config_override",
+        dest="task_config_override",
+        action="append",
+        default=[],
+        metavar="FIELD=VALUE",
+        help="Replace a field of --task_config, e.g. prediction_window_end=730 or "
+        "outcome_events=[CPT4/33510]. The value is parsed as YAML. Repeat it to replace "
+        "several fields.",
     )
     base_arg_parser.add_argument(
         "--concept_ancestor", dest="concept_ancestor", action="store", required=False
