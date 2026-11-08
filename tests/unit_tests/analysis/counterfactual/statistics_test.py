@@ -124,5 +124,21 @@ class CoxTest(unittest.TestCase):
         self.assertEqual((hr, lower, upper), (details["hr"], details["hr_lower_95"], details["hr_upper_95"]))
 
 
+    def test_no_events_in_one_arm_gives_no_estimate_and_an_unbounded_interval(self):
+        # 0 vs 4 events: the fit would otherwise stop at the search bound with a narrow interval
+        time = np.arange(1.0, 41.0)
+        treatment = np.repeat([1.0, 0.0], 20)
+        event = np.zeros(40, dtype=int)
+        event[[20, 25, 30, 35]] = 1
+        clusters = np.arange(40) // 2
+        details = fit_cox_details(time, event, treatment, clusters=clusters)
+        self.assertEqual(details["hr"], 0.0)
+        self.assertEqual((details["hr_lower_95"], details["hr_upper_95"]), (0.0, math.inf))
+        self.assertEqual((details["hr_lower_95_model"], details["hr_upper_95_model"]), (0.0, math.inf))
+        self.assertTrue(math.isnan(details["p_value"]))
+        self.assertEqual(details["n_clusters"], 20)
+        hr, lower, upper, _ = fit_cox(time, event, 1.0 - treatment)
+        self.assertEqual((hr, lower, upper), (math.inf, 0.0, math.inf))
+
 if __name__ == "__main__":
     unittest.main()

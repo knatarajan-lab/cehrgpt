@@ -516,10 +516,31 @@ def fit_cox_details(
     the observations of a cluster summed is returned as well, and it is what hr_lower/hr_upper/p_value use.
     Generated trajectories of one patient, and the two arms of the same patient, are correlated, so the model-based
     interval is too narrow for them.
+
+    When one arm has no events the likelihood keeps rising as β goes to -inf (or +inf), so there is no estimate:
+    the HR is 0 (or inf), the interval runs from 0 to inf and the p-value is NaN. Fitting it anyway would stop at
+    the search bound with a near-zero standard error, an interval that looks precise and is not.
     """
     time = np.asarray(time, dtype=float)
     event = np.asarray(event, dtype=int)
     x = np.asarray(treatment, dtype=float)
+    n_clusters = int(len(np.unique(np.asarray(clusters)))) if clusters is not None else None
+    events_treated = int(event[x == 1].sum())
+    events_untreated = int(event[x == 0].sum())
+    if events_treated == 0 or events_untreated == 0:
+        beta = -math.inf if events_treated == 0 else math.inf
+        return {
+            "beta": beta,
+            "hr": math.exp(beta),
+            "hr_lower_95": 0.0,
+            "hr_upper_95": math.inf,
+            "p_value": math.nan,
+            "se_model": math.inf,
+            "se_robust": math.inf if clusters is not None else None,
+            "n_clusters": n_clusters,
+            "hr_lower_95_model": 0.0,
+            "hr_upper_95_model": math.inf,
+        }
     result = minimize_scalar(
         _cox_partial_log_likelihood,
         bounds=(-10, 10),
@@ -530,10 +551,8 @@ def fit_cox_details(
     residual, information = _cox_score_residuals(time, event, x, beta)
     se_model = 1.0 / math.sqrt(information + EPSILON)
     se_robust = None
-    n_clusters = None
     if clusters is not None:
         _, inverse = np.unique(np.asarray(clusters), return_inverse=True)
-        n_clusters = int(inverse.max()) + 1
         cluster_scores = np.bincount(inverse, weights=residual, minlength=n_clusters)
         correction = n_clusters / (n_clusters - 1) if n_clusters > 1 else 1.0
         se_robust = math.sqrt(correction * float(np.sum(cluster_scores ** 2))) / (information + EPSILON)
@@ -813,19 +832,25 @@ def summarize_controls(labelled: pl.DataFrame) -> pl.DataFrame:
     contains the expected HR, and the mean and spread of log(HR / expected HR).
     For negative controls the mean is the systematic bias of the analysis and a
     coverage well below 95% means the intervals are too narrow.
+
+    A control with no events in one arm has no estimate (HR 0 or inf, interval 0
+    to inf): it counts as covering and is left out of the mean and spread, and
+    ``n_not_estimable`` counts them.
     """
     controls = labelled.filter(pl.col("outcome_type") != PRIMARY)
     if controls.is_empty():
         return controls
+    log_ratio = (pl.col("hr") / pl.col("expected_hr")).log()
     return (
         controls.with_columns(
-            (pl.col("hr") / pl.col("expected_hr")).log().alias("log_hr_ratio")
+            pl.when(log_ratio.is_finite()).then(log_ratio).alias("log_hr_ratio")
         )
         .group_by("outcome_type", maintain_order=True)
         .agg(
             pl.len().alias("n_controls"),
             pl.col("ci_covers_expected").drop_nulls().len().alias("n_with_expected_hr"),
             pl.col("ci_covers_expected").sum().alias("n_ci_covers_expected"),
+            (pl.col("hr").is_infinite() | (pl.col("hr") == 0)).sum().alias("n_not_estimable"),
             pl.col("log_hr_ratio").mean().alias("mean_log_hr_ratio"),
             pl.col("log_hr_ratio").std().alias("sd_log_hr_ratio"),
         )

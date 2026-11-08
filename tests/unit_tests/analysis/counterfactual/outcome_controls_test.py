@@ -100,6 +100,17 @@ class ControlSummaryTest(unittest.TestCase):
         logs = [math.log(1.0), math.log(1.4), math.log(0.9)]
         self.assertAlmostEqual(negative["mean_log_hr_ratio"], sum(logs) / 3)
 
+    def test_a_control_without_events_in_one_arm_covers_and_is_left_out_of_the_bias(self):
+        labelled = hr.label_outcomes(
+            summary([("2", 1.0, 0.8, 1.2), ("3", 0.0, 0.0, math.inf), ("4", 0.9, 0.7, 1.1)]),
+            self.types,
+            self.expected,
+        )
+        negative = hr.summarize_controls(labelled).row(0, named=True)
+        self.assertEqual(negative["n_ci_covers_expected"], 3)
+        self.assertEqual(negative["n_not_estimable"], 1)
+        self.assertAlmostEqual(negative["mean_log_hr_ratio"], (math.log(1.0) + math.log(0.9)) / 2)
+
     def test_positive_controls_without_an_expected_value_do_not_count_towards_coverage(self):
         controls = hr.summarize_controls(self.labelled)
         positive = controls.filter(pl.col("outcome_type") == hr.POSITIVE_CONTROL).row(0, named=True)
