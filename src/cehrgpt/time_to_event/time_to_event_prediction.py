@@ -501,6 +501,13 @@ def main(args):
     vocab = cehrgpt_tokenizer.get_vocab()
     # The year/age values that exist as tokens, for the rebuilt demographic header
     known_numeric_tokens = index_numeric_tokens(vocab)
+    # The value bin of every value token id, to save the values of the prefixes. decode_value
+    # joins the bins with spaces and splits them again, which breaks on a categorical value
+    # with a space in it.
+    value_bins = {
+        value_id: value_bin
+        for value_bin, value_id in cehrgpt_tokenizer.get_value_vocab().items()
+    }
     tte_outputs = []
     warned_missing_values = False
     for record in tqdm(test_dataset, total=len(test_dataset)):
@@ -589,6 +596,13 @@ def main(args):
                     asdict(concept_time_to_event) if concept_time_to_event else None
                 ),
                 "prefix": list(partial_history),
+                # The value bin of every token of prefix, BIN:NONE for the tokens without a
+                # value; None when the model or the dataset has no values
+                "prefix_values": (
+                    [value_bins.get(value_id) for value_id in prompt_values]
+                    if prompt_values is not None
+                    else None
+                ),
             }
         )
         flush_to_disk_if_full(
@@ -713,6 +727,7 @@ def flush_to_disk_if_full(
                 "time_to_event",
                 "trials",
                 "prefix",
+                "prefix_values",
             ],
         ).to_parquet(output_parquet_file)
         for output in tte_outputs:

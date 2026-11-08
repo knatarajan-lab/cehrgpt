@@ -240,9 +240,16 @@ class TimeToEventModel:
         # decode drops the special tokens such as the padding after a trajectory stopped, so
         # the values of those positions are dropped too to keep one value per token
         all_tokens = self.tokenizer.decode(generated_ids, skip_special_tokens=False)
-        all_values = self.tokenizer.decode_value(
-            generated_values, skip_special_tokens=False
-        )
+        # Look the bins up one by one: decode_value joins them with spaces and splits them
+        # again, which breaks on a categorical value with a space in it
+        value_bins = self.__dict__.get("_value_bins")
+        if value_bins is None:
+            value_bins = {
+                value_id: value_bin
+                for value_bin, value_id in self.tokenizer.get_value_vocab().items()
+            }
+            self._value_bins = value_bins
+        all_values = [value_bins.get(int(value_id)) for value_id in generated_values]
         skipped = set(all_tokens) - set(tokens)
         return [
             value
