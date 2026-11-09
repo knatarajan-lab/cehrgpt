@@ -75,7 +75,7 @@ import argparse
 import os
 import random
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import polars as pl
 
@@ -131,6 +131,12 @@ def get_descendants_for_concepts(vocab_path: str, concept_ids: List[int]) -> Set
     return result
 
 
+def build_ingredient_descendants(vocab_path: str, ingredient_ids: List[int]) -> Dict[str, Set[str]]:
+    """{ingredient: its descendants, itself included} for each of *ingredient_ids*."""
+    print(f"  Building ingredient→descendants map for {len(ingredient_ids)} ingredients …")
+    return {str(ing): get_descendants_for_concepts(vocab_path, [ing]) for ing in ingredient_ids}
+
+
 def load_vocab(tokenizer_path: str) -> Dict[str, int]:
     return CehrGptTokenizer.from_pretrained(tokenizer_path).get_vocab()
 
@@ -140,27 +146,40 @@ def resolve_comparator_token_ids(
     comparator_concept_ids: List[int],
     drop_unknown: bool = False,
     vocab: Optional[Dict[str, int]] = None,
-) -> Dict[str, int]:
+    ingredient_descendants: Optional[Dict[str, Set[str]]] = None,
+) -> Dict[str, Dict[str, int]]:
     """
-    Map each comparator ingredient to its token id in the CEHR-GPT vocabulary.
+    Map each comparator ingredient to the tokens that can stand for it in the context:
+    {ingredient: {concept: token id}}.
 
-    The comparator ingredient replaces the source drug token in the context, so
-    the model can only be conditioned on it if the tokenizer knows it.  A
-    missing ingredient would map to ``[OOV]``, which silently runs the
-    "comparator" arm on an unknown drug, so it is an error.  With *drop_unknown* the
-    ingredients the tokenizer does not know are left out instead (and reported), as long as
-    one is left.
+    The comparator replaces the source drug token in the context, so the model can only be
+    conditioned on it if the tokenizer knows it.  An ingredient the tokenizer knows is its own
+    token.  An ingredient the tokenizer only knows as products (the drug with a dose and form,
+    the descendants in *ingredient_descendants*) stands for those products, and the swap puts in
+    one of them.  An ingredient without either would map to ``[OOV]``, which silently runs the
+    "comparator" arm on an unknown drug, so it is an error.  With *drop_unknown* those
+    ingredients are left out instead (and reported), as long as one is left.
     """
     vocab = vocab if vocab is not None else load_vocab(tokenizer_path)
-    missing = [str(c) for c in comparator_concept_ids if str(c) not in vocab]
+    ingredient_descendants = ingredient_descendants or {}
+    tokens: Dict[str, Dict[str, int]] = {}
+    for concept_id in comparator_concept_ids:
+        ingredient = str(concept_id)
+        if ingredient in vocab:
+            tokens[ingredient] = {ingredient: int(vocab[ingredient])}
+        else:
+            tokens[ingredient] = {
+                d: int(vocab[d]) for d in sorted(ingredient_descendants.get(ingredient, ())) if d in vocab
+            }
+    missing = [c for c, products in tokens.items() if not products]
     if missing and not drop_unknown:
         raise ValueError(
             f"{len(missing)} comparator ingredient concept_id(s) are not in the vocabulary of "
-            f"the tokenizer at {tokenizer_path}: {', '.join(missing)}. Remove them from "
-            f"--comparator_concept_ids, use a tokenizer that was trained on them, or leave them out "
-            f"with --drop_unknown_comparators."
+            f"the tokenizer at {tokenizer_path}, neither as the ingredient nor as a product: "
+            f"{', '.join(missing)}. Remove them from --comparator_concept_ids, use a tokenizer that "
+            f"was trained on them, or leave them out with --drop_unknown_comparators."
         )
-    known = {str(c): int(vocab[str(c)]) for c in comparator_concept_ids if str(c) in vocab}
+    known = {c: products for c, products in tokens.items() if products}
     if not known:
         raise ValueError(
             f"none of the comparator ingredients is in the vocabulary of the tokenizer at {tokenizer_path}"
@@ -170,7 +189,52 @@ def resolve_comparator_token_ids(
             f"  Warning: {len(missing)} comparator ingredient(s) are not in the vocabulary of the "
             f"tokenizer and are left out: {', '.join(missing)}"
         )
+    for ingredient, products in known.items():
+        if ingredient not in products:
+            print(f"  Comparator ingredient {ingredient} is known to the tokenizer only as "
+                  f"{len(products)} product(s); the swap puts in one of them")
     return known
+
+
+def compute_product_sampling_weights(
+    drug_info: pl.DataFrame,
+    comparator_patient_ids: Set[int],
+    comparator_tokens: Dict[str, Dict[str, int]],
+) -> Dict[str, Tuple[List[str], List[float]]]:
+    """
+    For each comparator ingredient, the concepts that can stand for it in the context and their
+    sampling weights: {ingredient: (concepts, weights)}.
+
+    An ingredient the tokenizer knows is its own concept, with weight 1.  For an ingredient known
+    only as products, each product is weighted by how many of the real comparator patients started
+    it, so the swapped drugs keep the doses and forms of the real prescriptions.  When none of the
+    real patients started one of the known products, the products are weighted equally.
+    """
+    started = (
+        drug_info
+        .filter(pl.col("person_id").is_in(list(comparator_patient_ids)))
+        ["drug_concept_id"]
+        .cast(pl.String)
+        .to_list()
+    )
+    choices: Dict[str, Tuple[List[str], List[float]]] = {}
+    for ingredient, products in comparator_tokens.items():
+        concepts = sorted(products)
+        if concepts == [ingredient]:
+            choices[ingredient] = (concepts, [1.0])
+            continue
+        counts = [sum(1 for s in started if s == c) for c in concepts]
+        if sum(counts) == 0:
+            print(f"  Warning: no comparator patient started a known product of {ingredient} — "
+                  f"using uniform weights over its {len(concepts)} products")
+            counts = [1] * len(concepts)
+        kept = [(c, n) for c, n in zip(concepts, counts) if n > 0]
+        total = sum(n for _, n in kept)
+        choices[ingredient] = ([c for c, _ in kept], [n / total for _, n in kept])
+        print(f"  Product sampling weights of ingredient {ingredient}:")
+        for c, n in sorted(kept, key=lambda x: -x[1]):
+            print(f"    concept {c}: {n / total:.3%}")
+    return choices
 
 
 def compute_ingredient_sampling_weights(
@@ -178,6 +242,7 @@ def compute_ingredient_sampling_weights(
     comparator_patient_ids: Set[int],
     comparator_ingredient_ids: List[int],
     vocab_path: str,
+    ingredient_descendants: Optional[Dict[str, Set[str]]] = None,
 ) -> Dict[str, float]:
     """
     Compute the empirical frequency of each comparator ingredient among
@@ -202,12 +267,8 @@ def compute_ingredient_sampling_weights(
         n = len(comparator_ingredient_ids)
         return {str(c): 1.0 / n for c in comparator_ingredient_ids}
 
-    # Build per-ingredient descendants map
-    print(f"  Building ingredient→descendants map for {len(comparator_ingredient_ids)} ingredients …")
-    ingredient_descendants: Dict[str, Set[str]] = {
-        str(ing): get_descendants_for_concepts(vocab_path, [ing])
-        for ing in comparator_ingredient_ids
-    }
+    if ingredient_descendants is None:
+        ingredient_descendants = build_ingredient_descendants(vocab_path, comparator_ingredient_ids)
 
     # Count patients per ingredient
     counts: Dict[str, int] = {str(c): 0 for c in comparator_ingredient_ids}
@@ -361,7 +422,10 @@ def create_comparator_context(
         OMOP vocabulary root (must contain concept_ancestor/ parquets).
     tokenizer_path
         CEHR-GPT tokenizer.  Every comparator ingredient must be in its
-        vocabulary, otherwise a ``ValueError`` is raised before any data is read.
+        vocabulary, as the ingredient or as one of its products, otherwise a
+        ``ValueError`` is raised before any data is read.  An ingredient known only
+        as products is swapped in as one of them, sampled by how often the real
+        comparator patients started each.
     source_concept_ids
         OMOP ingredient concept_ids for the SOURCE drug class.  All clinical-
         drug descendants are expanded via concept_ancestor.
@@ -409,8 +473,9 @@ def create_comparator_context(
                 f"preference_score_trim must be in (0, 0.5), got {preference_score_trim}"
             )
     vocab = load_vocab(tokenizer_path)
+    ingredient_descendants = build_ingredient_descendants(vocab_path, comparator_concept_ids)
     comparator_token_ids = resolve_comparator_token_ids(
-        tokenizer_path, comparator_concept_ids, drop_unknown_comparators, vocab
+        tokenizer_path, comparator_concept_ids, drop_unknown_comparators, vocab, ingredient_descendants
     )
 
     random.seed(seed)
@@ -462,7 +527,9 @@ def create_comparator_context(
         comparator_patient_ids=comparator_patients,
         comparator_ingredient_ids=comparator_concept_ids,
         vocab_path=vocab_path,
+        ingredient_descendants=ingredient_descendants,
     )
+    product_choices = compute_product_sampling_weights(drug_info, comparator_patients, comparator_token_ids)
     unknown_weight = sum(w for c, w in weights.items() if c not in comparator_token_ids)
     if unknown_weight:
         known_total = sum(w for c, w in weights.items() if c in comparator_token_ids)
@@ -514,8 +581,15 @@ def create_comparator_context(
     n_failed = 0
 
     for row in df_source.iter_rows(named=True):
-        # Sample comparator ingredient proportional to empirical frequency
-        comparator_str = random.choices(weight_concepts, weights=weight_values, k=1)[0]
+        # Sample comparator ingredient proportional to empirical frequency, then the token that
+        # stands for it: the ingredient itself, or one of its products by their frequency (only
+        # drawn when there is a choice, so a run with ingredient tokens samples as before)
+        ingredient_str = random.choices(weight_concepts, weights=weight_values, k=1)[0]
+        products, product_weights = product_choices[ingredient_str]
+        comparator_str = (
+            products[0] if len(products) == 1
+            else random.choices(products, weights=product_weights, k=1)[0]
+        )
         result = swap_drug_in_concept_ids(
             list(row["concept_ids"]), source_concepts, comparator_str
         )
@@ -530,7 +604,7 @@ def create_comparator_context(
         # the model is conditioned on the comparator drug, not the source drug.
         if "input_ids" in row:
             input_ids = list(row["input_ids"])
-            input_ids[swap_pos] = comparator_token_ids[comparator_str]
+            input_ids[swap_pos] = comparator_token_ids[ingredient_str][comparator_str]
             row["input_ids"] = input_ids
         swapped_records.append(cut_after_position(row, swap_pos))
         n_swapped += 1
@@ -573,7 +647,8 @@ def _parse_args() -> argparse.Namespace:
         required=True,
         help=(
             "CEHR-GPT tokenizer directory.  Every comparator ingredient must be in its "
-            "vocabulary, otherwise the script stops before reading any data."
+            "vocabulary, as the ingredient or as one of its products (then one of those is "
+            "swapped in), otherwise the script stops before reading any data."
         ),
     )
     parser.add_argument(

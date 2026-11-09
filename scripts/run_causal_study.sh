@@ -151,6 +151,8 @@ OVERWRITE="${OVERWRITE:-false}"
 #   * monotherapy: exactly one drug of the study may start in the first MONOTHERAPY_WINDOW_DAYS
 #     days from the index date (empty: the older same-visit checks);
 #   * the indication has to be recorded in the POPULATION_WINDOW_DAYS days up to the index date;
+#   * optional: patients are MIN_AGE or older on the index date, and also have a record of one of
+#     INCLUSION_CONCEPT_IDS (within INCLUSION_WINDOW_DAYS days up to the index date, or anywhere);
 #   * patients with the outcome before the index date are left out of that outcome;
 #   * time at risk starts the day after the index date and needs MIN_DAYS_AT_RISK days; the
 #     intent-to-treat design (default) ends it with the observation of the patient, so a patient
@@ -367,6 +369,15 @@ else
     if [ -n "${POPULATION_CONCEPT_IDS}" ] && [ -n "${POPULATION_WINDOW_DAYS}" ]; then
         _EXTRACT_EXTRA_ARGS+=(--population_window_days "${POPULATION_WINDOW_DAYS}")
     fi
+    if [ -n "${MIN_AGE}" ]; then
+        _EXTRACT_EXTRA_ARGS+=(--min_age "${MIN_AGE}")
+    fi
+    if [ -n "${INCLUSION_CONCEPT_IDS}" ]; then
+        _EXTRACT_EXTRA_ARGS+=(--inclusion_concept_ids "${INCLUSION_CONCEPT_IDS}")
+        if [ -n "${INCLUSION_WINDOW_DAYS}" ]; then
+            _EXTRACT_EXTRA_ARGS+=(--inclusion_window_days "${INCLUSION_WINDOW_DAYS}")
+        fi
+    fi
     if [ "${CENSOR_AT_SWITCH}" = "true" ]; then
         _EXTRACT_EXTRA_ARGS+=(--censor_at_switch)
     fi
@@ -378,6 +389,12 @@ else
     echo "  Comparator : ${COMPARATOR_NAME} (for frequency estimation)"
     if [ -n "${POPULATION_CONCEPT_IDS}" ]; then
         echo "  Population filter: ${POPULATION_CONCEPT_IDS} (within ${POPULATION_WINDOW_DAYS:-any} days)"
+    fi
+    if [ -n "${MIN_AGE}" ]; then
+        echo "  Minimum age on the index date: ${MIN_AGE}"
+    fi
+    if [ -n "${INCLUSION_CONCEPT_IDS}" ]; then
+        echo "  Also required: one of ${INCLUSION_CONCEPT_IDS} (within ${INCLUSION_WINDOW_DAYS:-any} days)"
     fi
     if [ -n "${EXCLUSION_CONCEPT_IDS}" ]; then
         echo "  Exclusion (new-user filter): enabled ($(echo "${EXCLUSION_CONCEPT_IDS}" | tr ',' '\n' | wc -l | tr -d ' ') ingredients)"

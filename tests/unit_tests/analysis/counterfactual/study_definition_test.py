@@ -134,6 +134,23 @@ class CustomStudyTest(unittest.TestCase):
         self.assertEqual(lines["ERA_GAP_DAYS"], '"${ERA_GAP_DAYS:-45}"')
         self.assertEqual(lines["MONOTHERAPY_WINDOW_DAYS"], '"${MONOTHERAPY_WINDOW_DAYS-}"')
         self.assertEqual(lines["MIN_DAYS_AT_RISK"], '"${MIN_DAYS_AT_RISK:-2}"')
+        # the optional rules are off
+        self.assertEqual(lines["MIN_AGE"], '"${MIN_AGE-}"')
+        self.assertEqual(lines["INCLUSION_CONCEPT_IDS"], '"${INCLUSION_CONCEPT_IDS-}"')
+        self.assertEqual(lines["INCLUSION_WINDOW_DAYS"], '"${INCLUSION_WINDOW_DAYS-}"')
+
+    def test_the_age_and_the_second_condition_of_a_study(self):
+        folder = self.path / "with_rules"
+        folder.mkdir()
+        write_study(folder)
+        definition = json.loads((folder / "study.json").read_text())
+        definition["min_age"] = 50
+        definition["inclusion"] = {"name": "Risk factor", "concept_ids": [11, 12], "window_days": None}
+        (folder / "study.json").write_text(json.dumps(definition))
+        lines = dict(line.split("=", 1) for line in study.environment(study=str(folder)))
+        self.assertEqual(lines["MIN_AGE"], '"${MIN_AGE-50}"')
+        self.assertEqual(lines["INCLUSION_CONCEPT_IDS"], '"${INCLUSION_CONCEPT_IDS-11,12}"')
+        self.assertEqual(lines["INCLUSION_WINDOW_DAYS"], '"${INCLUSION_WINDOW_DAYS-}"')
 
     def test_another_pair_of_the_same_study(self):
         pair = study.resolve_pair("Class C", "Class B", study=str(self.path))

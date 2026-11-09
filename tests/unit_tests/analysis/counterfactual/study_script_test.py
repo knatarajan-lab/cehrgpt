@@ -121,6 +121,19 @@ class StudyScriptTest(unittest.TestCase):
         ):
             self.assertIn(expected, extraction)
         self.assertNotIn("--censor_at_switch", extraction)
+        # LEGEND has no age rule and no second condition
+        self.assertNotIn("--min_age", extraction)
+        self.assertNotIn("--inclusion_concept_ids", extraction)
+
+    def test_the_age_and_the_second_condition_reach_both_extractions(self):
+        result, commands = self.run_script(MIN_AGE="50", INCLUSION_CONCEPT_IDS="11,12", INCLUSION_WINDOW_DAYS="")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        extractions = self.calls(commands, "extract_drug_initiation_sequences.py")
+        self.assertEqual(len(extractions), 2)
+        for extraction in extractions:
+            self.assertIn("--min_age 50", extraction)
+            self.assertIn("--inclusion_concept_ids 11,12", extraction)
+            self.assertNotIn("--inclusion_window_days", extraction)
 
     def test_another_pair_of_classes_changes_the_ingredients(self):
         result, commands = self.run_script(

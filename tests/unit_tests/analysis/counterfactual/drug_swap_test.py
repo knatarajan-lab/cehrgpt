@@ -139,13 +139,84 @@ class DrugSwapTest(unittest.TestCase):
                 swap.create_comparator_context(
                     treated_context_path="does/not/exist",
                     drug_info_path="does/not/exist",
-                    vocab_path="does/not/exist",
+                    vocab_path=str(self.root / "vocab"),
                     tokenizer_path="tokenizer",
                     source_concept_ids=[SOURCE],
                     comparator_concept_ids=[COMPARATOR_A],
                     output_path=self.root / "swapped.parquet",
                 )
         self.assertFalse(os.path.exists(self.root / "swapped.parquet"))
+
+
+class ProductSwapTest(unittest.TestCase):
+    """A comparator ingredient the tokenizer knows only as products (201, 202 under 200)."""
+
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        root = Path(self.folder.name)
+        (root / "vocab" / "concept_ancestor").mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "ancestor_concept_id": [SOURCE, COMPARATOR_A, COMPARATOR_A, COMPARATOR_A],
+                "descendant_concept_id": [SOURCE, COMPARATOR_A, 201, 202],
+            }
+        ).write_parquet(root / "vocab" / "concept_ancestor" / "part.parquet")
+        n_source = 40
+        pl.DataFrame(
+            {
+                # the real comparator patients started product 201 three times as often as 202
+                "person_id": list(range(n_source)) + [100, 101, 102, 103],
+                "drug_concept_id": ["100"] * n_source + ["201", "201", "201", "202"],
+                "drug_epoch_time": [0.0] * (n_source + 4),
+                "era_end_epoch_time": [None] * (n_source + 4),
+                "arm": ["source"] * n_source + ["comparator"] * 4,
+            },
+            schema_overrides={"era_end_epoch_time": pl.Float64},
+        ).write_parquet(root / "drug_info.parquet")
+        pl.DataFrame(
+            {
+                "person_id": list(range(n_source)),
+                "concept_ids": [["9202", "100", "x"]] * n_source,
+                "input_ids": [[5, 10, 7]] * n_source,
+            }
+        ).write_parquet(root / "treated.parquet")
+        self.root = root
+        self.n_source = n_source
+
+    def run_swap(self, vocab):
+        with stub_from_pretrained(vocab):
+            swap.create_comparator_context(
+                treated_context_path=str(self.root / "treated.parquet"),
+                drug_info_path=str(self.root / "drug_info.parquet"),
+                vocab_path=str(self.root / "vocab"),
+                tokenizer_path="tokenizer",
+                source_concept_ids=[SOURCE],
+                comparator_concept_ids=[COMPARATOR_A],
+                output_path=self.root / "swapped.parquet",
+            )
+        return pl.read_parquet(self.root / "swapped.parquet")
+
+    def test_a_product_the_real_patients_started_is_swapped_in(self):
+        vocab = {"[OOV]": 1, "9202": 5, "100": 10, "201": 21, "202": 22, "x": 7}
+        swapped = self.run_swap(vocab)
+        self.assertEqual(len(swapped), self.n_source)
+        drugs = swapped["drug_concept_id"].to_list()
+        self.assertEqual(set(drugs), {"201", "202"})
+        self.assertGreater(drugs.count("201"), drugs.count("202"))
+        for row in swapped.iter_rows(named=True):
+            self.assertEqual(row["concept_ids"], ["9202", row["drug_concept_id"]])
+            self.assertEqual(row["input_ids"], [5, vocab[row["drug_concept_id"]]])
+
+    def test_the_ingredient_token_is_used_when_the_tokenizer_knows_it(self):
+        vocab = {"[OOV]": 1, "9202": 5, "100": 10, "200": 20, "201": 21, "202": 22, "x": 7}
+        swapped = self.run_swap(vocab)
+        self.assertEqual(set(swapped["drug_concept_id"].to_list()), {"200"})
+        self.assertEqual(set(tuple(r) for r in swapped["input_ids"].to_list()), {(5, 20)})
+
+    def test_an_ingredient_known_neither_way_still_raises(self):
+        with self.assertRaisesRegex(ValueError, "neither as the ingredient nor as a product"):
+            self.run_swap({"[OOV]": 1, "9202": 5, "100": 10, "x": 7})
 
 
 if __name__ == "__main__":

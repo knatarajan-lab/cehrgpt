@@ -8,6 +8,7 @@ sub-folders of this folder; any other folder works the same way (`STUDY=/path/to
 | Bundled study | Content |
 |---|---|
 | `legend_hypertension/` | The hypertension study of OHDSI LEGEND: 80 exposures (58 drugs, 15 drug classes, 7 major classes), 45 outcomes (13 of its 58 cannot be shown in token sequences), 76 negative controls. Its `README.md` says how it was read from the LEGEND repository. |
+| `oral_surveillance/` | Emulation of the ORAL Surveillance trial: tofacitinib versus TNF inhibitors in rheumatoid arthritis, MACE and cancer as primary outcomes, 20 negative controls. Written by hand; its `README.md` lists the trial rules that are left out. |
 
 ## Files of a study folder
 
@@ -47,6 +48,8 @@ checks that the folder can be read and shows its exposures.
 | `exposures.drug_level` | The level of the single drugs (ingredients). All drugs of this level are the *drugs of the study*: the target and the comparator use some, **every other one goes on the exclusion list** |
 | `default_pair` | Target and comparator used when none is given (optional) |
 | `indication` | A patient needs a record of one of `concept_ids` (descendants count) in the `window_days` days up to and including the index date. Optional: without it there is no indication filter |
+| `min_age` | Patients younger than this many years on the index date are left out. Optional |
+| `inclusion` | A second required condition next to the indication, as `{"name", "concept_ids", "window_days"}`: a record of one of `concept_ids` (descendants count) in the `window_days` days up to the index date, or anywhere before the index drug when `window_days` is `null`. Optional |
 | `washout_days` | Days of observed history needed before the index date |
 | `era_gap_days` | Records of a drug at most this many days apart belong to one continuous exposure |
 | `monotherapy_window_days` | Exactly one drug of the study may start from the index date up to this many days later; a combination product counts for each of its ingredients. `null`: the older same-visit checks |
