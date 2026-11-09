@@ -26,3 +26,6 @@ build/
 test_data
 test_dataset_prepared
 test*results
+
+# the bundled LEGEND study definition is data of the package
+!src/cehrgpt/analysis/counterfactual/legend_hypertension/*.json

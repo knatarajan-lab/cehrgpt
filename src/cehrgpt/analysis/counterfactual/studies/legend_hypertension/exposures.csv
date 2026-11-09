@@ -1,0 +1,81 @@
+type,name,cohort_id,concept_id,included_concept_ids
+Drug,Acebutolol,1319998,1319998,
+Drug,Aliskiren,1317967,1317967,
+Drug,Amiloride,991382,991382,
+Drug,Amlodipine,1332418,1332418,
+Drug,Atenolol,1314002,1314002,
+Drug,Azilsartan,40235485,40235485,
+Drug,Benazepril,1335471,1335471,
+Drug,Betaxolol,1322081,1322081,
+Drug,Bisoprolol,1338005,1338005,
+Drug,Bumetanide,932745,932745,
+Drug,Candesartan,1351557,1351557,
+Drug,Captopril,1340128,1340128,
+Drug,Carvedilol,1346823,1346823,
+Drug,Chlorthalidone,1395058,1395058,
+Drug,Clonidine,1398937,1398937,
+Drug,Diltiazem,1328165,1328165,
+Drug,Doxazosin,1363053,1363053,
+Drug,Enalapril,1341927,1341927,
+Drug,Eplerenone,1309799,1309799,
+Drug,Eprosartan,1346686,1346686,
+Drug,Felodipine,1353776,1353776,
+Drug,Fosinopril,1363749,1363749,
+Drug,Furosemide,956874,956874,
+Drug,Guanfacine,1344965,1344965,
+Drug,Hydralazine,1373928,1373928,
+Drug,Hydrochlorothiazide,974166,974166,
+Drug,Indapamide,978555,978555,
+Drug,irbesartan,1347384,1347384,
+Drug,Isradipine,1326012,1326012,
+Drug,Labetalol,1386957,1386957,
+Drug,Lisinopril,1308216,1308216,
+Drug,Losartan,1367500,1367500,
+Drug,Methyldopa,1305447,1305447,
+Drug,Metolazone,907013,907013,
+Drug,Metoprolol,1307046,1307046,
+Drug,Minoxidil,1309068,1309068,
+Drug,Moexipril,1310756,1310756,
+Drug,Nadolol,1313200,1313200,
+Drug,Nebivolol,1314577,1314577,
+Drug,Nicardipine,1318137,1318137,
+Drug,Nifedipine,1318853,1318853,
+Drug,Nisoldipine,1319880,1319880,
+Drug,Olmesartan,40226742,40226742,
+Drug,Penbutolol,1327978,1327978,
+Drug,Perindopril,1373225,1373225,
+Drug,Pindolol,1345858,1345858,
+Drug,Prazosin,1350489,1350489,
+Drug,Propranolol,1353766,1353766,
+Drug,Quinapril,1331235,1331235,
+Drug,Ramipril,1334456,1334456,
+Drug,Spironolactone,970250,970250,
+Drug,Telmisartan,1317640,1317640,
+Drug,Terazosin,1341238,1341238,
+Drug,Torsemide,942350,942350,
+Drug,Trandolapril,1342439,1342439,
+Drug,Triamterene,904542,904542,
+Drug,Valsartan,1308842,1308842,
+Drug,Verapamil,1307863,1307863,
+Drug class,ACE inhibitors,1,,1335471;1340128;1341927;1363749;1308216;1310756;1373225;1331235;1334456;1342439
+Drug class,Aldosterone antagonist diuretics,2,,1309799;970250
+Drug class,Alpha-1 blockers,3,,1363053;1350489;1341238
+Drug class,Angiotensin receptor blockers (ARBs),4,,40235485;1351557;1346686;1347384;1367500;40226742;1317640;1308842
+Drug class,Beta blockers - cardioselective,5,,1314002;1322081;1338005;1307046
+Drug class,Beta blockers - cardioselective and vasodilatory,6,,1314577
+Drug class,Beta blockers - combined alpha and beta receptor,7,,1346823;1386957
+Drug class,Beta blockers - intrinsic sympathomimetic activity,8,,1319998;1327978;1345858
+Drug class,Beta blockers - noncardioselective,9,,1313200;1353766
+Drug class,Dihydropyridine calcium channel blockers (dCCB),10,,1332418;1353776;1326012;1318137;1318853;1319880
+Drug class,Direct vasodilators,11,,1373928;1309068
+Drug class,Loop diuretics,12,,932745;956874;942350
+Drug class,Non-dihydropyridine calcium channel blockers (ndCCB),13,,1328165;1307863
+Drug class,Potassium sparing diurectics,14,,991382;904542
+Drug class,Thiazide or thiazide-like diuretics,15,,1395058;974166;978555;907013
+Drug major class,ACE inhibitors,1,,1335471;1340128;1341927;1363749;1308216;1310756;1373225;1331235;1334456;1342439
+Drug major class,Diuretics,16,,991382;932745;1309799;956874;970250;942350;904542
+Drug major class,Alpha-1 blockers,3,,1363053;1350489;1341238
+Drug major class,Angiotensin receptor blockers (ARBs),4,,40235485;1351557;1346686;1347384;1367500;40226742;1317640;1308842
+Drug major class,Beta blockers,17,,1319998;1314002;1322081;1338005;1346823;1386957;1307046;1313200;1314577;1327978;1345858;1353766
+Drug major class,Calcium channel blockers (CCB),18,,1332418;1328165;1353776;1326012;1318137;1318853;1319880;1307863
+Drug major class,Direct vasodilators,11,,1373928;1309068

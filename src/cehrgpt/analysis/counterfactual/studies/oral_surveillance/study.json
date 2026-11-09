@@ -1,0 +1,57 @@
+{
+ "name": "ORAL-Surveillance",
+ "description": "Emulation of ORAL Surveillance (NCT02092467): new users of tofacitinib versus new users of a TNF inhibitor among patients with rheumatoid arthritis",
+ "exposures": {
+  "levels": [
+   "Drug class",
+   "Drug"
+  ],
+  "default_level": "Drug class",
+  "drug_level": "Drug"
+ },
+ "default_pair": {
+  "target": "Tofacitinib",
+  "comparator": "TNF inhibitors (adalimumab or etanercept)"
+ },
+ "primary_outcomes": [
+  "Major adverse cardiovascular events",
+  "Malignancy excluding non-melanoma skin cancer"
+ ],
+ "indication": {
+  "name": "Rheumatoid arthritis",
+  "concept_ids": [
+   80809
+  ],
+  "window_days": 365
+ },
+ "min_age": 50,
+ "inclusion": {
+  "name": "At least one cardiovascular risk factor",
+  "concept_ids": [
+   437264,
+   4209423,
+   40766945,
+   316866,
+   432867,
+   4029305,
+   201820,
+   4185932,
+   314666,
+   4215140,
+   321042,
+   4336464,
+   4216130,
+   4182335,
+   4326027
+  ],
+  "window_days": null
+ },
+ "washout_days": 365,
+ "era_gap_days": 60,
+ "monotherapy_window_days": 7,
+ "time_at_risk": {
+  "risk_window_start_day": 1,
+  "min_days_at_risk": 1,
+  "remove_subjects_with_prior_outcome": true
+ }
+}

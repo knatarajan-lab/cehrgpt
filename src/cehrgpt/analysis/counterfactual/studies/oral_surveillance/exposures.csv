@@ -1,0 +1,17 @@
+type,name,cohort_id,concept_id,included_concept_ids
+Drug,Tofacitinib,1,42904205,
+Drug,Adalimumab,2,1119119,
+Drug,Etanercept,3,1151789,
+Drug,Infliximab,4,937368,
+Drug,Certolizumab pegol,5,912263,
+Drug,Golimumab,6,19041065,
+Drug,Baricitinib,7,1510627,
+Drug,Upadacitinib,8,1361580,
+Drug,Abatacept,9,1186087,
+Drug,Tocilizumab,10,40171288,
+Drug,Sarilumab,11,1594587,
+Drug,Rituximab,12,1314273,
+Drug,Anakinra,13,1114375,
+Drug class,Tofacitinib,14,,42904205
+Drug class,TNF inhibitors (adalimumab or etanercept),15,,1119119;1151789
+Drug class,TNF inhibitors (all),16,,1119119;1151789;937368;912263;19041065

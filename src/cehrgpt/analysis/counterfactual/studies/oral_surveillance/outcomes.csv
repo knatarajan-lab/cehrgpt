@@ -1,0 +1,31 @@
+name,kind,concept_ids,exact_concept_ids,exclude_concept_ids,exclude_exact_concept_ids,inpatient_or_er,note
+Major adverse cardiovascular events,primary,4329847,,314666,,true,MI row of LEGEND Acute myocardial infarction
+Major adverse cardiovascular events,primary,443454,372924;375557;376713;432923;439847;441874,,,true,stroke rows of LEGEND Stroke
+Malignancy excluding non-melanoma skin cancer,primary,443392,,4111921;4112752,,false,443392 Malignant neoplastic disease; excluded: basal and squamous cell carcinoma of skin (check the ids resolve to those names)
+Acute myocardial infarction,primary,4329847,,314666,,true,from LEGEND
+Stroke,primary,443454,372924;375557;376713;432923;439847;441874,,,true,from LEGEND
+All-cause mortality,primary,[DEATH],,,,false,
+Venous thromboembolic events,primary,254662;440417;444247,,195294;196715;199837;318137;433832;435026;435616;435887;438820;440477;442055;4062269;4187790;4235812,,false,from LEGEND
+Herpes zoster,primary,443943,,,,false,an expected effect of tofacitinib; LEGEND has the non-standard 440329 as a negative control
+Pneumonia,primary,255848,,,,true,stands in for serious infection
+Sepsis,primary,132797,,,,true,stands in for serious infection
+Senile hyperkeratosis,negative_control,141932,,,,,
+Impacted cerumen,negative_control,374375,,,,,
+Presbyopia,negative_control,373478,,,,,
+Ingrowing nail,negative_control,139099,,,,,
+Injury of knee,negative_control,444132,,,,,
+Sprain of ankle,negative_control,81151,,,,,
+Calcaneal spur,negative_control,73560,,,,,
+Strain of rotator cuff capsule,negative_control,72748,,,,,
+Non-toxic multinodular goiter,negative_control,136368,,,,,
+Anal and rectal polyp,negative_control,73241,,,,,
+Regular astigmatism,negative_control,380706,,,,,
+Epidermoid cyst,negative_control,4170770,,,,,
+Macular drusen,negative_control,4083487,,,,,
+Contusion of knee,negative_control,78619,,,,,
+Absence of breast,negative_control,4088290,,,,,
+Noise effects on inner ear,negative_control,377572,,,,,
+Ptotic breast,negative_control,81634,,,,,
+Burn of forearm,negative_control,133655,,,,,
+Abnormal pupil,negative_control,436409,,,,,
+Endometriosis,negative_control,433527,,,,,

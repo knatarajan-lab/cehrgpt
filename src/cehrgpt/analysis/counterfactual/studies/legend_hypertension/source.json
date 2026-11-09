@@ -1,0 +1,19 @@
+{
+ "repository": "https://github.com/OHDSI/Legend",
+ "commit": "4e7867fc3fc9ce902f2fb5274252484d7f38060b",
+ "commit_date": "2020-12-18T17:10:59+01:00",
+ "indication": "Hypertension",
+ "files": [
+  "inst/sql/sql_server/<outcome>.sql",
+  "inst/settings/OutcomesOfInterest.csv",
+  "inst/settings/NegativeControls.csv",
+  "inst/settings/ExposuresOfInterest.csv",
+  "inst/sql/sql_server/CreateExposureCohorts<indication>.sql",
+  "inst/settings/cmAnalysisList<indication>.json",
+  "R/CreateExposureCohorts.R"
+ ],
+ "n_outcomes": 58,
+ "n_negative_controls": 76,
+ "generated_by": "read from the LEGEND repository by an agent following README.md in this folder (there is no parsing code)",
+ "n_outcomes_left_out": 13
+}
