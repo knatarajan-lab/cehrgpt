@@ -1361,8 +1361,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             # Shift so that tokens < n predict n
             shift_logits = lm_logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-            valid_tokens: torch.BoolTensor = shift_labels != 100
-            total_num_tokens = valid_tokens.sum()
+            valid_tokens: torch.BoolTensor = shift_labels != -100
+            # Clamp so a batch with every label ignored gives 0 loss rather than 0/0
+            total_num_tokens = valid_tokens.sum().clamp(min=1)
             if (
                 self.cehrgpt.config.lab_token_penalty
                 and self.cehrgpt.config.lab_token_exists
