@@ -37,6 +37,7 @@ from cehrgpt.runners.gpt_runner_util import (
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.time_to_event.time_to_event_model import TimeToEventModel
 from cehrgpt.tokenization.special_tokens import OUT_OF_VOCABULARY_TOKEN
+from cehrgpt.tools.bootstrap_ci import evaluate_predictions
 
 LOG = logging.get_logger("transformers")
 
@@ -328,6 +329,32 @@ def run_on_multiple_gpus(args, gpu_ids: List[str]) -> int:
     return 0
 
 
+def write_prediction_metrics(args, prediction_output_folder_name: str) -> None:
+    """
+    Write the ROC-AUC and PR-AUC of all the saved predictions, with bootstrap intervals.
+
+    Covers everything in the prediction folder, so also the predictions of earlier sessions of a
+    resumed run. The json goes next to the folder rather than in it, the folder holds only parquet
+    files. The predictions are already saved at this point, so metrics that can't be computed
+    (e.g. a single class) are a warning rather than a failed run.
+    """
+    if args.n_boot <= 0:
+        return
+    try:
+        evaluate_predictions(
+            [prediction_output_folder_name],
+            f"{prediction_output_folder_name}_metrics.json",
+            n_boot=args.n_boot,
+            alpha=args.alpha,
+        )
+    except (ValueError, FileNotFoundError) as e:
+        LOG.warning(
+            "Could not compute the metrics of %s: %s",
+            prediction_output_folder_name,
+            e,
+        )
+
+
 def split_outcome_events(
     outcome_events: List[Union[str, int]]
 ) -> Tuple[List[int], List[str]]:
@@ -370,6 +397,18 @@ def main(args):
             exit_code = run_on_multiple_gpus(args, gpu_ids)
             if exit_code:
                 sys.exit(exit_code)
+            write_prediction_metrics(
+                args,
+                os.path.join(
+                    args.output_folder,
+                    get_cehrgpt_output_folder(
+                        args, CehrGptTokenizer.from_pretrained(args.tokenizer_folder)
+                    ),
+                    load_task_config_from_yaml(
+                        args.task_config, args.task_config_override
+                    ).task_name,
+                ),
+            )
             return
         # CUDA has not been initialized yet, so this pins the single requested GPU
         os.environ["CUDA_VISIBLE_DEVICES"] = gpu_ids[0]
@@ -622,6 +661,9 @@ def main(args):
     )
     # Remove the temp folder
     shutil.rmtree(temp_folder)
+    # A --gpu_ids worker only has its shard, the parent computes the metrics of all of them
+    if not args.prepared_dataset_path:
+        write_prediction_metrics(args, prediction_output_folder_name)
 
 
 def delete_lock_create_processed_flag(output_folder: str, sample_id: str):
@@ -841,6 +883,23 @@ def create_arg_parser():
         "--store_generated_trajectories",
         action="store_true",
         help="Persist raw generated token trajectories in the prediction parquet files.",
+    )
+    base_arg_parser.add_argument(
+        "--n_boot",
+        dest="n_boot",
+        action="store",
+        type=int,
+        default=1000,
+        help="Patient-level bootstrap replicates of the ROC-AUC and PR-AUC computed at the end "
+        "of the run, 0 skips the metrics.",
+    )
+    base_arg_parser.add_argument(
+        "--alpha",
+        dest="alpha",
+        action="store",
+        type=float,
+        default=0.05,
+        help="The significance level of the bootstrap intervals, 0.05 gives a 95%% interval.",
     )
     base_arg_parser.add_argument(
         "--max_n_trial",

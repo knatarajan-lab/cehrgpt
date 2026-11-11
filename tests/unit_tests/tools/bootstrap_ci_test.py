@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,7 @@ from sklearn.metrics import auc, precision_recall_curve, roc_auc_score
 from cehrgpt.tools.bootstrap_ci import (
     bootstrap_confidence_intervals,
     compute_metrics,
+    evaluate_predictions,
     read_predictions,
 )
 
@@ -131,6 +133,30 @@ class TestReadPredictions(unittest.TestCase):
         self.assertEqual(sorted(subject_ids.tolist()), [1, 3])
         self.assertEqual(y.tolist(), [1, 1])
         self.assertEqual(score.tolist(), [0.9, 0.9])
+
+
+class TestEvaluatePredictions(unittest.TestCase):
+    def test_reads_the_predictions_and_writes_the_result(self):
+        subject_ids, y, score = make_predictions()
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "predictions"
+            folder.mkdir()
+            pl.DataFrame(
+                {
+                    "subject_id": subject_ids,
+                    "boolean_value": y.astype(bool),
+                    "predicted_boolean_probability": score,
+                }
+            ).write_parquet(folder / "a.parquet")
+            output_file = Path(tmp) / "nested" / "metrics.json"
+            result = evaluate_predictions(
+                [str(folder)], str(output_file), n_boot=20, n_jobs=1
+            )
+            self.assertEqual(json.loads(output_file.read_text()), result)
+        expected = bootstrap_confidence_intervals(
+            subject_ids, y, score, n_boot=20, n_jobs=1
+        )
+        self.assertEqual(result, expected)
 
 
 if __name__ == "__main__":
