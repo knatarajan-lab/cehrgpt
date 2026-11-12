@@ -2470,7 +2470,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # are finished (end token, stopping criteria), which otherwise go through every layer
         # as padding until the last sequence of the batch finishes. The tokens are still
         # sampled for the whole batch, so that every sequence draws the random numbers it
-        # would draw without it; past_key_values is not returned.
+        # would draw without it: the sequences are the same wherever the model computes the
+        # same numbers on a batch of fewer rows. bfloat16 flash attention does not always (it
+        # can be a rounding step away), a sample then moves now and then and the sequences
+        # are other draws from the same distributions. past_key_values is not returned.
         drop_finished_sequences = model_kwargs.pop("drop_finished_sequences", False)
         if drop_finished_sequences and (
             output_scores

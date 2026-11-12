@@ -194,7 +194,8 @@ class TimeToEventModel:
         # sequences of the batch. With fast_decoding the cache is appended to in place instead
         # of copied at every step (where the model supports it), and the model stops running
         # on the sequences whose outcome is determined, which otherwise stay in the batch
-        # until the last one is. The sampled trajectories are the same.
+        # until the last one is. The trajectories are sampled from the same distributions,
+        # see generate(drop_finished_sequences=True) for when they are the very same.
         self.fast_decoding = fast_decoding
         # One stopping criteria per task window, see _get_stopping_criteria
         self._stopping_criteria: Dict[Tuple, TimeToEventStoppingCriteria] = {}

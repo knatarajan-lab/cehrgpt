@@ -237,13 +237,136 @@ def count_rows(model: CEHRGPT2LMHeadModel, run) -> tuple:
         handle.remove()
 
 
+def check_row_independent_sampling(device, vocab_size: int) -> bool:
+    """
+    Whether torch.multinomial gives a row the same sample whatever the other rows are.
+
+    Dropping the finished trajectories relies on it: the tokens are sampled for the whole
+    batch, with a dummy distribution for the dropped rows, so that the rows that are left draw
+    the random numbers they would draw with the whole batch.
+    """
+    generator_seed = 20240
+    torch.manual_seed(0)
+    probabilities = torch.rand(16, vocab_size, device=device)
+    probabilities = probabilities / probabilities.sum(-1, keepdim=True)
+    kept = torch.tensor([1, 4, 5, 9, 15], device=device)
+    dummy = torch.zeros_like(probabilities)
+    dummy[:, 0] = 1.0
+    dummy[kept] = probabilities[kept]
+    mismatches = 0
+    for trial in range(100):
+        samples = []
+        for rows in (probabilities, dummy):
+            torch.manual_seed(generator_seed + trial)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(generator_seed + trial)
+            samples.append(torch.multinomial(rows, num_samples=1).squeeze(1)[kept])
+        mismatches += (samples[0] != samples[1]).sum().item()
+    print(
+        f"sampling per row: {'independent' if mismatches == 0 else 'NOT independent'} of "
+        f"the other rows ({mismatches}/500 samples differ)"
+    )
+    return mismatches == 0
+
+
+class StepLogits:
+    """The logits of every decoding step of a generation, and the rows they are of."""
+
+    def __init__(self, model):
+        self.model = model
+        self.logits, self.rows = [], []
+
+    def __enter__(self):
+        self._handle = self.model.lm_head.register_forward_hook(
+            lambda _module, _args, output: self.logits.append(output[:, -1].float().cpu())
+        )
+        scatter = CEHRGPT2LMHeadModel._scatter_active_rows
+        vocab_size = self.model.config.vocab_size
+
+        def record_rows(probabilities, active_rows, batch_size):
+            # Called for the tokens, then for the values of a model with values
+            if probabilities.shape[-1] == vocab_size:
+                self.rows.append(None if active_rows is None else active_rows.cpu())
+            return scatter(probabilities, active_rows, batch_size)
+
+        CEHRGPT2LMHeadModel._scatter_active_rows = staticmethod(record_rows)
+        self._scatter = scatter
+        return self
+
+    def __exit__(self, *args):
+        CEHRGPT2LMHeadModel._scatter_active_rows = staticmethod(self._scatter)
+        self._handle.remove()
+
+
+def diagnose_fast_decoding(args, prompt_index, legacy, fast, legacy_steps, fast_steps, prompt_length):
+    """
+    Where the trajectories of the two generations part, and by how much the logits differ.
+
+    A trajectory is compared for as long as it has the same tokens on both sides: after that
+    the two sides continue different trajectories, which says nothing about the model. The
+    logits of the rows the model ran on with fast decoding are compared with the logits of
+    the same rows of the whole batch.
+    """
+    num_sequences = legacy.sequences.shape[0]
+    same_prefix = torch.ones(num_sequences, dtype=torch.bool)
+    legacy_tokens = legacy.sequences[:, prompt_length:].cpu()
+    fast_tokens = fast.sequences[:, prompt_length:].cpu()
+    max_difference, max_tv, compared_steps = 0.0, 0.0, 0
+    first_difference = None
+    for step in range(min(len(legacy_steps.logits), len(fast_steps.logits))):
+        rows = fast_steps.rows[step]
+        active = torch.arange(num_sequences) if rows is None else rows
+        legacy_logits = legacy_steps.logits[step]
+        fast_logits = fast_steps.logits[step]
+        comparable = same_prefix[active]
+        if comparable.any():
+            expected = legacy_logits[active][comparable]
+            actual = fast_logits[comparable]
+            difference = (expected - actual).abs().max().item()
+            tv = (
+                0.5
+                * (torch.softmax(expected, -1) - torch.softmax(actual, -1))
+                .abs()
+                .sum(-1)
+                .max()
+                .item()
+            )
+            compared_steps += 1
+            if difference > 0 and first_difference is None:
+                first_difference = (step, len(active), difference, tv)
+            max_difference, max_tv = max(max_difference, difference), max(max_tv, tv)
+        if step < min(legacy_tokens.shape[1], fast_tokens.shape[1]):
+            same_prefix &= legacy_tokens[:, step] == fast_tokens[:, step]
+    within = max_difference <= args.logit_atol and max_tv <= args.probability_tv_atol
+    if first_difference is None:
+        where = "the logits never differ on the same trajectory"
+    else:
+        step, active_rows, difference, tv = first_difference
+        where = (
+            f"the logits first differ at step {step}, with {active_rows} of "
+            f"{num_sequences} trajectories still running (logit difference "
+            f"{difference:.4g}, probability TV {tv:.4g})"
+        )
+    print(
+        f"  prompt={prompt_index} diagnosis: {where}; over {compared_steps} steps "
+        f"max_abs_logit_difference={max_difference:.4g} (tolerance {args.logit_atol}) "
+        f"max_probability_tv={max_tv:.4g} (tolerance {args.probability_tv_atol}); "
+        f"identical_trajectories={int(same_prefix.sum())}/{num_sequences}"
+    )
+    return within, max_difference, max_tv
+
+
 def check_fast_decoding(args, model, tokenizer, prefixes, generation_config, device):
     """
-    Fail when fast decoding does not generate the trajectories of the generation without it.
+    Compare fast decoding with the generation without it, sampled with the same seed.
 
-    Both sides sample with the same seed and stop a trajectory after
-    --prediction_window_end days. The logits of the dropped trajectories do not exist, so the
-    trajectories themselves are compared: every token, and every value of a model with values.
+    Both sides stop a trajectory after --prediction_window_end days. When the model computes
+    the same numbers on a batch of fewer rows, the trajectories are the same token for token.
+    It does not always: a batch of another size can round differently (bfloat16), and a logit
+    one rounding step away now and then moves a sample, after which that trajectory is
+    another one. So when the trajectories differ, both sides are generated again with their
+    logits recorded, and the comparison passes if the logits of the same trajectory stay
+    within the tolerances: the two sides then sample from the same distributions.
     """
     if not model._can_use_static_kv_cache(
         {
@@ -256,67 +379,89 @@ def check_fast_decoding(args, model, tokenizer, prefixes, generation_config, dev
             "This model does not use the static KV cache (it is for the gpt2 backbone with "
             "flash attention): only dropping the finished trajectories is compared"
         )
+    check_row_independent_sampling(device, model.config.vocab_size)
     pad_token_id = generation_config.pad_token_id
     total_tokens = 0
     mismatched_tokens = 0
+    max_logit_difference = 0.0
+    max_probability_tv = 0.0
+    failed = False
+
+    def run(prompt, seed, fast):
+        return count_rows(
+            model,
+            lambda: generate(
+                model,
+                tokenizer,
+                prompt,
+                generation_config,
+                share_prompt_prefill=None,
+                track_ages=None,
+                seed=seed,
+                static_kv_cache=fast,
+                drop_finished_sequences=fast,
+                stopping_criteria=TimeToEventStoppingCriteria(
+                    tokenizer, [], 0, -1, 0, args.prediction_window_end
+                ),
+            ),
+        )
+
     for prompt_index, prefix in enumerate(prefixes):
         token_ids = tokenizer.encode(prefix)
         prompt = torch.tensor([token_ids], dtype=torch.long, device=device)
-        results = []
-        for fast in (False, True):
-            outputs, rows = count_rows(
-                model,
-                lambda: generate(
-                    model,
-                    tokenizer,
-                    prompt,
-                    generation_config,
-                    share_prompt_prefill=None,
-                    track_ages=None,
-                    seed=args.seed + prompt_index,
-                    static_kv_cache=fast,
-                    drop_finished_sequences=fast,
-                    stopping_criteria=TimeToEventStoppingCriteria(
-                        tokenizer, [], 0, -1, 0, args.prediction_window_end
-                    ),
-                ),
-            )
-            results.append((outputs, rows))
-        (legacy, legacy_rows), (fast, fast_rows) = results
-        if legacy.sequences.shape != fast.sequences.shape:
-            raise AssertionError(
-                f"Prompt {prompt_index}: {tuple(legacy.sequences.shape)} tokens without fast "
-                f"decoding, {tuple(fast.sequences.shape)} with it"
-            )
-        generated = legacy.sequences[:, len(token_ids) :]
-        mismatches = generated != fast.sequences[:, len(token_ids) :]
+        seed = args.seed + prompt_index
+        (legacy, legacy_rows), (fast, fast_rows) = run(prompt, seed, False), run(
+            prompt, seed, True
+        )
+        steps = min(legacy.sequences.shape[1], fast.sequences.shape[1]) - len(token_ids)
+        generated = legacy.sequences[:, len(token_ids) : len(token_ids) + steps]
+        fast_generated = fast.sequences[:, len(token_ids) : len(token_ids) + steps]
+        mismatches = generated != fast_generated
         if model.config.include_values:
             # The padding of a finished trajectory has no value
             mismatches |= (
-                legacy.sequence_vals[:, len(token_ids) :]
-                != fast.sequence_vals[:, len(token_ids) :]
+                legacy.sequence_vals[:, len(token_ids) : len(token_ids) + steps]
+                != fast.sequence_vals[:, len(token_ids) : len(token_ids) + steps]
             ) & (generated != pad_token_id)
+        same = not mismatches.any() and legacy.sequences.shape == fast.sequences.shape
         total_tokens += mismatches.numel()
         mismatched_tokens += mismatches.sum().item()
-        steps = len(legacy_rows) - 1
         print(
-            f"{'PASS' if not mismatches.any() else 'FAIL'} prompt={prompt_index} "
-            f"encoded_tokens={len(token_ids)} sequences={generated.shape[0]} "
-            f"generated_tokens={generated.shape[1]} "
-            f"mean_rows_per_step={sum(legacy_rows[1:]) / steps:.1f}->"
-            f"{sum(fast_rows[1:]) / steps:.1f} "
+            f"prompt={prompt_index} encoded_tokens={len(token_ids)} "
+            f"sequences={generated.shape[0]} "
+            f"generated_tokens={legacy.sequences.shape[1] - len(token_ids)}->"
+            f"{fast.sequences.shape[1] - len(token_ids)} "
+            f"mean_rows_per_step={sum(legacy_rows[1:]) / max(len(legacy_rows) - 1, 1):.1f}->"
+            f"{sum(fast_rows[1:]) / max(len(fast_rows) - 1, 1):.1f} "
             f"seconds={legacy.seconds:.3f}->{fast.seconds:.3f} "
+            f"trajectories={'identical' if same else 'differ'} "
             f"mismatched_tokens={mismatches.sum().item()}"
         )
-    status = "PASS" if mismatched_tokens == 0 else "FAIL"
+        if not same:
+            # Again, with the logits: the same seeds give the same generations
+            with StepLogits(model) as legacy_steps:
+                legacy, _ = run(prompt, seed, False)
+            with StepLogits(model) as fast_steps:
+                fast, _ = run(prompt, seed, True)
+            within, difference, tv = diagnose_fast_decoding(
+                args, prompt_index, legacy, fast, legacy_steps, fast_steps, len(token_ids)
+            )
+            max_logit_difference = max(max_logit_difference, difference)
+            max_probability_tv = max(max_probability_tv, tv)
+            failed |= not within
     print(
-        f"{status} comparison=fast_decoding; prompts={len(prefixes)}; "
+        f"{'FAIL' if failed else 'PASS'} comparison=fast_decoding; prompts={len(prefixes)}; "
         f"prediction_window_end={args.prediction_window_end}; "
-        f"mismatched_tokens={mismatched_tokens}/{total_tokens}"
+        f"mismatched_tokens={mismatched_tokens}/{total_tokens}; "
+        f"max_abs_logit_difference={max_logit_difference:.8g}; "
+        f"logit_tolerance={args.logit_atol}; "
+        f"max_probability_tv={max_probability_tv:.8g}; "
+        f"probability_tv_tolerance={args.probability_tv_atol}"
     )
-    if mismatched_tokens:
+    if failed:
         raise AssertionError(
-            "Fast decoding generated other trajectories than the generation without it"
+            "Fast decoding computes other logits than the generation without it, beyond the "
+            "tolerances"
         )
 
 
