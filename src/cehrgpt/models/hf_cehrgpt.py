@@ -1704,8 +1704,13 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         cehrgpt_tokenizer,
         past_key_values=None,
         inputs_embeds=None,
+        prompt_prefill=None,
+        return_prompt_prefill=False,
         **kwargs,
     ):
+        # prompt_prefill and return_prompt_prefill are arguments of generate consumed by
+        # _sample. They are named here because generate only accepts the arguments of this
+        # method and of forward.
         ages = kwargs.get("ages")
         # Omit tokens covered by past_key_values
         if past_key_values:
@@ -2398,6 +2403,28 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # Remove this from the model_kwargs and will pass it to other functions explicitly
         cehrgpt_tokenizer = model_kwargs.pop("cehrgpt_tokenizer")
 
+        # generate(prompt_prefill=...) continues a prompt from what an earlier generation of
+        # the same prompt computed, returned by generate(return_prompt_prefill=True): the
+        # logits of the first new token and the KV cache of the prompt. The first decoding
+        # step then uses those very numbers instead of running the model on the prompt, so
+        # it is identical to the step of the generation they come from.
+        prompt_prefill = model_kwargs.pop("prompt_prefill", None)
+        return_prompt_prefill = model_kwargs.pop("return_prompt_prefill", False)
+        returned_prompt_prefill = None
+        if prompt_prefill is not None:
+            if self.cehrgpt.config.causal_sfm:
+                raise ValueError(
+                    "prompt_prefill cannot be used with causal_sfm, every sequence has its "
+                    "own random vector in the prompt"
+                )
+            if model_kwargs.get("past_key_values") is not None:
+                raise ValueError("prompt_prefill and past_key_values are exclusive")
+            if prompt_prefill["prompt_length"] != input_ids.shape[1]:
+                raise ValueError(
+                    f"prompt_prefill is of a prompt of {prompt_prefill['prompt_length']} "
+                    f"tokens, the prompt has {input_ids.shape[1]}"
+                )
+
         # init attention / hidden states / scores tuples
         scores = () if (return_dict_in_generate and output_scores) else None
         raw_logits = () if (return_dict_in_generate and output_logits) else None
@@ -2544,7 +2571,27 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             )
 
             # forward pass to get next token
-            if share_prompt_prefill and not prompt_prefilled:
+            if prompt_prefill is not None and not prompt_prefilled:
+                # The rows of the logits are cloned: they are processed row by row below
+                outputs = CehrGptCausalLMOutput(
+                    logits=prompt_prefill["logits"]
+                    .expand(batch_size, -1, -1)
+                    .clone(),
+                    value_hidden_states=(
+                        prompt_prefill["value_hidden_states"].expand(batch_size, -1, -1)
+                        if prompt_prefill["value_hidden_states"] is not None
+                        else None
+                    ),
+                    past_key_values=tuple(
+                        tuple(
+                            state.expand(batch_size, *state.shape[1:])
+                            for state in layer_past
+                        )
+                        for layer_past in prompt_prefill["past_key_values"]
+                    ),
+                )
+                prompt_prefilled = True
+            elif share_prompt_prefill and not prompt_prefilled:
                 single_inputs = {
                     key: (
                         value[:1]
@@ -2584,6 +2631,29 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             if synced_gpus and this_peer_finished:
                 continue  # don't waste resources running the code we don't need
+
+            if (
+                return_prompt_prefill
+                and returned_prompt_prefill is None
+                and prompt_prefill is None
+                and outputs.past_key_values is not None
+                and input_ids.shape[1] == cur_len
+            ):
+                # The sequences share the prompt, so the first row stands for all of them.
+                # Copied, so the rest of this generation can be freed.
+                returned_prompt_prefill = {
+                    "prompt_length": cur_len,
+                    "logits": outputs.logits[:1, -1:].clone(),
+                    "value_hidden_states": (
+                        outputs.value_hidden_states[:1, -1:].clone()
+                        if outputs.value_hidden_states is not None
+                        else None
+                    ),
+                    "past_key_values": tuple(
+                        tuple(state[:1].clone() for state in layer_past)
+                        for layer_past in outputs.past_key_values
+                    ),
+                }
 
             next_token_logits = outputs.logits[:, -1, :]
 
@@ -2707,6 +2777,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             attentions=decoder_attentions,
             hidden_states=decoder_hidden_states,
             past_key_values=model_kwargs.get("past_key_values"),
+            prompt_prefill=returned_prompt_prefill,
         )
 
 

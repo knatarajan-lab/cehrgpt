@@ -4,6 +4,7 @@
 import argparse
 import glob
 import os
+from typing import Optional
 
 import pandas as pd
 import torch
@@ -28,10 +29,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--probability_tv_atol", type=float, default=1e-3)
     parser.add_argument(
         "--comparison",
-        choices=("combined", "shared_prefill", "age_tracking", "prompt_cache"),
+        choices=(
+            "combined",
+            "shared_prefill",
+            "age_tracking",
+            "prompt_cache",
+            "determinism",
+        ),
         default="combined",
         help="prompt_cache compares a generation that encodes the prompt against one that "
-        "starts from the prompt's KV cache, like the next batches of samples of a patient do.",
+        "starts from what the first computed from the prompt, like the next batches of samples "
+        "of a patient do. "
+        "determinism runs the model twice on every prompt without reseeding and fails when the "
+        "logits differ, which they do when dropout is applied in evaluation.",
     )
     return parser.parse_args()
 
@@ -55,12 +65,23 @@ def generate(
     prompt: torch.Tensor,
     generation_config,
     *,
-    share_prompt_prefill: bool,
-    track_ages: bool,
+    share_prompt_prefill: Optional[bool],
+    track_ages: Optional[bool],
     seed: int,
-    past_key_values=None,
+    prompt_prefill=None,
+    return_prompt_prefill: bool = False,
 ):
-    model._generation_share_prompt_prefill = share_prompt_prefill
+    if share_prompt_prefill is None:
+        # The production behavior: the model decides, it does not share under flash attention
+        model._generation_share_prompt_prefill = True
+        model.__dict__.pop("_can_share_generation_prompt_prefill", None)
+    else:
+        model._generation_share_prompt_prefill = share_prompt_prefill
+        # The model never shares the prefill under flash attention, where both sides of a
+        # comparison would then run the same path and trivially match. The comparison is
+        # there to find out whether sharing is equivalent, so it decides, not the attention
+        # implementation.
+        model._can_share_generation_prompt_prefill = lambda: share_prompt_prefill
     model._generation_track_ages_override = track_ages
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -70,7 +91,62 @@ def generate(
             inputs=prompt,
             generation_config=generation_config,
             cehrgpt_tokenizer=tokenizer,
-            **({"past_key_values": past_key_values} if past_key_values is not None else {}),
+            **({"prompt_prefill": prompt_prefill} if prompt_prefill is not None else {}),
+            **({"return_prompt_prefill": True} if return_prompt_prefill else {}),
+        )
+
+
+def count_prefill_rows(model: CEHRGPT2LMHeadModel, run) -> tuple:
+    """The result of run(), and the batch size of every forward pass over a whole prompt."""
+    prefill_rows = []
+
+    def record(_module, args, kwargs):
+        input_ids = args[0] if args else kwargs["input_ids"]
+        if kwargs.get("past_key_values") is None and input_ids.shape[1] > 1:
+            prefill_rows.append(input_ids.shape[0])
+
+    handle = model.cehrgpt.register_forward_pre_hook(record, with_kwargs=True)
+    try:
+        return run(), prefill_rows
+    finally:
+        handle.remove()
+
+
+def check_determinism(model, tokenizer, prefixes, device) -> None:
+    """Fail when two forward passes over the same prompt, without reseeding, differ."""
+    max_logit_difference = 0.0
+    for prompt_index, prefix in enumerate(prefixes):
+        input_ids = torch.tensor(
+            [tokenizer.encode(prefix)], dtype=torch.long, device=device
+        )
+        logits = []
+        with torch.inference_mode():
+            for _ in range(2):
+                logits.append(
+                    model(
+                        input_ids=input_ids,
+                        attention_mask=torch.ones_like(input_ids, dtype=torch.bool),
+                        ages=torch.zeros_like(input_ids),
+                        output_motor_features=False,
+                        return_dict=True,
+                    ).logits.float()
+                )
+        difference = (logits[0] - logits[1]).abs().max().item()
+        max_logit_difference = max(max_logit_difference, difference)
+        print(
+            f"prompt={prompt_index} encoded_tokens={input_ids.shape[1]} "
+            f"max_abs_logit_difference={difference:.8g}"
+        )
+    status = "PASS" if max_logit_difference == 0.0 else "FAIL"
+    print(
+        f"{status} comparison=determinism; prompts={len(prefixes)}; "
+        f"attn_pdrop={model.config.attn_pdrop}; "
+        f"max_abs_logit_difference={max_logit_difference:.8g}"
+    )
+    if max_logit_difference != 0.0:
+        raise AssertionError(
+            "Two forward passes over the same prompt differ in evaluation: something random "
+            "such as dropout is applied"
         )
 
 
@@ -93,7 +169,10 @@ def main() -> None:
         .eval()
         .to(device)
     )
-    if model.config.apply_rotary and args.comparison != "prompt_cache":
+    if model.config.apply_rotary and args.comparison not in (
+        "prompt_cache",
+        "determinism",
+    ):
         raise RuntimeError(
             "This legacy-age-vs-skipped-age comparison requires apply_rotary=false"
         )
@@ -110,12 +189,19 @@ def main() -> None:
     )
     generation_config.output_logits = True
     prefixes = load_prefixes(args.prediction_folder, args.num_prompts)
+    print(
+        f"attn_implementation={getattr(model.config, '_attn_implementation', 'eager')}; "
+        f"dtype={model.dtype}; attn_pdrop={model.config.attn_pdrop}"
+    )
+    if args.comparison == "determinism":
+        check_determinism(model, tokenizer, prefixes, device)
+        return
     comparison_paths = {
         "combined": ((False, True), (True, False)),
         "shared_prefill": ((False, False), (True, False)),
         "age_tracking": ((False, True), (False, False)),
         # Both sides run the production paths, the optimized one from the prompt's KV cache
-        "prompt_cache": ((True, None), (True, None)),
+        "prompt_cache": ((None, None), (None, None)),
     }
     (legacy_share_prefill, legacy_track_ages), (
         optimized_share_prefill,
@@ -137,38 +223,45 @@ def main() -> None:
             )
         prompt = torch.tensor([token_ids], dtype=torch.long, device=device)
         seed = args.seed + prompt_index
-        legacy = generate(
+        legacy, legacy_prefill_rows = count_prefill_rows(
             model,
-            tokenizer,
-            prompt,
-            generation_config,
-            share_prompt_prefill=legacy_share_prefill,
-            track_ages=legacy_track_ages,
-            seed=seed,
+            lambda: generate(
+                model,
+                tokenizer,
+                prompt,
+                generation_config,
+                share_prompt_prefill=legacy_share_prefill,
+                track_ages=legacy_track_ages,
+                seed=seed,
+                return_prompt_prefill=args.comparison == "prompt_cache",
+            ),
         )
-        prompt_cache = None
-        if args.comparison == "prompt_cache":
-            # What TimeToEventModel keeps from the first batch of samples of a patient: the
-            # first row of the cache, without the generated tokens and the last prompt token
-            prompt_cache = tuple(
-                tuple(
-                    state[:1, ..., : len(token_ids) - 1, :]
-                    .clone()
-                    .expand(args.num_return_sequences, *state.shape[1:-2], -1, -1)
-                    for state in layer_past
-                )
-                for layer_past in legacy.past_key_values
+        # What TimeToEventModel keeps from the first batch of samples of a patient for the
+        # next ones: the logits of the first new token and the KV cache of the prompt
+        prompt_prefill = legacy.prompt_prefill if args.comparison == "prompt_cache" else None
+        optimized, optimized_prefill_rows = count_prefill_rows(
+            model,
+            lambda: generate(
+                model,
+                tokenizer,
+                prompt,
+                generation_config,
+                share_prompt_prefill=optimized_share_prefill,
+                track_ages=optimized_track_ages,
+                seed=seed,
+                prompt_prefill=prompt_prefill,
+            ),
+        )
+        if (
+            args.comparison in ("combined", "shared_prefill", "prompt_cache")
+            and legacy_prefill_rows == optimized_prefill_rows
+        ):
+            # Both sides encoded the prompt the same way: the comparison would pass without
+            # having compared anything
+            raise AssertionError(
+                f"Prompt {prompt_index}: both sides encoded the prompt with batch sizes "
+                f"{legacy_prefill_rows}, the two paths of {args.comparison} are the same path"
             )
-        optimized = generate(
-            model,
-            tokenizer,
-            prompt,
-            generation_config,
-            share_prompt_prefill=optimized_share_prefill,
-            track_ages=optimized_track_ages,
-            seed=seed,
-            past_key_values=prompt_cache,
-        )
 
         if len(legacy.logits) != len(optimized.logits):
             raise AssertionError(f"Prompt {prompt_index} generated a different step count")
@@ -234,6 +327,7 @@ def main() -> None:
         print(
             f"PASS prompt={prompt_index} encoded_tokens={len(token_ids)} "
             f"sequences={args.num_return_sequences} generated_tokens={args.max_new_tokens} "
+            f"prefill_rows={legacy_prefill_rows}->{optimized_prefill_rows} "
             f"identical_trajectories={token_matches.all(dim=1).sum().item()}"
         )
 

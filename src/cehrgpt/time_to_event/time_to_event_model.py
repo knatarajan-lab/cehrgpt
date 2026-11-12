@@ -182,11 +182,13 @@ class TimeToEventModel:
         self.max_sequence = model.config.n_positions
         # A patient's samples are generated in batches of batch_size, and again when a trial
         # leaves trajectories undetermined. Every one of those generations starts from the same
-        # prompt, so the KV cache of the prompt is kept from the first to the next ones, which
-        # then only run the model on the new tokens.
+        # prompt, so what the first one computes from the prompt is kept for the next ones, which
+        # then start from the very numbers of the first one and only run the model on the new
+        # tokens.
         self.reuse_prompt_cache = reuse_prompt_cache
-        # (prompt key, KV cache of one row of the prompt without its last token)
-        self._prompt_cache: Optional[Tuple[Any, Tuple[Tuple[torch.Tensor, ...], ...]]] = None
+        # (prompt key, the prompt_prefill returned by generate): the logits of the first new
+        # token and the KV cache of the prompt
+        self._prompt_cache: Optional[Tuple[Any, Dict[str, Any]]] = None
         # One stopping criteria per task window, see _get_stopping_criteria
         self._stopping_criteria: Dict[Tuple[int, int, int, int], TimeToEventStoppingCriteria] = {}
 
@@ -277,57 +279,22 @@ class TimeToEventModel:
                 indices = indices[:4] + indices[next_visit:]
         return prompt, indices
 
-    def _can_reuse_prompt_cache(self, num_prompt_tokens: int) -> bool:
+    def _can_reuse_prompt_cache(self) -> bool:
         config = self.model.config
         return (
             self.reuse_prompt_cache
             and bool(self.generation_config.use_cache)
-            # The last token of the prompt is left out of the cache: the model has to read
-            # it to predict the first new token
-            and num_prompt_tokens > 1
             # Every sequence gets its own random vector, in the middle of the prompt
             and not getattr(config, "causal_sfm", False)
             # The visit-local window of a decoding step is not covered by the tests of the reuse
             and not getattr(config, "use_local_attention", False)
         )
 
-    def _get_prompt_cache(self, prompt_key: Any, num_sequences: int):
-        """The KV cache of the prompt for num_sequences sequences, None when there is none."""
+    def _get_prompt_cache(self, prompt_key: Any) -> Optional[Dict[str, Any]]:
+        """What the model computed from the prompt, None when it is another prompt's."""
         if self._prompt_cache is None or self._prompt_cache[0] != prompt_key:
             return None
-        return tuple(
-            tuple(state.expand(num_sequences, *state.shape[1:]) for state in layer_past)
-            for layer_past in self._prompt_cache[1]
-        )
-
-    def _store_prompt_cache(
-        self, prompt_key: Any, past_key_values: Any, num_prompt_tokens: int
-    ) -> None:
-        """
-        Keep the prompt part of the KV cache a generation ended with.
-
-        The sequences of a generation share the prompt, so the first row is kept for all of
-        them. It is copied, so the cache of the generated tokens can be freed.
-        """
-        self._prompt_cache = None
-        if not isinstance(past_key_values, tuple) or not past_key_values:
-            return
-        prompt_cache = []
-        for layer_past in past_key_values:
-            if not isinstance(layer_past, tuple) or any(
-                not isinstance(state, torch.Tensor)
-                or state.dim() < 3
-                or state.shape[-2] < num_prompt_tokens
-                for state in layer_past
-            ):
-                return
-            prompt_cache.append(
-                tuple(
-                    state[:1, ..., : num_prompt_tokens - 1, :].clone()
-                    for state in layer_past
-                )
-            )
-        self._prompt_cache = (prompt_key, tuple(prompt_cache))
+        return self._prompt_cache[1]
 
     def _decode_values(
         self,
@@ -403,7 +370,7 @@ class TimeToEventModel:
                 ).unsqueeze(0).to(self.device),
             }
 
-        reuse_prompt_cache = self._can_reuse_prompt_cache(len(token_ids))
+        reuse_prompt_cache = self._can_reuse_prompt_cache()
         prompt_key = (
             tuple(token_ids),
             tuple(value_kwargs["value_indicators"][0].tolist()) if value_kwargs else None,
@@ -434,14 +401,12 @@ class TimeToEventModel:
                         ]
                     )
                 prompt_cache = (
-                    self._get_prompt_cache(
-                        prompt_key, self.generation_config.num_return_sequences
-                    )
-                    if reuse_prompt_cache
-                    else None
+                    self._get_prompt_cache(prompt_key) if reuse_prompt_cache else None
                 )
                 if prompt_cache is not None:
-                    generation_kwargs["past_key_values"] = prompt_cache
+                    generation_kwargs["prompt_prefill"] = prompt_cache
+                elif reuse_prompt_cache:
+                    generation_kwargs["return_prompt_prefill"] = True
                 results = self.model.generate(
                     inputs=prompt,
                     generation_config=self.generation_config,
@@ -449,10 +414,11 @@ class TimeToEventModel:
                     **generation_kwargs,
                 )
                 if reuse_prompt_cache and prompt_cache is None:
-                    self._store_prompt_cache(
-                        prompt_key,
-                        getattr(results, "past_key_values", None),
-                        len(token_ids),
+                    prompt_prefill = getattr(results, "prompt_prefill", None)
+                    self._prompt_cache = (
+                        (prompt_key, prompt_prefill)
+                        if prompt_prefill is not None
+                        else None
                     )
                 sequence_vals = getattr(results, "sequence_vals", None)
                 for i, seq in enumerate(results.sequences):

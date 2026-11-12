@@ -605,9 +605,8 @@ class TestPromptCacheReuse(unittest.TestCase):
             [shape for shape in with_reuse if shape[1] != prompt_length],
             [(2, 1)] * (len(with_reuse) - 1),
         )
-        # The same number of decoding steps, plus the last token of the prompt read again
-        # by the two batches that start from the cache
-        self.assertEqual(len(with_reuse), len(without_reuse))
+        # The two batches that start from the first one's prompt skip its forward pass
+        self.assertEqual(len(with_reuse), len(without_reuse) - 2)
 
     def test_the_samples_match_the_ones_without_reuse(self):
         for apply_rotary in (False, True):
@@ -620,10 +619,8 @@ class TestPromptCacheReuse(unittest.TestCase):
                 self.assertEqual(len(actual), 6)
                 self.assertEqual(actual, expected)
 
-    def test_generation_from_the_cache_has_the_logits_of_a_full_prefill(self):
+    def test_generation_from_the_prompt_prefill_is_identical_to_a_full_prefill(self):
         tokenizer = EncodingDifferentialTokenizer()
-        model = build_generation_model()
-        predictor = self._predictor(model, reuse_prompt_cache=True)
         prompt = torch.tensor([tokenizer.encode(PROMPT)], dtype=torch.long)
         generation_config = GenerationConfig(
             max_length=32,
@@ -637,27 +634,80 @@ class TestPromptCacheReuse(unittest.TestCase):
             return_dict_in_generate=True,
             output_logits=True,
         )
+        for apply_rotary in (False, True):
+            with self.subTest(apply_rotary=apply_rotary):
+                model = build_generation_model(apply_rotary=apply_rotary)
 
-        torch.manual_seed(99)
-        expected = model.generate(
-            inputs=prompt, generation_config=generation_config, cehrgpt_tokenizer=tokenizer
+                torch.manual_seed(99)
+                expected = model.generate(
+                    inputs=prompt,
+                    generation_config=generation_config,
+                    cehrgpt_tokenizer=tokenizer,
+                    return_prompt_prefill=True,
+                )
+                prompt_prefill = expected.prompt_prefill
+                self.assertEqual(prompt_prefill["prompt_length"], len(PROMPT))
+                self.assertEqual(prompt_prefill["logits"].shape, (1, 1, 24))
+                self.assertEqual(
+                    prompt_prefill["past_key_values"][0][0].shape[0::2],
+                    (1, len(PROMPT)),
+                )
+                kept = {
+                    "logits": prompt_prefill["logits"].clone(),
+                    "key": prompt_prefill["past_key_values"][0][0].clone(),
+                }
+                torch.manual_seed(99)
+                actual = model.generate(
+                    inputs=prompt,
+                    generation_config=generation_config,
+                    cehrgpt_tokenizer=tokenizer,
+                    prompt_prefill=prompt_prefill,
+                )
+
+                # Not close, identical: the first step uses the numbers of the full prefill
+                torch.testing.assert_close(
+                    actual.sequences, expected.sequences, rtol=0, atol=0
+                )
+                self.assertEqual(len(actual.logits), len(expected.logits))
+                for expected_logits, actual_logits in zip(expected.logits, actual.logits):
+                    torch.testing.assert_close(
+                        actual_logits, expected_logits, rtol=0, atol=0
+                    )
+                self.assertIsNone(actual.prompt_prefill)
+                # A generation leaves the prefill it starts from untouched, for the next one
+                torch.testing.assert_close(
+                    prompt_prefill["logits"], kept["logits"], rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    prompt_prefill["past_key_values"][0][0], kept["key"], rtol=0, atol=0
+                )
+
+    def test_a_prompt_prefill_of_another_prompt_length_is_refused(self):
+        tokenizer = EncodingDifferentialTokenizer()
+        model = build_generation_model()
+        generation_config = GenerationConfig(
+            max_length=32,
+            max_new_tokens=2,
+            num_return_sequences=2,
+            do_sample=True,
+            use_cache=True,
+            pad_token_id=0,
+            eos_token_id=None,
+            return_dict_in_generate=True,
         )
-        predictor._store_prompt_cache("key", expected.past_key_values, len(PROMPT))
-        prompt_cache = predictor._get_prompt_cache("key", 3)
-        self.assertEqual(prompt_cache[0][0].shape[0], 3)
-        self.assertEqual(prompt_cache[0][0].shape[-2], len(PROMPT) - 1)
-        torch.manual_seed(99)
-        actual = model.generate(
-            inputs=prompt,
+        prompt_prefill = model.generate(
+            inputs=torch.tensor([tokenizer.encode(PROMPT)], dtype=torch.long),
             generation_config=generation_config,
             cehrgpt_tokenizer=tokenizer,
-            past_key_values=prompt_cache,
-        )
+            return_prompt_prefill=True,
+        ).prompt_prefill
 
-        torch.testing.assert_close(actual.sequences, expected.sequences, rtol=0, atol=0)
-        for expected_logits, actual_logits in zip(expected.logits, actual.logits):
-            torch.testing.assert_close(
-                actual_logits, expected_logits, rtol=1e-5, atol=1e-5
+        with self.assertRaisesRegex(ValueError, "prompt_prefill is of a prompt"):
+            model.generate(
+                inputs=torch.tensor([tokenizer.encode(PROMPT[:-1])], dtype=torch.long),
+                generation_config=generation_config,
+                cehrgpt_tokenizer=tokenizer,
+                prompt_prefill=prompt_prefill,
             )
 
     def test_the_samples_and_values_match_for_a_model_with_values(self):
@@ -720,7 +770,7 @@ class TestPromptCacheReuse(unittest.TestCase):
 
         self.assertIsNone(
             predictor._get_prompt_cache(
-                (tuple(predictor.tokenizer.encode(other_prompt)), None, None), 2
+                (tuple(predictor.tokenizer.encode(other_prompt)), None, None)
             )
         )
         predictor.simulate(other_prompt)
@@ -749,15 +799,12 @@ class TestPromptCacheReuse(unittest.TestCase):
     def test_models_that_cannot_share_a_prompt_cache_do_not_reuse_it(self):
         model = build_generation_model()
         predictor = self._predictor(model, reuse_prompt_cache=True)
-        self.assertTrue(predictor._can_reuse_prompt_cache(len(PROMPT)))
-        self.assertFalse(predictor._can_reuse_prompt_cache(1))
+        self.assertTrue(predictor._can_reuse_prompt_cache())
         model.config.causal_sfm = True
-        self.assertFalse(predictor._can_reuse_prompt_cache(len(PROMPT)))
+        self.assertFalse(predictor._can_reuse_prompt_cache())
         model.config.causal_sfm = False
         self.assertFalse(
-            self._predictor(model, reuse_prompt_cache=False)._can_reuse_prompt_cache(
-                len(PROMPT)
-            )
+            self._predictor(model, reuse_prompt_cache=False)._can_reuse_prompt_cache()
         )
 
 
