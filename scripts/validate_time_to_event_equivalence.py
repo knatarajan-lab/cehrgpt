@@ -333,6 +333,11 @@ def diagnose_fast_decoding(args, prompt_index, legacy, fast, legacy_steps, fast_
         active = torch.arange(num_sequences) if rows is None else rows
         legacy_logits = legacy_steps.logits[step]
         fast_logits = fast_steps.logits[step]
+        # The prefill of a shared prompt has one row for all the sequences
+        if legacy_logits.shape[0] == 1:
+            legacy_logits = legacy_logits.expand(num_sequences, -1)
+        if fast_logits.shape[0] == 1 and len(active) > 1:
+            fast_logits = fast_logits.expand(len(active), -1)
         comparable = same_prefix[active]
         if comparable.any():
             expected = legacy_logits[active][comparable]
