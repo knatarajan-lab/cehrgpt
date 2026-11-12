@@ -58,9 +58,12 @@ def read_predictions(
             files.append(str(path))
     if not files:
         raise FileNotFoundError(f"No parquet files found in {list(paths)}")
+    # Scanned one by one: the other columns can differ between the files of a resumed run
     df = (
-        pl.scan_parquet(files)
-        .select(SUBJECT_COLUMN, LABEL_COLUMN, SCORE_COLUMN)
+        pl.concat(
+            pl.scan_parquet(file).select(SUBJECT_COLUMN, LABEL_COLUMN, SCORE_COLUMN)
+            for file in files
+        )
         .drop_nulls()
         .collect()
     )
@@ -225,12 +228,41 @@ def create_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def evaluate_predictions(
+    predictions: Sequence[str],
+    output_file: Optional[str] = None,
+    **bootstrap_options: Any,
+) -> Dict[str, Any]:
+    """
+    ROC-AUC and PR-AUC with bootstrap intervals of saved predictions, for any prediction script.
+
+    Args:
+        predictions: Parquet files or folders (searched recursively) with the columns subject_id,
+            boolean_value and predicted_boolean_probability.
+        output_file: Write the result to this json file (optional).
+        **bootstrap_options: The options of bootstrap_confidence_intervals, e.g. n_boot, alpha.
+
+    Returns:
+        The result of bootstrap_confidence_intervals.
+    """
+    subject_ids, y, score = read_predictions(predictions)
+    result = bootstrap_confidence_intervals(subject_ids, y, score, **bootstrap_options)
+    print(
+        f"n={result['n_labels']:,} patients={result['n_patients']:,} "
+        f"ROC-AUC {result['roc_auc_text']}  PR-AUC {result['pr_auc_text']}"
+    )
+    if output_file:
+        output_path = Path(output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(result, indent=2))
+        print(f"Wrote {output_path}")
+    return result
+
+
 def main(args: argparse.Namespace) -> Dict[str, Any]:
-    subject_ids, y, score = read_predictions(args.predictions)
-    result = bootstrap_confidence_intervals(
-        subject_ids,
-        y,
-        score,
+    return evaluate_predictions(
+        args.predictions,
+        args.output_file,
         n_boot=args.n_boot,
         alpha=args.alpha,
         pr_auc=args.pr_auc,
@@ -238,16 +270,6 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
         n_jobs=args.n_jobs,
         seed=args.seed,
     )
-    print(
-        f"n={result['n_labels']:,} patients={result['n_patients']:,} "
-        f"ROC-AUC {result['roc_auc_text']}  PR-AUC {result['pr_auc_text']}"
-    )
-    if args.output_file:
-        output_file = Path(args.output_file)
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        output_file.write_text(json.dumps(result, indent=2))
-        print(f"Wrote {output_file}")
-    return result
 
 
 if __name__ == "__main__":

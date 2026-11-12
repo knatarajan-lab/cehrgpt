@@ -853,6 +853,10 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.gradient_checkpointing = False
 
         # Initialize weights and apply final processing
+        # Runtime switch for differential validation, not part of the checkpoint: False keeps
+        # an attention mask without padding on the flash path, as before it was dropped.
+        self._drop_unpadded_flash_attention_mask = True
+
         self.post_init()
 
         # We do need to update the pre-computed attention bias matrix if sample packing requires a larger context window
@@ -968,6 +972,20 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
     def set_value_input_embeddings(self, value: nn.Module):
         self.vte = value
 
+    def concept_embeddings(self, input_ids: torch.LongTensor) -> torch.Tensor:
+        """Embeddings of the concept tokens, from the pretrained embeddings where a token has one."""
+        if self.config.use_pretrained_embeddings:
+            pretrained_token_id_indicators = torch.isin(
+                input_ids,
+                torch.tensor(self.config.pretrained_token_ids).to(input_ids.device),
+            )
+            return torch.where(
+                pretrained_token_id_indicators.unsqueeze(-1),
+                self.pretrained_wte(input_ids),
+                self.wte(input_ids),
+            )
+        return self.wte(input_ids)
+
     def get_input_embeddings(self):
         return self.wte
 
@@ -1041,6 +1059,24 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
 
         raw_attention_mask = attention_mask  # save before conversion for local-attention window
         attention_mask = self.prepare_attention_mask(input_ids, attention_mask)
+
+        # The flash path un-pads the keys and values of every layer with the mask, which with a
+        # KV cache copies the whole cache at every decoding step, and derives the un-pad indices
+        # with several GPU-to-CPU syncs per layer (reuse_unpad_data can't share them across the
+        # layers under torch.inference_mode, whose tensors have no version counter). A mask
+        # without padding changes nothing, so it is dropped: one sync per forward pass instead.
+        # Evaluation only, a training step would pay the sync without ever dropping its mask.
+        if (
+            self._drop_unpadded_flash_attention_mask
+            and not self.training
+            and attention_mask is not None
+            and attention_mask.dim() == 2
+            and getattr(self.config, "_attn_implementation", "eager")
+            == "flash_attention_2"
+            and not getattr(self.config, "use_local_attention", False)
+            and bool(attention_mask.all())
+        ):
+            attention_mask = None
 
         # SDPA cannot take `is_causal=True` together with an explicit mask, so causality
         # has to be folded into the mask. Done once here rather than per layer: at a 16k
@@ -1128,18 +1164,7 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         # head_mask has shape n_layer x batch x n_heads x N x N
         head_mask = self.get_head_mask(head_mask, self.config.n_layer)
 
-        if self.config.use_pretrained_embeddings:
-            pretrained_token_id_indicators = torch.isin(
-                input_ids,
-                torch.tensor(self.config.pretrained_token_ids).to(input_ids.device),
-            )
-            input_embeddings = torch.where(
-                pretrained_token_id_indicators.unsqueeze(-1),
-                self.pretrained_wte(input_ids),
-                self.wte(input_ids),
-            )
-        else:
-            input_embeddings = self.wte(input_ids)
+        input_embeddings = self.concept_embeddings(input_ids)
 
         if self.config.causal_sfm and input_shape[1] >= self.config.demographics_size:
             demographic_embeddings = input_embeddings[
@@ -1477,6 +1502,13 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             self.value_head = nn.Linear(
                 config.n_embd, config.value_vocab_size, bias=False
             )
+            # Combines h_t with the embedding of token t+1, so the value bin is predicted
+            # for a known lab instead of averaged over every token that could come next
+            self.value_condition_layer = nn.Sequential(
+                nn.Linear(2 * config.n_embd, config.n_embd),
+                nn.GELU(approximate="tanh"),
+                nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon),
+            )
         if self.config.include_age_at_vs_prediction:
             self.age_at_vs_head = nn.Linear(
                 config.n_embd, config.age_at_vs_vocab_size, bias=False
@@ -1507,6 +1539,41 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         self._generation_share_prompt_prefill = True
         self._generation_track_ages_override = None
         self._generation_last_token_logits_only = True
+        # (tokenizer, lookup) of _get_generation_time_delta_lookup
+        self._generation_time_delta_lookup = None
+
+    def _get_generation_time_delta_lookup(
+        self, cehrgpt_tokenizer, device: torch.device
+    ) -> torch.Tensor:
+        """
+        The days every token moves time forward by, indexed by token id.
+
+        Built with a pass over the whole vocabulary, so it is kept for the next generations with
+        the same tokenizer rather than rebuilt for every call of generate.
+        """
+        cached = self._generation_time_delta_lookup
+        if (
+            cached is not None
+            and cached[0] is cehrgpt_tokenizer
+            and cached[1].device == device
+            and cached[1].shape[0] == self.config.vocab_size
+        ):
+            return cached[1]
+        time_delta_lookup = torch.zeros(
+            self.config.vocab_size, dtype=torch.float32, device=device
+        )
+        time_token_ids = []
+        time_token_days = []
+        for token, token_id in cehrgpt_tokenizer.get_vocab().items():
+            if token_id < self.config.vocab_size and is_att_token(token):
+                time_token_ids.append(token_id)
+                time_token_days.append(extract_time_interval_in_days(token))
+        if time_token_ids:
+            time_delta_lookup[torch.tensor(time_token_ids, device=device)] = (
+                torch.tensor(time_token_days, dtype=torch.float32, device=device)
+            )
+        self._generation_time_delta_lookup = (cehrgpt_tokenizer, time_delta_lookup)
+        return time_delta_lookup
 
     def _can_share_generation_prompt_prefill(self) -> bool:
         return (
@@ -1564,6 +1631,25 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
     def set_output_embeddings(self, new_embeddings):
         self.lm_head = new_embeddings
+
+    def compute_next_value_logits(
+        self, hidden_states: torch.Tensor, next_token_ids: torch.LongTensor
+    ) -> torch.Tensor:
+        """
+        Value logits of the tokens in `next_token_ids`, predicted from the hidden states one step earlier.
+
+        hidden_states is (..., n_embd) and next_token_ids has the same leading shape; position i of
+        hidden_states is the state just before next_token_ids[i] is consumed.
+        """
+        # The same concept embeddings the model reads as input, so a token with a pretrained
+        # embedding is described to the value head the same way
+        next_token_embeddings = self.cehrgpt.concept_embeddings(
+            next_token_ids.to(self.cehrgpt.wte.weight.device)
+        ).to(device=hidden_states.device, dtype=hidden_states.dtype)
+        value_hidden_states = self.value_condition_layer(
+            torch.cat([hidden_states, next_token_embeddings], dim=-1)
+        )
+        return self.value_head(value_hidden_states)
 
     def get_value_output_embeddings(self):
         if self.config.include_values:
@@ -1623,8 +1709,13 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         cehrgpt_tokenizer,
         past_key_values=None,
         inputs_embeds=None,
+        prompt_prefill=None,
+        return_prompt_prefill=False,
         **kwargs,
     ):
+        # prompt_prefill and return_prompt_prefill are arguments of generate consumed by
+        # _sample. They are named here because generate only accepts the arguments of this
+        # method and of forward.
         ages = kwargs.get("ages")
         # Omit tokens covered by past_key_values
         if past_key_values:
@@ -1927,10 +2018,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             logits_hidden_states = hidden_states
 
         lm_logits = self.lm_head(logits_hidden_states)
-        if self.cehrgpt.include_values:
-            value_logits = self.value_head(logits_hidden_states)
-        else:
-            value_logits = None
 
         linear_prob_hidden_states = None
         # We don't process this during the generation phase, indicated by
@@ -2013,6 +2100,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             shift_logits = lm_logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             valid_tokens: torch.BoolTensor = shift_labels != -100
+            # Every loss term is a sum over its own predictions divided by this one count, so the
+            # total is a per-token negative log-likelihood of the sequence and every prediction of a
+            # kind carries the same weight (its *_loss_weight). Dividing a term by its own count
+            # instead would up-weight rare predictions such as time tokens by 1 / their frequency.
             total_num_tokens = valid_tokens.sum()
             if (
                 self.cehrgpt.config.lab_token_penalty
@@ -2034,7 +2125,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     token_loss * self.cehrgpt.config.lab_token_loss_weight,
                     token_loss,
                 )
-
                 token_loss = token_loss.sum() / total_num_tokens
             else:
                 # Flatten the tokens
@@ -2175,27 +2265,31 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     * float(not self.config.freeze_cehrgpt_generation_model)
                 )
 
-            if true_values is not None and true_value_indicators is not None:
-                true_values = true_values.to(value_logits.device)
-                shift_value_logits = value_logits[..., :-1, :].contiguous()
-                shift_value_indicators = true_value_indicators[..., :-1].contiguous()
+            if (
+                self.cehrgpt.include_values
+                and true_values is not None
+                and true_value_indicators is not None
+            ):
+                true_values = true_values.to(lm_logits.device)
+                shift_value_logits = self.compute_next_value_logits(
+                    hidden_states[:, :-1, :], input_ids[:, 1:]
+                )
+                # Position t predicts the value of token t+1, so the mask comes from t+1 as well.
+                # Taking it from t would skip every value whose previous token has none, such as
+                # the first lab of a panel.
+                shift_value_indicators = (
+                    true_value_indicators[..., 1:].contiguous().to(lm_logits.device)
+                )
                 shift_next_values = true_values[..., 1:].contiguous()
                 value_loss_fct = CrossEntropyLoss(reduction="none")
                 token_value_loss = value_loss_fct(
-                    shift_value_logits.view(-1, shift_value_logits.size(-1)),
+                    shift_value_logits.reshape(-1, shift_value_logits.size(-1)),
                     shift_next_values.view(-1),
                 )
                 token_value_loss = torch.where(
                     shift_value_indicators.view(-1), token_value_loss, 0
                 )
                 token_value_loss = token_value_loss.sum() / total_num_tokens
-                if (
-                    self.cehrgpt.config.lab_token_penalty
-                    and self.cehrgpt.config.lab_token_exists
-                ):
-                    token_value_loss = (
-                        token_value_loss * self.config.lab_token_loss_weight
-                    )
                 loss += (
                     token_value_loss
                     * self.config.value_prediction_loss_weight
@@ -2246,7 +2340,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             loss=loss,
             logits=lm_logits,
             value_indicators=value_indicators,
-            next_value_logits=value_logits,
+            # The value head needs the next token, which is only known once it is sampled,
+            # so generation calls compute_next_value_logits on these hidden states
+            value_hidden_states=(
+                logits_hidden_states if self.cehrgpt.include_values else None
+            ),
             past_key_values=transformer_outputs.past_key_values,
             hidden_states=transformer_outputs.hidden_states,
             linear_prob_hidden_states=linear_prob_hidden_states,
@@ -2309,6 +2407,29 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
         # Remove this from the model_kwargs and will pass it to other functions explicitly
         cehrgpt_tokenizer = model_kwargs.pop("cehrgpt_tokenizer")
+
+        # generate(prompt_prefill=...) continues a prompt from what an earlier generation of
+        # the same prompt computed, returned by generate(return_prompt_prefill=True): the
+        # logits of the first new token and the KV cache of the prompt. The first decoding
+        # step then uses those very numbers instead of running the model on the prompt, so
+        # it is identical to the step of the generation they come from.
+        prompt_prefill = model_kwargs.pop("prompt_prefill", None)
+        return_prompt_prefill = model_kwargs.pop("return_prompt_prefill", False)
+        returned_prompt_prefill = None
+        if (prompt_prefill is not None or return_prompt_prefill) and (
+            self.cehrgpt.config.causal_sfm
+        ):
+            raise ValueError(
+                "prompt_prefill cannot be used with causal_sfm, every sequence has its own "
+                "random vector in the prompt"
+            )
+        if prompt_prefill is not None:
+            if model_kwargs.get("past_key_values") is not None:
+                raise ValueError("prompt_prefill and past_key_values are exclusive")
+            if output_attentions or output_hidden_states:
+                raise ValueError(
+                    "prompt_prefill has no attentions or hidden states of the prompt to return"
+                )
 
         # init attention / hidden states / scores tuples
         scores = () if (return_dict_in_generate and output_scores) else None
@@ -2380,28 +2501,22 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             else track_ages_override
         )
         if track_ages:
-            time_delta_lookup = torch.zeros(
-                self.config.vocab_size, dtype=torch.float32, device=input_ids.device
+            time_delta_lookup = self._get_generation_time_delta_lookup(
+                cehrgpt_tokenizer, input_ids.device
             )
-            time_token_ids = []
-            time_token_days = []
-            for token, token_id in cehrgpt_tokenizer.get_vocab().items():
-                if token_id < self.config.vocab_size and is_att_token(token):
-                    time_token_ids.append(token_id)
-                    time_token_days.append(extract_time_interval_in_days(token))
-            if time_token_ids:
-                time_delta_lookup[
-                    torch.tensor(time_token_ids, device=input_ids.device)
-                ] = torch.tensor(
-                    time_token_days, dtype=torch.float32, device=input_ids.device
-                )
             batched_time_delta = torch.zeros(
                 batch_size, dtype=torch.float32, device=input_ids.device
             )
             batched_ages = model_kwargs.get("ages", None)
             if batched_ages is None:
+                # generate(num_return_sequences=N) repeats one prompt N times, whose ages
+                # are then decoded once rather than N times
+                rows_are_identical = torch.equal(
+                    input_ids, input_ids[:1].expand_as(input_ids)
+                )
+                rows_to_decode = input_ids[:1] if rows_are_identical else input_ids
                 batched_ages = []
-                for token_ids in input_ids.detach().cpu():
+                for token_ids in rows_to_decode.detach().cpu():
                     concept_ids = cehrgpt_tokenizer.decode(
                         token_ids.numpy(), skip_special_tokens=False
                     )
@@ -2409,6 +2524,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 batched_ages = torch.as_tensor(
                     np.asarray(batched_ages), device=input_ids.device
                 )
+                if rows_are_identical:
+                    batched_ages = batched_ages.repeat(batch_size, 1)
             else:
                 batched_ages = batched_ages.to(input_ids.device)
             base_ages = batched_ages[:, -1]
@@ -2419,6 +2536,39 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             batched_ages = None
             base_ages = None
             model_kwargs["ages"] = None
+
+        # A prefill stands for one prompt: the one every row of this generation must have, and,
+        # when it is reused, the one it was computed from. Checked on the tokens and the values
+        # themselves, a prompt of the same length would otherwise be continued with the logits
+        # and the KV cache of another one.
+        prompt_rows = {
+            "input_ids": input_ids,
+            "value_indicators": value_indicators,
+            "values": values,
+            "ages": batched_ages,
+        }
+        if prompt_prefill is not None or return_prompt_prefill:
+            for name, rows in prompt_rows.items():
+                if rows is not None and not torch.equal(
+                    rows, rows[:1].expand_as(rows)
+                ):
+                    raise ValueError(
+                        f"prompt_prefill needs every sequence to start from the same prompt, "
+                        f"the {name} differ"
+                    )
+        if prompt_prefill is not None:
+            for name, rows in prompt_rows.items():
+                expected = prompt_prefill["prompt"][name]
+                if (rows is None) != (expected is None) or (
+                    rows is not None
+                    and (
+                        rows.shape[1:] != expected.shape[1:]
+                        or not torch.equal(rows[:1], expected.to(rows.device))
+                    )
+                ):
+                    raise ValueError(
+                        f"prompt_prefill was computed from another prompt, the {name} differ"
+                    )
 
         # `generate(num_return_sequences=N)` expands one prompt to N identical
         # rows before entering this sampling loop.  In eval mode, and without
@@ -2460,7 +2610,27 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             )
 
             # forward pass to get next token
-            if share_prompt_prefill and not prompt_prefilled:
+            if prompt_prefill is not None and not prompt_prefilled:
+                # The rows of the logits are cloned: they are processed row by row below
+                outputs = CehrGptCausalLMOutput(
+                    logits=prompt_prefill["logits"]
+                    .expand(batch_size, -1, -1)
+                    .clone(),
+                    value_hidden_states=(
+                        prompt_prefill["value_hidden_states"].expand(batch_size, -1, -1)
+                        if prompt_prefill["value_hidden_states"] is not None
+                        else None
+                    ),
+                    past_key_values=tuple(
+                        tuple(
+                            state.expand(batch_size, *state.shape[1:])
+                            for state in layer_past
+                        )
+                        for layer_past in prompt_prefill["past_key_values"]
+                    ),
+                )
+                prompt_prefilled = True
+            elif share_prompt_prefill and not prompt_prefilled:
                 single_inputs = {
                     key: (
                         value[:1]
@@ -2478,8 +2648,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     output_hidden_states=output_hidden_states,
                 )
                 outputs.logits = outputs.logits.expand(batch_size, -1, -1)
-                if outputs.next_value_logits is not None:
-                    outputs.next_value_logits = outputs.next_value_logits.expand(
+                if outputs.value_hidden_states is not None:
+                    outputs.value_hidden_states = outputs.value_hidden_states.expand(
                         batch_size, -1, -1
                     )
                 outputs.past_key_values = tuple(
@@ -2500,6 +2670,32 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             if synced_gpus and this_peer_finished:
                 continue  # don't waste resources running the code we don't need
+
+            if (
+                return_prompt_prefill
+                and returned_prompt_prefill is None
+                and prompt_prefill is None
+                and outputs.past_key_values is not None
+                and input_ids.shape[1] == cur_len
+            ):
+                # The sequences share the prompt, so the first row stands for all of them.
+                # Copied, so the rest of this generation can be freed.
+                returned_prompt_prefill = {
+                    "prompt": {
+                        name: rows[:1].clone() if rows is not None else None
+                        for name, rows in prompt_rows.items()
+                    },
+                    "logits": outputs.logits[:1, -1:].clone(),
+                    "value_hidden_states": (
+                        outputs.value_hidden_states[:1, -1:].clone()
+                        if outputs.value_hidden_states is not None
+                        else None
+                    ),
+                    "past_key_values": tuple(
+                        tuple(state[:1].clone() for state in layer_past)
+                        for layer_past in outputs.past_key_values
+                    ),
+                }
 
             next_token_logits = outputs.logits[:, -1, :]
 
@@ -2569,7 +2765,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 next_value_indicators = torch.isin(
                     next_tokens, lab_token_ids
                 )
-                next_value_logits = outputs.next_value_logits[:, -1]
+                next_value_logits = self.compute_next_value_logits(
+                    outputs.value_hidden_states[:, -1], next_tokens
+                )
                 # sample
                 next_value_probs = nn.functional.softmax(next_value_logits, dim=-1)
                 next_value_tokens = torch.multinomial(next_value_probs, num_samples=1)
@@ -2621,6 +2819,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             attentions=decoder_attentions,
             hidden_states=decoder_hidden_states,
             past_key_values=model_kwargs.get("past_key_values"),
+            prompt_prefill=returned_prompt_prefill,
         )
 
 

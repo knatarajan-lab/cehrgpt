@@ -4,10 +4,11 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import pandas as pd
 import torch
-from transformers import GenerationConfig
+from transformers import GenerationConfig, PreTrainedModel
 
 from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token, is_visit_start
 from cehrgpt.models.config import CEHRGPTConfig
@@ -460,6 +461,902 @@ class TestGenerationDifferentialEquivalence(unittest.TestCase):
         model.config._attn_implementation = "flash_attention_2"
 
         self.assertFalse(model._can_share_generation_prompt_prefill())
+
+
+class EncodingDifferentialTokenizer(DifferentialTokenizer):
+    def encode(self, tokens):
+        return [self.vocab[token] for token in tokens]
+
+
+PROMPT = ["year:2000", "age:20", "Gender/1", "Race/1", "VS", "C8", "C9"]
+
+
+class TimeTokenizer(EncodingDifferentialTokenizer):
+    """A second age token, and time tokens of more than a year, which move the ages forward."""
+
+    def __init__(self):
+        super().__init__()
+        tokens = [self.inverse_vocab[index] for index in range(len(self.vocab))]
+        tokens[15] = "age:30"
+        tokens[16:24] = [f"D{400 + index}" for index in range(8)]
+        self.vocab = {token: index for index, token in enumerate(tokens)}
+        self.inverse_vocab = {index: token for token, index in self.vocab.items()}
+
+
+class ValueTokenizer(EncodingDifferentialTokenizer):
+    """Every token is a lab, so every generated token gets a value from the value head."""
+
+    def __init__(self):
+        super().__init__()
+        self.lab_token_ids = list(range(24))
+
+    def get_value_vocab(self):
+        return {f"BIN:{index}": index for index in range(6)}
+
+
+def build_generation_model(
+    apply_rotary=False,
+    attn_implementation=None,
+    attn_pdrop=0.0,
+    backbone="gpt2",
+    include_values=False,
+):
+    torch.manual_seed(7)
+    config = CEHRGPTConfig(
+        vocab_size=24,
+        n_positions=32,
+        n_embd=32,
+        n_layer=2,
+        n_head=4,
+        n_inner=64,
+        bos_token_id=1,
+        eos_token_id=None,
+        pad_token_id=0,
+        include_values=include_values,
+        value_vocab_size=6 if include_values else None,
+        lab_token_ids=list(range(24)) if include_values else None,
+        use_sub_time_tokenization=False,
+        include_ttv_prediction=False,
+        include_motor_time_to_event=False,
+        apply_rotary=apply_rotary,
+        backbone=backbone,
+        resid_pdrop=0.0,
+        embd_pdrop=0.0,
+        attn_pdrop=attn_pdrop,
+    )
+    if attn_implementation is None:
+        return CEHRGPT2LMHeadModel(config).eval()
+    config._attn_implementation = attn_implementation
+    # flash-attn is not installed where the unit tests run, the tests patch its functions
+    with mock.patch.object(
+        PreTrainedModel,
+        "_check_and_enable_flash_attn_2",
+        classmethod(lambda cls, config, *args, **kwargs: config),
+    ):
+        return CEHRGPT2LMHeadModel(config).eval()
+
+
+def sampling_config(num_return_sequences=3, max_new_tokens=5, **kwargs):
+    return GenerationConfig(
+        max_length=32,
+        max_new_tokens=max_new_tokens,
+        num_return_sequences=num_return_sequences,
+        do_sample=True,
+        top_p=1.0,
+        use_cache=True,
+        pad_token_id=0,
+        eos_token_id=None,
+        return_dict_in_generate=True,
+        **kwargs,
+    )
+
+
+def record_ages(model):
+    """The ages of every forward pass of the model, and the handle of the hook recording them."""
+    ages = []
+    handle = model.cehrgpt.register_forward_pre_hook(
+        lambda _module, _args, kwargs: ages.append(kwargs.get("ages")),
+        with_kwargs=True,
+    )
+    return ages, handle
+
+
+class TestStoppingCriteriaReuse(unittest.TestCase):
+    def _predictor(self):
+        return TimeToEventModel(
+            tokenizer=FakeTokenizer(),
+            model=FakeGenerationModel(),
+            outcome_events=["OUT"],
+            generation_config=GenerationConfig(
+                max_length=8, max_new_tokens=1, num_return_sequences=1, do_sample=True
+            ),
+        )
+
+    def test_the_vocabulary_tables_are_built_once_per_task_window(self):
+        predictor = self._predictor()
+        with mock.patch(
+            "cehrgpt.time_to_event.time_to_event_model.TimeToEventStoppingCriteria",
+            wraps=TimeToEventStoppingCriteria,
+        ) as criteria_class:
+            first = predictor._get_stopping_criteria(0, -1, 0, 30)
+            second = predictor._get_stopping_criteria(0, -1, 0, 30)
+            other_window = predictor._get_stopping_criteria(0, -1, 0, 60)
+
+        self.assertIs(first, second)
+        self.assertIsNot(first, other_window)
+        self.assertEqual(criteria_class.call_count, 2)
+
+    def test_replaced_outcome_events_or_tokenizer_get_their_own_criteria(self):
+        predictor = self._predictor()
+        first = predictor._get_stopping_criteria(0, -1, 0, 30)
+
+        predictor.outcome_events = ["X"]
+        other_events = predictor._get_stopping_criteria(0, -1, 0, 30)
+        self.assertIsNot(other_events, first)
+        # X is the outcome now, OUT is not anymore
+        self.assertEqual(
+            other_events(torch.tensor([[3], [2]]), scores=None).tolist(), [True, False]
+        )
+
+        predictor.tokenizer = FakeTokenizer()
+        self.assertIsNot(predictor._get_stopping_criteria(0, -1, 0, 30), other_events)
+
+    def test_a_reused_criteria_forgets_the_previous_generation(self):
+        predictor = self._predictor()
+        criteria = predictor._get_stopping_criteria(0, -1, 0, 15)
+        # 20 days, then a token after the 15 day window: finished
+        criteria(torch.tensor([[0]]), scores=None)
+        criteria(torch.tensor([[0, 0]]), scores=None)
+        self.assertEqual(
+            criteria(torch.tensor([[0, 0, 3]]), scores=None).tolist(), [True]
+        )
+
+        criteria = predictor._get_stopping_criteria(0, -1, 0, 15)
+
+        # Same batch size as before, the time and the finished state start over
+        self.assertEqual(criteria(torch.tensor([[3]]), scores=None).tolist(), [False])
+        self.assertEqual(
+            criteria(torch.tensor([[3, 0]]), scores=None).tolist(), [False]
+        )
+
+
+class TestPromptCacheReuse(unittest.TestCase):
+    def _predictor(self, model, reuse_prompt_cache, num_return_sequences=6):
+        return TimeToEventModel(
+            tokenizer=EncodingDifferentialTokenizer(),
+            model=model,
+            outcome_events=["C12"],
+            generation_config=GenerationConfig(
+                max_length=32,
+                max_new_tokens=5,
+                num_return_sequences=num_return_sequences,
+                do_sample=True,
+                top_p=1.0,
+                use_cache=True,
+                pad_token_id=0,
+                eos_token_id=None,
+                return_dict_in_generate=True,
+            ),
+            batch_size=2,
+            enable_early_stopping=False,
+            reuse_prompt_cache=reuse_prompt_cache,
+        )
+
+    def _simulate(self, model, reuse_prompt_cache, prompt=PROMPT):
+        """The sequences of a simulation, and the sequence length of every forward pass."""
+        predictor = self._predictor(model, reuse_prompt_cache)
+        forward_lengths = []
+        handle = model.cehrgpt.register_forward_pre_hook(
+            lambda _module, args, kwargs: forward_lengths.append(
+                tuple((args[0] if args else kwargs["input_ids"]).shape)
+            ),
+            with_kwargs=True,
+        )
+        try:
+            torch.manual_seed(2024)
+            sequences = predictor.simulate(prompt)
+        finally:
+            handle.remove()
+        return predictor, sequences, forward_lengths
+
+    def test_the_prompt_is_encoded_once_for_all_the_batches(self):
+        model = build_generation_model()
+
+        _, _, without_reuse = self._simulate(model, reuse_prompt_cache=False)
+        _, _, with_reuse = self._simulate(model, reuse_prompt_cache=True)
+
+        prompt_length = len(PROMPT)
+        self.assertEqual(
+            sum(length == prompt_length for _, length in without_reuse), 3
+        )
+        # The first batch encodes the prompt, the other two only read new tokens
+        self.assertEqual(sum(length == prompt_length for _, length in with_reuse), 1)
+        self.assertEqual(
+            [shape for shape in with_reuse if shape[1] != prompt_length],
+            [(2, 1)] * (len(with_reuse) - 1),
+        )
+        # The two batches that start from the first one's prompt skip its forward pass
+        self.assertEqual(len(with_reuse), len(without_reuse) - 2)
+
+    def test_the_samples_match_the_ones_without_reuse(self):
+        for apply_rotary in (False, True):
+            with self.subTest(apply_rotary=apply_rotary):
+                model = build_generation_model(apply_rotary=apply_rotary)
+
+                _, expected, _ = self._simulate(model, reuse_prompt_cache=False)
+                _, actual, _ = self._simulate(model, reuse_prompt_cache=True)
+
+                self.assertEqual(len(actual), 6)
+                self.assertEqual(actual, expected)
+
+    def test_generation_from_the_prompt_prefill_is_identical_to_a_full_prefill(self):
+        tokenizer = EncodingDifferentialTokenizer()
+        prompt = torch.tensor([tokenizer.encode(PROMPT)], dtype=torch.long)
+        generation_config = sampling_config(output_logits=True)
+        for backbone, apply_rotary in (
+            ("gpt2", False),
+            ("gpt2", True),
+            ("qwen2", False),
+        ):
+            with self.subTest(backbone=backbone, apply_rotary=apply_rotary):
+                model = build_generation_model(
+                    apply_rotary=apply_rotary, backbone=backbone
+                )
+
+                torch.manual_seed(99)
+                expected = model.generate(
+                    inputs=prompt,
+                    generation_config=generation_config,
+                    cehrgpt_tokenizer=tokenizer,
+                    return_prompt_prefill=True,
+                )
+                prompt_prefill = expected.prompt_prefill
+                torch.testing.assert_close(
+                    prompt_prefill["prompt"]["input_ids"], prompt, rtol=0, atol=0
+                )
+                self.assertEqual(prompt_prefill["logits"].shape, (1, 1, 24))
+                self.assertEqual(
+                    prompt_prefill["past_key_values"][0][0].shape[0::2],
+                    (1, len(PROMPT)),
+                )
+                kept = {
+                    "logits": prompt_prefill["logits"].clone(),
+                    "key": prompt_prefill["past_key_values"][0][0].clone(),
+                }
+                torch.manual_seed(99)
+                actual = model.generate(
+                    inputs=prompt,
+                    generation_config=generation_config,
+                    cehrgpt_tokenizer=tokenizer,
+                    prompt_prefill=prompt_prefill,
+                )
+
+                # Not close, identical: the first step uses the numbers of the full prefill
+                torch.testing.assert_close(
+                    actual.sequences, expected.sequences, rtol=0, atol=0
+                )
+                self.assertEqual(len(actual.logits), len(expected.logits))
+                for expected_logits, actual_logits in zip(expected.logits, actual.logits):
+                    torch.testing.assert_close(
+                        actual_logits, expected_logits, rtol=0, atol=0
+                    )
+                self.assertIsNone(actual.prompt_prefill)
+                # A generation leaves the prefill it starts from untouched, for the next one
+                torch.testing.assert_close(
+                    prompt_prefill["logits"], kept["logits"], rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    prompt_prefill["past_key_values"][0][0], kept["key"], rtol=0, atol=0
+                )
+
+    def test_the_value_of_the_first_new_token_comes_from_the_prompt_prefill(self):
+        tokenizer = ValueTokenizer()
+        model = build_generation_model(include_values=True)
+        # The value head of a randomly initialized model gives every value about the same
+        # probability whatever the hidden state. Scaled up, the values follow the hidden state.
+        with torch.no_grad():
+            model.value_head.weight.mul_(200)
+        prompt = torch.tensor([tokenizer.encode(PROMPT)], dtype=torch.long)
+        value_kwargs = {
+            "value_indicators": torch.tensor([[False] * 6 + [True]]),
+            "values": torch.tensor([[0] * 6 + [4]]),
+        }
+        generation_config = sampling_config(num_return_sequences=8)
+
+        torch.manual_seed(11)
+        expected = model.generate(
+            inputs=prompt,
+            generation_config=generation_config,
+            cehrgpt_tokenizer=tokenizer,
+            return_prompt_prefill=True,
+            **value_kwargs,
+        )
+        self.assertIsNotNone(expected.prompt_prefill["value_hidden_states"])
+        torch.manual_seed(11)
+        actual = model.generate(
+            inputs=prompt,
+            generation_config=generation_config,
+            cehrgpt_tokenizer=tokenizer,
+            prompt_prefill=expected.prompt_prefill,
+            **value_kwargs,
+        )
+
+        # Every token is a lab: the first new token has a value, sampled from the value
+        # hidden state of the prefill
+        self.assertTrue(expected.sequence_val_masks[:, len(PROMPT)].all())
+        torch.testing.assert_close(
+            actual.sequence_vals, expected.sequence_vals, rtol=0, atol=0
+        )
+        torch.testing.assert_close(actual.sequences, expected.sequences, rtol=0, atol=0)
+
+        # The values of the 8 sequences depend on that hidden state
+        broken = dict(expected.prompt_prefill)
+        torch.manual_seed(0)
+        broken["value_hidden_states"] = torch.randn_like(broken["value_hidden_states"])
+        torch.manual_seed(11)
+        from_broken = model.generate(
+            inputs=prompt,
+            generation_config=generation_config,
+            cehrgpt_tokenizer=tokenizer,
+            prompt_prefill=broken,
+            **value_kwargs,
+        )
+        self.assertFalse(
+            torch.equal(
+                from_broken.sequence_vals[:, len(PROMPT)],
+                expected.sequence_vals[:, len(PROMPT)],
+            )
+        )
+
+    def _prompt_prefill(self, model, tokenizer, prompt_tokens=PROMPT, **kwargs):
+        return model.generate(
+            inputs=torch.tensor([tokenizer.encode(prompt_tokens)], dtype=torch.long),
+            generation_config=sampling_config(num_return_sequences=2, max_new_tokens=2),
+            cehrgpt_tokenizer=tokenizer,
+            return_prompt_prefill=True,
+            **kwargs,
+        ).prompt_prefill
+
+    def test_a_prompt_prefill_of_another_prompt_is_refused(self):
+        tokenizer = EncodingDifferentialTokenizer()
+        model = build_generation_model()
+        prompt_prefill = self._prompt_prefill(model, tokenizer)
+        generation_config = sampling_config(num_return_sequences=2, max_new_tokens=2)
+
+        for other_prompt in (PROMPT[:-1], PROMPT[:-1] + ["C10"]):
+            with self.subTest(other_prompt=other_prompt):
+                with self.assertRaisesRegex(ValueError, "the input_ids differ"):
+                    model.generate(
+                        inputs=torch.tensor(
+                            [tokenizer.encode(other_prompt)], dtype=torch.long
+                        ),
+                        generation_config=generation_config,
+                        cehrgpt_tokenizer=tokenizer,
+                        prompt_prefill=prompt_prefill,
+                    )
+
+    def test_a_prompt_prefill_of_other_values_is_refused(self):
+        tokenizer = ValueTokenizer()
+        model = build_generation_model(include_values=True)
+        indicators = torch.tensor([[False] * 6 + [True]])
+        prompt_prefill = self._prompt_prefill(
+            model,
+            tokenizer,
+            value_indicators=indicators,
+            values=torch.tensor([[0] * 6 + [4]]),
+        )
+
+        with self.assertRaisesRegex(ValueError, "the values differ"):
+            model.generate(
+                inputs=torch.tensor([tokenizer.encode(PROMPT)], dtype=torch.long),
+                generation_config=sampling_config(
+                    num_return_sequences=2, max_new_tokens=2
+                ),
+                cehrgpt_tokenizer=tokenizer,
+                prompt_prefill=prompt_prefill,
+                value_indicators=indicators,
+                values=torch.tensor([[0] * 6 + [2]]),
+            )
+
+    def test_a_prompt_prefill_of_other_ages_is_refused(self):
+        tokenizer = TimeTokenizer()
+        model = build_generation_model(apply_rotary=True)
+        prompt_prefill = self._prompt_prefill(model, tokenizer)
+        self.assertEqual(prompt_prefill["prompt"]["ages"].tolist(), [[20] * len(PROMPT)])
+
+        with self.assertRaisesRegex(ValueError, "the ages differ"):
+            model.generate(
+                inputs=torch.tensor([tokenizer.encode(PROMPT)], dtype=torch.long),
+                generation_config=sampling_config(
+                    num_return_sequences=2, max_new_tokens=2
+                ),
+                cehrgpt_tokenizer=tokenizer,
+                prompt_prefill=prompt_prefill,
+                ages=torch.full((1, len(PROMPT)), 30),
+            )
+
+    def test_a_prompt_prefill_needs_one_prompt_for_all_the_sequences(self):
+        tokenizer = EncodingDifferentialTokenizer()
+        model = build_generation_model()
+        two_prompts = torch.tensor(
+            [tokenizer.encode(PROMPT), tokenizer.encode(PROMPT[:-1] + ["C10"])],
+            dtype=torch.long,
+        )
+        generation_config = sampling_config(num_return_sequences=1, max_new_tokens=2)
+
+        with self.assertRaisesRegex(ValueError, "the same prompt"):
+            model.generate(
+                inputs=two_prompts,
+                generation_config=generation_config,
+                cehrgpt_tokenizer=tokenizer,
+                return_prompt_prefill=True,
+            )
+        with self.assertRaisesRegex(ValueError, "the same prompt"):
+            model.generate(
+                inputs=two_prompts,
+                generation_config=generation_config,
+                cehrgpt_tokenizer=tokenizer,
+                prompt_prefill=self._prompt_prefill(model, tokenizer),
+            )
+
+    def test_a_prompt_prefill_cannot_return_the_states_of_the_prompt(self):
+        tokenizer = EncodingDifferentialTokenizer()
+        model = build_generation_model()
+
+        with self.assertRaisesRegex(ValueError, "no attentions or hidden states"):
+            model.generate(
+                inputs=torch.tensor([tokenizer.encode(PROMPT)], dtype=torch.long),
+                generation_config=sampling_config(
+                    num_return_sequences=2, max_new_tokens=2, output_hidden_states=True
+                ),
+                cehrgpt_tokenizer=tokenizer,
+                prompt_prefill=self._prompt_prefill(model, tokenizer),
+            )
+
+    def test_a_prompt_prefill_is_refused_with_causal_sfm(self):
+        tokenizer = EncodingDifferentialTokenizer()
+        model = build_generation_model()
+        prompt_prefill = self._prompt_prefill(model, tokenizer)
+        model.cehrgpt.config.causal_sfm = True
+
+        with self.assertRaisesRegex(ValueError, "causal_sfm"):
+            model.generate(
+                inputs=torch.tensor([tokenizer.encode(PROMPT)], dtype=torch.long),
+                generation_config=sampling_config(
+                    num_return_sequences=2, max_new_tokens=2
+                ),
+                cehrgpt_tokenizer=tokenizer,
+                prompt_prefill=prompt_prefill,
+            )
+
+    def test_the_ages_move_forward_the_same_with_and_without_reuse(self):
+        model = build_generation_model(apply_rotary=True)
+
+        def simulate(reuse_prompt_cache):
+            predictor = self._predictor(model, reuse_prompt_cache)
+            predictor.tokenizer = TimeTokenizer()
+            ages, handle = record_ages(model)
+            try:
+                torch.manual_seed(2024)
+                sequences = predictor.simulate(PROMPT)
+            finally:
+                handle.remove()
+            # The ages of the decoding steps, one per sequence
+            return sequences, [
+                step.flatten().tolist() for step in ages if step.shape[1] == 1
+            ]
+
+        expected_sequences, expected_ages = simulate(reuse_prompt_cache=False)
+        actual_sequences, actual_ages = simulate(reuse_prompt_cache=True)
+
+        self.assertEqual(actual_sequences, expected_sequences)
+        # A third of the vocabulary is a time token of more than a year: ages did move
+        self.assertGreater(max(max(step) for step in expected_ages), 20)
+        # Without reuse every batch has a prefill and 4 decoding steps, with reuse the
+        # batches after the first one have 4 decoding steps and no prefill
+        self.assertEqual(actual_ages, expected_ages)
+
+    def test_different_prompts_in_a_batch_keep_their_own_ages(self):
+        tokenizer = TimeTokenizer()
+        model = build_generation_model(apply_rotary=True)
+        ages, handle = record_ages(model)
+        try:
+            model.generate(
+                inputs=torch.tensor(
+                    [
+                        tokenizer.encode(PROMPT),
+                        tokenizer.encode(["year:2000", "age:30"] + PROMPT[2:]),
+                    ],
+                    dtype=torch.long,
+                ),
+                generation_config=sampling_config(
+                    num_return_sequences=1, max_new_tokens=1
+                ),
+                cehrgpt_tokenizer=tokenizer,
+            )
+        finally:
+            handle.remove()
+
+        self.assertEqual(
+            ages[0].tolist(), [[20] * len(PROMPT), [30] * len(PROMPT)]
+        )
+
+    def test_the_time_token_lookup_is_per_tokenizer(self):
+        model = build_generation_model(apply_rotary=True)
+        tokenizer, time_tokenizer = EncodingDifferentialTokenizer(), TimeTokenizer()
+        device = torch.device("cpu")
+
+        lookup = model._get_generation_time_delta_lookup(tokenizer, device)
+        self.assertIs(model._get_generation_time_delta_lookup(tokenizer, device), lookup)
+        self.assertEqual(lookup.nonzero().flatten().tolist(), [7])
+
+        time_lookup = model._get_generation_time_delta_lookup(time_tokenizer, device)
+        self.assertEqual(time_lookup[16:24].tolist(), list(range(400, 408)))
+
+    def test_the_samples_and_values_match_for_a_model_with_values(self):
+        class ValueTokenizer(EncodingDifferentialTokenizer):
+            def __init__(self):
+                super().__init__()
+                self.lab_token_ids = [9, 10, 11]
+
+            def get_value_vocab(self):
+                return {f"BIN:{index}": index for index in range(6)}
+
+        torch.manual_seed(7)
+        model = CEHRGPT2LMHeadModel(
+            CEHRGPTConfig(
+                vocab_size=24,
+                n_positions=32,
+                n_embd=32,
+                n_layer=2,
+                n_head=4,
+                n_inner=64,
+                bos_token_id=1,
+                eos_token_id=None,
+                pad_token_id=0,
+                include_values=True,
+                value_vocab_size=6,
+                lab_token_ids=[9, 10, 11],
+                use_sub_time_tokenization=False,
+                include_ttv_prediction=False,
+                include_motor_time_to_event=False,
+                resid_pdrop=0.0,
+                embd_pdrop=0.0,
+                attn_pdrop=0.0,
+            )
+        ).eval()
+
+        def simulate(reuse_prompt_cache):
+            predictor = self._predictor(model, reuse_prompt_cache)
+            predictor.tokenizer = ValueTokenizer()
+            torch.manual_seed(3)
+            # The last token of the prompt is a lab with a value, read from the prompt and
+            # not from the cache
+            return predictor.simulate(
+                PROMPT,
+                value_indicators=[False] * 6 + [True],
+                values=[0] * 6 + [4],
+                return_values=True,
+            )
+
+        expected_sequences, expected_values = simulate(reuse_prompt_cache=False)
+        actual_sequences, actual_values = simulate(reuse_prompt_cache=True)
+
+        self.assertEqual(actual_sequences, expected_sequences)
+        self.assertEqual(actual_values, expected_values)
+
+    def test_the_same_tokens_with_other_values_are_another_prompt(self):
+        model = build_generation_model(include_values=True)
+        predictor = self._predictor(model, reuse_prompt_cache=True)
+        predictor.tokenizer = ValueTokenizer()
+        indicators = [False] * 6 + [True]
+        predictor.simulate(PROMPT, value_indicators=indicators, values=[0] * 6 + [4])
+        forward_lengths = []
+        handle = model.cehrgpt.register_forward_pre_hook(
+            lambda _module, args, kwargs: forward_lengths.append(
+                (args[0] if args else kwargs["input_ids"]).shape[1]
+            ),
+            with_kwargs=True,
+        )
+        try:
+            predictor.simulate(PROMPT, value_indicators=indicators, values=[0] * 6 + [2])
+        finally:
+            handle.remove()
+
+        # The prompt is encoded again, once, for the other values
+        self.assertEqual(forward_lengths.count(len(PROMPT)), 1)
+
+    def test_the_cache_of_one_patient_is_not_used_for_another(self):
+        model = build_generation_model()
+        predictor, _, _ = self._simulate(model, reuse_prompt_cache=True)
+        first_key = predictor._prompt_cache[0]
+        other_prompt = PROMPT[:-1] + ["C10"]
+
+        self.assertIsNone(
+            predictor._get_prompt_cache(
+                (tuple(predictor.tokenizer.encode(other_prompt)), None, None)
+            )
+        )
+        predictor.simulate(other_prompt)
+
+        self.assertNotEqual(predictor._prompt_cache[0], first_key)
+
+    def test_a_retry_starts_from_the_cache_of_the_first_trial(self):
+        model = build_generation_model()
+        predictor = self._predictor(model, reuse_prompt_cache=True)
+        forward_lengths = []
+        handle = model.cehrgpt.register_forward_pre_hook(
+            lambda _module, args, kwargs: forward_lengths.append(
+                (args[0] if args else kwargs["input_ids"]).shape[1]
+            ),
+            with_kwargs=True,
+        )
+        try:
+            predictor.simulate(PROMPT)
+            forward_lengths.clear()
+            predictor.simulate(PROMPT)
+        finally:
+            handle.remove()
+
+        self.assertEqual(set(forward_lengths), {1})
+
+    def test_models_that_cannot_share_a_prompt_cache_do_not_reuse_it(self):
+        model = build_generation_model()
+        predictor = self._predictor(model, reuse_prompt_cache=True)
+        self.assertTrue(predictor._can_reuse_prompt_cache())
+        model.config.causal_sfm = True
+        self.assertFalse(predictor._can_reuse_prompt_cache())
+        model.config.causal_sfm = False
+        model.config.use_local_attention = True
+        self.assertFalse(predictor._can_reuse_prompt_cache())
+        model.config.use_local_attention = False
+        self.assertFalse(
+            self._predictor(model, reuse_prompt_cache=False)._can_reuse_prompt_cache()
+        )
+
+
+def fake_flash_attn_func(query, key, value, dropout_p=0.0, softmax_scale=None, causal=False):
+    """flash_attn_func on (batch, length, heads, head_dim) tensors, computed with SDPA."""
+    query, key, value = (
+        states.float().transpose(1, 2) for states in (query, key, value)
+    )
+    attn_mask = None
+    if causal:
+        query_length, key_length = query.shape[-2], key.shape[-2]
+        # Aligned to the bottom right, like flash-attn from 2.1
+        attn_mask = torch.ones(query_length, key_length, dtype=torch.bool).tril(
+            diagonal=key_length - query_length
+        )
+    output = torch.nn.functional.scaled_dot_product_attention(
+        query, key, value, attn_mask=attn_mask
+    )
+    return output.transpose(1, 2).to(torch.bfloat16)
+
+
+def unexpected_varlen(*args, **kwargs):
+    raise AssertionError("The keys and values were un-padded")
+
+
+class TestFlashAttentionWithoutPadding(unittest.TestCase):
+    def setUp(self):
+        patches = [
+            mock.patch(
+                "cehrgpt.models.gpt2.flash_attn_func", fake_flash_attn_func, create=True
+            ),
+            mock.patch(
+                "cehrgpt.models.gpt2.flash_attn_varlen_func",
+                unexpected_varlen,
+                create=True,
+            ),
+            mock.patch(
+                "cehrgpt.models.gpt2.index_first_axis",
+                lambda states, indices: states[indices],
+                create=True,
+            ),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _generate(self, model):
+        tokenizer = EncodingDifferentialTokenizer()
+        torch.manual_seed(5)
+        return model.generate(
+            inputs=torch.tensor([tokenizer.encode(PROMPT)], dtype=torch.long),
+            generation_config=GenerationConfig(
+                max_length=32,
+                max_new_tokens=4,
+                num_return_sequences=3,
+                do_sample=True,
+                top_p=1.0,
+                use_cache=True,
+                pad_token_id=0,
+                eos_token_id=None,
+                return_dict_in_generate=True,
+                output_logits=True,
+            ),
+            cehrgpt_tokenizer=tokenizer,
+        )
+
+    def test_generation_from_an_unpadded_prompt_never_unpads(self):
+        flash_model = build_generation_model(attn_implementation="flash_attention_2")
+        eager_model = build_generation_model()
+        eager_model.load_state_dict(flash_model.state_dict())
+
+        # unexpected_varlen fails the generation if a layer takes the un-padding path
+        flash = self._generate(flash_model)
+        eager = self._generate(eager_model)
+
+        # The flash path computes in bfloat16, so only the first step is comparable: the
+        # next ones can follow different samples
+        torch.testing.assert_close(
+            flash.logits[0].float(), eager.logits[0], rtol=0, atol=5e-2
+        )
+
+    def _causal_flags(self, backbone, is_causal=True):
+        """(query length, key length, causal) of every flash_attn_func call of a generation."""
+        calls = []
+
+        def record(query, key, value, dropout_p=0.0, softmax_scale=None, causal=False):
+            calls.append((query.shape[1], key.shape[1], causal))
+            return fake_flash_attn_func(query, key, value, causal=causal)
+
+        model = build_generation_model(
+            attn_implementation="flash_attention_2", backbone=backbone
+        )
+        for block in model.cehrgpt.h:
+            block.attn.is_causal = is_causal
+        with mock.patch(
+            f"cehrgpt.models.{backbone}.flash_attn_func", record, create=True
+        ), mock.patch(
+            f"cehrgpt.models.{backbone}.flash_attn_varlen_func",
+            unexpected_varlen,
+            create=True,
+        ):
+            self._generate(model)
+        return calls
+
+    def test_the_prefill_is_causal_and_a_single_query_is_not(self):
+        prompt_length = len(PROMPT)
+        for backbone in ("gpt2", "qwen2"):
+            with self.subTest(backbone=backbone):
+                calls = self._causal_flags(backbone)
+
+                # 2 layers: the prefill of the 3 sequences, then 3 decoding steps
+                self.assertEqual(
+                    calls[:2], [(prompt_length, prompt_length, True)] * 2
+                )
+                self.assertEqual(
+                    calls[2:],
+                    [
+                        (1, prompt_length + step, False)
+                        for step in (1, 2, 3)
+                        for _layer in range(2)
+                    ],
+                )
+
+    def test_an_attention_that_is_not_causal_stays_not_causal(self):
+        for backbone in ("gpt2", "qwen2"):
+            with self.subTest(backbone=backbone):
+                calls = self._causal_flags(backbone, is_causal=False)
+
+                self.assertEqual({causal for _, _, causal in calls}, {False})
+
+    def test_the_whole_prompt_matches_eager_attention(self):
+        # Every position of the prompt, not only the last one: a missing causal mask changes
+        # the logits of all the positions before the last
+        flash_model = build_generation_model(attn_implementation="flash_attention_2")
+        eager_model = build_generation_model()
+        eager_model.load_state_dict(flash_model.state_dict())
+        input_ids = torch.tensor([EncodingDifferentialTokenizer().encode(PROMPT)])
+        kwargs = {
+            "input_ids": input_ids,
+            "attention_mask": torch.ones_like(input_ids, dtype=torch.bool),
+            "output_motor_features": False,
+            "return_dict": True,
+        }
+
+        flash_logits = flash_model(**kwargs).logits.float()
+        eager_logits = eager_model(**kwargs).logits
+
+        self.assertEqual(flash_logits.shape, (1, len(PROMPT), 24))
+        torch.testing.assert_close(flash_logits, eager_logits, rtol=0, atol=5e-2)
+        with mock.patch(
+            "cehrgpt.models.gpt2.flash_attn_func",
+            lambda query, key, value, *args, **kwargs: fake_flash_attn_func(
+                query, key, value, causal=False
+            ),
+        ):
+            not_causal_logits = flash_model(**kwargs).logits.float()
+        # The tolerance above is tight enough to tell a missing causal mask
+        self.assertGreater(
+            (not_causal_logits - eager_logits).abs().max().item(), 5e-2
+        )
+
+    def test_the_mask_is_kept_when_dropping_it_is_switched_off(self):
+        model = build_generation_model(attn_implementation="flash_attention_2")
+        model.cehrgpt._drop_unpadded_flash_attention_mask = False
+        input_ids = torch.tensor([[2, 3, 4, 5, 6, 8]])
+
+        with self.assertRaisesRegex(AssertionError, "un-padded"):
+            model(
+                input_ids=input_ids,
+                attention_mask=torch.ones_like(input_ids, dtype=torch.bool),
+                output_motor_features=False,
+                return_dict=True,
+            )
+
+    def test_a_padded_batch_keeps_its_mask(self):
+        model = build_generation_model(attn_implementation="flash_attention_2")
+        input_ids = torch.tensor([[2, 3, 4, 5, 6, 8], [2, 3, 4, 5, 0, 0]])
+
+        with self.assertRaisesRegex(AssertionError, "un-padded"):
+            model(
+                input_ids=input_ids,
+                attention_mask=input_ids != 0,
+                output_motor_features=False,
+                return_dict=True,
+            )
+
+    def test_training_keeps_the_mask(self):
+        model = build_generation_model(attn_implementation="flash_attention_2").train()
+        input_ids = torch.tensor([[2, 3, 4, 5, 6, 8]])
+
+        with self.assertRaisesRegex(AssertionError, "un-padded"):
+            model(
+                input_ids=input_ids,
+                attention_mask=torch.ones_like(input_ids, dtype=torch.bool),
+                output_motor_features=False,
+                return_dict=True,
+            )
+
+
+class TestFlashAttentionDropout(unittest.TestCase):
+    def _dropout_rates(self, training):
+        """The dropout rates the flash-attn functions are called with by a forward pass."""
+        rates = []
+
+        def record_flash(query, key, value, dropout_p=0.0, **kwargs):
+            rates.append(dropout_p)
+            return fake_flash_attn_func(query, key, value, **kwargs)
+
+        def record_varlen(query, key, value, dropout_p=0.0, **kwargs):
+            rates.append(dropout_p)
+            # One unpadded sequence, the un-padded states are (length, heads, head_dim)
+            return fake_flash_attn_func(
+                query[None], key[None], value[None], causal=kwargs["causal"]
+            )[0]
+
+        model = build_generation_model(
+            attn_implementation="flash_attention_2", attn_pdrop=0.1
+        ).train(training)
+        input_ids = torch.tensor([[2, 3, 4, 5, 6, 8]])
+        with mock.patch(
+            "cehrgpt.models.gpt2.flash_attn_func", record_flash, create=True
+        ), mock.patch(
+            "cehrgpt.models.gpt2.flash_attn_varlen_func", record_varlen, create=True
+        ), mock.patch(
+            "cehrgpt.models.gpt2.index_first_axis",
+            lambda states, indices: states[indices],
+            create=True,
+        ), mock.patch(
+            "cehrgpt.models.gpt2.pad_input",
+            lambda states, indices, batch_size, length: states[None],
+            create=True,
+        ):
+            model(
+                input_ids=input_ids,
+                attention_mask=torch.ones_like(input_ids, dtype=torch.bool),
+                output_motor_features=False,
+                return_dict=True,
+            )
+        return rates
+
+    def test_attention_dropout_is_off_outside_training(self):
+        self.assertEqual(self._dropout_rates(training=False), [0.0, 0.0])
+
+    def test_attention_dropout_is_kept_in_training(self):
+        self.assertEqual(self._dropout_rates(training=True), [0.1, 0.1])
 
 
 if __name__ == "__main__":

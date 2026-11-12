@@ -6,7 +6,7 @@ import signal
 import subprocess
 import sys
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, replace
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
@@ -37,6 +37,7 @@ from cehrgpt.runners.gpt_runner_util import (
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.time_to_event.time_to_event_model import TimeToEventModel
 from cehrgpt.tokenization.special_tokens import OUT_OF_VOCABULARY_TOKEN
+from cehrgpt.tools.bootstrap_ci import evaluate_predictions
 
 LOG = logging.get_logger("transformers")
 
@@ -54,16 +55,45 @@ class TaskConfig:
     max_new_tokens: int = 128
 
 
-def load_task_config_from_yaml(task_config_yaml_file_path: str) -> TaskConfig:
+def load_task_config_from_yaml(
+    task_config_yaml_file_path: str, overrides: Optional[List[str]] = None
+) -> TaskConfig:
     # Read YAML file
     try:
         with open(task_config_yaml_file_path, "r") as stream:
             task_definition = yaml.safe_load(stream)
-            return TaskConfig(**task_definition)
+            task_config = TaskConfig(**task_definition)
     except (yaml.YAMLError, OSError) as e:
         raise ValueError(
             f"Could not open the task_config yaml file from {task_config_yaml_file_path}"
         ) from e
+    return apply_task_config_overrides(task_config, overrides or [])
+
+
+def apply_task_config_overrides(
+    task_config: TaskConfig, overrides: List[str]
+) -> TaskConfig:
+    """Replace the fields of the task config given as field=value, the value parsed as YAML."""
+    field_names = {field.name for field in fields(TaskConfig)}
+    changes = {}
+    for override in overrides:
+        name, separator, value = override.partition("=")
+        name = name.strip()
+        if not separator or not name:
+            raise ValueError(
+                f"A task config override must look like field=value, got {override!r}"
+            )
+        if name not in field_names:
+            raise ValueError(
+                f"{name!r} is not a task config field, the fields are {sorted(field_names)}"
+            )
+        try:
+            changes[name] = yaml.safe_load(value)
+        except yaml.YAMLError as e:
+            raise ValueError(f"Could not parse the value of {override!r}") from e
+    if changes:
+        LOG.info("Overriding the task config with %s", changes)
+    return replace(task_config, **changes)
 
 
 def encode_prompt_values(
@@ -211,7 +241,9 @@ def run_on_multiple_gpus(args, gpu_ids: List[str]) -> int:
     """
     cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(args.tokenizer_folder)
     folder_name = get_cehrgpt_output_folder(args, cehrgpt_tokenizer)
-    task_name = load_task_config_from_yaml(args.task_config).task_name
+    task_name = load_task_config_from_yaml(
+        args.task_config, args.task_config_override
+    ).task_name
     prediction_output_folder_name = os.path.join(
         args.output_folder, folder_name, task_name
     )
@@ -297,6 +329,32 @@ def run_on_multiple_gpus(args, gpu_ids: List[str]) -> int:
     return 0
 
 
+def write_prediction_metrics(args, prediction_output_folder_name: str) -> None:
+    """
+    Write the ROC-AUC and PR-AUC of all the saved predictions, with bootstrap intervals.
+
+    Covers everything in the prediction folder, so also the predictions of earlier sessions of a
+    resumed run. The json goes next to the folder rather than in it, the folder holds only parquet
+    files. The predictions are already saved at this point, so metrics that can't be computed
+    (e.g. a single class) are a warning rather than a failed run.
+    """
+    if args.n_boot <= 0:
+        return
+    try:
+        evaluate_predictions(
+            [prediction_output_folder_name],
+            f"{prediction_output_folder_name}_metrics.json",
+            n_boot=args.n_boot,
+            alpha=args.alpha,
+        )
+    except (ValueError, FileNotFoundError) as e:
+        LOG.warning(
+            "Could not compute the metrics of %s: %s",
+            prediction_output_folder_name,
+            e,
+        )
+
+
 def split_outcome_events(
     outcome_events: List[Union[str, int]]
 ) -> Tuple[List[int], List[str]]:
@@ -339,6 +397,18 @@ def main(args):
             exit_code = run_on_multiple_gpus(args, gpu_ids)
             if exit_code:
                 sys.exit(exit_code)
+            write_prediction_metrics(
+                args,
+                os.path.join(
+                    args.output_folder,
+                    get_cehrgpt_output_folder(
+                        args, CehrGptTokenizer.from_pretrained(args.tokenizer_folder)
+                    ),
+                    load_task_config_from_yaml(
+                        args.task_config, args.task_config_override
+                    ).task_name,
+                ),
+            )
             return
         # CUDA has not been initialized yet, so this pins the single requested GPU
         os.environ["CUDA_VISIBLE_DEVICES"] = gpu_ids[0]
@@ -365,7 +435,9 @@ def main(args):
 
     folder_name = get_cehrgpt_output_folder(args, cehrgpt_tokenizer)
 
-    task_config = load_task_config_from_yaml(args.task_config)
+    task_config = load_task_config_from_yaml(
+        args.task_config, args.task_config_override
+    )
     task_name = task_config.task_name
     outcome_events, tokens = split_outcome_events(task_config.outcome_events)
     if tokens and task_config.include_descendants:
@@ -460,6 +532,7 @@ def main(args):
         device=get_device(),
         store_generated_trajectories=args.store_generated_trajectories,
         max_input_length=max_input_length,
+        reuse_prompt_cache=not args.disable_prompt_cache_reuse,
     )
     if args.prepared_dataset_path:
         test_dataset = load_from_disk(args.prepared_dataset_path)
@@ -589,6 +662,9 @@ def main(args):
     )
     # Remove the temp folder
     shutil.rmtree(temp_folder)
+    # A --gpu_ids worker only has its shard, the parent computes the metrics of all of them
+    if not args.prepared_dataset_path:
+        write_prediction_metrics(args, prediction_output_folder_name)
 
 
 def delete_lock_create_processed_flag(output_folder: str, sample_id: str):
@@ -787,6 +863,16 @@ def create_arg_parser():
         "--task_config", dest="task_config", action="store", required=True
     )
     base_arg_parser.add_argument(
+        "--task_config_override",
+        dest="task_config_override",
+        action="append",
+        default=[],
+        metavar="FIELD=VALUE",
+        help="Replace a field of --task_config, e.g. prediction_window_end=730 or "
+        "outcome_events=[CPT4/33510]. The value is parsed as YAML. Repeat it to replace "
+        "several fields.",
+    )
+    base_arg_parser.add_argument(
         "--concept_ancestor", dest="concept_ancestor", action="store", required=False
     )
     base_arg_parser.add_argument(
@@ -798,6 +884,31 @@ def create_arg_parser():
         "--store_generated_trajectories",
         action="store_true",
         help="Persist raw generated token trajectories in the prediction parquet files.",
+    )
+    base_arg_parser.add_argument(
+        "--disable_prompt_cache_reuse",
+        dest="disable_prompt_cache_reuse",
+        action="store_true",
+        help="Encode the prompt again for every batch of samples and every trial of a patient, "
+        "instead of keeping its KV cache from the first batch. Slower, for comparing against "
+        "the predictions of the earlier behavior.",
+    )
+    base_arg_parser.add_argument(
+        "--n_boot",
+        dest="n_boot",
+        action="store",
+        type=int,
+        default=1000,
+        help="Patient-level bootstrap replicates of the ROC-AUC and PR-AUC computed at the end "
+        "of the run, 0 skips the metrics.",
+    )
+    base_arg_parser.add_argument(
+        "--alpha",
+        dest="alpha",
+        action="store",
+        type=float,
+        default=0.05,
+        help="The significance level of the bootstrap intervals, 0.05 gives a 95%% interval.",
     )
     base_arg_parser.add_argument(
         "--max_n_trial",

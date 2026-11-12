@@ -78,6 +78,14 @@ class CehrGPTArguments:
         default=25,
         metadata={"help": "Step interval for InstabilityProbe logging"},
     )
+    stop_at_step: int = dataclasses.field(
+        default=0,
+        metadata={
+            "help": "Evaluate, save a checkpoint and stop training at this step, keeping the "
+            "learning rate schedule of the full run (num_train_epochs or max_steps). Training "
+            "resumed from that checkpoint with a larger value continues the same run. 0 disables it."
+        },
+    )
     resid_pdrop: Optional[float] = dataclasses.field(
         default=0.1,
         metadata={

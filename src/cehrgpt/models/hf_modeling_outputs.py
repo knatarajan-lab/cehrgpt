@@ -77,7 +77,8 @@ class CehrGptCausalLMOutput(ModelOutput):
     loss: Optional[torch.FloatTensor] = None
     logits: torch.FloatTensor = None
     value_indicators: torch.BoolTensor = None
-    next_value_logits: torch.FloatTensor = None
+    # Final hidden states at the logit positions, for the value head conditioned on the next token
+    value_hidden_states: Optional[torch.FloatTensor] = None
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     linear_prob_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
@@ -131,6 +132,10 @@ class CehrGptGenerateDecoderOnlyOutput(ModelOutput):
     attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     past_key_values: Optional[Tuple[Tuple[Tuple[torch.FloatTensor]]]] = None
+    # What the model computed from the prompt alone, returned with return_prompt_prefill=True:
+    # give it back to generate as prompt_prefill to continue the same prompt again without
+    # encoding it. See CEHRGPT2LMHeadModel._sample.
+    prompt_prefill: Optional[dict] = None
 
 
 @dataclass

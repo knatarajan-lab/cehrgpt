@@ -70,6 +70,17 @@ class TimeToEventStoppingCriteria(StoppingCriteria):
         self._visit_count = None
         self._finished = None
 
+    def reset(self) -> None:
+        """
+        Forget the trajectories of the previous generation, keeping the vocabulary tables.
+
+        The tables take a pass over the whole vocabulary to build, so one criteria is built per
+        task window and reset before every generation rather than rebuilt.
+        """
+        self._time_delta = None
+        self._visit_count = None
+        self._finished = None
+
     def _move_to(self, device: torch.device, batch_size: int) -> None:
         if self._device != device:
             self._time_days = self._time_days.to(device)
@@ -154,6 +165,7 @@ class TimeToEventModel:
         store_generated_trajectories: bool = False,
         enable_early_stopping: bool = True,
         max_input_length: Optional[int] = None,
+        reuse_prompt_cache: bool = True,
     ):
         self.tokenizer = tokenizer
         self.model = model.eval()
@@ -168,9 +180,52 @@ class TimeToEventModel:
         self.store_generated_trajectories = store_generated_trajectories
         self.enable_early_stopping = enable_early_stopping
         self.max_sequence = model.config.n_positions
+        # A patient's samples are generated in batches of batch_size, and again when a trial
+        # leaves trajectories undetermined. Every one of those generations starts from the same
+        # prompt, so what the first one computes from the prompt is kept for the next ones, which
+        # then start from the very numbers of the first one and only run the model on the new
+        # tokens.
+        self.reuse_prompt_cache = reuse_prompt_cache
+        # (prompt key, the prompt_prefill returned by generate): the logits of the first new
+        # token and the KV cache of the prompt
+        self._prompt_cache: Optional[Tuple[Any, Dict[str, Any]]] = None
+        # One stopping criteria per task window, see _get_stopping_criteria
+        self._stopping_criteria: Dict[Tuple, TimeToEventStoppingCriteria] = {}
 
     def is_outcome_event(self, token: str) -> bool:
         return token in self.outcome_events
+
+    def _get_stopping_criteria(
+        self,
+        future_visit_start: int,
+        future_visit_end: int,
+        prediction_window_start: int,
+        prediction_window_end: int,
+    ) -> TimeToEventStoppingCriteria:
+        """The stopping criteria of a task window, built once and reset for every generation."""
+        # The outcome events and the tokenizer are part of the key: they can be replaced on
+        # the model after it is built, which a criteria built earlier would not see
+        key = (
+            future_visit_start,
+            future_visit_end,
+            prediction_window_start,
+            prediction_window_end,
+            frozenset(self.outcome_events),
+            id(self.tokenizer),
+        )
+        criteria = self._stopping_criteria.get(key)
+        if criteria is None:
+            criteria = TimeToEventStoppingCriteria(
+                tokenizer=self.tokenizer,
+                outcome_events=self.outcome_events,
+                future_visit_start=future_visit_start,
+                future_visit_end=future_visit_end,
+                prediction_window_start=prediction_window_start,
+                prediction_window_end=prediction_window_end,
+            )
+            self._stopping_criteria[key] = criteria
+        criteria.reset()
+        return criteria
 
     @property
     def include_values(self) -> bool:
@@ -227,6 +282,23 @@ class TimeToEventModel:
                 prompt = demographics + prompt[next_visit:]
                 indices = indices[:4] + indices[next_visit:]
         return prompt, indices
+
+    def _can_reuse_prompt_cache(self) -> bool:
+        config = self.model.config
+        return (
+            self.reuse_prompt_cache
+            and bool(self.generation_config.use_cache)
+            # Every sequence gets its own random vector, in the middle of the prompt
+            and not getattr(config, "causal_sfm", False)
+            # The visit-local window of a decoding step is not covered by the tests of the reuse
+            and not getattr(config, "use_local_attention", False)
+        )
+
+    def _get_prompt_cache(self, prompt_key: Any) -> Optional[Dict[str, Any]]:
+        """What the model computed from the prompt, None when it is another prompt's."""
+        if self._prompt_cache is None or self._prompt_cache[0] != prompt_key:
+            return None
+        return self._prompt_cache[1]
 
     def _decode_values(
         self,
@@ -302,6 +374,15 @@ class TimeToEventModel:
                 ).unsqueeze(0).to(self.device),
             }
 
+        reuse_prompt_cache = self._can_reuse_prompt_cache()
+        prompt_key = (
+            tuple(token_ids),
+            tuple(value_kwargs["value_indicators"][0].tolist()) if value_kwargs else None,
+            tuple(value_kwargs["values"][0].tolist()) if value_kwargs else None,
+        )
+        if not reuse_prompt_cache:
+            self._prompt_cache = None
+
         simulated_sequences = []
         simulated_values = []
         old_num_return_sequences = self.generation_config.num_return_sequences
@@ -315,22 +396,34 @@ class TimeToEventModel:
                 if self.enable_early_stopping:
                     generation_kwargs["stopping_criteria"] = StoppingCriteriaList(
                         [
-                            TimeToEventStoppingCriteria(
-                                tokenizer=self.tokenizer,
-                                outcome_events=self.outcome_events,
-                                future_visit_start=future_visit_start,
-                                future_visit_end=future_visit_end,
-                                prediction_window_start=prediction_window_start,
-                                prediction_window_end=prediction_window_end,
+                            self._get_stopping_criteria(
+                                future_visit_start,
+                                future_visit_end,
+                                prediction_window_start,
+                                prediction_window_end,
                             )
                         ]
                     )
+                prompt_cache = (
+                    self._get_prompt_cache(prompt_key) if reuse_prompt_cache else None
+                )
+                if prompt_cache is not None:
+                    generation_kwargs["prompt_prefill"] = prompt_cache
+                elif reuse_prompt_cache:
+                    generation_kwargs["return_prompt_prefill"] = True
                 results = self.model.generate(
                     inputs=prompt,
                     generation_config=self.generation_config,
                     cehrgpt_tokenizer=self.tokenizer,
                     **generation_kwargs,
                 )
+                if reuse_prompt_cache and prompt_cache is None:
+                    prompt_prefill = getattr(results, "prompt_prefill", None)
+                    self._prompt_cache = (
+                        (prompt_key, prompt_prefill)
+                        if prompt_prefill is not None
+                        else None
+                    )
                 sequence_vals = getattr(results, "sequence_vals", None)
                 for i, seq in enumerate(results.sequences):
                     generated_ids = seq[len(token_ids) :].cpu().numpy()
