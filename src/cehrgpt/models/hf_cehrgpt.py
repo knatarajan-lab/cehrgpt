@@ -34,6 +34,7 @@ from cehrgpt.models.config import CEHRGPTConfig
 from cehrgpt.models.gpt2 import (
     GPT2Block,
     HAS_XFORMERS,
+    StaticKeyValueCache,
     is_sample_pack,
     reuse_unpad_data_during_forward,
 )
@@ -1575,6 +1576,49 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         self._generation_time_delta_lookup = (cehrgpt_tokenizer, time_delta_lookup)
         return time_delta_lookup
 
+    def _can_use_static_kv_cache(self, model_kwargs, outputs_layer_states: bool) -> bool:
+        """
+        Whether generation can keep its KV cache in a StaticKeyValueCache.
+
+        The attention that appends to it in place is the flash attention of the gpt2 backbone
+        without an attention mask, so the prompts must have no padding (their mask is then
+        dropped in evaluation) and nothing else can be in the way of that call.
+        """
+        config = self.cehrgpt.config
+        attention_mask = model_kwargs.get("attention_mask")
+        return (
+            not self.training
+            and not outputs_layer_states
+            and bool(model_kwargs.get("use_cache", False))
+            and getattr(config, "backbone", "gpt2") == "gpt2"
+            and getattr(config, "_attn_implementation", "eager") == "flash_attention_2"
+            and not getattr(config, "use_local_attention", False)
+            and not config.causal_sfm
+            and not self.cehrgpt.model_parallel
+            and self.cehrgpt._drop_unpadded_flash_attention_mask
+            and attention_mask is not None
+            and bool(attention_mask.all())
+        )
+
+    @staticmethod
+    def _scatter_active_rows(
+        probabilities: torch.Tensor,
+        active_rows: Optional[torch.Tensor],
+        batch_size: int,
+    ) -> torch.Tensor:
+        """
+        The probabilities of the active rows of a batch, as the probabilities of the batch.
+
+        The rows that are not active get all their probability on the first token.
+        """
+        if active_rows is None:
+            return probabilities
+        batch_probabilities = probabilities.new_zeros(
+            (batch_size, probabilities.shape[-1])
+        )
+        batch_probabilities[:, 0] = 1.0
+        return batch_probabilities.index_copy_(0, active_rows, probabilities)
+
     def _can_share_generation_prompt_prefill(self) -> bool:
         return (
             self._generation_share_prompt_prefill
@@ -1711,11 +1755,13 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         inputs_embeds=None,
         prompt_prefill=None,
         return_prompt_prefill=False,
+        static_kv_cache=False,
+        drop_finished_sequences=False,
         **kwargs,
     ):
-        # prompt_prefill and return_prompt_prefill are arguments of generate consumed by
-        # _sample. They are named here because generate only accepts the arguments of this
-        # method and of forward.
+        # prompt_prefill, return_prompt_prefill, static_kv_cache and drop_finished_sequences
+        # are arguments of generate consumed by _sample. They are named here because generate
+        # only accepts the arguments of this method and of forward.
         ages = kwargs.get("ages")
         # Omit tokens covered by past_key_values
         if past_key_values:
@@ -2415,6 +2461,29 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # it is identical to the step of the generation they come from.
         prompt_prefill = model_kwargs.pop("prompt_prefill", None)
         return_prompt_prefill = model_kwargs.pop("return_prompt_prefill", False)
+        # generate(static_kv_cache=True) keeps the keys and values of the attention layers in
+        # memory allocated once for the longest sequence, instead of copying all of them at
+        # every decoding step to append a token. The numbers are the same. Used where it
+        # applies, see _can_use_static_kv_cache; past_key_values is then not returned.
+        static_kv_cache = model_kwargs.pop("static_kv_cache", False)
+        # generate(drop_finished_sequences=True) stops running the model on the sequences that
+        # are finished (end token, stopping criteria), which otherwise go through every layer
+        # as padding until the last sequence of the batch finishes. The tokens are still
+        # sampled for the whole batch, so that every sequence draws the random numbers it
+        # would draw without it; past_key_values is not returned.
+        drop_finished_sequences = model_kwargs.pop("drop_finished_sequences", False)
+        if drop_finished_sequences and (
+            output_scores
+            or output_logits
+            or output_attentions
+            or output_hidden_states
+            or streamer is not None
+            or synced_gpus
+        ):
+            raise ValueError(
+                "drop_finished_sequences has no scores, logits, attentions or hidden states "
+                "for the sequences it drops, and does not support a streamer or synced_gpus"
+            )
         returned_prompt_prefill = None
         if (prompt_prefill is not None or return_prompt_prefill) and (
             self.cehrgpt.config.causal_sfm
@@ -2600,6 +2669,12 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             and torch.equal(values, values[:1].expand_as(values))
         )
         prompt_prefilled = False
+        use_static_kv_cache = static_kv_cache and self._can_use_static_kv_cache(
+            model_kwargs, output_attentions or output_hidden_states
+        )
+        # The rows of the batch the model still runs on, None for all of them
+        active_rows = None
+        past_key_values_returned = not use_static_kv_cache
 
         while self._has_unfinished_sequences(
             this_peer_finished, synced_gpus, device=input_ids.device
@@ -2608,6 +2683,18 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             model_inputs = self.prepare_inputs_for_generation(
                 input_ids, cehrgpt_tokenizer, **model_kwargs
             )
+            if active_rows is not None:
+                # The KV cache only has the active rows, the inputs are for the whole batch
+                model_inputs = {
+                    key: (
+                        value.index_select(0, active_rows)
+                        if isinstance(value, torch.Tensor)
+                        and value.ndim > 0
+                        and value.shape[0] == batch_size
+                        else value
+                    )
+                    for key, value in model_inputs.items()
+                }
 
             # forward pass to get next token
             if prompt_prefill is not None and not prompt_prefilled:
@@ -2700,13 +2787,18 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             next_token_logits = outputs.logits[:, -1, :]
 
             # pre-process distribution
-            next_token_scores = logits_processor(input_ids, next_token_logits)
+            active_input_ids = (
+                input_ids
+                if active_rows is None
+                else input_ids.index_select(0, active_rows)
+            )
+            next_token_scores = logits_processor(active_input_ids, next_token_logits)
             if do_sample:
                 if logits_warper is None:
                     raise ValueError(
                         "Sampling requires a LogitsProcessorList logits_warper"
                     )
-                next_token_scores = logits_warper(input_ids, next_token_scores)
+                next_token_scores = logits_warper(active_input_ids, next_token_scores)
 
             # Store scores, attentions and hidden_states when required
             if return_dict_in_generate:
@@ -2732,9 +2824,17 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             if do_sample:
                 probs = nn.functional.softmax(next_token_scores, dim=-1)
+                # Sampled for the whole batch: the random numbers a row draws depend on its
+                # position in the batch, so an active row samples what it would sample if the
+                # finished rows were still there. A finished row gets a padding token below.
+                probs = self._scatter_active_rows(probs, active_rows, batch_size)
                 next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
             else:
                 next_tokens = torch.argmax(next_token_scores, dim=-1)
+                if active_rows is not None:
+                    next_tokens = next_tokens.new_zeros(batch_size).index_copy_(
+                        0, active_rows, next_tokens
+                    )
 
             if track_ages:
                 batched_time_delta.add_(time_delta_lookup[next_tokens])
@@ -2748,11 +2848,14 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 # so it only needs the age for that token rather than the full history.
                 model_kwargs["ages"] = next_age
 
-            # finished sentences should have their next token be a padding token
-            if eos_token_id_tensor is not None:
+            # finished sentences should have their next token be a padding token. Without an
+            # eos token the sequences a stopping criteria finished keep being generated, unless
+            # they are dropped: then nothing is generated for them, and they are padded too.
+            if eos_token_id_tensor is not None or drop_finished_sequences:
                 if pad_token_id is None:
                     raise ValueError(
-                        "If `eos_token_id` is defined, make sure that `pad_token_id` is defined."
+                        "If `eos_token_id` is defined or drop_finished_sequences is set, make "
+                        "sure that `pad_token_id` is defined."
                     )
                 next_tokens = next_tokens * unfinished_sequences + pad_token_id * (
                     1 - unfinished_sequences
@@ -2766,10 +2869,18 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                     next_tokens, lab_token_ids
                 )
                 next_value_logits = self.compute_next_value_logits(
-                    outputs.value_hidden_states[:, -1], next_tokens
+                    outputs.value_hidden_states[:, -1],
+                    (
+                        next_tokens
+                        if active_rows is None
+                        else next_tokens.index_select(0, active_rows)
+                    ),
                 )
-                # sample
+                # sample, for the whole batch like the tokens
                 next_value_probs = nn.functional.softmax(next_value_logits, dim=-1)
+                next_value_probs = self._scatter_active_rows(
+                    next_value_probs, active_rows, batch_size
+                )
                 next_value_tokens = torch.multinomial(next_value_probs, num_samples=1)
 
                 # update value_indicators
@@ -2792,6 +2903,24 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 is_encoder_decoder=self.config.is_encoder_decoder,
             )
 
+            if (
+                use_static_kv_cache
+                and model_kwargs.get("past_key_values") is not None
+                and not isinstance(
+                    model_kwargs["past_key_values"][0], StaticKeyValueCache
+                )
+            ):
+                # After the first step, which gave the KV cache of the prompt
+                model_kwargs["past_key_values"] = tuple(
+                    StaticKeyValueCache.from_key_value(
+                        key,
+                        value,
+                        capacity=max(generation_config.max_length, key.shape[-2] + 1),
+                        dtype=torch.bfloat16,
+                    )
+                    for key, value in model_kwargs["past_key_values"]
+                )
+
             # if eos_token was found in one sentence, set sentence to finished
             if eos_token_id_tensor is not None:
                 unfinished_sequences = unfinished_sequences.mul(
@@ -2804,6 +2933,29 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 input_ids, scores
             )
             this_peer_finished = unfinished_sequences.max() == 0
+
+            if drop_finished_sequences and not this_peer_finished:
+                current_rows = (
+                    active_rows
+                    if active_rows is not None
+                    else torch.arange(batch_size, device=input_ids.device)
+                )
+                still_running = unfinished_sequences.index_select(0, current_rows).bool()
+                if not bool(still_running.all()):
+                    kept = still_running.nonzero().squeeze(1)
+                    active_rows = current_rows.index_select(0, kept)
+                    past_key_values_returned = False
+                    if model_kwargs.get("past_key_values") is not None:
+                        model_kwargs["past_key_values"] = tuple(
+                            (
+                                layer_past.select_rows(kept)
+                                if isinstance(layer_past, StaticKeyValueCache)
+                                else tuple(
+                                    state.index_select(0, kept) for state in layer_past
+                                )
+                            )
+                            for layer_past in model_kwargs["past_key_values"]
+                        )
 
         if streamer is not None:
             streamer.end()
@@ -2818,7 +2970,11 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             logits=raw_logits,
             attentions=decoder_attentions,
             hidden_states=decoder_hidden_states,
-            past_key_values=model_kwargs.get("past_key_values"),
+            past_key_values=(
+                model_kwargs.get("past_key_values")
+                if past_key_values_returned
+                else None
+            ),
             prompt_prefill=returned_prompt_prefill,
         )
 

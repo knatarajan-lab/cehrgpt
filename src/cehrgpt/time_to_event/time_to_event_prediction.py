@@ -533,6 +533,7 @@ def main(args):
         store_generated_trajectories=args.store_generated_trajectories,
         max_input_length=max_input_length,
         reuse_prompt_cache=not args.disable_prompt_cache_reuse,
+        fast_decoding=not args.disable_fast_decoding,
     )
     if args.prepared_dataset_path:
         test_dataset = load_from_disk(args.prepared_dataset_path)
@@ -891,6 +892,14 @@ def create_arg_parser():
         action="store_true",
         help="Encode the prompt again for every batch of samples and every trial of a patient, "
         "instead of keeping its KV cache from the first batch. Slower, for comparing against "
+        "the predictions of the earlier behavior.",
+    )
+    base_arg_parser.add_argument(
+        "--disable_fast_decoding",
+        dest="disable_fast_decoding",
+        action="store_true",
+        help="Copy the KV cache at every decoding step and keep running the model on the "
+        "trajectories whose outcome is determined, as before. Slower, for comparing against "
         "the predictions of the earlier behavior.",
     )
     base_arg_parser.add_argument(

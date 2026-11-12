@@ -10,17 +10,26 @@ from typing import Optional
 
 import pandas as pd
 import torch
+from transformers import StoppingCriteriaList
 from transformers.utils import is_flash_attn_2_available
 
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.gpt_runner_util import read_backbone, resolve_attn_implementation
-from cehrgpt.time_to_event.time_to_event_model import TimeToEventModel
+from cehrgpt.time_to_event.time_to_event_model import (
+    TimeToEventModel,
+    TimeToEventStoppingCriteria,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_folder", required=True)
+    parser.add_argument(
+        "--tokenizer_folder",
+        default=None,
+        help="The folder of the tokenizer, when it is not saved with the model.",
+    )
     parser.add_argument("--prediction_folder", required=True)
     parser.add_argument("--num_prompts", type=int, default=3)
     parser.add_argument("--num_return_sequences", type=int, default=8)
@@ -37,6 +46,8 @@ def parse_args() -> argparse.Namespace:
             "age_tracking",
             "prompt_cache",
             "unpadded_mask",
+            "static_cache",
+            "fast_decoding",
             "determinism",
         ),
         default="combined",
@@ -45,8 +56,18 @@ def parse_args() -> argparse.Namespace:
         "of a patient do. "
         "unpadded_mask compares flash attention with the attention mask of a prompt without "
         "padding kept (un-padded keys and values) and dropped. "
+        "static_cache compares a KV cache that grows at every step with one appended to in "
+        "place. fast_decoding compares the trajectories of a generation with the ones of the "
+        "generation time-to-event prediction runs: the cache appended to in place, and the "
+        "trajectories that passed --prediction_window_end dropped from the batch. "
         "determinism runs the model twice on every prompt without reseeding and fails when the "
         "logits differ, which they do when dropout is applied in evaluation.",
+    )
+    parser.add_argument(
+        "--prediction_window_end",
+        type=int,
+        default=30,
+        help="With --comparison fast_decoding: the days after which a trajectory is finished.",
     )
     parser.add_argument(
         "--reuse_num_return_sequences",
@@ -90,6 +111,9 @@ def generate(
     return_prompt_prefill: bool = False,
     drop_unpadded_mask: bool = True,
     greedy_rows: Optional[int] = None,
+    static_kv_cache: bool = False,
+    drop_finished_sequences: bool = False,
+    stopping_criteria=None,
 ):
     """
     Generate from a prompt along one of the paths to compare.
@@ -129,6 +153,13 @@ def generate(
             cehrgpt_tokenizer=tokenizer,
             **({"prompt_prefill": prompt_prefill} if prompt_prefill is not None else {}),
             **({"return_prompt_prefill": True} if return_prompt_prefill else {}),
+            **({"static_kv_cache": True} if static_kv_cache else {}),
+            **({"drop_finished_sequences": True} if drop_finished_sequences else {}),
+            **(
+                {"stopping_criteria": StoppingCriteriaList([stopping_criteria])}
+                if stopping_criteria is not None
+                else {}
+            ),
         )
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -191,10 +222,110 @@ def check_determinism(model, tokenizer, prefixes, device) -> None:
         )
 
 
+def count_rows(model: CEHRGPT2LMHeadModel, run) -> tuple:
+    """The result of run(), and the number of sequences of every forward pass."""
+    rows = []
+    handle = model.cehrgpt.register_forward_pre_hook(
+        lambda _module, args, kwargs: rows.append(
+            (args[0] if args else kwargs["input_ids"]).shape[0]
+        ),
+        with_kwargs=True,
+    )
+    try:
+        return run(), rows
+    finally:
+        handle.remove()
+
+
+def check_fast_decoding(args, model, tokenizer, prefixes, generation_config, device):
+    """
+    Fail when fast decoding does not generate the trajectories of the generation without it.
+
+    Both sides sample with the same seed and stop a trajectory after
+    --prediction_window_end days. The logits of the dropped trajectories do not exist, so the
+    trajectories themselves are compared: every token, and every value of a model with values.
+    """
+    if not model._can_use_static_kv_cache(
+        {
+            "use_cache": True,
+            "attention_mask": torch.ones(1, 1, dtype=torch.bool, device=device),
+        },
+        False,
+    ):
+        print(
+            "This model does not use the static KV cache (it is for the gpt2 backbone with "
+            "flash attention): only dropping the finished trajectories is compared"
+        )
+    pad_token_id = generation_config.pad_token_id
+    total_tokens = 0
+    mismatched_tokens = 0
+    for prompt_index, prefix in enumerate(prefixes):
+        token_ids = tokenizer.encode(prefix)
+        prompt = torch.tensor([token_ids], dtype=torch.long, device=device)
+        results = []
+        for fast in (False, True):
+            outputs, rows = count_rows(
+                model,
+                lambda: generate(
+                    model,
+                    tokenizer,
+                    prompt,
+                    generation_config,
+                    share_prompt_prefill=None,
+                    track_ages=None,
+                    seed=args.seed + prompt_index,
+                    static_kv_cache=fast,
+                    drop_finished_sequences=fast,
+                    stopping_criteria=TimeToEventStoppingCriteria(
+                        tokenizer, [], 0, -1, 0, args.prediction_window_end
+                    ),
+                ),
+            )
+            results.append((outputs, rows))
+        (legacy, legacy_rows), (fast, fast_rows) = results
+        if legacy.sequences.shape != fast.sequences.shape:
+            raise AssertionError(
+                f"Prompt {prompt_index}: {tuple(legacy.sequences.shape)} tokens without fast "
+                f"decoding, {tuple(fast.sequences.shape)} with it"
+            )
+        generated = legacy.sequences[:, len(token_ids) :]
+        mismatches = generated != fast.sequences[:, len(token_ids) :]
+        if model.config.include_values:
+            # The padding of a finished trajectory has no value
+            mismatches |= (
+                legacy.sequence_vals[:, len(token_ids) :]
+                != fast.sequence_vals[:, len(token_ids) :]
+            ) & (generated != pad_token_id)
+        total_tokens += mismatches.numel()
+        mismatched_tokens += mismatches.sum().item()
+        steps = len(legacy_rows) - 1
+        print(
+            f"{'PASS' if not mismatches.any() else 'FAIL'} prompt={prompt_index} "
+            f"encoded_tokens={len(token_ids)} sequences={generated.shape[0]} "
+            f"generated_tokens={generated.shape[1]} "
+            f"mean_rows_per_step={sum(legacy_rows[1:]) / steps:.1f}->"
+            f"{sum(fast_rows[1:]) / steps:.1f} "
+            f"seconds={legacy.seconds:.3f}->{fast.seconds:.3f} "
+            f"mismatched_tokens={mismatches.sum().item()}"
+        )
+    status = "PASS" if mismatched_tokens == 0 else "FAIL"
+    print(
+        f"{status} comparison=fast_decoding; prompts={len(prefixes)}; "
+        f"prediction_window_end={args.prediction_window_end}; "
+        f"mismatched_tokens={mismatched_tokens}/{total_tokens}"
+    )
+    if mismatched_tokens:
+        raise AssertionError(
+            "Fast decoding generated other trajectories than the generation without it"
+        )
+
+
 def main() -> None:
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = CehrGptTokenizer.from_pretrained(args.model_folder)
+    tokenizer = CehrGptTokenizer.from_pretrained(
+        args.tokenizer_folder or args.model_folder
+    )
     model = (
         CEHRGPT2LMHeadModel.from_pretrained(
             args.model_folder,
@@ -210,9 +341,11 @@ def main() -> None:
         .eval()
         .to(device)
     )
-    if model.config.apply_rotary and args.comparison not in (
-        "prompt_cache",
-        "determinism",
+    # The comparisons that switch the age tracking off, which a rotary model needs
+    if model.config.apply_rotary and args.comparison in (
+        "combined",
+        "shared_prefill",
+        "age_tracking",
     ):
         raise RuntimeError(
             "This legacy-age-vs-skipped-age comparison requires apply_rotary=false"
@@ -237,6 +370,12 @@ def main() -> None:
     if args.comparison == "determinism":
         check_determinism(model, tokenizer, prefixes, device)
         return
+    if args.comparison == "fast_decoding":
+        generation_config.output_logits = False
+        check_fast_decoding(
+            args, model, tokenizer, prefixes, generation_config, device
+        )
+        return
     comparison_paths = {
         "combined": ((False, True), (True, False)),
         "shared_prefill": ((False, False), (True, False)),
@@ -245,6 +384,8 @@ def main() -> None:
         "prompt_cache": ((None, None), (None, None)),
         # Both sides run the production paths, the legacy one keeps the attention mask
         "unpadded_mask": ((None, None), (None, None)),
+        # Both sides run the production paths, the optimized one with the static KV cache
+        "static_cache": ((None, None), (None, None)),
     }
     if args.comparison == "unpadded_mask" and (
         getattr(model.config, "_attn_implementation", "eager") != "flash_attention_2"
@@ -310,8 +451,15 @@ def main() -> None:
                 seed=seed,
                 prompt_prefill=prompt_prefill,
                 greedy_rows=optimized_rows,
+                static_kv_cache=args.comparison == "static_cache",
             ),
         )
+        if args.comparison == "static_cache" and optimized.past_key_values is not None:
+            # A generation with the static cache does not return its cache
+            raise RuntimeError(
+                "This model does not use the static KV cache, which is for the gpt2 backbone "
+                "with flash attention and prompts without padding"
+            )
         if (
             args.comparison in ("combined", "shared_prefill", "prompt_cache")
             and legacy_prefill_rows == optimized_prefill_rows

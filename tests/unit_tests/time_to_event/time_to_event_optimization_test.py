@@ -8,10 +8,11 @@ from unittest import mock
 
 import pandas as pd
 import torch
-from transformers import GenerationConfig, PreTrainedModel
+from transformers import GenerationConfig, PreTrainedModel, StoppingCriteriaList
 
 from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token, is_visit_start
 from cehrgpt.models.config import CEHRGPTConfig
+from cehrgpt.models.gpt2 import StaticKeyValueCache
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.time_to_event.time_to_event_model import (
     TimeToEventModel,
@@ -1357,6 +1358,674 @@ class TestFlashAttentionDropout(unittest.TestCase):
 
     def test_attention_dropout_is_kept_in_training(self):
         self.assertEqual(self._dropout_rates(training=True), [0.1, 0.1])
+
+
+def record_batch_sizes(model):
+    """The batch size of every forward pass of the model, and the handle of the hook."""
+    sizes = []
+    handle = model.cehrgpt.register_forward_pre_hook(
+        lambda _module, args, kwargs: sizes.append(
+            (args[0] if args else kwargs["input_ids"]).shape[0]
+        ),
+        with_kwargs=True,
+    )
+    return sizes, handle
+
+
+class StepRecorder:
+    """
+    What a generation computes at every decoding step, to compare two generations exactly.
+
+    The sampled tokens of a small randomly initialized model hardly depend on what the model
+    reads, the logits do: the logits of every row the model ran on are recorded, with the
+    rows of the batch they are (None for all of them), and the logits of the values.
+    """
+
+    def __init__(self, model):
+        self.model = model
+        self.logits, self.value_logits, self.rows = [], [], []
+
+    def __enter__(self):
+        self._handles = [
+            self.model.lm_head.register_forward_hook(
+                lambda _module, _args, output: self.logits.append(output[:, -1].clone())
+            )
+        ]
+        if getattr(self.model, "value_head", None) is not None:
+            self._handles.append(
+                self.model.value_head.register_forward_hook(
+                    lambda _module, _args, output: self.value_logits.append(
+                        output.clone()
+                    )
+                )
+            )
+        scatter = CEHRGPT2LMHeadModel._scatter_active_rows
+
+        def record_rows(probabilities, active_rows, batch_size):
+            # Called for the tokens, then for the values when the model has values
+            if probabilities.shape[-1] == self.model.config.vocab_size:
+                self.rows.append(active_rows)
+            return scatter(probabilities, active_rows, batch_size)
+
+        self._patch = mock.patch.object(
+            CEHRGPT2LMHeadModel, "_scatter_active_rows", staticmethod(record_rows)
+        )
+        self._patch.start()
+        return self
+
+    def __exit__(self, *args):
+        self._patch.stop()
+        for handle in self._handles:
+            handle.remove()
+
+    def assert_same_steps(self, test, whole_batch):
+        """Every step of this generation has the logits of its rows in whole_batch."""
+        test.assertEqual(len(self.logits), len(whole_batch.logits))
+        test.assertEqual(len(self.rows), len(self.logits))
+        for name in ("logits", "value_logits"):
+            actual_steps, expected_steps = getattr(self, name), getattr(whole_batch, name)
+            test.assertEqual(len(actual_steps), len(expected_steps))
+            for step, (actual, expected) in enumerate(zip(actual_steps, expected_steps)):
+                rows = self.rows[step]
+                if rows is not None:
+                    expected = expected.index_select(0, rows)
+                elif expected.shape[0] == 1:
+                    # The prefill of a shared prompt has one row for all the sequences
+                    expected = expected.expand(actual.shape[0], -1)
+                elif actual.shape[0] == 1:
+                    actual = actual.expand(expected.shape[0], -1)
+                # Identical on the same rows. A batch of fewer rows can differ in the last
+                # bit of a float32 (1e-7 of the value), far below what reading the cache of
+                # another row or the wrong token changes (1e-2).
+                torch.testing.assert_close(
+                    actual,
+                    expected,
+                    rtol=0 if rows is None else 1e-5,
+                    atol=0 if rows is None else 1e-5,
+                    msg=f"{name} of step {step}",
+                )
+
+
+class TestStaticKeyValueCache(unittest.TestCase):
+    def _cache(self, capacity=6, batch_size=2):
+        torch.manual_seed(0)
+        key = torch.randn(batch_size, 3, 4, 5)
+        value = torch.randn(batch_size, 3, 4, 5)
+        return (
+            StaticKeyValueCache.from_key_value(key, value, capacity, torch.float32),
+            key,
+            value,
+        )
+
+    def test_reads_like_the_key_and_value_it_was_built_from(self):
+        cache, key, value = self._cache()
+
+        self.assertEqual(len(cache), 2)
+        cached_key, cached_value = cache
+        torch.testing.assert_close(cached_key, key, rtol=0, atol=0)
+        torch.testing.assert_close(cached_value, value, rtol=0, atol=0)
+        torch.testing.assert_close(cache[0], key, rtol=0, atol=0)
+        self.assertEqual(cache.states()[0].shape, (2, 4, 3, 5))
+
+    def test_append_writes_in_place_after_the_tokens_it_has(self):
+        cache, key, value = self._cache()
+        buffer = cache.keys.data_ptr()
+        new_key, new_value = torch.randn(2, 3, 2, 5), torch.randn(2, 3, 2, 5)
+
+        cache.append(new_key, new_value)
+
+        self.assertEqual(cache.length, 6)
+        self.assertEqual(cache.keys.data_ptr(), buffer)
+        torch.testing.assert_close(
+            cache[0], torch.cat([key, new_key], dim=-2), rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            cache[1], torch.cat([value, new_value], dim=-2), rtol=0, atol=0
+        )
+
+    def test_append_past_the_capacity_is_refused(self):
+        cache, _, _ = self._cache(capacity=5)
+
+        with self.assertRaisesRegex(ValueError, "holds 5 tokens"):
+            cache.append(torch.randn(2, 3, 2, 5), torch.randn(2, 3, 2, 5))
+        with self.assertRaisesRegex(ValueError, "cannot hold"):
+            StaticKeyValueCache.from_key_value(
+                torch.randn(2, 3, 4, 5), torch.randn(2, 3, 4, 5), 3, torch.float32
+            )
+
+    def test_select_rows_keeps_the_rows_and_leaves_the_cache_alone(self):
+        cache, key, value = self._cache()
+
+        selected = cache.select_rows(torch.tensor([1]))
+        selected.append(torch.zeros(1, 3, 1, 5), torch.zeros(1, 3, 1, 5))
+
+        torch.testing.assert_close(selected[0][:, :, :4], key[1:], rtol=0, atol=0)
+        torch.testing.assert_close(selected[1][:, :, :4], value[1:], rtol=0, atol=0)
+        self.assertEqual(selected.length, 5)
+        self.assertEqual(cache.length, 4)
+        torch.testing.assert_close(cache[0], key, rtol=0, atol=0)
+
+    def test_select_rows_keeps_the_order_of_the_rows(self):
+        cache, key, value = self._cache(batch_size=3)
+
+        selected = cache.select_rows(torch.tensor([0, 2]))
+
+        torch.testing.assert_close(selected[0], key[[0, 2]], rtol=0, atol=0)
+        torch.testing.assert_close(selected[1], value[[0, 2]], rtol=0, atol=0)
+
+
+class TestDropFinishedSequences(unittest.TestCase):
+    """Rows finish at different steps: a time token of more than a year ends the window."""
+
+    def _generate(
+        self,
+        model,
+        eos_token_id=1,
+        tokenizer=None,
+        generation_config_changes=None,
+        **kwargs,
+    ):
+        tokenizer = tokenizer or TimeTokenizer()
+        generation_config = sampling_config(num_return_sequences=8, max_new_tokens=20)
+        generation_config.eos_token_id = eos_token_id
+        for name, value in (generation_config_changes or {}).items():
+            setattr(generation_config, name, value)
+        sizes, handle = record_batch_sizes(model)
+        try:
+            with StepRecorder(model) as self.steps:
+                torch.manual_seed(5)
+                outputs = model.generate(
+                    inputs=torch.tensor([tokenizer.encode(PROMPT)], dtype=torch.long),
+                    generation_config=generation_config,
+                    cehrgpt_tokenizer=tokenizer,
+                    stopping_criteria=StoppingCriteriaList(
+                        [TimeToEventStoppingCriteria(tokenizer, ["C12"], 0, -1, 0, 500)]
+                    ),
+                    **kwargs,
+                )
+        finally:
+            handle.remove()
+        return outputs, sizes
+
+    def test_the_sequences_are_the_ones_generated_with_the_whole_batch(self):
+        for apply_rotary, changes in (
+            (False, None),
+            (True, None),
+            # A processor that reads the tokens generated so far
+            (False, {"repetition_penalty": 1.3}),
+        ):
+            with self.subTest(apply_rotary=apply_rotary, changes=changes):
+                model = build_generation_model(apply_rotary=apply_rotary)
+
+                expected, expected_sizes = self._generate(
+                    model, generation_config_changes=changes
+                )
+                expected_steps = self.steps
+                actual, actual_sizes = self._generate(
+                    model,
+                    generation_config_changes=changes,
+                    drop_finished_sequences=True,
+                )
+                self.steps.assert_same_steps(self, expected_steps)
+
+                torch.testing.assert_close(
+                    actual.sequences, expected.sequences, rtol=0, atol=0
+                )
+                # The prefill of the shared prompt, then the whole batch at every step
+                self.assertEqual(set(expected_sizes[1:]), {8})
+                # The model runs on fewer and fewer rows
+                self.assertEqual(actual_sizes[:2], [1, 8])
+                self.assertEqual(
+                    actual_sizes[1:], sorted(actual_sizes[1:], reverse=True)
+                )
+                self.assertLess(actual_sizes[-1], 4)
+                self.assertGreater(len(set(actual_sizes[1:])), 2)
+                self.assertIsNone(actual.past_key_values)
+                self.assertIsNotNone(expected.past_key_values)
+
+    def test_the_values_are_the_ones_generated_with_the_whole_batch(self):
+        tokenizer = ValueTokenizer()
+        model = build_generation_model(include_values=True)
+        with torch.no_grad():
+            model.value_head.weight.mul_(200)
+        # C12 is an outcome: rows finish when they sample it
+        expected, _ = self._generate(model, tokenizer=tokenizer)
+        expected_steps = self.steps
+        actual, sizes = self._generate(
+            model, tokenizer=tokenizer, drop_finished_sequences=True
+        )
+
+        self.assertLess(sizes[-1], 8)
+        # The value logits of a row are the ones of the token that row sampled
+        self.assertEqual(len(self.steps.value_logits), len(self.steps.logits))
+        self.steps.assert_same_steps(self, expected_steps)
+        torch.testing.assert_close(actual.sequences, expected.sequences, rtol=0, atol=0)
+        # A finished row is padding, whose values are not read
+        generated = actual.sequences != 0
+        torch.testing.assert_close(
+            actual.sequence_vals[generated],
+            expected.sequence_vals[generated],
+            rtol=0,
+            atol=0,
+        )
+        self.assertTrue((actual.sequence_vals[generated] != 0).any())
+
+    def test_without_an_end_token_a_finished_sequence_is_padded(self):
+        model = build_generation_model()
+        # Not the token 0, which a dropped row would get anyway
+        changes = {"pad_token_id": 1}
+
+        expected, _ = self._generate(
+            model, eos_token_id=None, generation_config_changes=changes
+        )
+        expected_steps = self.steps
+        actual, sizes = self._generate(
+            model,
+            eos_token_id=None,
+            generation_config_changes=changes,
+            drop_finished_sequences=True,
+        )
+
+        self.assertLess(sizes[-1], 8)
+        self.steps.assert_same_steps(self, expected_steps)
+        # Without it a finished sequence keeps being generated
+        self.assertFalse(torch.equal(actual.sequences, expected.sequences))
+        generated = torch.zeros_like(actual.sequences, dtype=torch.bool)
+        generated[:, : len(PROMPT)] = True
+        for step, rows in enumerate(self.steps.rows):
+            generated[:, len(PROMPT) + step] = True
+            if rows is not None:
+                generated[:, len(PROMPT) + step] = False
+                generated[rows, len(PROMPT) + step] = True
+        torch.testing.assert_close(
+            actual.sequences[generated], expected.sequences[generated], rtol=0, atol=0
+        )
+        self.assertTrue((~generated).any())
+        self.assertEqual(set(actual.sequences[~generated].tolist()), {1})
+
+    def test_greedy_decoding_matches_the_whole_batch(self):
+        model = build_generation_model()
+        tokenizer = TimeTokenizer()
+        prompts = torch.tensor(
+            [
+                tokenizer.encode(PROMPT),
+                tokenizer.encode(PROMPT[:-1] + ["D400"]),
+                tokenizer.encode(PROMPT[:-1] + ["C10"]),
+            ],
+            dtype=torch.long,
+        )
+
+        def generate(**kwargs):
+            sizes, handle = record_batch_sizes(model)
+            try:
+                outputs = model.generate(
+                    inputs=prompts,
+                    generation_config=GenerationConfig(
+                        max_length=32,
+                        max_new_tokens=6,
+                        do_sample=False,
+                        use_cache=True,
+                        pad_token_id=0,
+                        eos_token_id=1,
+                        return_dict_in_generate=True,
+                    ),
+                    cehrgpt_tokenizer=tokenizer,
+                    stopping_criteria=StoppingCriteriaList(
+                        [TimeToEventStoppingCriteria(tokenizer, ["C12"], 0, -1, 0, 300)]
+                    ),
+                    **kwargs,
+                )
+            finally:
+                handle.remove()
+            return outputs, sizes
+
+        expected, _ = generate()
+        actual, sizes = generate(drop_finished_sequences=True)
+
+        # The second prompt is past the window after one more token
+        self.assertEqual(sizes[:3], [3, 3, 2])
+        torch.testing.assert_close(actual.sequences, expected.sequences, rtol=0, atol=0)
+
+    def test_it_cannot_return_per_step_outputs_or_run_without_padding(self):
+        model = build_generation_model()
+        tokenizer = TimeTokenizer()
+        prompt = torch.tensor([tokenizer.encode(PROMPT)], dtype=torch.long)
+
+        with self.assertRaisesRegex(ValueError, "drop_finished_sequences has no"):
+            model.generate(
+                inputs=prompt,
+                generation_config=sampling_config(output_logits=True),
+                cehrgpt_tokenizer=tokenizer,
+                drop_finished_sequences=True,
+            )
+
+
+class TestStaticCacheGeneration(unittest.TestCase):
+    def setUp(self):
+        self.key_buffers = []
+
+        self.flags = []
+
+        def record(query, key, value, dropout_p=0.0, softmax_scale=None, causal=False):
+            if query.shape[1] == 1:
+                self.key_buffers.append((key.data_ptr(), key.shape[1], key.is_contiguous()))
+                self.flags.append((dropout_p, causal))
+            return fake_flash_attn_func(query, key, value, causal=causal)
+
+        patches = [
+            mock.patch("cehrgpt.models.gpt2.flash_attn_func", record, create=True),
+            mock.patch(
+                "cehrgpt.models.gpt2.flash_attn_varlen_func",
+                unexpected_varlen,
+                create=True,
+            ),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _generate(self, model, num_return_sequences=4, max_new_tokens=12, **kwargs):
+        tokenizer = TimeTokenizer()
+        self.key_buffers.clear()
+        self.flags.clear()
+        torch.manual_seed(3)
+        return model.generate(
+            inputs=torch.tensor([tokenizer.encode(PROMPT)], dtype=torch.long),
+            generation_config=sampling_config(
+                num_return_sequences=num_return_sequences,
+                max_new_tokens=max_new_tokens,
+                output_logits=True,
+            ),
+            cehrgpt_tokenizer=tokenizer,
+            **kwargs,
+        )
+
+    def test_the_logits_are_identical_to_the_ones_of_a_growing_cache(self):
+        for apply_rotary in (False, True):
+            with self.subTest(apply_rotary=apply_rotary):
+                model = build_generation_model(
+                    apply_rotary=apply_rotary, attn_implementation="flash_attention_2"
+                )
+
+                expected = self._generate(model)
+                actual = self._generate(model, static_kv_cache=True)
+
+                torch.testing.assert_close(
+                    actual.sequences, expected.sequences, rtol=0, atol=0
+                )
+                self.assertEqual(len(actual.logits), 12)
+                for expected_logits, actual_logits in zip(expected.logits, actual.logits):
+                    torch.testing.assert_close(
+                        actual_logits, expected_logits, rtol=0, atol=0
+                    )
+                self.assertIsNone(actual.past_key_values)
+
+    def test_the_keys_stay_where_they_are(self):
+        model = build_generation_model(attn_implementation="flash_attention_2")
+
+        self._generate(model)
+        growing = list(self.key_buffers)
+        self._generate(model, static_kv_cache=True)
+        static = list(self.key_buffers)
+
+        # 11 decoding steps of 2 layers, over the prompt and the tokens generated so far
+        lengths = [len(PROMPT) + step for step in range(1, 12) for _layer in range(2)]
+        self.assertEqual([length for _, length, _ in growing], lengths)
+        self.assertEqual([length for _, length, _ in static], lengths)
+        # One buffer per layer for the whole generation, read where it is: not contiguous,
+        # the memory of the tokens to come is between the rows
+        self.assertEqual(len({pointer for pointer, _, _ in static}), 2)
+        self.assertFalse(any(contiguous for _, _, contiguous in static[:-2]))
+        # A growing cache is copied to a new place at every step
+        self.assertTrue(all(contiguous for _, _, contiguous in growing))
+
+    def test_a_single_query_is_not_causal_and_has_no_dropout_in_evaluation(self):
+        model = build_generation_model(
+            attn_implementation="flash_attention_2", attn_pdrop=0.1
+        )
+
+        self._generate(model, static_kv_cache=True)
+
+        self.assertEqual(len({pointer for pointer, _, _ in self.key_buffers}), 2)
+        self.assertEqual(set(self.flags), {(0.0, False)})
+
+    def test_an_attention_that_is_not_causal_stays_not_causal(self):
+        model = build_generation_model(attn_implementation="flash_attention_2")
+        calls = []
+
+        def record(query, key, value, dropout_p=0.0, softmax_scale=None, causal=False):
+            calls.append((query.shape[1], causal))
+            return fake_flash_attn_func(query, key, value, causal=causal)
+
+        with mock.patch("cehrgpt.models.gpt2.flash_attn_func", record):
+            # More than one query at a time over a static cache: the prompt in two parts
+            cache = [None, None]
+            for block_index, block in enumerate(model.cehrgpt.h):
+                hidden = torch.randn(1, 3, 32)
+                _, cache[block_index] = block.attn(hidden, use_cache=True)[:2]
+                key, value = cache[block_index]
+                static = StaticKeyValueCache.from_key_value(key, value, 8, torch.bfloat16)
+                block.attn(torch.randn(1, 2, 32), layer_past=static, use_cache=True)
+                block.attn.is_causal = False
+                block.attn(torch.randn(1, 2, 32), layer_past=static, use_cache=True)
+                self.assertEqual(static.length, 7)
+
+        # (queries, causal) of the three calls of every layer
+        self.assertEqual(calls, [(3, True), (2, True), (2, False)] * 2)
+
+    def test_it_works_from_a_prompt_prefill_and_with_dropped_sequences(self):
+        model = build_generation_model(attn_implementation="flash_attention_2")
+        tokenizer = TimeTokenizer()
+        prompt = torch.tensor([tokenizer.encode(PROMPT)], dtype=torch.long)
+
+        def generate(**kwargs):
+            generation_config = sampling_config(
+                num_return_sequences=8, max_new_tokens=20
+            )
+            generation_config.eos_token_id = 1
+            sizes, handle = record_batch_sizes(model)
+            try:
+                torch.manual_seed(5)
+                outputs = model.generate(
+                    inputs=prompt,
+                    generation_config=generation_config,
+                    cehrgpt_tokenizer=tokenizer,
+                    stopping_criteria=StoppingCriteriaList(
+                        [TimeToEventStoppingCriteria(tokenizer, ["C12"], 0, -1, 0, 500)]
+                    ),
+                    **kwargs,
+                )
+            finally:
+                handle.remove()
+            return outputs, sizes
+
+        with StepRecorder(model) as expected_steps:
+            expected, _ = generate(return_prompt_prefill=True)
+        with StepRecorder(model) as steps:
+            actual, sizes = generate(
+                prompt_prefill=expected.prompt_prefill,
+                static_kv_cache=True,
+                drop_finished_sequences=True,
+            )
+
+        # No forward pass over the prompt: the first step is the one of the prefill
+        steps.logits.insert(0, expected.prompt_prefill["logits"][:, -1])
+        steps.assert_same_steps(self, expected_steps)
+        torch.testing.assert_close(actual.sequences, expected.sequences, rtol=0, atol=0)
+        self.assertLess(sizes[-1], 8)
+        # The buffers of the rows that are left are new ones every time rows are dropped
+        self.assertGreater(len({pointer for pointer, _, _ in self.key_buffers}), 2)
+
+    def test_it_is_not_used_where_the_attention_cannot_append_in_place(self):
+        tokenizer = TimeTokenizer()
+        prompt = torch.tensor([tokenizer.encode(PROMPT)], dtype=torch.long)
+        kwargs = {"use_cache": True, "attention_mask": torch.ones_like(prompt).bool()}
+        flash_model = build_generation_model(attn_implementation="flash_attention_2")
+        self.assertTrue(flash_model._can_use_static_kv_cache(kwargs, False))
+
+        self.assertFalse(flash_model._can_use_static_kv_cache(kwargs, True))
+        self.assertFalse(
+            flash_model._can_use_static_kv_cache({**kwargs, "use_cache": False}, False)
+        )
+        padded = {**kwargs, "attention_mask": torch.tensor([[False] + [True] * 6])}
+        self.assertFalse(flash_model._can_use_static_kv_cache(padded, False))
+        for name in ("use_local_attention", "causal_sfm"):
+            setattr(flash_model.cehrgpt.config, name, True)
+            self.assertFalse(flash_model._can_use_static_kv_cache(kwargs, False), name)
+            setattr(flash_model.cehrgpt.config, name, False)
+        flash_model.cehrgpt._drop_unpadded_flash_attention_mask = False
+        self.assertFalse(flash_model._can_use_static_kv_cache(kwargs, False))
+        flash_model.cehrgpt._drop_unpadded_flash_attention_mask = True
+        self.assertFalse(flash_model.train()._can_use_static_kv_cache(kwargs, False))
+
+        with mock.patch(
+            "cehrgpt.models.qwen2.flash_attn_func", fake_flash_attn_func, create=True
+        ):
+            qwen2_flash_model = build_generation_model(
+                backbone="qwen2", attn_implementation="flash_attention_2"
+            )
+            self.assertFalse(qwen2_flash_model._can_use_static_kv_cache(kwargs, False))
+
+        # Eager attention and the qwen2 backbone grow their cache, which is returned
+        for backbone in ("gpt2", "qwen2"):
+            model = build_generation_model(backbone=backbone)
+            self.assertFalse(model._can_use_static_kv_cache(kwargs, False))
+            outputs = model.generate(
+                inputs=prompt,
+                generation_config=sampling_config(max_new_tokens=2),
+                cehrgpt_tokenizer=tokenizer,
+                static_kv_cache=True,
+            )
+            self.assertIsInstance(outputs.past_key_values[0][0], torch.Tensor)
+
+
+class TestFastDecodingPrediction(unittest.TestCase):
+    def _predictor(self, model, fast_decoding, tokenizer=None):
+        generation_config = sampling_config(num_return_sequences=12, max_new_tokens=20)
+        generation_config.eos_token_id = 1
+        return TimeToEventModel(
+            tokenizer=tokenizer or TimeTokenizer(),
+            model=model,
+            outcome_events=["C12"],
+            generation_config=generation_config,
+            batch_size=5,
+            fast_decoding=fast_decoding,
+        )
+
+    def test_the_trajectories_and_the_prediction_are_the_same(self):
+        for backbone, attn_implementation in (
+            ("gpt2", None),
+            ("gpt2", "flash_attention_2"),
+            ("qwen2", None),
+        ):
+            with self.subTest(
+                backbone=backbone, attn_implementation=attn_implementation
+            ), mock.patch(
+                "cehrgpt.models.gpt2.flash_attn_func", fake_flash_attn_func, create=True
+            ), mock.patch(
+                "cehrgpt.models.gpt2.flash_attn_varlen_func",
+                unexpected_varlen,
+                create=True,
+            ):
+                model = build_generation_model(
+                    backbone=backbone, attn_implementation=attn_implementation
+                )
+                results = {}
+                for fast_decoding in (False, True):
+                    predictor = self._predictor(model, fast_decoding)
+                    sizes, handle = record_batch_sizes(model)
+                    try:
+                        torch.manual_seed(8)
+                        results[fast_decoding] = (
+                            predictor.simulate(PROMPT, prediction_window_end=500),
+                            list(sizes),
+                        )
+                        torch.manual_seed(8)
+                        results[fast_decoding] += (
+                            predictor.predict_time_to_events(
+                                PROMPT, prediction_window_end=500
+                            ),
+                        )
+                    finally:
+                        handle.remove()
+
+                slow_sequences, slow_sizes, slow_prediction = results[False]
+                fast_sequences, fast_sizes, fast_prediction = results[True]
+                self.assertEqual(fast_sequences, slow_sequences)
+                self.assertEqual(len(fast_sequences), 12)
+                self.assertEqual(
+                    fast_prediction.outcome_events, slow_prediction.outcome_events
+                )
+                self.assertEqual(
+                    fast_prediction.time_intervals, slow_prediction.time_intervals
+                )
+                # The same forward passes, on fewer rows
+                self.assertEqual(len(fast_sizes), len(slow_sizes))
+                self.assertLess(sum(fast_sizes), sum(slow_sizes))
+
+    def test_the_values_of_the_trajectories_are_the_same(self):
+        model = build_generation_model(include_values=True)
+        with torch.no_grad():
+            model.value_head.weight.mul_(200)
+        results = []
+        for fast_decoding in (False, True):
+            predictor = self._predictor(model, fast_decoding, ValueTokenizer())
+            torch.manual_seed(8)
+            results.append(
+                predictor.simulate(
+                    PROMPT,
+                    prediction_window_end=500,
+                    value_indicators=[False] * 6 + [True],
+                    values=[0] * 6 + [4],
+                    return_values=True,
+                )
+            )
+
+        (slow_sequences, slow_values), (fast_sequences, fast_values) = results
+        self.assertEqual(fast_sequences, slow_sequences)
+
+        # The padding of a finished trajectory has no value to read. The tokenizer of this
+        # test decodes it, the real one leaves it out.
+        def generated(sequences, values):
+            return [
+                [value for token, value in zip(tokens, token_values) if token != "PAD"]
+                for tokens, token_values in zip(sequences, values)
+            ]
+
+        self.assertEqual(
+            generated(fast_sequences, fast_values), generated(slow_sequences, slow_values)
+        )
+        self.assertTrue(any("PAD" in tokens for tokens in fast_sequences))
+
+    def test_the_generation_gets_the_flags(self):
+        model = FakeGenerationModel()
+        for fast_decoding, pad_token_id, expected in (
+            (True, 4, {"static_kv_cache", "drop_finished_sequences"}),
+            (True, None, {"static_kv_cache"}),
+            (False, 4, set()),
+        ):
+            model.generation_kwargs.clear()
+            predictor = TimeToEventModel(
+                tokenizer=FakeTokenizer(),
+                model=model,
+                outcome_events=["OUT"],
+                generation_config=GenerationConfig(
+                    max_length=8,
+                    max_new_tokens=1,
+                    num_return_sequences=1,
+                    do_sample=True,
+                    pad_token_id=pad_token_id,
+                ),
+                fast_decoding=fast_decoding,
+            )
+
+            predictor.simulate(["X"])
+
+            self.assertEqual(
+                {"static_kv_cache", "drop_finished_sequences"}
+                & set(model.generation_kwargs[0]),
+                expected,
+            )
 
 
 if __name__ == "__main__":

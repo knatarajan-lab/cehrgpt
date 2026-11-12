@@ -188,6 +188,84 @@ def _get_unpad_data(attention_mask):
     return result
 
 
+class StaticKeyValueCache:
+    """
+    The keys and values of one attention layer during generation, appended to in place.
+
+    The attention layers grow their cache with `torch.cat`, which copies the keys and values
+    of the prompt and of every token generated so far at every decoding step, and the flash
+    path copies them a second time to re-order them. Here the memory for the longest sequence
+    is allocated once, in the (batch, length, heads, head_dim) layout flash-attn reads, and a
+    step writes the keys and values of its token into it.
+
+    It stands for the usual (key, value) pair of a layer: iterating or indexing it gives the
+    key and the value in the (batch, heads, length, head_dim) layout, as views. Any attention
+    can therefore read it, only `GPT2FlashAttention` appends to it in place.
+    """
+
+    def __init__(self, keys: torch.Tensor, values: torch.Tensor, length: int):
+        if keys.shape != values.shape or keys.dim() != 4:
+            raise ValueError("keys and values are (batch, capacity, heads, head_dim)")
+        self.keys = keys
+        self.values = values
+        self.length = length
+
+    @classmethod
+    def from_key_value(
+        cls,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        capacity: int,
+        dtype: torch.dtype,
+    ) -> "StaticKeyValueCache":
+        """From the (batch, heads, length, head_dim) key and value of a layer."""
+        batch_size, num_heads, length, head_dim = key.shape
+        if capacity < length:
+            raise ValueError(f"A capacity of {capacity} cannot hold {length} tokens")
+        shape = (batch_size, capacity, num_heads, head_dim)
+        keys = torch.empty(shape, dtype=dtype, device=key.device)
+        values = torch.empty(shape, dtype=dtype, device=value.device)
+        keys[:, :length] = key.permute(0, 2, 1, 3)
+        values[:, :length] = value.permute(0, 2, 1, 3)
+        return cls(keys, values, length)
+
+    @property
+    def capacity(self) -> int:
+        return self.keys.shape[1]
+
+    def append(self, key: torch.Tensor, value: torch.Tensor) -> None:
+        """Write the (batch, heads, new length, head_dim) key and value of new tokens."""
+        end = self.length + key.shape[-2]
+        if end > self.capacity:
+            raise ValueError(
+                f"The cache holds {self.capacity} tokens, {end} were written to it"
+            )
+        self.keys[:, self.length : end] = key.permute(0, 2, 1, 3)
+        self.values[:, self.length : end] = value.permute(0, 2, 1, 3)
+        self.length = end
+
+    def states(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """The keys and values written so far, (batch, length, heads, head_dim) views."""
+        return self.keys[:, : self.length], self.values[:, : self.length]
+
+    def select_rows(self, rows: torch.Tensor) -> "StaticKeyValueCache":
+        """The cache of the sequences `rows`, the indices of the ones to keep."""
+        return StaticKeyValueCache(
+            self.keys.index_select(0, rows),
+            self.values.index_select(0, rows),
+            self.length,
+        )
+
+    def __len__(self) -> int:
+        return 2
+
+    def __getitem__(self, index: int) -> torch.Tensor:
+        return self.states()[index].permute(0, 2, 1, 3)
+
+    def __iter__(self):
+        return iter((self[0], self[1]))
+
+
 class RotaryPositionEmbedding(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
@@ -346,10 +424,25 @@ class GPT2FlashAttention(GPT2Attention):
         key = self._split_heads(key, self.num_heads, self.head_dim)
         value = self._split_heads(value, self.num_heads, self.head_dim)
 
+        # A static cache is appended to in place and read as it is, when nothing but the
+        # plain flash-attn call has to read it: no padding to remove, no local window. In the
+        # other cases it is read like the usual (key, value) pair below.
+        if (
+            isinstance(layer_past, StaticKeyValueCache)
+            and use_cache is True
+            and attention_mask is None
+            and encoder_hidden_states is None
+            and not self.reorder_and_upcast_attn
+            and not getattr(self.config, "use_local_attention", False)
+        ):
+            return self._forward_with_static_cache(
+                query, key, value, layer_past, output_attentions
+            )
+
         if layer_past is not None:
             past_key, past_value = layer_past
-            key = torch.cat((past_key, key), dim=-2)
-            value = torch.cat((past_value, value), dim=-2)
+            key = torch.cat((past_key.to(key.dtype), key), dim=-2)
+            value = torch.cat((past_value.to(value.dtype), value), dim=-2)
 
         if use_cache is True:
             present = (key, value)
@@ -488,6 +581,43 @@ class GPT2FlashAttention(GPT2Attention):
         if output_attentions:
             outputs += (attn_weights,)
 
+        return outputs
+
+    def _forward_with_static_cache(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cache: StaticKeyValueCache,
+        output_attentions: Optional[bool],
+    ):
+        """
+        Attention of new tokens over a static cache, which their keys and values are written to.
+
+        The same flash-attn call as _flash_attention_forward without a mask, on the same
+        numbers: the keys and values are converted to the dtype flash-attn computes in when
+        they are written instead of at every step, and are already in its layout.
+        """
+        dtype = query.dtype
+        query_length = query.size(-2)
+        cache.append(key, value)
+        key_states, value_states = cache.states()
+        query_states = query.permute(0, 2, 1, 3).contiguous().to(torch.bfloat16)
+        attn_output = flash_attn_func(
+            query_states,
+            key_states,
+            value_states,
+            self.attn_dropout.p if self.training else 0.0,
+            softmax_scale=None,
+            causal=self.is_causal and query_length != 1,
+        )
+        attn_output = attn_output.permute(0, 2, 1, 3).contiguous().to(dtype)
+        attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
+        attn_output = self.c_proj(attn_output)
+        attn_output = self.resid_dropout(attn_output)
+        outputs = (attn_output, cache)
+        if output_attentions:
+            outputs += (None,)
         return outputs
 
     def _flash_attention_forward(

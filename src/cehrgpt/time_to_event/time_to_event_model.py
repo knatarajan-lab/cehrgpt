@@ -166,6 +166,7 @@ class TimeToEventModel:
         enable_early_stopping: bool = True,
         max_input_length: Optional[int] = None,
         reuse_prompt_cache: bool = True,
+        fast_decoding: bool = True,
     ):
         self.tokenizer = tokenizer
         self.model = model.eval()
@@ -189,6 +190,12 @@ class TimeToEventModel:
         # (prompt key, the prompt_prefill returned by generate): the logits of the first new
         # token and the KV cache of the prompt
         self._prompt_cache: Optional[Tuple[Any, Dict[str, Any]]] = None
+        # A decoding step is mostly memory traffic over the KV cache of the prompt and of the
+        # sequences of the batch. With fast_decoding the cache is appended to in place instead
+        # of copied at every step (where the model supports it), and the model stops running
+        # on the sequences whose outcome is determined, which otherwise stay in the batch
+        # until the last one is. The sampled trajectories are the same.
+        self.fast_decoding = fast_decoding
         # One stopping criteria per task window, see _get_stopping_criteria
         self._stopping_criteria: Dict[Tuple, TimeToEventStoppingCriteria] = {}
 
@@ -404,6 +411,11 @@ class TimeToEventModel:
                             )
                         ]
                     )
+                if self.fast_decoding:
+                    generation_kwargs["static_kv_cache"] = True
+                    # A dropped sequence is padded, which needs a padding token
+                    if self.generation_config.pad_token_id is not None:
+                        generation_kwargs["drop_finished_sequences"] = True
                 prompt_cache = (
                     self._get_prompt_cache(prompt_key) if reuse_prompt_cache else None
                 )
