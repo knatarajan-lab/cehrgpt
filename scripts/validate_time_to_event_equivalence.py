@@ -28,8 +28,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--probability_tv_atol", type=float, default=1e-3)
     parser.add_argument(
         "--comparison",
-        choices=("combined", "shared_prefill", "age_tracking"),
+        choices=("combined", "shared_prefill", "age_tracking", "prompt_cache"),
         default="combined",
+        help="prompt_cache compares a generation that encodes the prompt against one that "
+        "starts from the prompt's KV cache, like the next batches of samples of a patient do.",
     )
     return parser.parse_args()
 
@@ -56,6 +58,7 @@ def generate(
     share_prompt_prefill: bool,
     track_ages: bool,
     seed: int,
+    past_key_values=None,
 ):
     model._generation_share_prompt_prefill = share_prompt_prefill
     model._generation_track_ages_override = track_ages
@@ -67,6 +70,7 @@ def generate(
             inputs=prompt,
             generation_config=generation_config,
             cehrgpt_tokenizer=tokenizer,
+            **({"past_key_values": past_key_values} if past_key_values is not None else {}),
         )
 
 
@@ -89,7 +93,7 @@ def main() -> None:
         .eval()
         .to(device)
     )
-    if model.config.apply_rotary:
+    if model.config.apply_rotary and args.comparison != "prompt_cache":
         raise RuntimeError(
             "This legacy-age-vs-skipped-age comparison requires apply_rotary=false"
         )
@@ -110,6 +114,8 @@ def main() -> None:
         "combined": ((False, True), (True, False)),
         "shared_prefill": ((False, False), (True, False)),
         "age_tracking": ((False, True), (False, False)),
+        # Both sides run the production paths, the optimized one from the prompt's KV cache
+        "prompt_cache": ((True, None), (True, None)),
     }
     (legacy_share_prefill, legacy_track_ages), (
         optimized_share_prefill,
@@ -140,6 +146,19 @@ def main() -> None:
             track_ages=legacy_track_ages,
             seed=seed,
         )
+        prompt_cache = None
+        if args.comparison == "prompt_cache":
+            # What TimeToEventModel keeps from the first batch of samples of a patient: the
+            # first row of the cache, without the generated tokens and the last prompt token
+            prompt_cache = tuple(
+                tuple(
+                    state[:1, ..., : len(token_ids) - 1, :]
+                    .clone()
+                    .expand(args.num_return_sequences, *state.shape[1:-2], -1, -1)
+                    for state in layer_past
+                )
+                for layer_past in legacy.past_key_values
+            )
         optimized = generate(
             model,
             tokenizer,
@@ -148,6 +167,7 @@ def main() -> None:
             share_prompt_prefill=optimized_share_prefill,
             track_ages=optimized_track_ages,
             seed=seed,
+            past_key_values=prompt_cache,
         )
 
         if len(legacy.logits) != len(optimized.logits):

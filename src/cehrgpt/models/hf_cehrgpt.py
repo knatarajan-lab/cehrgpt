@@ -1056,6 +1056,23 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         raw_attention_mask = attention_mask  # save before conversion for local-attention window
         attention_mask = self.prepare_attention_mask(input_ids, attention_mask)
 
+        # The flash path un-pads the keys and values of every layer with the mask, which with a
+        # KV cache copies the whole cache at every decoding step, and derives the un-pad indices
+        # with several GPU-to-CPU syncs per layer (reuse_unpad_data can't share them across the
+        # layers under torch.inference_mode, whose tensors have no version counter). A mask
+        # without padding changes nothing, so it is dropped: one sync per forward pass instead.
+        # Evaluation only, a training step would pay the sync without ever dropping its mask.
+        if (
+            not self.training
+            and attention_mask is not None
+            and attention_mask.dim() == 2
+            and getattr(self.config, "_attn_implementation", "eager")
+            == "flash_attention_2"
+            and not getattr(self.config, "use_local_attention", False)
+            and bool(attention_mask.all())
+        ):
+            attention_mask = None
+
         # SDPA cannot take `is_causal=True` together with an explicit mask, so causality
         # has to be folded into the mask. Done once here rather than per layer: at a 16k
         # packed sequence length the combined mask is a sizeable tensor, and every layer
@@ -1517,6 +1534,41 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         self._generation_share_prompt_prefill = True
         self._generation_track_ages_override = None
         self._generation_last_token_logits_only = True
+        # (tokenizer, lookup) of _get_generation_time_delta_lookup
+        self._generation_time_delta_lookup = None
+
+    def _get_generation_time_delta_lookup(
+        self, cehrgpt_tokenizer, device: torch.device
+    ) -> torch.Tensor:
+        """
+        The days every token moves time forward by, indexed by token id.
+
+        Built with a pass over the whole vocabulary, so it is kept for the next generations with
+        the same tokenizer rather than rebuilt for every call of generate.
+        """
+        cached = self._generation_time_delta_lookup
+        if (
+            cached is not None
+            and cached[0] is cehrgpt_tokenizer
+            and cached[1].device == device
+            and cached[1].shape[0] == self.config.vocab_size
+        ):
+            return cached[1]
+        time_delta_lookup = torch.zeros(
+            self.config.vocab_size, dtype=torch.float32, device=device
+        )
+        time_token_ids = []
+        time_token_days = []
+        for token, token_id in cehrgpt_tokenizer.get_vocab().items():
+            if token_id < self.config.vocab_size and is_att_token(token):
+                time_token_ids.append(token_id)
+                time_token_days.append(extract_time_interval_in_days(token))
+        if time_token_ids:
+            time_delta_lookup[torch.tensor(time_token_ids, device=device)] = (
+                torch.tensor(time_token_days, dtype=torch.float32, device=device)
+            )
+        self._generation_time_delta_lookup = (cehrgpt_tokenizer, time_delta_lookup)
+        return time_delta_lookup
 
     def _can_share_generation_prompt_prefill(self) -> bool:
         return (
@@ -2416,28 +2468,22 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             else track_ages_override
         )
         if track_ages:
-            time_delta_lookup = torch.zeros(
-                self.config.vocab_size, dtype=torch.float32, device=input_ids.device
+            time_delta_lookup = self._get_generation_time_delta_lookup(
+                cehrgpt_tokenizer, input_ids.device
             )
-            time_token_ids = []
-            time_token_days = []
-            for token, token_id in cehrgpt_tokenizer.get_vocab().items():
-                if token_id < self.config.vocab_size and is_att_token(token):
-                    time_token_ids.append(token_id)
-                    time_token_days.append(extract_time_interval_in_days(token))
-            if time_token_ids:
-                time_delta_lookup[
-                    torch.tensor(time_token_ids, device=input_ids.device)
-                ] = torch.tensor(
-                    time_token_days, dtype=torch.float32, device=input_ids.device
-                )
             batched_time_delta = torch.zeros(
                 batch_size, dtype=torch.float32, device=input_ids.device
             )
             batched_ages = model_kwargs.get("ages", None)
             if batched_ages is None:
+                # generate(num_return_sequences=N) repeats one prompt N times, whose ages
+                # are then decoded once rather than N times
+                rows_are_identical = torch.equal(
+                    input_ids, input_ids[:1].expand_as(input_ids)
+                )
+                rows_to_decode = input_ids[:1] if rows_are_identical else input_ids
                 batched_ages = []
-                for token_ids in input_ids.detach().cpu():
+                for token_ids in rows_to_decode.detach().cpu():
                     concept_ids = cehrgpt_tokenizer.decode(
                         token_ids.numpy(), skip_special_tokens=False
                     )
@@ -2445,6 +2491,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 batched_ages = torch.as_tensor(
                     np.asarray(batched_ages), device=input_ids.device
                 )
+                if rows_are_identical:
+                    batched_ages = batched_ages.repeat(batch_size, 1)
             else:
                 batched_ages = batched_ages.to(input_ids.device)
             base_ages = batched_ages[:, -1]
