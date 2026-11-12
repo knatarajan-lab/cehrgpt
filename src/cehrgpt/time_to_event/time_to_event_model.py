@@ -190,7 +190,7 @@ class TimeToEventModel:
         # token and the KV cache of the prompt
         self._prompt_cache: Optional[Tuple[Any, Dict[str, Any]]] = None
         # One stopping criteria per task window, see _get_stopping_criteria
-        self._stopping_criteria: Dict[Tuple[int, int, int, int], TimeToEventStoppingCriteria] = {}
+        self._stopping_criteria: Dict[Tuple, TimeToEventStoppingCriteria] = {}
 
     def is_outcome_event(self, token: str) -> bool:
         return token in self.outcome_events
@@ -203,11 +203,15 @@ class TimeToEventModel:
         prediction_window_end: int,
     ) -> TimeToEventStoppingCriteria:
         """The stopping criteria of a task window, built once and reset for every generation."""
+        # The outcome events and the tokenizer are part of the key: they can be replaced on
+        # the model after it is built, which a criteria built earlier would not see
         key = (
             future_visit_start,
             future_visit_end,
             prediction_window_start,
             prediction_window_end,
+            frozenset(self.outcome_events),
+            id(self.tokenizer),
         )
         criteria = self._stopping_criteria.get(key)
         if criteria is None:

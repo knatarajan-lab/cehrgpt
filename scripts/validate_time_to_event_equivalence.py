@@ -2,6 +2,7 @@
 """Differentially validate legacy and optimized time-to-event generation."""
 
 import argparse
+import copy
 import glob
 import os
 from typing import Optional
@@ -34,16 +35,32 @@ def parse_args() -> argparse.Namespace:
             "shared_prefill",
             "age_tracking",
             "prompt_cache",
+            "unpadded_mask",
             "determinism",
         ),
         default="combined",
         help="prompt_cache compares a generation that encodes the prompt against one that "
         "starts from what the first computed from the prompt, like the next batches of samples "
         "of a patient do. "
+        "unpadded_mask compares flash attention with the attention mask of a prompt without "
+        "padding kept (un-padded keys and values) and dropped. "
         "determinism runs the model twice on every prompt without reseeding and fails when the "
         "logits differ, which they do when dropout is applied in evaluation.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--reuse_num_return_sequences",
+        type=int,
+        default=None,
+        help="With --comparison prompt_cache: the number of sequences of the generation that "
+        "starts from the prompt of the first one, when it is not --num_return_sequences. The "
+        "last batch of samples of a patient, or a trial again, is smaller than the first batch "
+        "whose prompt it reuses. Both sides then decode greedily, the samples of batches of "
+        "different sizes are not comparable.",
+    )
+    args = parser.parse_args()
+    if args.reuse_num_return_sequences is not None and args.comparison != "prompt_cache":
+        parser.error("--reuse_num_return_sequences needs --comparison prompt_cache")
+    return args
 
 
 def load_prefixes(folder: str, count: int) -> list[list[str]]:
@@ -70,7 +87,22 @@ def generate(
     seed: int,
     prompt_prefill=None,
     return_prompt_prefill: bool = False,
+    drop_unpadded_mask: bool = True,
+    greedy_rows: Optional[int] = None,
 ):
+    """
+    Generate from a prompt along one of the paths to compare.
+
+    greedy_rows generates that many sequences greedily instead of sampling
+    num_return_sequences of them.
+    """
+    if greedy_rows is not None:
+        # Greedy decoding does not take num_return_sequences, the prompt is repeated instead
+        prompt = prompt.expand(greedy_rows, -1)
+        generation_config = copy.deepcopy(generation_config)
+        generation_config.do_sample = False
+        generation_config.num_return_sequences = 1
+    model.cehrgpt._drop_unpadded_flash_attention_mask = drop_unpadded_mask
     if share_prompt_prefill is None:
         # The production behavior: the model decides, it does not share under flash attention
         model._generation_share_prompt_prefill = True
@@ -202,7 +234,23 @@ def main() -> None:
         "age_tracking": ((False, True), (False, False)),
         # Both sides run the production paths, the optimized one from the prompt's KV cache
         "prompt_cache": ((None, None), (None, None)),
+        # Both sides run the production paths, the legacy one keeps the attention mask
+        "unpadded_mask": ((None, None), (None, None)),
     }
+    if args.comparison == "unpadded_mask" and (
+        getattr(model.config, "_attn_implementation", "eager") != "flash_attention_2"
+    ):
+        raise RuntimeError(
+            "unpadded_mask compares two paths of flash attention, which this model does not use"
+        )
+    legacy_rows = optimized_rows = None
+    if args.reuse_num_return_sequences is not None:
+        legacy_rows = args.num_return_sequences
+        optimized_rows = args.reuse_num_return_sequences
+    compared_rows = min(
+        args.num_return_sequences,
+        args.reuse_num_return_sequences or args.num_return_sequences,
+    )
     (legacy_share_prefill, legacy_track_ages), (
         optimized_share_prefill,
         optimized_track_ages,
@@ -234,6 +282,8 @@ def main() -> None:
                 track_ages=legacy_track_ages,
                 seed=seed,
                 return_prompt_prefill=args.comparison == "prompt_cache",
+                drop_unpadded_mask=args.comparison != "unpadded_mask",
+                greedy_rows=legacy_rows,
             ),
         )
         # What TimeToEventModel keeps from the first batch of samples of a patient for the
@@ -250,6 +300,7 @@ def main() -> None:
                 track_ages=optimized_track_ages,
                 seed=seed,
                 prompt_prefill=prompt_prefill,
+                greedy_rows=optimized_rows,
             ),
         )
         if (
@@ -265,16 +316,17 @@ def main() -> None:
 
         if len(legacy.logits) != len(optimized.logits):
             raise AssertionError(f"Prompt {prompt_index} generated a different step count")
-        identical_prefix = torch.ones(
-            args.num_return_sequences, dtype=torch.bool, device=device
-        )
+        # The sequences both sides have: the reusing side can have fewer or more
+        legacy_sequences = legacy.sequences[:compared_rows]
+        optimized_sequences = optimized.sequences[:compared_rows]
+        identical_prefix = torch.ones(compared_rows, dtype=torch.bool, device=device)
         for step, (legacy_logits, optimized_logits) in enumerate(
             zip(legacy.logits, optimized.logits)
         ):
             if not identical_prefix.any():
                 break
-            comparable_legacy = legacy_logits[identical_prefix]
-            comparable_optimized = optimized_logits[identical_prefix]
+            comparable_legacy = legacy_logits[:compared_rows][identical_prefix]
+            comparable_optimized = optimized_logits[:compared_rows][identical_prefix]
             difference = (
                 (comparable_legacy - comparable_optimized).abs().max().item()
             )
@@ -303,30 +355,32 @@ def main() -> None:
                 )
 
             position = len(token_ids) + step
-            same_step = legacy.sequences[:, position] == optimized.sequences[:, position]
+            same_step = legacy_sequences[:, position] == optimized_sequences[:, position]
             if model.config.include_values:
-                legacy_value_mask = legacy.sequence_val_masks[:, position]
-                optimized_value_mask = optimized.sequence_val_masks[:, position]
+                legacy_value_mask = legacy.sequence_val_masks[:compared_rows, position]
+                optimized_value_mask = optimized.sequence_val_masks[
+                    :compared_rows, position
+                ]
                 same_value = legacy_value_mask == optimized_value_mask
                 same_value &= (
                     ~legacy_value_mask
                     | (
-                        legacy.sequence_vals[:, position]
-                        == optimized.sequence_vals[:, position]
+                        legacy.sequence_vals[:compared_rows, position]
+                        == optimized.sequence_vals[:compared_rows, position]
                     )
                 )
                 same_step &= same_value
             identical_prefix &= same_step
 
-        legacy_generated = legacy.sequences[:, len(token_ids) :]
-        optimized_generated = optimized.sequences[:, len(token_ids) :]
+        legacy_generated = legacy_sequences[:, len(token_ids) :]
+        optimized_generated = optimized_sequences[:, len(token_ids) :]
         token_matches = legacy_generated == optimized_generated
         total_sampled_tokens += token_matches.numel()
         mismatched_sampled_tokens += (~token_matches).sum().item()
         identical_trajectories += token_matches.all(dim=1).sum().item()
         print(
             f"PASS prompt={prompt_index} encoded_tokens={len(token_ids)} "
-            f"sequences={args.num_return_sequences} generated_tokens={args.max_new_tokens} "
+            f"sequences={compared_rows} generated_tokens={args.max_new_tokens} "
             f"prefill_rows={legacy_prefill_rows}->{optimized_prefill_rows} "
             f"identical_trajectories={token_matches.all(dim=1).sum().item()}"
         )
@@ -338,7 +392,7 @@ def main() -> None:
         f"max_probability_tv={max_probability_tv:.8g}; "
         f"probability_tv_tolerance={args.probability_tv_atol}; "
         f"identical_trajectories={identical_trajectories}/"
-        f"{len(prefixes) * args.num_return_sequences}; "
+        f"{len(prefixes) * compared_rows}; "
         f"sampled_token_mismatches={mismatched_sampled_tokens}/{total_sampled_tokens}"
     )
 

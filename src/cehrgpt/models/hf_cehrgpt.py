@@ -853,6 +853,10 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.gradient_checkpointing = False
 
         # Initialize weights and apply final processing
+        # Runtime switch for differential validation, not part of the checkpoint: False keeps
+        # an attention mask without padding on the flash path, as before it was dropped.
+        self._drop_unpadded_flash_attention_mask = True
+
         self.post_init()
 
         # We do need to update the pre-computed attention bias matrix if sample packing requires a larger context window
@@ -1063,7 +1067,8 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         # without padding changes nothing, so it is dropped: one sync per forward pass instead.
         # Evaluation only, a training step would pay the sync without ever dropping its mask.
         if (
-            not self.training
+            self._drop_unpadded_flash_attention_mask
+            and not self.training
             and attention_mask is not None
             and attention_mask.dim() == 2
             and getattr(self.config, "_attn_implementation", "eager")
@@ -2411,18 +2416,19 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         prompt_prefill = model_kwargs.pop("prompt_prefill", None)
         return_prompt_prefill = model_kwargs.pop("return_prompt_prefill", False)
         returned_prompt_prefill = None
+        if (prompt_prefill is not None or return_prompt_prefill) and (
+            self.cehrgpt.config.causal_sfm
+        ):
+            raise ValueError(
+                "prompt_prefill cannot be used with causal_sfm, every sequence has its own "
+                "random vector in the prompt"
+            )
         if prompt_prefill is not None:
-            if self.cehrgpt.config.causal_sfm:
-                raise ValueError(
-                    "prompt_prefill cannot be used with causal_sfm, every sequence has its "
-                    "own random vector in the prompt"
-                )
             if model_kwargs.get("past_key_values") is not None:
                 raise ValueError("prompt_prefill and past_key_values are exclusive")
-            if prompt_prefill["prompt_length"] != input_ids.shape[1]:
+            if output_attentions or output_hidden_states:
                 raise ValueError(
-                    f"prompt_prefill is of a prompt of {prompt_prefill['prompt_length']} "
-                    f"tokens, the prompt has {input_ids.shape[1]}"
+                    "prompt_prefill has no attentions or hidden states of the prompt to return"
                 )
 
         # init attention / hidden states / scores tuples
@@ -2530,6 +2536,39 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             batched_ages = None
             base_ages = None
             model_kwargs["ages"] = None
+
+        # A prefill stands for one prompt: the one every row of this generation must have, and,
+        # when it is reused, the one it was computed from. Checked on the tokens and the values
+        # themselves, a prompt of the same length would otherwise be continued with the logits
+        # and the KV cache of another one.
+        prompt_rows = {
+            "input_ids": input_ids,
+            "value_indicators": value_indicators,
+            "values": values,
+            "ages": batched_ages,
+        }
+        if prompt_prefill is not None or return_prompt_prefill:
+            for name, rows in prompt_rows.items():
+                if rows is not None and not torch.equal(
+                    rows, rows[:1].expand_as(rows)
+                ):
+                    raise ValueError(
+                        f"prompt_prefill needs every sequence to start from the same prompt, "
+                        f"the {name} differ"
+                    )
+        if prompt_prefill is not None:
+            for name, rows in prompt_rows.items():
+                expected = prompt_prefill["prompt"][name]
+                if (rows is None) != (expected is None) or (
+                    rows is not None
+                    and (
+                        rows.shape[1:] != expected.shape[1:]
+                        or not torch.equal(rows[:1], expected.to(rows.device))
+                    )
+                ):
+                    raise ValueError(
+                        f"prompt_prefill was computed from another prompt, the {name} differ"
+                    )
 
         # `generate(num_return_sequences=N)` expands one prompt to N identical
         # rows before entering this sampling loop.  In eval mode, and without
@@ -2642,7 +2681,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 # The sequences share the prompt, so the first row stands for all of them.
                 # Copied, so the rest of this generation can be freed.
                 returned_prompt_prefill = {
-                    "prompt_length": cur_len,
+                    "prompt": {
+                        name: rows[:1].clone() if rows is not None else None
+                        for name, rows in prompt_rows.items()
+                    },
                     "logits": outputs.logits[:1, -1:].clone(),
                     "value_hidden_states": (
                         outputs.value_hidden_states[:1, -1:].clone()
