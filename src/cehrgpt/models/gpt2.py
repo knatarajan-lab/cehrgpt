@@ -559,16 +559,18 @@ class GPT2FlashAttention(GPT2Attention):
                 attn_output_unpad, indices_q, batch_size, query_length
             )
         else:
-            # No mask means no padding. A single query decoding against a KV cache may see
-            # every key, and flash-attn before 2.1 aligned the causal mask to the top left,
-            # which would hide all the keys but the first from it.
+            # No mask means no padding. The causal mask changes nothing for a single query
+            # decoding against a KV cache, every key is before it. It is left out for that
+            # query because flash-attn before 2.1 aligned the mask to the top left, which
+            # would hide all the keys but the first from it. Same rule as transformers'
+            # _flash_attention_forward.
             attn_output = flash_attn_func(
                 query_states,
                 key_states,
                 value_states,
                 dropout,
                 softmax_scale=softmax_scale,
-                causal=query_length != 1,
+                causal=self.is_causal and query_length != 1,
             )
         # re-order the tensor back to (batch, n_heads, seq_length, head_dim)
         return attn_output.permute(0, 2, 1, 3).contiguous().to(dtype)
