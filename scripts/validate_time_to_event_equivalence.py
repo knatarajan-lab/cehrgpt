@@ -64,6 +64,15 @@ def parse_args() -> argparse.Namespace:
         "logits differ, which they do when dropout is applied in evaluation.",
     )
     parser.add_argument(
+        "--attn_implementation",
+        choices=("eager", "flash_attention_2"),
+        default=None,
+        help="The attention of the model, when it is not the one it runs with by default. "
+        "eager without --use_bfloat16 computes in float32, where two paths that compute the "
+        "same thing agree to about 1e-5: a difference that stays there is a bug, one that "
+        "is only there with bfloat16 flash attention is its rounding.",
+    )
+    parser.add_argument(
         "--prediction_window_end",
         type=int,
         default=30,
@@ -311,6 +320,12 @@ def diagnose_fast_decoding(args, prompt_index, legacy, fast, legacy_steps, fast_
     same_prefix = torch.ones(num_sequences, dtype=torch.bool)
     legacy_tokens = legacy.sequences[:, prompt_length:].cpu()
     fast_tokens = fast.sequences[:, prompt_length:].cpu()
+    # A model with values also reads the value sampled for every lab: two trajectories with
+    # the same tokens and another value are other trajectories
+    legacy_values = fast_values = None
+    if legacy.sequence_vals is not None:
+        legacy_values = legacy.sequence_vals[:, prompt_length:].cpu()
+        fast_values = fast.sequence_vals[:, prompt_length:].cpu()
     max_difference, max_tv, compared_steps = 0.0, 0.0, 0
     first_difference = None
     for step in range(min(len(legacy_steps.logits), len(fast_steps.logits))):
@@ -337,6 +352,13 @@ def diagnose_fast_decoding(args, prompt_index, legacy, fast, legacy_steps, fast_
             max_difference, max_tv = max(max_difference, difference), max(max_tv, tv)
         if step < min(legacy_tokens.shape[1], fast_tokens.shape[1]):
             same_prefix &= legacy_tokens[:, step] == fast_tokens[:, step]
+            if legacy_values is not None:
+                # The value of a dropped row is not sampled, and that row is not compared
+                still_active = torch.zeros(num_sequences, dtype=torch.bool)
+                still_active[active] = True
+                same_prefix &= ~still_active | (
+                    legacy_values[:, step] == fast_values[:, step]
+                )
     within = max_difference <= args.logit_atol and max_tv <= args.probability_tv_atol
     if first_difference is None:
         where = "the logits never differ on the same trajectory"
@@ -475,7 +497,8 @@ def main() -> None:
         CEHRGPT2LMHeadModel.from_pretrained(
             args.model_folder,
             attn_implementation=resolve_attn_implementation(
-                backbone=read_backbone(args.model_folder)
+                backbone=read_backbone(args.model_folder),
+                requested=args.attn_implementation,
             ),
             torch_dtype=(
                 torch.bfloat16

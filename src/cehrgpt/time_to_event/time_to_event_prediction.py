@@ -534,6 +534,7 @@ def main(args):
         max_input_length=max_input_length,
         reuse_prompt_cache=not args.disable_prompt_cache_reuse,
         fast_decoding=not args.disable_fast_decoding,
+        drop_finished_trajectories=args.drop_finished_trajectories,
     )
     if args.prepared_dataset_path:
         test_dataset = load_from_disk(args.prepared_dataset_path)
@@ -898,9 +899,17 @@ def create_arg_parser():
         "--disable_fast_decoding",
         dest="disable_fast_decoding",
         action="store_true",
-        help="Copy the KV cache at every decoding step and keep running the model on the "
-        "trajectories whose outcome is determined, as before. Slower, for comparing against "
-        "the predictions of the earlier behavior.",
+        help="Copy the KV cache at every decoding step, as before. Slower, for comparing "
+        "against the predictions of the earlier behavior.",
+    )
+    base_arg_parser.add_argument(
+        "--drop_finished_trajectories",
+        dest="drop_finished_trajectories",
+        action="store_true",
+        help="Stop running the model on the trajectories whose outcome is determined, which "
+        "otherwise stay in the batch until the last one is. With bfloat16 flash attention a "
+        "batch of fewer rows does not compute exactly the same numbers, so the trajectories "
+        "are not the ones generated without it.",
     )
     base_arg_parser.add_argument(
         "--n_boot",

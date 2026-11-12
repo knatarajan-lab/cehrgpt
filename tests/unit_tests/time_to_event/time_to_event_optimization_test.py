@@ -1910,6 +1910,7 @@ class TestFastDecodingPrediction(unittest.TestCase):
             generation_config=generation_config,
             batch_size=5,
             fast_decoding=fast_decoding,
+            drop_finished_trajectories=fast_decoding,
         )
 
     def test_the_trajectories_and_the_prediction_are_the_same(self):
@@ -1997,12 +1998,35 @@ class TestFastDecodingPrediction(unittest.TestCase):
         )
         self.assertTrue(any("PAD" in tokens for tokens in fast_sequences))
 
+    def test_trajectories_are_only_dropped_when_asked_for(self):
+        predictor = TimeToEventModel(
+            tokenizer=FakeTokenizer(),
+            model=FakeGenerationModel(),
+            outcome_events=["OUT"],
+            generation_config=GenerationConfig(
+                max_length=8,
+                max_new_tokens=1,
+                num_return_sequences=1,
+                do_sample=True,
+                pad_token_id=4,
+            ),
+        )
+
+        predictor.simulate(["X"])
+
+        self.assertTrue(predictor.fast_decoding)
+        self.assertFalse(predictor.drop_finished_trajectories)
+        self.assertIn("static_kv_cache", predictor.model.generation_kwargs[0])
+        self.assertNotIn("drop_finished_sequences", predictor.model.generation_kwargs[0])
+
     def test_the_generation_gets_the_flags(self):
         model = FakeGenerationModel()
-        for fast_decoding, pad_token_id, expected in (
-            (True, 4, {"static_kv_cache", "drop_finished_sequences"}),
-            (True, None, {"static_kv_cache"}),
-            (False, 4, set()),
+        for fast_decoding, drop_finished_trajectories, pad_token_id, expected in (
+            (True, True, 4, {"static_kv_cache", "drop_finished_sequences"}),
+            # A dropped trajectory is padded
+            (True, True, None, {"static_kv_cache"}),
+            (False, True, 4, {"drop_finished_sequences"}),
+            (False, False, 4, set()),
         ):
             model.generation_kwargs.clear()
             predictor = TimeToEventModel(
@@ -2017,6 +2041,7 @@ class TestFastDecodingPrediction(unittest.TestCase):
                     pad_token_id=pad_token_id,
                 ),
                 fast_decoding=fast_decoding,
+                drop_finished_trajectories=drop_finished_trajectories,
             )
 
             predictor.simulate(["X"])
