@@ -864,5 +864,53 @@ class TestFlashAttentionWithoutPadding(unittest.TestCase):
             )
 
 
+class TestFlashAttentionDropout(unittest.TestCase):
+    def _dropout_rates(self, training):
+        """The dropout rates the flash-attn functions are called with by a forward pass."""
+        rates = []
+
+        def record_flash(query, key, value, dropout_p=0.0, **kwargs):
+            rates.append(dropout_p)
+            return fake_flash_attn_func(query, key, value, **kwargs)
+
+        def record_varlen(query, key, value, dropout_p=0.0, **kwargs):
+            rates.append(dropout_p)
+            # One unpadded sequence, the un-padded states are (length, heads, head_dim)
+            return fake_flash_attn_func(
+                query[None], key[None], value[None], causal=kwargs["causal"]
+            )[0]
+
+        model = build_generation_model(
+            attn_implementation="flash_attention_2", attn_pdrop=0.1
+        ).train(training)
+        input_ids = torch.tensor([[2, 3, 4, 5, 6, 8]])
+        with mock.patch(
+            "cehrgpt.models.gpt2.flash_attn_func", record_flash, create=True
+        ), mock.patch(
+            "cehrgpt.models.gpt2.flash_attn_varlen_func", record_varlen, create=True
+        ), mock.patch(
+            "cehrgpt.models.gpt2.index_first_axis",
+            lambda states, indices: states[indices],
+            create=True,
+        ), mock.patch(
+            "cehrgpt.models.gpt2.pad_input",
+            lambda states, indices, batch_size, length: states[None],
+            create=True,
+        ):
+            model(
+                input_ids=input_ids,
+                attention_mask=torch.ones_like(input_ids, dtype=torch.bool),
+                output_motor_features=False,
+                return_dict=True,
+            )
+        return rates
+
+    def test_attention_dropout_is_off_outside_training(self):
+        self.assertEqual(self._dropout_rates(training=False), [0.0, 0.0])
+
+    def test_attention_dropout_is_kept_in_training(self):
+        self.assertEqual(self._dropout_rates(training=True), [0.1, 0.1])
+
+
 if __name__ == "__main__":
     unittest.main()
