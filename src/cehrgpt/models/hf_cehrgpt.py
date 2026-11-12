@@ -853,6 +853,10 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
         self.gradient_checkpointing = False
 
         # Initialize weights and apply final processing
+        # Runtime switch for differential validation, not part of the checkpoint: False keeps
+        # an attention mask without padding on the flash path, as before it was dropped.
+        self._drop_unpadded_flash_attention_mask = True
+
         self.post_init()
 
         # We do need to update the pre-computed attention bias matrix if sample packing requires a larger context window
@@ -1055,6 +1059,24 @@ class CEHRGPT2Model(CEHRGPTPreTrainedModel):
 
         raw_attention_mask = attention_mask  # save before conversion for local-attention window
         attention_mask = self.prepare_attention_mask(input_ids, attention_mask)
+
+        # The flash path un-pads the keys and values of every layer with the mask, which with a
+        # KV cache copies the whole cache at every decoding step, and derives the un-pad indices
+        # with several GPU-to-CPU syncs per layer (reuse_unpad_data can't share them across the
+        # layers under torch.inference_mode, whose tensors have no version counter). A mask
+        # without padding changes nothing, so it is dropped: one sync per forward pass instead.
+        # Evaluation only, a training step would pay the sync without ever dropping its mask.
+        if (
+            self._drop_unpadded_flash_attention_mask
+            and not self.training
+            and attention_mask is not None
+            and attention_mask.dim() == 2
+            and getattr(self.config, "_attn_implementation", "eager")
+            == "flash_attention_2"
+            and not getattr(self.config, "use_local_attention", False)
+            and bool(attention_mask.all())
+        ):
+            attention_mask = None
 
         # SDPA cannot take `is_causal=True` together with an explicit mask, so causality
         # has to be folded into the mask. Done once here rather than per layer: at a 16k
@@ -1517,6 +1539,41 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         self._generation_share_prompt_prefill = True
         self._generation_track_ages_override = None
         self._generation_last_token_logits_only = True
+        # (tokenizer, lookup) of _get_generation_time_delta_lookup
+        self._generation_time_delta_lookup = None
+
+    def _get_generation_time_delta_lookup(
+        self, cehrgpt_tokenizer, device: torch.device
+    ) -> torch.Tensor:
+        """
+        The days every token moves time forward by, indexed by token id.
+
+        Built with a pass over the whole vocabulary, so it is kept for the next generations with
+        the same tokenizer rather than rebuilt for every call of generate.
+        """
+        cached = self._generation_time_delta_lookup
+        if (
+            cached is not None
+            and cached[0] is cehrgpt_tokenizer
+            and cached[1].device == device
+            and cached[1].shape[0] == self.config.vocab_size
+        ):
+            return cached[1]
+        time_delta_lookup = torch.zeros(
+            self.config.vocab_size, dtype=torch.float32, device=device
+        )
+        time_token_ids = []
+        time_token_days = []
+        for token, token_id in cehrgpt_tokenizer.get_vocab().items():
+            if token_id < self.config.vocab_size and is_att_token(token):
+                time_token_ids.append(token_id)
+                time_token_days.append(extract_time_interval_in_days(token))
+        if time_token_ids:
+            time_delta_lookup[torch.tensor(time_token_ids, device=device)] = (
+                torch.tensor(time_token_days, dtype=torch.float32, device=device)
+            )
+        self._generation_time_delta_lookup = (cehrgpt_tokenizer, time_delta_lookup)
+        return time_delta_lookup
 
     def _can_share_generation_prompt_prefill(self) -> bool:
         return (
@@ -1652,8 +1709,13 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         cehrgpt_tokenizer,
         past_key_values=None,
         inputs_embeds=None,
+        prompt_prefill=None,
+        return_prompt_prefill=False,
         **kwargs,
     ):
+        # prompt_prefill and return_prompt_prefill are arguments of generate consumed by
+        # _sample. They are named here because generate only accepts the arguments of this
+        # method and of forward.
         ages = kwargs.get("ages")
         # Omit tokens covered by past_key_values
         if past_key_values:
@@ -2346,6 +2408,29 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         # Remove this from the model_kwargs and will pass it to other functions explicitly
         cehrgpt_tokenizer = model_kwargs.pop("cehrgpt_tokenizer")
 
+        # generate(prompt_prefill=...) continues a prompt from what an earlier generation of
+        # the same prompt computed, returned by generate(return_prompt_prefill=True): the
+        # logits of the first new token and the KV cache of the prompt. The first decoding
+        # step then uses those very numbers instead of running the model on the prompt, so
+        # it is identical to the step of the generation they come from.
+        prompt_prefill = model_kwargs.pop("prompt_prefill", None)
+        return_prompt_prefill = model_kwargs.pop("return_prompt_prefill", False)
+        returned_prompt_prefill = None
+        if (prompt_prefill is not None or return_prompt_prefill) and (
+            self.cehrgpt.config.causal_sfm
+        ):
+            raise ValueError(
+                "prompt_prefill cannot be used with causal_sfm, every sequence has its own "
+                "random vector in the prompt"
+            )
+        if prompt_prefill is not None:
+            if model_kwargs.get("past_key_values") is not None:
+                raise ValueError("prompt_prefill and past_key_values are exclusive")
+            if output_attentions or output_hidden_states:
+                raise ValueError(
+                    "prompt_prefill has no attentions or hidden states of the prompt to return"
+                )
+
         # init attention / hidden states / scores tuples
         scores = () if (return_dict_in_generate and output_scores) else None
         raw_logits = () if (return_dict_in_generate and output_logits) else None
@@ -2416,28 +2501,22 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             else track_ages_override
         )
         if track_ages:
-            time_delta_lookup = torch.zeros(
-                self.config.vocab_size, dtype=torch.float32, device=input_ids.device
+            time_delta_lookup = self._get_generation_time_delta_lookup(
+                cehrgpt_tokenizer, input_ids.device
             )
-            time_token_ids = []
-            time_token_days = []
-            for token, token_id in cehrgpt_tokenizer.get_vocab().items():
-                if token_id < self.config.vocab_size and is_att_token(token):
-                    time_token_ids.append(token_id)
-                    time_token_days.append(extract_time_interval_in_days(token))
-            if time_token_ids:
-                time_delta_lookup[
-                    torch.tensor(time_token_ids, device=input_ids.device)
-                ] = torch.tensor(
-                    time_token_days, dtype=torch.float32, device=input_ids.device
-                )
             batched_time_delta = torch.zeros(
                 batch_size, dtype=torch.float32, device=input_ids.device
             )
             batched_ages = model_kwargs.get("ages", None)
             if batched_ages is None:
+                # generate(num_return_sequences=N) repeats one prompt N times, whose ages
+                # are then decoded once rather than N times
+                rows_are_identical = torch.equal(
+                    input_ids, input_ids[:1].expand_as(input_ids)
+                )
+                rows_to_decode = input_ids[:1] if rows_are_identical else input_ids
                 batched_ages = []
-                for token_ids in input_ids.detach().cpu():
+                for token_ids in rows_to_decode.detach().cpu():
                     concept_ids = cehrgpt_tokenizer.decode(
                         token_ids.numpy(), skip_special_tokens=False
                     )
@@ -2445,6 +2524,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 batched_ages = torch.as_tensor(
                     np.asarray(batched_ages), device=input_ids.device
                 )
+                if rows_are_identical:
+                    batched_ages = batched_ages.repeat(batch_size, 1)
             else:
                 batched_ages = batched_ages.to(input_ids.device)
             base_ages = batched_ages[:, -1]
@@ -2455,6 +2536,39 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             batched_ages = None
             base_ages = None
             model_kwargs["ages"] = None
+
+        # A prefill stands for one prompt: the one every row of this generation must have, and,
+        # when it is reused, the one it was computed from. Checked on the tokens and the values
+        # themselves, a prompt of the same length would otherwise be continued with the logits
+        # and the KV cache of another one.
+        prompt_rows = {
+            "input_ids": input_ids,
+            "value_indicators": value_indicators,
+            "values": values,
+            "ages": batched_ages,
+        }
+        if prompt_prefill is not None or return_prompt_prefill:
+            for name, rows in prompt_rows.items():
+                if rows is not None and not torch.equal(
+                    rows, rows[:1].expand_as(rows)
+                ):
+                    raise ValueError(
+                        f"prompt_prefill needs every sequence to start from the same prompt, "
+                        f"the {name} differ"
+                    )
+        if prompt_prefill is not None:
+            for name, rows in prompt_rows.items():
+                expected = prompt_prefill["prompt"][name]
+                if (rows is None) != (expected is None) or (
+                    rows is not None
+                    and (
+                        rows.shape[1:] != expected.shape[1:]
+                        or not torch.equal(rows[:1], expected.to(rows.device))
+                    )
+                ):
+                    raise ValueError(
+                        f"prompt_prefill was computed from another prompt, the {name} differ"
+                    )
 
         # `generate(num_return_sequences=N)` expands one prompt to N identical
         # rows before entering this sampling loop.  In eval mode, and without
@@ -2496,7 +2610,27 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             )
 
             # forward pass to get next token
-            if share_prompt_prefill and not prompt_prefilled:
+            if prompt_prefill is not None and not prompt_prefilled:
+                # The rows of the logits are cloned: they are processed row by row below
+                outputs = CehrGptCausalLMOutput(
+                    logits=prompt_prefill["logits"]
+                    .expand(batch_size, -1, -1)
+                    .clone(),
+                    value_hidden_states=(
+                        prompt_prefill["value_hidden_states"].expand(batch_size, -1, -1)
+                        if prompt_prefill["value_hidden_states"] is not None
+                        else None
+                    ),
+                    past_key_values=tuple(
+                        tuple(
+                            state.expand(batch_size, *state.shape[1:])
+                            for state in layer_past
+                        )
+                        for layer_past in prompt_prefill["past_key_values"]
+                    ),
+                )
+                prompt_prefilled = True
+            elif share_prompt_prefill and not prompt_prefilled:
                 single_inputs = {
                     key: (
                         value[:1]
@@ -2536,6 +2670,32 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             if synced_gpus and this_peer_finished:
                 continue  # don't waste resources running the code we don't need
+
+            if (
+                return_prompt_prefill
+                and returned_prompt_prefill is None
+                and prompt_prefill is None
+                and outputs.past_key_values is not None
+                and input_ids.shape[1] == cur_len
+            ):
+                # The sequences share the prompt, so the first row stands for all of them.
+                # Copied, so the rest of this generation can be freed.
+                returned_prompt_prefill = {
+                    "prompt": {
+                        name: rows[:1].clone() if rows is not None else None
+                        for name, rows in prompt_rows.items()
+                    },
+                    "logits": outputs.logits[:1, -1:].clone(),
+                    "value_hidden_states": (
+                        outputs.value_hidden_states[:1, -1:].clone()
+                        if outputs.value_hidden_states is not None
+                        else None
+                    ),
+                    "past_key_values": tuple(
+                        tuple(state[:1].clone() for state in layer_past)
+                        for layer_past in outputs.past_key_values
+                    ),
+                }
 
             next_token_logits = outputs.logits[:, -1, :]
 
@@ -2659,6 +2819,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             attentions=decoder_attentions,
             hidden_states=decoder_hidden_states,
             past_key_values=model_kwargs.get("past_key_values"),
+            prompt_prefill=returned_prompt_prefill,
         )
 
 

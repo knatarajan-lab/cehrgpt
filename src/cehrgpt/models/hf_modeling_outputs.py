@@ -132,6 +132,10 @@ class CehrGptGenerateDecoderOnlyOutput(ModelOutput):
     attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     past_key_values: Optional[Tuple[Tuple[Tuple[torch.FloatTensor]]]] = None
+    # What the model computed from the prompt alone, returned with return_prompt_prefill=True:
+    # give it back to generate as prompt_prefill to continue the same prompt again without
+    # encoding it. See CEHRGPT2LMHeadModel._sample.
+    prompt_prefill: Optional[dict] = None
 
 
 @dataclass

@@ -532,6 +532,7 @@ def main(args):
         device=get_device(),
         store_generated_trajectories=args.store_generated_trajectories,
         max_input_length=max_input_length,
+        reuse_prompt_cache=not args.disable_prompt_cache_reuse,
     )
     if args.prepared_dataset_path:
         test_dataset = load_from_disk(args.prepared_dataset_path)
@@ -883,6 +884,14 @@ def create_arg_parser():
         "--store_generated_trajectories",
         action="store_true",
         help="Persist raw generated token trajectories in the prediction parquet files.",
+    )
+    base_arg_parser.add_argument(
+        "--disable_prompt_cache_reuse",
+        dest="disable_prompt_cache_reuse",
+        action="store_true",
+        help="Encode the prompt again for every batch of samples and every trial of a patient, "
+        "instead of keeping its KV cache from the first batch. Slower, for comparing against "
+        "the predictions of the earlier behavior.",
     )
     base_arg_parser.add_argument(
         "--n_boot",
