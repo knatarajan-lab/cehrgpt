@@ -272,7 +272,9 @@ class GPT2FlashAttention(GPT2Attention):
                 value,
                 attention_mask,
                 query.size(-2),
-                self.attn_dropout.p,
+                # flash-attn drops attention weights whenever the rate is not zero, it does
+                # not know whether the model is training
+                self.attn_dropout.p if self.training else 0.0,
                 softmax_scale=None,
             )
 
