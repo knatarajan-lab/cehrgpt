@@ -5,8 +5,8 @@ import tempfile
 import unittest
 
 import pandas as pd
-from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import Dataset, DatasetDict
+from meds_to_cehr.arguments import DataTrainingArguments
 
 from cehrgpt.runners.data_utils import extract_cohort_sequences
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments

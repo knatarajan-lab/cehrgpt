@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 import torch
-from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import DatasetMapping
+from meds_to_cehr.mapping.base import DatasetMapping
 from transformers.utils import logging
 
 from cehrgpt.gpt_utils import (

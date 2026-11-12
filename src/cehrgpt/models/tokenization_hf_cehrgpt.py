@@ -13,12 +13,11 @@ import femr.ontology
 import numpy as np
 import scipy.stats as stats
 import transformers
-from cehrbert.models.hf_models.tokenization_utils import agg_helper, load_json_file
-from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
-from cehrbert_data.const.artificial_tokens import DEATH_TOKEN
 from datasets import Dataset, DatasetDict, IterableDataset
 from femr.stat_utils import OnlineStatistics, ReservoirSampler
 from meds import death_code
+from meds_to_cehr.arguments import DataTrainingArguments
+from meds_to_cehr.constants import DEATH_TOKEN, NONE_BIN, UNKNOWN_BIN
 from scipy.interpolate import UnivariateSpline
 from tokenizers import AddedToken, Tokenizer
 from tokenizers.models import WordLevel
@@ -43,14 +42,13 @@ from cehrgpt.models.special_tokens import (
     PAD_TOKEN,
     START_TOKEN,
 )
+from cehrgpt.models.tokenization_utils import agg_helper, load_json_file
 from cehrgpt.omop.ontology import Ontology
 
 NUM_OF_BINS = 10
 DEGREE_OF_FREEDOM = 3
 SAMPLE_SIZE = 10_000
 NA = "N/A"
-UNKNOWN_BIN = "BIN:unknown"
-NONE_BIN = "BIN:NONE"
 TOKENIZER_FILE_NAME = "cehrgpt_tokenizer.json"
 VALUE_TOKENIZER_FILE_NAME = "cehrgpt_value_tokenizer.json"
 TIME_TOKENIZER_FILE_NAME = "cehrgpt_time_tokenizer.json"
