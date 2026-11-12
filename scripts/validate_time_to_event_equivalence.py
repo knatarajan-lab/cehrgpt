@@ -5,6 +5,7 @@ import argparse
 import copy
 import glob
 import os
+import time
 from typing import Optional
 
 import pandas as pd
@@ -118,14 +119,22 @@ def generate(
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    start = time.perf_counter()
     with torch.inference_mode():
-        return model.generate(
+        outputs = model.generate(
             inputs=prompt,
             generation_config=generation_config,
             cehrgpt_tokenizer=tokenizer,
             **({"prompt_prefill": prompt_prefill} if prompt_prefill is not None else {}),
             **({"return_prompt_prefill": True} if return_prompt_prefill else {}),
         )
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    # Not a field of the output: how long this generation took, for the report
+    outputs.__dict__["seconds"] = time.perf_counter() - start
+    return outputs
 
 
 def count_prefill_rows(model: CEHRGPT2LMHeadModel, run) -> tuple:
@@ -331,12 +340,6 @@ def main() -> None:
                 (comparable_legacy - comparable_optimized).abs().max().item()
             )
             max_logit_difference = max(max_logit_difference, difference)
-            torch.testing.assert_close(
-                comparable_optimized,
-                comparable_legacy,
-                rtol=0,
-                atol=args.logit_atol,
-            )
             legacy_probabilities = torch.softmax(comparable_legacy.float(), dim=-1)
             optimized_probabilities = torch.softmax(comparable_optimized.float(), dim=-1)
             probability_tv = (
@@ -348,10 +351,18 @@ def main() -> None:
                 .item()
             )
             max_probability_tv = max(max_probability_tv, probability_tv)
-            if probability_tv > args.probability_tv_atol:
+            # Both are reported when either fails: a logit can be a rounding step of bfloat16
+            # away (0.03 for a logit between 4 and 8) without the probabilities moving
+            if difference > args.logit_atol or probability_tv > args.probability_tv_atol:
+                mismatched = (
+                    (comparable_legacy - comparable_optimized).abs() > args.logit_atol
+                ).float().mean().item()
                 raise AssertionError(
-                    f"Prompt {prompt_index}, step {step} probability TV "
-                    f"{probability_tv} exceeds {args.probability_tv_atol}"
+                    f"Prompt {prompt_index}, step {step}: max_abs_logit_difference="
+                    f"{difference:.8g} (tolerance {args.logit_atol}, "
+                    f"{100 * mismatched:.2f}% of the logits above it); "
+                    f"max_probability_tv={probability_tv:.8g} "
+                    f"(tolerance {args.probability_tv_atol})"
                 )
 
             position = len(token_ids) + step
@@ -382,6 +393,7 @@ def main() -> None:
             f"PASS prompt={prompt_index} encoded_tokens={len(token_ids)} "
             f"sequences={compared_rows} generated_tokens={args.max_new_tokens} "
             f"prefill_rows={legacy_prefill_rows}->{optimized_prefill_rows} "
+            f"seconds={legacy.seconds:.3f}->{optimized.seconds:.3f} "
             f"identical_trajectories={token_matches.all(dim=1).sum().item()}"
         )
 
