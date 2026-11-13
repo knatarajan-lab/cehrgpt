@@ -13,6 +13,7 @@ from cehrgpt.gpt_utils import (
     is_visit_end,
     is_visit_start,
 )
+from cehrgpt.models.gpt2 import GPT2FlashAttention
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 
@@ -168,6 +169,7 @@ class TimeToEventModel:
         reuse_prompt_cache: bool = True,
         fast_decoding: bool = True,
         drop_finished_trajectories: bool = False,
+        attention_dropout_at_inference: bool = False,
     ):
         self.tokenizer = tokenizer
         self.model = model.eval()
@@ -201,6 +203,26 @@ class TimeToEventModel:
         # GPU), so the trajectories are not the ones of the whole batch. See
         # generate(drop_finished_sequences=True).
         self.drop_finished_trajectories = drop_finished_trajectories
+        # With attention_dropout_at_inference the trajectories are sampled with the attention
+        # dropout of training, like the predictions made before that dropout was turned off
+        # outside training. It is the dropout of the flash attention of the gpt2 backbone, the
+        # only attention that had it. Every trajectory then reads the prompt through its own
+        # dropout, so what one generation computed from the prompt is not kept for the next.
+        self.attention_dropout_at_inference = attention_dropout_at_inference
+        flash_attention_layers = [
+            module
+            for module in (self.model.modules() if hasattr(self.model, "modules") else [])
+            if isinstance(module, GPT2FlashAttention)
+        ]
+        if attention_dropout_at_inference and not flash_attention_layers:
+            raise ValueError(
+                "attention_dropout_at_inference is the dropout of the flash attention of the "
+                "gpt2 backbone, which this model does not use"
+            )
+        for layer in flash_attention_layers:
+            layer.attention_dropout_at_inference = attention_dropout_at_inference
+        if attention_dropout_at_inference:
+            self.reuse_prompt_cache = False
         # One stopping criteria per task window, see _get_stopping_criteria
         self._stopping_criteria: Dict[Tuple, TimeToEventStoppingCriteria] = {}
 

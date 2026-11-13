@@ -12,7 +12,7 @@ from transformers import GenerationConfig, PreTrainedModel, StoppingCriteriaList
 
 from cehrgpt.gpt_utils import extract_time_interval_in_days, is_att_token, is_visit_start
 from cehrgpt.models.config import CEHRGPTConfig
-from cehrgpt.models.gpt2 import StaticKeyValueCache
+from cehrgpt.models.gpt2 import GPT2FlashAttention, StaticKeyValueCache
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.time_to_event.time_to_event_model import (
     TimeToEventModel,
@@ -1313,7 +1313,7 @@ class TestFlashAttentionWithoutPadding(unittest.TestCase):
 
 
 class TestFlashAttentionDropout(unittest.TestCase):
-    def _dropout_rates(self, training):
+    def _dropout_rates(self, training, at_inference=False):
         """The dropout rates the flash-attn functions are called with by a forward pass."""
         rates = []
 
@@ -1331,6 +1331,9 @@ class TestFlashAttentionDropout(unittest.TestCase):
         model = build_generation_model(
             attn_implementation="flash_attention_2", attn_pdrop=0.1
         ).train(training)
+        for layer in model.modules():
+            if isinstance(layer, GPT2FlashAttention):
+                layer.attention_dropout_at_inference = at_inference
         input_ids = torch.tensor([[2, 3, 4, 5, 6, 8]])
         with mock.patch(
             "cehrgpt.models.gpt2.flash_attn_func", record_flash, create=True
@@ -1358,6 +1361,91 @@ class TestFlashAttentionDropout(unittest.TestCase):
 
     def test_attention_dropout_is_kept_in_training(self):
         self.assertEqual(self._dropout_rates(training=True), [0.1, 0.1])
+
+    def test_attention_dropout_outside_training_when_asked_for(self):
+        self.assertEqual(
+            self._dropout_rates(training=False, at_inference=True), [0.1, 0.1]
+        )
+
+
+class TestAttentionDropoutAtInference(unittest.TestCase):
+    def _predict(self, attention_dropout_at_inference, model=None):
+        """The dropout rates of the flash-attn calls of a prediction, and its predictor."""
+        rates = []
+
+        def record_flash(query, key, value, dropout_p=0.0, **kwargs):
+            rates.append(dropout_p)
+            return fake_flash_attn_func(query, key, value, **kwargs)
+
+        if model is None:
+            model = build_generation_model(
+                attn_implementation="flash_attention_2", attn_pdrop=0.1
+            )
+        generation_config = sampling_config(num_return_sequences=12, max_new_tokens=20)
+        generation_config.eos_token_id = 1
+        predictor = TimeToEventModel(
+            tokenizer=TimeTokenizer(),
+            model=model,
+            outcome_events=["C12"],
+            generation_config=generation_config,
+            batch_size=5,
+            attention_dropout_at_inference=attention_dropout_at_inference,
+        )
+        # (rows, tokens) of every forward pass of the model
+        sizes = []
+        handle = model.cehrgpt.register_forward_pre_hook(
+            lambda _module, args, kwargs: sizes.append(
+                tuple((args[0] if args else kwargs["input_ids"]).shape)
+            ),
+            with_kwargs=True,
+        )
+        with mock.patch(
+            "cehrgpt.models.gpt2.flash_attn_func", record_flash, create=True
+        ), mock.patch(
+            "cehrgpt.models.gpt2.flash_attn_varlen_func", unexpected_varlen, create=True
+        ):
+            torch.manual_seed(8)
+            sequences = predictor.simulate(PROMPT, prediction_window_end=500)
+        handle.remove()
+        self.assertEqual(len(sequences), 12)
+        return rates, sizes, predictor
+
+    def test_every_attention_of_a_prediction_drops_weights(self):
+        rates, _, predictor = self._predict(True)
+        self.assertTrue(rates)
+        self.assertEqual(set(rates), {0.1})
+        self.assertFalse(predictor.model.training)
+
+    def test_no_attention_drops_weights_by_default(self):
+        rates, _, _ = self._predict(False)
+        self.assertTrue(rates)
+        self.assertEqual(set(rates), {0.0})
+
+    def test_every_batch_encodes_the_prompt_with_its_own_dropout(self):
+        # 12 trajectories in batches of 5, 5 and 2. A pass on more than one token is a pass
+        # over the prompt: with dropout every batch makes its own, on all its rows, so that
+        # every trajectory reads the prompt through its own dropout
+        _, with_dropout, predictor = self._predict(True)
+        self.assertEqual(
+            [rows for rows, length in with_dropout if length > 1], [5, 5, 2]
+        )
+        self.assertFalse(predictor.reuse_prompt_cache)
+        self.assertIsNone(predictor._prompt_cache)
+        # Without it the prompt is encoded by the first batch only
+        _, without_dropout, _ = self._predict(False)
+        self.assertEqual([rows for rows, length in without_dropout if length > 1], [5])
+
+    def test_a_later_predictor_turns_the_dropout_off_again(self):
+        model = build_generation_model(
+            attn_implementation="flash_attention_2", attn_pdrop=0.1
+        )
+        self._predict(True, model)
+        rates, _, _ = self._predict(False, model)
+        self.assertEqual(set(rates), {0.0})
+
+    def test_a_model_without_flash_attention_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "flash attention"):
+            self._predict(True, build_generation_model(attn_pdrop=0.1))
 
 
 def record_batch_sizes(model):

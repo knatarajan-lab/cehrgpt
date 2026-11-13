@@ -535,6 +535,7 @@ def main(args):
         reuse_prompt_cache=not args.disable_prompt_cache_reuse,
         fast_decoding=not args.disable_fast_decoding,
         drop_finished_trajectories=args.drop_finished_trajectories,
+        attention_dropout_at_inference=args.attention_dropout_at_inference,
     )
     if args.prepared_dataset_path:
         test_dataset = load_from_disk(args.prepared_dataset_path)
@@ -910,6 +911,16 @@ def create_arg_parser():
         "otherwise stay in the batch until the last one is. With bfloat16 flash attention a "
         "batch of fewer rows does not compute exactly the same numbers, so the trajectories "
         "are not the ones generated without it.",
+    )
+    base_arg_parser.add_argument(
+        "--attention_dropout_at_inference",
+        dest="attention_dropout_at_inference",
+        action="store_true",
+        help="Sample the trajectories with the attention dropout of training (attn_pdrop), "
+        "as the predictions made before that dropout was turned off outside training. For "
+        "comparing against those predictions: the model then reads every history through "
+        "randomly dropped attention weights. gpt2 backbone with flash attention only; the "
+        "prompt is encoded again for every batch and trial.",
     )
     base_arg_parser.add_argument(
         "--n_boot",

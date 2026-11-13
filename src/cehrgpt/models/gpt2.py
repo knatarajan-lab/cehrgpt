@@ -385,6 +385,22 @@ class GPT2FlashAttention(GPT2Attention):
         self.apply_rotary = apply_rotary
         if self.apply_rotary:
             self.rope = RotaryPositionEmbedding(config.hidden_size)
+        # Attention dropout outside training, off unless asked for: see
+        # TimeToEventModel(attention_dropout_at_inference=True)
+        self.attention_dropout_at_inference = False
+
+    def _attention_dropout_rate(self) -> float:
+        """
+        The dropout rate of the attention weights for this forward pass.
+
+        flash-attn and the other attention functions drop attention weights whenever the rate
+        is not zero, they do not know whether the model is training. So the rate is zero
+        outside training, unless attention_dropout_at_inference asks for the dropout of
+        training, which the predictions made before it was turned off were sampled with.
+        """
+        if self.training or self.attention_dropout_at_inference:
+            return self.attn_dropout.p
+        return 0.0
 
     def forward(
         self,
@@ -537,7 +553,7 @@ class GPT2FlashAttention(GPT2Attention):
                     key_xa,
                     value_xa,
                     attn_bias=attn_bias,
-                    p=self.attn_dropout.p if self.training else 0.0,
+                    p=self._attention_dropout_rate(),
                     scale=None,
                 )
                 # Permute back to (B, H, L, D) for _merge_heads.
@@ -553,7 +569,7 @@ class GPT2FlashAttention(GPT2Attention):
                     key,
                     value,
                     attn_mask=attention_mask.to(query.dtype),
-                    dropout_p=self.attn_dropout.p if self.training else 0.0,
+                    dropout_p=self._attention_dropout_rate(),
                     is_causal=False,
                 )
                 attn_weights = None
@@ -565,9 +581,7 @@ class GPT2FlashAttention(GPT2Attention):
                 value,
                 attention_mask,
                 query.size(-2),
-                # flash-attn drops attention weights whenever the rate is not zero, it does
-                # not know whether the model is training
-                self.attn_dropout.p if self.training else 0.0,
+                self._attention_dropout_rate(),
                 softmax_scale=None,
             )
             attn_weights = None
@@ -607,7 +621,7 @@ class GPT2FlashAttention(GPT2Attention):
             query_states,
             key_states,
             value_states,
-            self.attn_dropout.p if self.training else 0.0,
+            self._attention_dropout_rate(),
             softmax_scale=None,
             causal=self.is_causal and query_length != 1,
         )
