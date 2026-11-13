@@ -533,6 +533,9 @@ def main(args):
         store_generated_trajectories=args.store_generated_trajectories,
         max_input_length=max_input_length,
         reuse_prompt_cache=not args.disable_prompt_cache_reuse,
+        fast_decoding=not args.disable_fast_decoding,
+        drop_finished_trajectories=args.drop_finished_trajectories,
+        attention_dropout_at_inference=args.attention_dropout_at_inference,
     )
     if args.prepared_dataset_path:
         test_dataset = load_from_disk(args.prepared_dataset_path)
@@ -892,6 +895,32 @@ def create_arg_parser():
         help="Encode the prompt again for every batch of samples and every trial of a patient, "
         "instead of keeping its KV cache from the first batch. Slower, for comparing against "
         "the predictions of the earlier behavior.",
+    )
+    base_arg_parser.add_argument(
+        "--disable_fast_decoding",
+        dest="disable_fast_decoding",
+        action="store_true",
+        help="Copy the KV cache at every decoding step, as before. Slower, for comparing "
+        "against the predictions of the earlier behavior.",
+    )
+    base_arg_parser.add_argument(
+        "--drop_finished_trajectories",
+        dest="drop_finished_trajectories",
+        action="store_true",
+        help="Stop running the model on the trajectories whose outcome is determined, which "
+        "otherwise stay in the batch until the last one is. With bfloat16 flash attention a "
+        "batch of fewer rows does not compute exactly the same numbers, so the trajectories "
+        "are not the ones generated without it.",
+    )
+    base_arg_parser.add_argument(
+        "--attention_dropout_at_inference",
+        dest="attention_dropout_at_inference",
+        action="store_true",
+        help="Sample the trajectories with the attention dropout of training (attn_pdrop), "
+        "as the predictions made before that dropout was turned off outside training. For "
+        "comparing against those predictions: the model then reads every history through "
+        "randomly dropped attention weights. gpt2 backbone with flash attention only; the "
+        "prompt is encoded again for every batch and trial.",
     )
     base_arg_parser.add_argument(
         "--n_boot",
