@@ -166,7 +166,6 @@ class TimeToEventModel:
         enable_early_stopping: bool = True,
         max_input_length: Optional[int] = None,
         reuse_prompt_cache: bool = True,
-        fast_decoding: bool = True,
         drop_finished_trajectories: bool = False,
     ):
         self.tokenizer = tokenizer
@@ -191,9 +190,6 @@ class TimeToEventModel:
         # (prompt key, the prompt_prefill returned by generate): the logits of the first new
         # token and the KV cache of the prompt
         self._prompt_cache: Optional[Tuple[Any, Dict[str, Any]]] = None
-        # With fast_decoding the KV cache is appended to in place instead of copied at every
-        # decoding step, where the model supports it. The numbers are the same.
-        self.fast_decoding = fast_decoding
         # With drop_finished_trajectories the model stops running on the trajectories whose
         # outcome is determined, which otherwise stay in the batch until the last one is. Off
         # by default: with bfloat16 flash attention a batch of fewer rows does not compute
@@ -416,8 +412,9 @@ class TimeToEventModel:
                             )
                         ]
                     )
-                if self.fast_decoding:
-                    generation_kwargs["static_kv_cache"] = True
+                # The KV cache is appended to in place instead of copied at every decoding
+                # step, where the model supports it. The numbers are the same.
+                generation_kwargs["static_kv_cache"] = True
                 # A dropped sequence is padded, which needs a padding token
                 if (
                     self.drop_finished_trajectories

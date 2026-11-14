@@ -1900,7 +1900,7 @@ class TestStaticCacheGeneration(unittest.TestCase):
 
 
 class TestFastDecodingPrediction(unittest.TestCase):
-    def _predictor(self, model, fast_decoding, tokenizer=None):
+    def _predictor(self, model, drop_finished, tokenizer=None):
         generation_config = sampling_config(num_return_sequences=12, max_new_tokens=20)
         generation_config.eos_token_id = 1
         return TimeToEventModel(
@@ -1909,8 +1909,7 @@ class TestFastDecodingPrediction(unittest.TestCase):
             outcome_events=["C12"],
             generation_config=generation_config,
             batch_size=5,
-            fast_decoding=fast_decoding,
-            drop_finished_trajectories=fast_decoding,
+            drop_finished_trajectories=drop_finished,
         )
 
     def test_the_trajectories_and_the_prediction_are_the_same(self):
@@ -1932,17 +1931,17 @@ class TestFastDecodingPrediction(unittest.TestCase):
                     backbone=backbone, attn_implementation=attn_implementation
                 )
                 results = {}
-                for fast_decoding in (False, True):
-                    predictor = self._predictor(model, fast_decoding)
+                for drop_finished in (False, True):
+                    predictor = self._predictor(model, drop_finished)
                     sizes, handle = record_batch_sizes(model)
                     try:
                         torch.manual_seed(8)
-                        results[fast_decoding] = (
+                        results[drop_finished] = (
                             predictor.simulate(PROMPT, prediction_window_end=500),
                             list(sizes),
                         )
                         torch.manual_seed(8)
-                        results[fast_decoding] += (
+                        results[drop_finished] += (
                             predictor.predict_time_to_events(
                                 PROMPT, prediction_window_end=500
                             ),
@@ -1969,8 +1968,8 @@ class TestFastDecodingPrediction(unittest.TestCase):
         with torch.no_grad():
             model.value_head.weight.mul_(200)
         results = []
-        for fast_decoding in (False, True):
-            predictor = self._predictor(model, fast_decoding, ValueTokenizer())
+        for drop_finished in (False, True):
+            predictor = self._predictor(model, drop_finished, ValueTokenizer())
             torch.manual_seed(8)
             results.append(
                 predictor.simulate(
@@ -2014,19 +2013,17 @@ class TestFastDecodingPrediction(unittest.TestCase):
 
         predictor.simulate(["X"])
 
-        self.assertTrue(predictor.fast_decoding)
         self.assertFalse(predictor.drop_finished_trajectories)
         self.assertIn("static_kv_cache", predictor.model.generation_kwargs[0])
         self.assertNotIn("drop_finished_sequences", predictor.model.generation_kwargs[0])
 
     def test_the_generation_gets_the_flags(self):
         model = FakeGenerationModel()
-        for fast_decoding, drop_finished_trajectories, pad_token_id, expected in (
-            (True, True, 4, {"static_kv_cache", "drop_finished_sequences"}),
+        for drop_finished_trajectories, pad_token_id, expected in (
+            (True, 4, {"static_kv_cache", "drop_finished_sequences"}),
             # A dropped trajectory is padded
-            (True, True, None, {"static_kv_cache"}),
-            (False, True, 4, {"drop_finished_sequences"}),
-            (False, False, 4, set()),
+            (True, None, {"static_kv_cache"}),
+            (False, 4, {"static_kv_cache"}),
         ):
             model.generation_kwargs.clear()
             predictor = TimeToEventModel(
@@ -2040,7 +2037,6 @@ class TestFastDecodingPrediction(unittest.TestCase):
                     do_sample=True,
                     pad_token_id=pad_token_id,
                 ),
-                fast_decoding=fast_decoding,
                 drop_finished_trajectories=drop_finished_trajectories,
             )
 
