@@ -10,17 +10,26 @@ from typing import Optional
 
 import pandas as pd
 import torch
+from transformers import StoppingCriteriaList
 from transformers.utils import is_flash_attn_2_available
 
 from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.gpt_runner_util import read_backbone, resolve_attn_implementation
-from cehrgpt.time_to_event.time_to_event_model import TimeToEventModel
+from cehrgpt.time_to_event.time_to_event_model import (
+    TimeToEventModel,
+    TimeToEventStoppingCriteria,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_folder", required=True)
+    parser.add_argument(
+        "--tokenizer_folder",
+        default=None,
+        help="The folder of the tokenizer, when it is not saved with the model.",
+    )
     parser.add_argument("--prediction_folder", required=True)
     parser.add_argument("--num_prompts", type=int, default=3)
     parser.add_argument("--num_return_sequences", type=int, default=8)
@@ -37,6 +46,8 @@ def parse_args() -> argparse.Namespace:
             "age_tracking",
             "prompt_cache",
             "unpadded_mask",
+            "static_cache",
+            "fast_decoding",
             "determinism",
         ),
         default="combined",
@@ -45,8 +56,27 @@ def parse_args() -> argparse.Namespace:
         "of a patient do. "
         "unpadded_mask compares flash attention with the attention mask of a prompt without "
         "padding kept (un-padded keys and values) and dropped. "
+        "static_cache compares a KV cache that grows at every step with one appended to in "
+        "place. fast_decoding compares the trajectories of a generation with the ones of the "
+        "generation time-to-event prediction runs: the cache appended to in place, and the "
+        "trajectories that passed --prediction_window_end dropped from the batch. "
         "determinism runs the model twice on every prompt without reseeding and fails when the "
         "logits differ, which they do when dropout is applied in evaluation.",
+    )
+    parser.add_argument(
+        "--attn_implementation",
+        choices=("eager", "flash_attention_2"),
+        default=None,
+        help="The attention of the model, when it is not the one it runs with by default. "
+        "eager without --use_bfloat16 computes in float32, where two paths that compute the "
+        "same thing agree to about 1e-5: a difference that stays there is a bug, one that "
+        "is only there with bfloat16 flash attention is its rounding.",
+    )
+    parser.add_argument(
+        "--prediction_window_end",
+        type=int,
+        default=30,
+        help="With --comparison fast_decoding: the days after which a trajectory is finished.",
     )
     parser.add_argument(
         "--reuse_num_return_sequences",
@@ -90,6 +120,9 @@ def generate(
     return_prompt_prefill: bool = False,
     drop_unpadded_mask: bool = True,
     greedy_rows: Optional[int] = None,
+    static_kv_cache: bool = False,
+    drop_finished_sequences: bool = False,
+    stopping_criteria=None,
 ):
     """
     Generate from a prompt along one of the paths to compare.
@@ -129,6 +162,13 @@ def generate(
             cehrgpt_tokenizer=tokenizer,
             **({"prompt_prefill": prompt_prefill} if prompt_prefill is not None else {}),
             **({"return_prompt_prefill": True} if return_prompt_prefill else {}),
+            **({"static_kv_cache": True} if static_kv_cache else {}),
+            **({"drop_finished_sequences": True} if drop_finished_sequences else {}),
+            **(
+                {"stopping_criteria": StoppingCriteriaList([stopping_criteria])}
+                if stopping_criteria is not None
+                else {}
+            ),
         )
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -191,15 +231,279 @@ def check_determinism(model, tokenizer, prefixes, device) -> None:
         )
 
 
+def count_rows(model: CEHRGPT2LMHeadModel, run) -> tuple:
+    """The result of run(), and the number of sequences of every forward pass."""
+    rows = []
+    handle = model.cehrgpt.register_forward_pre_hook(
+        lambda _module, args, kwargs: rows.append(
+            (args[0] if args else kwargs["input_ids"]).shape[0]
+        ),
+        with_kwargs=True,
+    )
+    try:
+        return run(), rows
+    finally:
+        handle.remove()
+
+
+def check_row_independent_sampling(device, vocab_size: int) -> bool:
+    """
+    Whether torch.multinomial gives a row the same sample whatever the other rows are.
+
+    Dropping the finished trajectories relies on it: the tokens are sampled for the whole
+    batch, with a dummy distribution for the dropped rows, so that the rows that are left draw
+    the random numbers they would draw with the whole batch.
+    """
+    generator_seed = 20240
+    torch.manual_seed(0)
+    probabilities = torch.rand(16, vocab_size, device=device)
+    probabilities = probabilities / probabilities.sum(-1, keepdim=True)
+    kept = torch.tensor([1, 4, 5, 9, 15], device=device)
+    dummy = torch.zeros_like(probabilities)
+    dummy[:, 0] = 1.0
+    dummy[kept] = probabilities[kept]
+    mismatches = 0
+    for trial in range(100):
+        samples = []
+        for rows in (probabilities, dummy):
+            torch.manual_seed(generator_seed + trial)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(generator_seed + trial)
+            samples.append(torch.multinomial(rows, num_samples=1).squeeze(1)[kept])
+        mismatches += (samples[0] != samples[1]).sum().item()
+    print(
+        f"sampling per row: {'independent' if mismatches == 0 else 'NOT independent'} of "
+        f"the other rows ({mismatches}/500 samples differ)"
+    )
+    return mismatches == 0
+
+
+class StepLogits:
+    """The logits of every decoding step of a generation, and the rows they are of."""
+
+    def __init__(self, model):
+        self.model = model
+        self.logits, self.rows = [], []
+
+    def __enter__(self):
+        self._handle = self.model.lm_head.register_forward_hook(
+            lambda _module, _args, output: self.logits.append(output[:, -1].float().cpu())
+        )
+        scatter = CEHRGPT2LMHeadModel._scatter_active_rows
+        vocab_size = self.model.config.vocab_size
+
+        def record_rows(probabilities, active_rows, batch_size):
+            # Called for the tokens, then for the values of a model with values
+            if probabilities.shape[-1] == vocab_size:
+                self.rows.append(None if active_rows is None else active_rows.cpu())
+            return scatter(probabilities, active_rows, batch_size)
+
+        CEHRGPT2LMHeadModel._scatter_active_rows = staticmethod(record_rows)
+        self._scatter = scatter
+        return self
+
+    def __exit__(self, *args):
+        CEHRGPT2LMHeadModel._scatter_active_rows = staticmethod(self._scatter)
+        self._handle.remove()
+
+
+def diagnose_fast_decoding(args, prompt_index, legacy, fast, legacy_steps, fast_steps, prompt_length):
+    """
+    Where the trajectories of the two generations part, and by how much the logits differ.
+
+    A trajectory is compared for as long as it has the same tokens on both sides: after that
+    the two sides continue different trajectories, which says nothing about the model. The
+    logits of the rows the model ran on with fast decoding are compared with the logits of
+    the same rows of the whole batch.
+    """
+    num_sequences = legacy.sequences.shape[0]
+    same_prefix = torch.ones(num_sequences, dtype=torch.bool)
+    legacy_tokens = legacy.sequences[:, prompt_length:].cpu()
+    fast_tokens = fast.sequences[:, prompt_length:].cpu()
+    # A model with values also reads the value sampled for every lab: two trajectories with
+    # the same tokens and another value are other trajectories
+    legacy_values = fast_values = None
+    if legacy.sequence_vals is not None:
+        legacy_values = legacy.sequence_vals[:, prompt_length:].cpu()
+        fast_values = fast.sequence_vals[:, prompt_length:].cpu()
+    max_difference, max_tv, compared_steps = 0.0, 0.0, 0
+    first_difference = None
+    for step in range(min(len(legacy_steps.logits), len(fast_steps.logits))):
+        rows = fast_steps.rows[step]
+        active = torch.arange(num_sequences) if rows is None else rows
+        legacy_logits = legacy_steps.logits[step]
+        fast_logits = fast_steps.logits[step]
+        # The prefill of a shared prompt has one row for all the sequences
+        if legacy_logits.shape[0] == 1:
+            legacy_logits = legacy_logits.expand(num_sequences, -1)
+        if fast_logits.shape[0] == 1 and len(active) > 1:
+            fast_logits = fast_logits.expand(len(active), -1)
+        comparable = same_prefix[active]
+        if comparable.any():
+            expected = legacy_logits[active][comparable]
+            actual = fast_logits[comparable]
+            difference = (expected - actual).abs().max().item()
+            tv = (
+                0.5
+                * (torch.softmax(expected, -1) - torch.softmax(actual, -1))
+                .abs()
+                .sum(-1)
+                .max()
+                .item()
+            )
+            compared_steps += 1
+            if difference > 0 and first_difference is None:
+                first_difference = (step, len(active), difference, tv)
+            max_difference, max_tv = max(max_difference, difference), max(max_tv, tv)
+        if step < min(legacy_tokens.shape[1], fast_tokens.shape[1]):
+            same_prefix &= legacy_tokens[:, step] == fast_tokens[:, step]
+            if legacy_values is not None:
+                # The value of a dropped row is not sampled, and that row is not compared
+                still_active = torch.zeros(num_sequences, dtype=torch.bool)
+                still_active[active] = True
+                same_prefix &= ~still_active | (
+                    legacy_values[:, step] == fast_values[:, step]
+                )
+    within = max_difference <= args.logit_atol and max_tv <= args.probability_tv_atol
+    if first_difference is None:
+        where = "the logits never differ on the same trajectory"
+    else:
+        step, active_rows, difference, tv = first_difference
+        where = (
+            f"the logits first differ at step {step}, with {active_rows} of "
+            f"{num_sequences} trajectories still running (logit difference "
+            f"{difference:.4g}, probability TV {tv:.4g})"
+        )
+    print(
+        f"  prompt={prompt_index} diagnosis: {where}; over {compared_steps} steps "
+        f"max_abs_logit_difference={max_difference:.4g} (tolerance {args.logit_atol}) "
+        f"max_probability_tv={max_tv:.4g} (tolerance {args.probability_tv_atol}); "
+        f"identical_trajectories={int(same_prefix.sum())}/{num_sequences}"
+    )
+    return within, max_difference, max_tv
+
+
+def check_fast_decoding(args, model, tokenizer, prefixes, generation_config, device):
+    """
+    Compare fast decoding with the generation without it, sampled with the same seed.
+
+    Both sides stop a trajectory after --prediction_window_end days. When the model computes
+    the same numbers on a batch of fewer rows, the trajectories are the same token for token.
+    It does not always: a batch of another size can round differently (bfloat16), and a logit
+    one rounding step away now and then moves a sample, after which that trajectory is
+    another one. So when the trajectories differ, both sides are generated again with their
+    logits recorded, and the comparison passes if the logits of the same trajectory stay
+    within the tolerances: the two sides then sample from the same distributions.
+    """
+    if not model._can_use_static_kv_cache(
+        {
+            "use_cache": True,
+            "attention_mask": torch.ones(1, 1, dtype=torch.bool, device=device),
+        },
+        False,
+    ):
+        print(
+            "This model does not use the static KV cache (it is for the gpt2 backbone with "
+            "flash attention): only dropping the finished trajectories is compared"
+        )
+    check_row_independent_sampling(device, model.config.vocab_size)
+    pad_token_id = generation_config.pad_token_id
+    total_tokens = 0
+    mismatched_tokens = 0
+    max_logit_difference = 0.0
+    max_probability_tv = 0.0
+    failed = False
+
+    def run(prompt, seed, fast):
+        return count_rows(
+            model,
+            lambda: generate(
+                model,
+                tokenizer,
+                prompt,
+                generation_config,
+                share_prompt_prefill=None,
+                track_ages=None,
+                seed=seed,
+                static_kv_cache=fast,
+                drop_finished_sequences=fast,
+                stopping_criteria=TimeToEventStoppingCriteria(
+                    tokenizer, [], 0, -1, 0, args.prediction_window_end
+                ),
+            ),
+        )
+
+    for prompt_index, prefix in enumerate(prefixes):
+        token_ids = tokenizer.encode(prefix)
+        prompt = torch.tensor([token_ids], dtype=torch.long, device=device)
+        seed = args.seed + prompt_index
+        (legacy, legacy_rows), (fast, fast_rows) = run(prompt, seed, False), run(
+            prompt, seed, True
+        )
+        steps = min(legacy.sequences.shape[1], fast.sequences.shape[1]) - len(token_ids)
+        generated = legacy.sequences[:, len(token_ids) : len(token_ids) + steps]
+        fast_generated = fast.sequences[:, len(token_ids) : len(token_ids) + steps]
+        mismatches = generated != fast_generated
+        if model.config.include_values:
+            # The padding of a finished trajectory has no value
+            mismatches |= (
+                legacy.sequence_vals[:, len(token_ids) : len(token_ids) + steps]
+                != fast.sequence_vals[:, len(token_ids) : len(token_ids) + steps]
+            ) & (generated != pad_token_id)
+        same = not mismatches.any() and legacy.sequences.shape == fast.sequences.shape
+        total_tokens += mismatches.numel()
+        mismatched_tokens += mismatches.sum().item()
+        print(
+            f"prompt={prompt_index} encoded_tokens={len(token_ids)} "
+            f"sequences={generated.shape[0]} "
+            f"generated_tokens={legacy.sequences.shape[1] - len(token_ids)}->"
+            f"{fast.sequences.shape[1] - len(token_ids)} "
+            f"mean_rows_per_step={sum(legacy_rows[1:]) / max(len(legacy_rows) - 1, 1):.1f}->"
+            f"{sum(fast_rows[1:]) / max(len(fast_rows) - 1, 1):.1f} "
+            f"seconds={legacy.seconds:.3f}->{fast.seconds:.3f} "
+            f"trajectories={'identical' if same else 'differ'} "
+            f"mismatched_tokens={mismatches.sum().item()}"
+        )
+        if not same:
+            # Again, with the logits: the same seeds give the same generations
+            with StepLogits(model) as legacy_steps:
+                legacy, _ = run(prompt, seed, False)
+            with StepLogits(model) as fast_steps:
+                fast, _ = run(prompt, seed, True)
+            within, difference, tv = diagnose_fast_decoding(
+                args, prompt_index, legacy, fast, legacy_steps, fast_steps, len(token_ids)
+            )
+            max_logit_difference = max(max_logit_difference, difference)
+            max_probability_tv = max(max_probability_tv, tv)
+            failed |= not within
+    print(
+        f"{'FAIL' if failed else 'PASS'} comparison=fast_decoding; prompts={len(prefixes)}; "
+        f"prediction_window_end={args.prediction_window_end}; "
+        f"mismatched_tokens={mismatched_tokens}/{total_tokens}; "
+        f"max_abs_logit_difference={max_logit_difference:.8g}; "
+        f"logit_tolerance={args.logit_atol}; "
+        f"max_probability_tv={max_probability_tv:.8g}; "
+        f"probability_tv_tolerance={args.probability_tv_atol}"
+    )
+    if failed:
+        raise AssertionError(
+            "Fast decoding computes other logits than the generation without it, beyond the "
+            "tolerances"
+        )
+
+
 def main() -> None:
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = CehrGptTokenizer.from_pretrained(args.model_folder)
+    tokenizer = CehrGptTokenizer.from_pretrained(
+        args.tokenizer_folder or args.model_folder
+    )
     model = (
         CEHRGPT2LMHeadModel.from_pretrained(
             args.model_folder,
             attn_implementation=resolve_attn_implementation(
-                backbone=read_backbone(args.model_folder)
+                backbone=read_backbone(args.model_folder),
+                requested=args.attn_implementation,
             ),
             torch_dtype=(
                 torch.bfloat16
@@ -210,9 +514,11 @@ def main() -> None:
         .eval()
         .to(device)
     )
-    if model.config.apply_rotary and args.comparison not in (
-        "prompt_cache",
-        "determinism",
+    # The comparisons that switch the age tracking off, which a rotary model needs
+    if model.config.apply_rotary and args.comparison in (
+        "combined",
+        "shared_prefill",
+        "age_tracking",
     ):
         raise RuntimeError(
             "This legacy-age-vs-skipped-age comparison requires apply_rotary=false"
@@ -237,6 +543,12 @@ def main() -> None:
     if args.comparison == "determinism":
         check_determinism(model, tokenizer, prefixes, device)
         return
+    if args.comparison == "fast_decoding":
+        generation_config.output_logits = False
+        check_fast_decoding(
+            args, model, tokenizer, prefixes, generation_config, device
+        )
+        return
     comparison_paths = {
         "combined": ((False, True), (True, False)),
         "shared_prefill": ((False, False), (True, False)),
@@ -245,6 +557,8 @@ def main() -> None:
         "prompt_cache": ((None, None), (None, None)),
         # Both sides run the production paths, the legacy one keeps the attention mask
         "unpadded_mask": ((None, None), (None, None)),
+        # Both sides run the production paths, the optimized one with the static KV cache
+        "static_cache": ((None, None), (None, None)),
     }
     if args.comparison == "unpadded_mask" and (
         getattr(model.config, "_attn_implementation", "eager") != "flash_attention_2"
@@ -310,8 +624,15 @@ def main() -> None:
                 seed=seed,
                 prompt_prefill=prompt_prefill,
                 greedy_rows=optimized_rows,
+                static_kv_cache=args.comparison == "static_cache",
             ),
         )
+        if args.comparison == "static_cache" and optimized.past_key_values is not None:
+            # A generation with the static cache does not return its cache
+            raise RuntimeError(
+                "This model does not use the static KV cache, which is for the gpt2 backbone "
+                "with flash attention and prompts without padding"
+            )
         if (
             args.comparison in ("combined", "shared_prefill", "prompt_cache")
             and legacy_prefill_rows == optimized_prefill_rows

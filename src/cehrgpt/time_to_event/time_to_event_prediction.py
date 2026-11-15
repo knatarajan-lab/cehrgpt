@@ -35,6 +35,7 @@ from cehrgpt.runners.gpt_runner_util import (
     resolve_attn_implementation,
 )
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
+from cehrgpt.time_to_event.run_manifest import write_run_manifest
 from cehrgpt.time_to_event.time_to_event_model import TimeToEventModel
 from cehrgpt.tokenization.special_tokens import OUT_OF_VOCABULARY_TOKEN
 from cehrgpt.tools.bootstrap_ci import evaluate_predictions
@@ -355,6 +356,30 @@ def write_prediction_metrics(args, prediction_output_folder_name: str) -> None:
         )
 
 
+def write_prediction_run_manifest(args) -> None:
+    """
+    Record the code, model, tokenizer, dataset and cohort of this session next to the predictions.
+
+    <task name>_manifest.json, next to the prediction folder like the metrics. Every session of
+    a resumed run adds an entry. A manifest that can't be written is a warning, not a failed run.
+    """
+    task_config = load_task_config_from_yaml(
+        args.task_config, args.task_config_override
+    )
+    manifest_path = os.path.join(
+        args.output_folder,
+        get_cehrgpt_output_folder(
+            args, CehrGptTokenizer.from_pretrained(args.tokenizer_folder)
+        ),
+        f"{task_config.task_name}_manifest.json",
+    )
+    try:
+        write_run_manifest(args, asdict(task_config), manifest_path)
+        LOG.info("Wrote the run manifest to %s", manifest_path)
+    except OSError as e:
+        LOG.warning("Could not write the run manifest %s: %s", manifest_path, e)
+
+
 def split_outcome_events(
     outcome_events: List[Union[str, int]]
 ) -> Tuple[List[int], List[str]]:
@@ -390,6 +415,10 @@ def main(args):
             "Either --dataset_folder, or both --tokenized_full_dataset_path and "
             "--cohort_folder, must be provided."
         )
+
+    # A --gpu_ids worker is part of its parent's session, which has written the manifest
+    if not args.prepared_dataset_path:
+        write_prediction_run_manifest(args)
 
     if args.gpu_ids and not args.prepared_dataset_path:
         gpu_ids = resolve_gpu_ids(args.gpu_ids)
@@ -533,6 +562,7 @@ def main(args):
         store_generated_trajectories=args.store_generated_trajectories,
         max_input_length=max_input_length,
         reuse_prompt_cache=not args.disable_prompt_cache_reuse,
+        drop_finished_trajectories=args.drop_finished_trajectories,
     )
     if args.prepared_dataset_path:
         test_dataset = load_from_disk(args.prepared_dataset_path)
@@ -892,6 +922,15 @@ def create_arg_parser():
         help="Encode the prompt again for every batch of samples and every trial of a patient, "
         "instead of keeping its KV cache from the first batch. Slower, for comparing against "
         "the predictions of the earlier behavior.",
+    )
+    base_arg_parser.add_argument(
+        "--drop_finished_trajectories",
+        dest="drop_finished_trajectories",
+        action="store_true",
+        help="Stop running the model on the trajectories whose outcome is determined, which "
+        "otherwise stay in the batch until the last one is. With bfloat16 flash attention a "
+        "batch of fewer rows does not compute exactly the same numbers, so the trajectories "
+        "are not the ones generated without it.",
     )
     base_arg_parser.add_argument(
         "--n_boot",

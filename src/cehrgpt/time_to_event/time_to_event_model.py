@@ -166,6 +166,7 @@ class TimeToEventModel:
         enable_early_stopping: bool = True,
         max_input_length: Optional[int] = None,
         reuse_prompt_cache: bool = True,
+        drop_finished_trajectories: bool = False,
     ):
         self.tokenizer = tokenizer
         self.model = model.eval()
@@ -189,6 +190,13 @@ class TimeToEventModel:
         # (prompt key, the prompt_prefill returned by generate): the logits of the first new
         # token and the KV cache of the prompt
         self._prompt_cache: Optional[Tuple[Any, Dict[str, Any]]] = None
+        # With drop_finished_trajectories the model stops running on the trajectories whose
+        # outcome is determined, which otherwise stay in the batch until the last one is. Off
+        # by default: with bfloat16 flash attention a batch of fewer rows does not compute
+        # the same numbers (a probability distance of about 0.01 at a step, measured on a
+        # GPU), so the trajectories are not the ones of the whole batch. See
+        # generate(drop_finished_sequences=True).
+        self.drop_finished_trajectories = drop_finished_trajectories
         # One stopping criteria per task window, see _get_stopping_criteria
         self._stopping_criteria: Dict[Tuple, TimeToEventStoppingCriteria] = {}
 
@@ -404,6 +412,15 @@ class TimeToEventModel:
                             )
                         ]
                     )
+                # The KV cache is appended to in place instead of copied at every decoding
+                # step, where the model supports it. The numbers are the same.
+                generation_kwargs["static_kv_cache"] = True
+                # A dropped sequence is padded, which needs a padding token
+                if (
+                    self.drop_finished_trajectories
+                    and self.generation_config.pad_token_id is not None
+                ):
+                    generation_kwargs["drop_finished_sequences"] = True
                 prompt_cache = (
                     self._get_prompt_cache(prompt_key) if reuse_prompt_cache else None
                 )
