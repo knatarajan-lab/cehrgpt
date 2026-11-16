@@ -13,7 +13,6 @@ import pandas as pd
 import torch
 import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
-from cehrbert.runners.runner_util import generate_prepared_ds_path
 from datasets import DatasetDict, concatenate_datasets, load_from_disk
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -35,6 +34,7 @@ from cehrgpt.models.special_tokens import LINEAR_PROB_TOKEN, RANDOM_TOKEN
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.data_utils import (
     extract_cohort_sequences,
+    generate_cohort_prepared_ds_path,
     prepare_finetune_dataset,
 )
 from cehrgpt.runners.gpt_runner_util import (
@@ -103,9 +103,7 @@ def prepare_processed_dataset(
     Returns the dataset, the tokenizer to use with it (it is reloaded from the output folder
     when the dataset was prepared earlier with expand_tokenizer), and that tokenizer's path.
     """
-    prepared_ds_path = generate_prepared_ds_path(
-        data_args, model_args, data_folder=data_args.cohort_folder
-    )
+    prepared_ds_path = generate_cohort_prepared_ds_path(data_args, model_args, cehrgpt_args)
     cache_file_collector = CacheFileCollector()
     tokenizer_path = model_args.tokenizer_name_or_path
     processed_dataset = None

@@ -1,5 +1,7 @@
+import hashlib
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Union, Tuple
 
 import numpy as np
@@ -11,6 +13,7 @@ from cehrbert.data_generators.hf_data_generator.meds_utils import (
 )
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from cehrbert.runners.runner_util import (
+    generate_prepared_ds_path,
     get_meds_extension_path,
     load_parquet_as_dataset,
 )
@@ -342,6 +345,36 @@ def create_dataset_splits(
     LOG.info("Test size: %s", len(test_set))
 
     return train_set, validation_set, test_set
+
+
+def generate_cohort_prepared_ds_path(
+    data_args: DataTrainingArguments,
+    model_args,
+    cehrgpt_args: CehrGPTArguments,
+) -> Path:
+    """
+    The folder a prepared cohort dataset is cached in.
+
+    generate_prepared_ds_path names it after the cohort folder, the tokenizer and the split
+    settings. A cohort sliced out of the full tokenized dataset (extract_cohort_sequences) is
+    also cut to the observation window, so the window and the dataset it was sliced from are
+    added to the name. Without them a run with another window loads the sequences of the first.
+    """
+    prepared_ds_path = generate_prepared_ds_path(
+        data_args, model_args, data_folder=data_args.cohort_folder
+    )
+    if cehrgpt_args.tokenized_full_dataset_path is None:
+        return prepared_ds_path
+    # None, 0 and a negative window all keep the whole history (ExtractTokenizedSequenceDataMapping)
+    window = data_args.observation_window
+    window_name = str(window) if window and window > 0 else "all"
+    full_dataset_path = os.path.abspath(
+        os.path.expanduser(cehrgpt_args.tokenized_full_dataset_path)
+    )
+    full_dataset_hash = hashlib.md5(full_dataset_path.encode("utf-8")).hexdigest()[:8]
+    return prepared_ds_path.with_name(
+        f"{prepared_ds_path.name}_obs{window_name}_{full_dataset_hash}"
+    )
 
 
 def extract_cohort_sequences(
