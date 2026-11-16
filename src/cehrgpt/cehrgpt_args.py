@@ -111,22 +111,6 @@ def create_inference_base_arg_parser(
         required=False,
     )
     parser.add_argument(
-        "--num_beams",
-        dest="num_beams",
-        action="store",
-        default=1,
-        type=int,
-        required=False,
-    )
-    parser.add_argument(
-        "--num_beam_groups",
-        dest="num_beam_groups",
-        action="store",
-        default=1,
-        type=int,
-        required=False,
-    )
-    parser.add_argument(
         "--epsilon_cutoff",
         dest="epsilon_cutoff",
         action="store",
