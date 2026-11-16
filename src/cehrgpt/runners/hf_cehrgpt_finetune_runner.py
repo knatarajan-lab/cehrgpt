@@ -18,7 +18,6 @@ from cehrbert.runners.hf_runner_argument_dataclass import (
     ModelArguments,
 )
 from cehrbert.runners.runner_util import (
-    generate_prepared_ds_path,
     get_last_hf_checkpoint,
 )
 from datasets import load_from_disk
@@ -54,6 +53,7 @@ from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.data_utils import (
     extract_cohort_sequences,
+    generate_cohort_prepared_ds_path,
     get_torch_dtype,
     prepare_finetune_dataset,
 )
@@ -297,9 +297,7 @@ def _create_finetune_dataset(
 def main():
     cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
     tokenizer = load_pretrained_tokenizer(model_args)
-    prepared_ds_path = generate_prepared_ds_path(
-        data_args, model_args, data_folder=data_args.cohort_folder
-    )
+    prepared_ds_path = generate_cohort_prepared_ds_path(data_args, model_args, cehrgpt_args)
     cache_file_collector = CacheFileCollector()
     processed_dataset = None
 
