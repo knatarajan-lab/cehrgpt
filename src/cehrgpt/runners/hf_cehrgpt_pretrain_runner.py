@@ -282,6 +282,7 @@ def load_and_create_model(
             motor_task_prevalence_rates=tokenizer.get_motor_task_prevalence_rates(),
             motor_max_log2_cumulative_hazard=cehrgpt_args.motor_max_log2_cumulative_hazard,
             linear_prob_n_layer=cehrgpt_args.linear_prob_n_layer,
+            motor_head_on_decoder=cehrgpt_args.motor_head_on_decoder,
             ve_token_id=tokenizer.ve_token_id,
             vs_token_id=tokenizer.vs_token_id,
             att_token_ids=tokenizer.att_token_ids,
@@ -688,6 +689,17 @@ def main():
                 model.config,
                 "linear_prob_n_layer",
                 cehrgpt_args.linear_prob_n_layer,
+            )
+        # Where the MOTOR head sits is fixed by the checkpoint's weights
+        if (
+            bool(getattr(model.config, "motor_head_on_decoder", False))
+            != bool(cehrgpt_args.motor_head_on_decoder)
+        ):
+            LOG.warning(
+                "motor_head_on_decoder=%s was requested but the loaded model has %s; "
+                "keeping the loaded model's setting",
+                cehrgpt_args.motor_head_on_decoder,
+                getattr(model.config, "motor_head_on_decoder", False),
             )
         if getattr(model.config, "motor_time_bins", None) is None:
             setattr(

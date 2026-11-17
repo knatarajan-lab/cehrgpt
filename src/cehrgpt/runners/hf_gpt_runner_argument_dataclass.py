@@ -340,6 +340,14 @@ class CehrGPTArguments:
         default=None,
         metadata={"help": "The number of linear prob layers to use."},
     )
+    motor_head_on_decoder: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "Ablation: put the MOTOR head on the decoder's final hidden state, next to "
+            "the language-model head, instead of on the cross-attention linear prob layers. "
+            "linear_prob_n_layer is then unused."
+        },
+    )
     vocab_dir: Optional[str] = dataclasses.field(
         default=None,
         metadata={"help": "The directory where the concept data is stored."},
