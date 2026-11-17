@@ -13,15 +13,15 @@ from .linear_prob_feature_sets_test import HIDDEN, make_args, metrics_of, write_
 
 
 class CvFoldsTest(unittest.TestCase):
-    def test_by_default_the_folds_are_a_number_as_before(self):
-        args = argparse.Namespace(seed=42)
+    def test_the_earlier_folds_can_be_asked_for(self):
+        args = argparse.Namespace(seed=42, disable_group_cv_by_subject=True)
         self.assertEqual(train.cv_folds(np.zeros(10), np.arange(10), args), train.DEFAULT_CV_FOLDS)
 
     def test_grouped_folds_never_split_a_subject(self):
         rng = np.random.default_rng(0)
         subjects = rng.integers(0, 60, 600)
         labels = rng.integers(0, 2, 600)
-        args = argparse.Namespace(seed=42, group_cv_by_subject=True, cv_folds=5)
+        args = argparse.Namespace(seed=42, cv_folds=5)  # grouped by default
         folds = train.cv_folds(labels, subjects, args)
         self.assertEqual(len(folds), 5)
         for fit, held_out in folds:
@@ -43,11 +43,16 @@ class BlockwiseTest(unittest.TestCase):
 
     def test_the_metrics_tell_how_c_was_picked(self):
         self.combined(informative=slice(0, HIDDEN))
-        train.main(make_args(self.root, feature_sets=["global"], group_cv_by_subject=True))
+        train.main(make_args(self.root, feature_sets=["global"]))
         metrics = metrics_of(self.root, "logistic_global")
         self.assertEqual(metrics["cv"], "grouped by subject")
         self.assertGreater(metrics["cv_roc_auc"], 0.9)
         self.assertGreater(metrics["C"], 0)
+
+    def test_the_metrics_tell_when_the_earlier_folds_were_used(self):
+        self.combined(informative=slice(0, HIDDEN))
+        train.main(make_args(self.root, feature_sets=["global"], disable_group_cv_by_subject=True))
+        self.assertEqual(metrics_of(self.root, "logistic_global")["cv"], "stratified")
 
     def test_the_blockwise_model_keeps_the_scale_with_the_best_cv(self):
         self.combined(informative=slice(0, HIDDEN))

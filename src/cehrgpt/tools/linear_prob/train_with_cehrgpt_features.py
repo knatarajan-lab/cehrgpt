@@ -35,13 +35,13 @@ def cv_folds(
     """
     The folds that LogisticRegressionCV picks C with.
 
-    By default the number of folds, which LogisticRegressionCV turns into an unshuffled StratifiedKFold, as before.
-    With --group_cv_by_subject, the samples of a subject are all in the same fold: a cohort can have several
-    prediction times of the same subject, and folds that split them score C on subjects the model was fit on, which
-    favours a weak penalty.
+    By default the samples of a subject are all in the same fold (StratifiedGroupKFold on subject_id): a cohort can
+    have several prediction times of the same subject, and folds that split them score C on subjects the model was
+    fit on, which favours a weak penalty. With --disable_group_cv_by_subject, the number of folds, which
+    LogisticRegressionCV turns into an unshuffled StratifiedKFold, as the earlier results were trained.
     """
     n_folds = getattr(args, "cv_folds", None) or DEFAULT_CV_FOLDS
-    if not getattr(args, "group_cv_by_subject", False):
+    if getattr(args, "disable_group_cv_by_subject", False):
         return n_folds
     splitter = StratifiedGroupKFold(
         n_splits=n_folds, shuffle=True, random_state=getattr(args, "seed", DEFAULT_SEED)
@@ -335,7 +335,7 @@ def train_feature_set(
         # how C was picked, to compare the cross-validated ROC-AUC with the test one
         "cv_roc_auc": best_cv_roc_auc(model),
         "C": float(model.C_[0]),
-        "cv": "grouped by subject" if getattr(args, "group_cv_by_subject", False) else "stratified",
+        "cv": "stratified" if getattr(args, "disable_group_cv_by_subject", False) else "grouped by subject",
     }
     if getattr(model, "local_scale_", None) is not None:
         metrics["local_scale"] = float(model.local_scale_)
@@ -460,10 +460,10 @@ if __name__ == "__main__":
         "so the order does not depend on the feature files) and of the logistic regression (default: 42)",
     )
     parser.add_argument(
-        "--group_cv_by_subject",
+        "--disable_group_cv_by_subject",
         action="store_true",
-        help="Keep all the samples of a subject in the same fold when C is picked by cross-validation "
-        "(StratifiedGroupKFold on subject_id). Without it the folds are an unshuffled StratifiedKFold, as before",
+        help="Pick C with an unshuffled StratifiedKFold, as the earlier results were trained. By default all the "
+        "samples of a subject are kept in the same fold (StratifiedGroupKFold on subject_id)",
     )
     parser.add_argument(
         "--cv_folds",
