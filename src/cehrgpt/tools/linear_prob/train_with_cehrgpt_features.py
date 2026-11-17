@@ -4,24 +4,55 @@ import json
 import os
 import pickle
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
 import polars as pl
 import pyarrow.dataset as pa_dataset
 from sklearn.linear_model import LogisticRegressionCV
+from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.metrics import auc, precision_recall_curve, roc_auc_score
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from cehrgpt.tools.linear_prob.feature_io import (
     FEATURE_SETS,
+    LOCAL,
     read_feature_info,
     resolve_feature_sets,
 )
 
 
 DEFAULT_SEED = 42
+DEFAULT_CV_FOLDS = 5
+# The feature set that weighs the local half against the global half (see train_feature_set)
+BLOCKWISE = "blockwise"
+
+
+def cv_folds(
+    labels: np.ndarray, subject_ids: np.ndarray, args
+) -> Union[int, List[Tuple[np.ndarray, np.ndarray]]]:
+    """
+    The folds that LogisticRegressionCV picks C with.
+
+    By default the number of folds, which LogisticRegressionCV turns into an unshuffled StratifiedKFold, as before.
+    With --group_cv_by_subject, the samples of a subject are all in the same fold: a cohort can have several
+    prediction times of the same subject, and folds that split them score C on subjects the model was fit on, which
+    favours a weak penalty.
+    """
+    n_folds = getattr(args, "cv_folds", None) or DEFAULT_CV_FOLDS
+    if not getattr(args, "group_cv_by_subject", False):
+        return n_folds
+    splitter = StratifiedGroupKFold(
+        n_splits=n_folds, shuffle=True, random_state=getattr(args, "seed", DEFAULT_SEED)
+    )
+    return list(splitter.split(np.zeros(len(labels)), labels, groups=subject_ids))
+
+
+def best_cv_roc_auc(model: LogisticRegressionCV) -> float:
+    """The cross-validated ROC-AUC of the C that the model picked (the mean over the folds)."""
+    scores = next(iter(model.scores_.values()))  # (folds, Cs), one entry for a binary label
+    return float(scores.mean(axis=0).max())
 
 
 def order_samples(df: pd.DataFrame, seed: int = DEFAULT_SEED) -> pd.DataFrame:
@@ -165,6 +196,17 @@ def variant_paths(output_dir: Path, name: str, as_saved: bool):
     return output_dir / f"feature_processor{suffix}.pickle", output_dir / f"logistic{suffix}"
 
 
+def scale_local(
+    features: np.ndarray, local_columns: Optional[slice], scale: Optional[float]
+) -> np.ndarray:
+    """The features with the (standardized) local columns multiplied by scale; unchanged when scale is None."""
+    if scale is None or local_columns is None:
+        return features
+    features = features.copy()
+    features[:, local_columns] *= scale
+    return features
+
+
 def train_feature_set(
     args,
     name: str,
@@ -172,12 +214,19 @@ def train_feature_set(
     data: Dict[str, Any],
     features_data_dir: Path,
     output_dir: Path,
+    local_columns: Optional[slice] = None,
+    local_scales: Optional[Sequence[float]] = None,
 ) -> None:
     """
     Train and test the logistic regression on one feature set: columns of each feature vector, or all of it (None)
     for the vectors as they were saved, which keep the paths of a single model.
+
+    With local_scales (the blockwise set), the local columns of the standardized vectors are multiplied by each scale
+    in turn and the scale whose best C has the highest cross-validated ROC-AUC is kept. Multiplying the local columns
+    by a is the same as an L2 penalty 1/a**2 times stronger on them than on the global ones, so this gives the two
+    halves their own penalty; a scale of 0 is the global features alone.
     """
-    as_saved = columns is None
+    as_saved = columns is None and not local_scales
     feature_train, feature_test = data["feature_train"], data["feature_test"]
     feature_processor_path, logistic_dir = variant_paths(output_dir, name, as_saved)
     logistic_dir.mkdir(exist_ok=True, parents=True)
@@ -223,19 +272,40 @@ def train_feature_set(
         train_dataset = prepare_dataset(
             feature_train, feature_processor, data["train_vectors"], columns
         )
-        # Train logistic regression
-        model = LogisticRegressionCV(
-            scoring="roc_auc",
-            random_state=getattr(args, "seed", DEFAULT_SEED),
-            max_iter=1000,
-            n_jobs=8,
+        folds = cv_folds(
+            train_dataset["boolean_value"], train_dataset["subject_id"], args
         )
-        model.fit(train_dataset["features"], train_dataset["boolean_value"])
+        model, local_scale, cv_by_scale = None, None, {}
+        for scale in local_scales or [None]:
+            candidate = LogisticRegressionCV(
+                Cs=getattr(args, "num_cs", None) or 10,
+                cv=folds,
+                scoring="roc_auc",
+                random_state=getattr(args, "seed", DEFAULT_SEED),
+                max_iter=1000,
+                n_jobs=8,
+            )
+            candidate.fit(
+                scale_local(train_dataset["features"], local_columns, scale),
+                train_dataset["boolean_value"],
+            )
+            if scale is not None:
+                cv_by_scale[scale] = best_cv_roc_auc(candidate)
+                print(f"Logistic ({name}): local scale {scale}, CV ROC-AUC {cv_by_scale[scale]:.4f}")
+            if model is None or best_cv_roc_auc(candidate) > best_cv_roc_auc(model):
+                model, local_scale = candidate, scale
+        if local_scale is not None:
+            # the scale is part of the model: the test features are scaled the same way
+            model.local_scale_ = local_scale
+            model.cv_roc_auc_by_local_scale_ = cv_by_scale
         with open(logistic_model_file, "wb") as f:
             pickle.dump(model, f)
 
     test_dataset = prepare_dataset(
         feature_test, feature_processor, data["test_vectors"], columns
+    )
+    test_dataset["features"] = scale_local(
+        test_dataset["features"], local_columns, getattr(model, "local_scale_", None)
     )
 
     y_pred = model.predict_proba(test_dataset["features"])[:, 1]
@@ -259,7 +329,19 @@ def train_feature_set(
     precision, recall, _ = precision_recall_curve(test_dataset["boolean_value"], y_pred)
     pr_auc = auc(recall, precision)
 
-    metrics = {"roc_auc": roc_auc, "pr_auc": pr_auc}
+    metrics = {
+        "roc_auc": roc_auc,
+        "pr_auc": pr_auc,
+        # how C was picked, to compare the cross-validated ROC-AUC with the test one
+        "cv_roc_auc": best_cv_roc_auc(model),
+        "C": float(model.C_[0]),
+        "cv": "grouped by subject" if getattr(args, "group_cv_by_subject", False) else "stratified",
+    }
+    if getattr(model, "local_scale_", None) is not None:
+        metrics["local_scale"] = float(model.local_scale_)
+        metrics["cv_roc_auc_by_local_scale"] = {
+            str(k): v for k, v in model.cv_roc_auc_by_local_scale_.items()
+        }
     print(f"Logistic ({name}):", features_data_dir.name, metrics)
     with open(logistic_test_result_file, "w") as f:
         json.dump(metrics, f, indent=4)
@@ -315,7 +397,14 @@ def main(args):
                 )
         else:
             pending[name] = columns
-    if not pending:
+    local_scales = getattr(args, "local_block_scales", None)
+    local_columns = None
+    if local_scales:
+        # the local columns of the combined vectors; an error when the vectors were not saved combined
+        local_columns = resolve_feature_sets([LOCAL], num_features, info, getattr(args, "hidden_size", None))[LOCAL]
+    blockwise_dir = variant_paths(output_dir, BLOCKWISE, False)[1]
+    train_blockwise = bool(local_scales) and not (blockwise_dir / "metrics.json").exists()
+    if not pending and not train_blockwise:
         return
 
     feature_train = pd.read_parquet(train_dir)
@@ -334,6 +423,10 @@ def main(args):
     }
     for name, columns in pending.items():
         train_feature_set(args, name, columns, data, features_data_dir, output_dir)
+    if train_blockwise:
+        train_feature_set(
+            args, BLOCKWISE, None, data, features_data_dir, output_dir, local_columns, local_scales
+        )
 
 
 if __name__ == "__main__":
@@ -365,6 +458,33 @@ if __name__ == "__main__":
         default=DEFAULT_SEED,
         help="The seed of the shuffle of the samples (they are first ordered by subject_id and prediction_time, "
         "so the order does not depend on the feature files) and of the logistic regression (default: 42)",
+    )
+    parser.add_argument(
+        "--group_cv_by_subject",
+        action="store_true",
+        help="Keep all the samples of a subject in the same fold when C is picked by cross-validation "
+        "(StratifiedGroupKFold on subject_id). Without it the folds are an unshuffled StratifiedKFold, as before",
+    )
+    parser.add_argument(
+        "--cv_folds",
+        type=int,
+        default=DEFAULT_CV_FOLDS,
+        help=f"The number of cross-validation folds that C is picked with (default: {DEFAULT_CV_FOLDS})",
+    )
+    parser.add_argument(
+        "--num_cs",
+        type=int,
+        default=10,
+        help="The number of values of C, log-spaced from 1e-4 to 1e4, that are tried (default: 10)",
+    )
+    parser.add_argument(
+        "--local_block_scales",
+        nargs="+",
+        type=float,
+        help="Also train the blockwise model on combined features, written to logistic_blockwise/: the "
+        "standardized local columns are multiplied by each of these scales (e.g. 0 0.25 0.5 1) and the scale with "
+        "the best cross-validated ROC-AUC is kept, which gives the local features their own L2 penalty. "
+        "0 is the global features alone and 1 the concatenated ones",
     )
     parser.add_argument(
         "--hidden_size",
