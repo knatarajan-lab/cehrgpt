@@ -3,7 +3,7 @@ import functools
 import hashlib
 import pickle
 from collections import defaultdict
-from typing import Any, Dict, Generator, List, Optional, Union
+from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -98,6 +98,24 @@ class DatasetMappingDecorator(DatasetMapping):
 
     def transform(self, record: Dict[str, Any]) -> Union[Dict[str, Any], Series]:
         raise NotImplemented("Must be implemented")
+
+
+def _event_values(event: Dict[str, Any]) -> Tuple[Optional[float], Optional[str]]:
+    """
+    The numeric and the text value of a MEDS event, None when the event has none.
+
+    The batched mapping reads the events through pandas, where a missing float32 numeric_value
+    becomes NaN rather than None. Taking NaN (or an empty text) for a value would give every
+    diagnosis, procedure and medication a value: a value mask of 1, a "0" categorical value in the
+    lab statistics, and no MOTOR task, since the codes with lab statistics are excluded from MOTOR.
+    """
+    numeric_value = event.get("numeric_value", None)
+    if numeric_value is not None and pd.isna(numeric_value):
+        numeric_value = None
+    text_value = event.get("text_value", None)
+    if not isinstance(text_value, str) or not text_value:
+        text_value = None
+    return numeric_value, text_value
 
 
 def _age_in_years(later: datetime.datetime, birth: datetime.datetime) -> int:
@@ -308,8 +326,7 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                     continue
 
                 # If numeric_value exists, this is a concept/value tuple, we indicate this using a concept_value_mask
-                numeric_value = e.get("numeric_value", None)
-                text_value = e.get("text_value", None)
+                numeric_value, text_value = _event_values(e)
                 # The unit might be populated with a None value
                 unit = e.get("unit", NA) if e.get("unit", NA) else NA
                 concept_value_mask = int(
