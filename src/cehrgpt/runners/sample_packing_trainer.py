@@ -177,7 +177,10 @@ class SamplePackingTrainer(CehrGptTrainer):
         self.train_lengths = kwargs.pop("train_lengths", None)
         self.validation_lengths = kwargs.pop("validation_lengths", None)
         super().__init__(*args, **kwargs)
-        self.accelerator.even_batches = False
+        # Every process must get the same number of packed batches: a process that runs out of batches first
+        # leaves the others waiting in the gradient all-reduce forever. accelerate gives the processes the same
+        # number by looping back to the first batches, which it supports for batches of varying size.
+        self.accelerator.even_batches = True
 
     def num_examples(self, dataloader: DataLoader) -> int:
         if has_length(dataloader):
@@ -227,6 +230,11 @@ class SamplePackingTrainer(CehrGptTrainer):
             max_position_embeddings=self.max_position_embeddings,
             drop_last=self.args.dataloader_drop_last,
             seed=self.args.seed,
+            # accelerator.prepare shards the batches across the processes (BatchSamplerShard), so the sampler
+            # must yield the same global batches on every rank. Sharding here as well gave each rank half of
+            # its own half of the data, and ranks with unequal batch counts that hung at the end of an epoch.
+            num_replicas=1,
+            rank=0,
             negative_sampling_probability=self.negative_sampling_probability,
             labels=labels,
         )
@@ -305,6 +313,11 @@ class SamplePackingTrainer(CehrGptTrainer):
             max_position_embeddings=self.max_position_embeddings,
             drop_last=self.args.dataloader_drop_last,
             seed=self.args.seed,
+            # accelerator.prepare shards the batches across the processes (BatchSamplerShard), so the sampler
+            # must yield the same global batches on every rank. Sharding here as well gave each rank half of
+            # its own half of the data, and ranks with unequal batch counts that hung at the end of an epoch.
+            num_replicas=1,
+            rank=0,
             shuffle=False,
         )
         dataloader_params = {
