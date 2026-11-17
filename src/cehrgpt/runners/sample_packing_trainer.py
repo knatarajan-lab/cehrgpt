@@ -177,6 +177,8 @@ class SamplePackingTrainer(CehrGptTrainer):
         self.train_lengths = kwargs.pop("train_lengths", None)
         self.validation_lengths = kwargs.pop("validation_lengths", None)
         super().__init__(*args, **kwargs)
+        # Packed batches have no fixed size, which accelerate cannot even out; the sampler gives every process the
+        # same number of batches instead (num_batches_multiple_of)
         self.accelerator.even_batches = False
 
     def num_examples(self, dataloader: DataLoader) -> int:
@@ -227,6 +229,12 @@ class SamplePackingTrainer(CehrGptTrainer):
             max_position_embeddings=self.max_position_embeddings,
             drop_last=self.args.dataloader_drop_last,
             seed=self.args.seed,
+            # accelerator.prepare shards the batches across the processes (BatchSamplerShard), so the sampler
+            # must yield the same global batches on every rank. Sharding here as well gave each rank half of
+            # its own half of the data, and ranks with unequal batch counts that hung at the end of an epoch.
+            num_replicas=1,
+            rank=0,
+            num_batches_multiple_of=self.accelerator.num_processes,
             negative_sampling_probability=self.negative_sampling_probability,
             labels=labels,
         )
@@ -305,6 +313,12 @@ class SamplePackingTrainer(CehrGptTrainer):
             max_position_embeddings=self.max_position_embeddings,
             drop_last=self.args.dataloader_drop_last,
             seed=self.args.seed,
+            # accelerator.prepare shards the batches across the processes (BatchSamplerShard), so the sampler
+            # must yield the same global batches on every rank. Sharding here as well gave each rank half of
+            # its own half of the data, and ranks with unequal batch counts that hung at the end of an epoch.
+            num_replicas=1,
+            rank=0,
+            num_batches_multiple_of=self.accelerator.num_processes,
             shuffle=False,
         )
         dataloader_params = {
