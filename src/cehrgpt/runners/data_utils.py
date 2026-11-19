@@ -585,7 +585,8 @@ def save_cohort_sequences_in_chunks(
                 name = f"chunk_{len(split_chunks):05d}"
                 sliced.save_to_disk(str(output_path / split / name))
                 split_chunks.append(name)
-            removed = remove_dataset_cache_files(sliced) + remove_dataset_cache_files(persons)
+            # the persons share the filter's index file with ds, which the next chunk still reads
+            removed = remove_dataset_cache_files(sliced, keep=ds) + remove_dataset_cache_files(persons, keep=ds)
             LOG.info(
                 "Sliced the %s persons %s to %s of %s into %s sequences, removed %s cache files",
                 split, start, start + len(persons), len(ds), len(sliced), removed,
