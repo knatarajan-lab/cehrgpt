@@ -369,6 +369,14 @@ class CehrGPTArguments:
             "others are on the CPU, at the cost of one model copy per worker."
         },
     )
+    cohort_chunk_num_persons: int = dataclasses.field(
+        default=20000,
+        metadata={
+            "help": "Linear probing with tokenized_full_dataset_path: the cohort sequences are sliced and "
+            "saved this many persons at a time, so that only one chunk's cache files are on disk next "
+            "to the saved slice."
+        },
+    )
     shard_dataset_path: Optional[str] = dataclasses.field(
         default=None,
         metadata={
