@@ -19,7 +19,10 @@ from tqdm import tqdm
 from transformers.trainer_utils import is_main_process
 from transformers.utils import logging
 
-from cehrgpt.data.cache_cleanup import clean_up_dataset_caches
+from cehrgpt.data.cache_cleanup import (
+    clean_up_dataset_caches,
+    remove_dataset_cache_files,
+)
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import (
     CehrGptDataCollator,
@@ -162,9 +165,15 @@ def prepare_processed_dataset(
                     )
                 processed_dataset.save_to_disk(prepared_ds_path)
                 stats = clean_up_dataset_caches(processed_dataset, cache_file_collector)
+                # The cache files that hold the dataset itself count as used, so the clean up above keeps them.
+                # Sliced from the tokenized dataset they are as big as the saved copy and sit next to that
+                # dataset, so they are removed here: the dataset is loaded again from the saved copy below.
+                removed = remove_dataset_cache_files(processed_dataset)
                 LOG.info(
-                    "Clean up the cached files for the cehrgpt feature dataset: %s",
+                    "Clean up the cached files for the cehrgpt feature dataset: %s, "
+                    "and the %s cache files of the dataset itself",
                     stats,
+                    removed,
                 )
             else:
                 cache_file_collector.remove_cache_files()

@@ -13,6 +13,7 @@ Run in this order, the second leaves the first without a file to find the raw fo
 disk. The collector goes first here, and the second is only for what is left.
 """
 
+import os
 from typing import Dict, Optional, Union
 
 from cehrbert.data_generators.hf_data_generator.cache_util import CacheFileCollector
@@ -46,3 +47,23 @@ def clean_up_dataset_caches(
     if isinstance(dataset, DatasetDict):
         return {split: _cleanup_cache_files(split_dataset) for split, split_dataset in dataset.items()}
     return _cleanup_cache_files(dataset)
+
+
+def remove_dataset_cache_files(dataset: Union[Dataset, DatasetDict]) -> int:
+    """
+    Remove the ``cache-*.arrow`` files that hold a dataset that has been saved to disk.
+
+    Dataset.cleanup_cache_files keeps these because the dataset uses them. Only the files that a map or filter wrote
+    are removed: the ``data-*.arrow`` files of a dataset loaded with load_from_disk are not cache files. The dataset
+    must not be used after this: load it again from where it was saved. Returns the number of files removed.
+    """
+    datasets = dataset.values() if isinstance(dataset, DatasetDict) else [dataset]
+    removed = 0
+    for split_dataset in datasets:
+        for cache_file in split_dataset.cache_files:
+            path = cache_file["filename"]
+            name = os.path.basename(path)
+            if name.startswith("cache-") and name.endswith(".arrow") and os.path.exists(path):
+                os.remove(path)
+                removed += 1
+    return removed
