@@ -49,20 +49,28 @@ def clean_up_dataset_caches(
     return _cleanup_cache_files(dataset)
 
 
-def remove_dataset_cache_files(dataset: Union[Dataset, DatasetDict]) -> int:
+def remove_dataset_cache_files(
+    dataset: Union[Dataset, DatasetDict], keep: Optional[Union[Dataset, DatasetDict]] = None
+) -> int:
     """
     Remove the ``cache-*.arrow`` files that hold a dataset that has been saved to disk.
 
     Dataset.cleanup_cache_files keeps these because the dataset uses them. Only the files that a map or filter wrote
-    are removed: the ``data-*.arrow`` files of a dataset loaded with load_from_disk are not cache files. The dataset
-    must not be used after this: load it again from where it was saved. Returns the number of files removed.
+    are removed: the ``data-*.arrow`` files of a dataset loaded with load_from_disk are not cache files. The files
+    that ``keep`` uses stay: a select of a filtered dataset shares the filter's index file, which the next select
+    still needs. The dataset must not be used after this: load it again from where it was saved. Returns the number
+    of files removed.
     """
     datasets = dataset.values() if isinstance(dataset, DatasetDict) else [dataset]
+    kept_datasets = [] if keep is None else (keep.values() if isinstance(keep, DatasetDict) else [keep])
+    kept = {os.path.abspath(f["filename"]) for kept_dataset in kept_datasets for f in kept_dataset.cache_files}
     removed = 0
     for split_dataset in datasets:
         for cache_file in split_dataset.cache_files:
             path = cache_file["filename"]
             name = os.path.basename(path)
+            if os.path.abspath(path) in kept:
+                continue
             if name.startswith("cache-") and name.endswith(".arrow") and os.path.exists(path):
                 os.remove(path)
                 removed += 1

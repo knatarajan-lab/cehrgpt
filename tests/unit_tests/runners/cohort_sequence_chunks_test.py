@@ -70,7 +70,9 @@ class SaveCohortSequencesInChunksTest(unittest.TestCase):
             data_folder=self.cohort_folder,
             dataset_prepared_path=self.tmp,
             cohort_folder=self.cohort_folder,
-            preprocessing_num_workers=1,
+            # map runs in processes that open the cache files, as on a server: a deleted file that the
+            # next chunk needs fails there, not in a single process that has it open already
+            preprocessing_num_workers=2,
             preprocessing_batch_size=2,
         )
         self.cehrgpt_args = CehrGPTArguments(tokenized_full_dataset_path=self.tokenized_path)
