@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 from datetime import datetime
 from pathlib import Path
@@ -22,7 +23,7 @@ from meds import held_out_split, subject_id_field, train_split, tuning_split
 from transformers import TrainingArguments
 from transformers.utils import logging
 
-from cehrgpt.data.cache_cleanup import clean_up_dataset_caches
+from cehrgpt.data.cache_cleanup import clean_up_dataset_caches, remove_dataset_cache_files
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import (
     ExtractTokenizedSequenceDataMapping,
     MedToCehrGPTDatasetMapping,
@@ -383,6 +384,26 @@ def extract_cohort_sequences(
     tokenizer: Optional[CehrGptTokenizer] = None,
 ) -> DatasetDict:
     """
+    The cohort sequences sliced out of the tokenized dataset, as cache files next to that dataset.
+
+    See _cohort_persons_and_transform for the steps. save_cohort_sequences_in_chunks writes the same
+    sequences to a folder a chunk of persons at a time, without the cache of the whole cohort.
+    """
+    filtered_tokenized_dataset, transform = _cohort_persons_and_transform(
+        data_args, cehrgpt_args, tokenizer
+    )
+    return DatasetDict({
+        split: _slice_cohort_sequences(ds, transform, data_args)
+        for split, ds in filtered_tokenized_dataset.items()
+    })
+
+
+def _cohort_persons_and_transform(
+    data_args: DataTrainingArguments,
+    cehrgpt_args: CehrGPTArguments,
+    tokenizer: Optional[CehrGptTokenizer] = None,
+) -> Tuple[DatasetDict, ExtractTokenizedSequenceDataMapping]:
+    """
     Extracts and processes cohort-specific tokenized sequences from a pre-tokenized dataset,.
 
     based on the provided cohort Parquet files and observation window constraints.
@@ -394,10 +415,9 @@ def extract_cohort_sequences(
        to include only patients present in the cohort.
     4. Aggregates each person's index date and label into a mapping.
     5. Checks for consistency to ensure all cohort person_ids are present in the tokenized dataset.
-    6. Applies a transformation (`ExtractTokenizedSequenceDataMapping`) to generate
-       observation-window-constrained patient sequences, with recalculated demographic tokens
-       prepended to each extracted slice.
-    7. Caches both the filtered and processed datasets using the provided `cache_file_collector`.
+    6. Builds the transformation (`ExtractTokenizedSequenceDataMapping`) that _slice_cohort_sequences
+       applies to generate observation-window-constrained patient sequences, with recalculated
+       demographic tokens prepended to each extracted slice.
 
     Args:
         data_args (DataTrainingArguments): Configuration parameters for data processing,
@@ -407,8 +427,8 @@ def extract_cohort_sequences(
             tokens (year, age) for the `input_ids` column. If ``None``, the original demographic
             token ids are reused as a fallback.
     Returns:
-        DatasetDict: A Hugging Face `DatasetDict` containing the processed datasets (e.g., train/validation/test),
-                     where each entry includes sequences filtered and truncated by the observation window.
+        The tokenized dataset filtered to the persons of the cohort (per split), and the transformation
+        that slices their sequences at the index dates.
 
     Raises:
         RuntimeError: If any `person_id` in the cohort is missing from the tokenized dataset.
@@ -506,18 +526,89 @@ def extract_cohort_sequences(
     transform = ExtractTokenizedSequenceDataMapping(
         person_index_date_map, data_args.observation_window, tokenizer
     )
-    processed_dataset = DatasetDict({
-        split: ds.map(
-            transform.batch_transform,
-            batched=True,
-            batch_size=data_args.preprocessing_batch_size,
-            # Cap writer_batch_size independently: clinical sequences can be very
-            # long, and matching it to preprocessing_batch_size can exceed the
-            # 2 GB Arrow write limit for large cohorts.
-            writer_batch_size=min(data_args.preprocessing_batch_size, 500),
-            num_proc=_clamp_num_proc(len(ds), data_args.preprocessing_num_workers, data_args.preprocessing_batch_size),
-            remove_columns=ds.column_names,
-        )
-        for split, ds in filtered_tokenized_dataset.items()
+    return filtered_tokenized_dataset, transform
+
+
+def _slice_cohort_sequences(
+    ds: Dataset, transform: ExtractTokenizedSequenceDataMapping, data_args: DataTrainingArguments
+) -> Dataset:
+    """Slice the sequences of the persons of ds at their index dates."""
+    return ds.map(
+        transform.batch_transform,
+        batched=True,
+        batch_size=data_args.preprocessing_batch_size,
+        # Cap writer_batch_size independently: clinical sequences can be very
+        # long, and matching it to preprocessing_batch_size can exceed the
+        # 2 GB Arrow write limit for large cohorts.
+        writer_batch_size=min(data_args.preprocessing_batch_size, 500),
+        num_proc=_clamp_num_proc(len(ds), data_args.preprocessing_num_workers, data_args.preprocessing_batch_size),
+        remove_columns=ds.column_names,
+    )
+
+
+# Written last by save_cohort_sequences_in_chunks: the chunks of every split, in order
+COHORT_CHUNKS_FILE = "cohort_chunks.json"
+
+
+def save_cohort_sequences_in_chunks(
+    data_args: DataTrainingArguments,
+    cehrgpt_args: CehrGPTArguments,
+    tokenizer: Optional[CehrGptTokenizer],
+    output_path: Union[str, Path],
+    num_persons_per_chunk: int,
+) -> Dict[str, List[str]]:
+    """
+    Slice the cohort sequences out of the tokenized dataset and save them a chunk of persons at a time.
+
+    One person gives a sequence per index date, so a slice is several times the size of the persons'
+    sequences: for MIMIC 80 to 130 GB. Sliced at once, the cache files of the slice and the saved copy of
+    it were on disk together. Here every chunk is saved to <output_path>/<split>/chunk_<n> and its cache
+    files removed before the next one is sliced, so the disk holds the saved slice and one chunk's cache.
+    load_cohort_sequence_chunks joins the chunks in order, which gives the rows of extract_cohort_sequences.
+
+    The file COHORT_CHUNKS_FILE is written last; a folder without it is an interrupted run.
+    """
+    if num_persons_per_chunk < 1:
+        raise ValueError(f"num_persons_per_chunk must be >= 1, got {num_persons_per_chunk}")
+    filtered_tokenized_dataset, transform = _cohort_persons_and_transform(
+        data_args, cehrgpt_args, tokenizer
+    )
+    output_path = Path(output_path)
+    chunks: Dict[str, List[str]] = {}
+    for split, ds in filtered_tokenized_dataset.items():
+        split_chunks = []
+        for start in range(0, len(ds), num_persons_per_chunk):
+            persons = ds.select(range(start, min(start + num_persons_per_chunk, len(ds))))
+            sliced = _slice_cohort_sequences(persons, transform, data_args)
+            if len(sliced) > 0:
+                # save_to_disk raises on a dataset without rows
+                name = f"chunk_{len(split_chunks):05d}"
+                sliced.save_to_disk(str(output_path / split / name))
+                split_chunks.append(name)
+            removed = remove_dataset_cache_files(sliced) + remove_dataset_cache_files(persons)
+            LOG.info(
+                "Sliced the %s persons %s to %s of %s into %s sequences, removed %s cache files",
+                split, start, start + len(persons), len(ds), len(sliced), removed,
+            )
+        if split_chunks:
+            chunks[split] = split_chunks
+        # the indices of the persons of the cohort, written by the filter next to the tokenized dataset
+        remove_dataset_cache_files(ds)
+    with open(output_path / COHORT_CHUNKS_FILE, "w") as f:
+        json.dump(chunks, f, indent=2)
+    return chunks
+
+
+def is_cohort_sequence_chunks(path: Union[str, Path]) -> bool:
+    return (Path(path) / COHORT_CHUNKS_FILE).exists()
+
+
+def load_cohort_sequence_chunks(path: Union[str, Path]) -> DatasetDict:
+    """The cohort sequences that save_cohort_sequences_in_chunks saved, a split per list of chunks."""
+    path = Path(path)
+    with open(path / COHORT_CHUNKS_FILE) as f:
+        chunks = json.load(f)
+    return DatasetDict({
+        split: concatenate_datasets([load_from_disk(str(path / split / name)) for name in names])
+        for split, names in chunks.items()
     })
-    return processed_dataset
