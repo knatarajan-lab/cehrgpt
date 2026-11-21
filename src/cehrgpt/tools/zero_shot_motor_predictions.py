@@ -4,11 +4,12 @@ Zero-shot predictions from the pretrained MOTOR head: the probability that a con
 trained on top.
 
 The head reads the linear probing hidden state of the last token, which is what the linear
-probing feature extraction already writes (extract the features with
---disable_combine_global_local so that only that state, not the last-token state of the base
-model, is in the vector). So this tool does not run the transformer: it loads only the weights
-of the MOTOR head from the checkpoint, applies them to the features, and turns the hazards into
-probabilities.
+probing feature extraction already writes: the whole vector when the features were extracted
+with --disable_combine_global_local, and the first half of it when the global and the local
+states were saved combined ([global | local], twice the hidden size, the default of the
+extraction). The local half, the last-token state of the base model, is not used. So this tool
+does not run the transformer: it loads only the weights of the MOTOR head from the checkpoint,
+applies them to the features, and turns the hazards into probabilities.
 
 The head models a piecewise-exponential hazard. For a task, the hazard in time bin p is
 2 ** logit[p] events per day (the convention of the training loss), the bins are
@@ -527,10 +528,34 @@ def combine_probabilities(
     return -np.expm1(np.log1p(-np.clip(probabilities, 0.0, 1.0 - 1e-12)).sum(axis=1))
 
 
+def global_features(features: np.ndarray, hidden_size: int) -> np.ndarray:
+    """
+    The linear probing state, which is what the MOTOR head reads, out of the saved feature vectors.
+
+    The extraction saves that state alone (the hidden size) or followed by the last-token state of
+    the base model ([global | local], twice the hidden size, see write_feature_info); the first
+    half is then the one the head was trained on.
+    """
+    width = features.shape[1]
+    if width == hidden_size:
+        return features
+    if width == 2 * hidden_size:
+        return features[:, :hidden_size]
+    raise ValueError(
+        f"The features are {width}-dimensional, which is neither the model's hidden size {hidden_size} "
+        f"(the global state alone) nor twice it (the global and the local states combined). Were they "
+        "extracted with another model?"
+    )
+
+
 def load_features_and_labels(
-    folder: str, label_column: str, max_rows: int = 0, seed: int = 0
+    folder: str, label_column: str, max_rows: int = 0, seed: int = 0, hidden_size: Optional[int] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """The feature vectors and labels of a folder, as a random sample of at most max_rows rows."""
+    """
+    The feature vectors and labels of a folder, as a random sample of at most max_rows rows.
+
+    With hidden_size, only the global state of every vector (see global_features).
+    """
     files = sorted(glob.glob(os.path.join(os.path.expanduser(folder), "**", "*.parquet"), recursive=True))
     if not files:
         raise FileNotFoundError(f"No parquet files under {folder}")
@@ -542,7 +567,8 @@ def load_features_and_labels(
         if label_column not in batch:
             raise ValueError(f"The training features have no column {label_column!r}")
         keep = rng.rand(len(batch["features"])) < fraction if fraction < 1.0 else np.ones(len(batch["features"]), bool)
-        features.append(batch["features"][keep])
+        kept = batch["features"][keep]
+        features.append(global_features(kept, hidden_size) if hidden_size else kept)
         labels.append(batch[label_column][keep])
     return np.concatenate(features), np.concatenate(labels).astype(int)
 
@@ -554,18 +580,20 @@ def supervised_baseline(
     eval_labels: np.ndarray,
     max_rows: int = 200_000,
     seed: int = 0,
+    hidden_size: Optional[int] = None,
 ) -> Dict[str, object]:
     """
     A logistic regression on the same features, trained on another folder, for comparison.
 
     A quick baseline (standardised features, default regularisation), not the tuned linear
-    probing pipeline.
+    probing pipeline. With hidden_size, the training vectors are cut to their global state, which
+    is what eval_features hold, so the baseline sees what the head sees.
     """
     from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
 
-    features, labels = load_features_and_labels(train_folder, label_column, max_rows, seed)
+    features, labels = load_features_and_labels(train_folder, label_column, max_rows, seed, hidden_size)
     if features.shape[1] != eval_features.shape[1]:
         raise ValueError("The training and the evaluation features have different widths")
     if labels.min() == labels.max():
@@ -683,14 +711,16 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
     outcome_times: List[np.ndarray] = []
     outcome_features: List[np.ndarray] = []
     total = 0
+    saved_width = None
     for batch in iter_feature_batches(args.features_folder, args.batch_size, extra):
-        features = batch["features"]
-        if features.shape[1] != config.n_embd:
-            raise ValueError(
-                f"The features are {features.shape[1]}-dimensional but the model's hidden size is "
-                f"{config.n_embd}. If they are twice as wide, they were extracted with the global and "
-                "local states combined; re-run the extraction with --disable_combine_global_local."
-            )
+        if saved_width is None:
+            saved_width = int(batch["features"].shape[1])
+            if saved_width == 2 * config.n_embd:
+                LOG.info(
+                    "The features are %s wide, the global and the local states combined: the first %s "
+                    "(the global state) are used", saved_width, config.n_embd,
+                )
+        features = global_features(batch["features"], config.n_embd)
         gap = torch.from_numpy(np.array(batch[args.gap_days_column], dtype=np.float32)) if args.gap_days_column else None
         if gap is None and args.gap_days:
             gap = torch.full((features.shape[0],), float(args.gap_days))
@@ -737,6 +767,13 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
         "concepts": concepts,
         "windows": [window_name(w) for w in windows],
         "model_path": args.model_path,
+        # the head reads the global state: the whole vector, or the first half of combined features
+        "feature_width": saved_width,
+        "features_used": (
+            "global (the first half of the combined features)"
+            if saved_width == 2 * config.n_embd
+            else "global"
+        ),
     }
     if outcome:
         probabilities_of_outcome = np.concatenate(outcome_probabilities)
@@ -776,6 +813,7 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
             outcome_metrics["supervised_baseline"] = supervised_baseline(
                 args.baseline_train_features, args.label_column,
                 np.concatenate(outcome_features), labels_of_outcome, args.baseline_max_rows,
+                hidden_size=config.n_embd,
             )
         metrics["outcome"] = outcome_metrics
     with open(os.path.join(args.output_dir, "metrics.json"), "w") as f:
@@ -788,7 +826,7 @@ def create_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model_path", required=True, help="Pretrained CEHR-GPT folder with a MOTOR head")
     parser.add_argument("--tokenizer_path", default=None, help="Tokenizer folder (default: model_path)")
-    parser.add_argument("--features_folder", help="Output of compute_cehrgpt_features (parquet with subject_id, prediction_time_posix, features); extracted with --disable_combine_global_local")
+    parser.add_argument("--features_folder", help="Output of compute_cehrgpt_features (parquet with subject_id, prediction_time_posix, features). Features with the global and the local states combined are accepted: the global half is used")
     parser.add_argument("--output_dir", help="Where predictions.parquet and metrics.json are written")
     parser.add_argument("--concepts", nargs="+", help="Concept ids of the MOTOR tasks to predict")
     parser.add_argument("--concepts_file", help="A file with one concept id per line")
@@ -806,7 +844,7 @@ def create_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--combine", choices=["independent_or", "max", "sampled"], default="independent_or", help="How the probabilities of several outcome concepts become the probability of any of them. sampled draws every task as an independent yes/no over --num_trials trials and adds up the events: it estimates the same value as independent_or, with sampling noise")
     parser.add_argument("--num_trials", type=int, default=100, help="With --combine sampled: the number of trials")
     parser.add_argument("--seed", type=int, default=0, help="With --combine sampled: the random seed")
-    parser.add_argument("--baseline_train_features", default=None, help="Features of the training split: a logistic regression is fitted on them and evaluated on the same rows, to compare with the zero-shot result")
+    parser.add_argument("--baseline_train_features", default=None, help="Features of the training split: a logistic regression is fitted on their global state (what the head reads) and evaluated on the same rows, to compare with the zero-shot result")
     parser.add_argument("--baseline_max_rows", type=int, default=200_000, help="Rows of the training features used by the baseline")
     parser.add_argument("--batch_size", type=int, default=4096)
     parser.add_argument("--device", default=None)
