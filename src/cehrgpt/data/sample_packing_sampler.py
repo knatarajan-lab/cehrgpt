@@ -97,6 +97,7 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
         # the huggingface trainer will call the accelerate.data_loader.DataLoaderShard.set_epoch,
         # which will call batch_sampler.sample.set_epoch
         self.sampler = SamplePlacerHolder()
+        self._length_cache = None
 
     def __iter__(self) -> Iterator[List[int]]:
 
@@ -112,6 +113,10 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
         # Partition indices for this rank
         indices = indices[self.rank :: self.num_replicas]
 
+        # The negative sampling draws depend only on the seed and the epoch, so that every rank skips the same
+        # samples and yields the same batches when the batches are sharded across the ranks afterwards
+        negative_sampling_rng = np.random.default_rng(self.seed + self.sampler.epoch)
+
         batch = []
         current_batch_tokens = 0
 
@@ -120,7 +125,7 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
             # in the fine-tuning dataset
             if self.negative_sampling_probability:
                 if (
-                    np.random.random() > self.negative_sampling_probability
+                    negative_sampling_rng.random() > self.negative_sampling_probability
                     and self.labels[idx] == 0
                 ):
                     continue
@@ -147,41 +152,13 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
 
     def __len__(self) -> int:
         """
-        Estimates the number of batches that will be generated.
+        The number of batches that __iter__ yields in the current epoch.
 
-        This is an approximation since the exact number depends on the specific
-        sequence lengths and their order.
+        The batches depend only on the lengths, the seed and the epoch, so they are counted exactly by packing them.
+        An estimate from the average length was off by over 10%, which gave the trainer a wrong number of steps per
+        epoch and a wrong learning-rate schedule, and the distributed trainer needs the real number of batches.
         """
-        if len(self.lengths) == 0:
-            return 0
-
-        # There is a chance to skip the negative samples to account for the class imbalance
-        # in the fine-tuning dataset
-        if self.negative_sampling_probability:
-            truncated_lengths = []
-            for length, label in zip(self.lengths, self.labels):
-                if (
-                    np.random.random() > self.negative_sampling_probability
-                    and label == 0
-                ):
-                    continue
-                truncated_lengths.append(length)
-        else:
-            # We need to truncate the lengths due to the context window limit imposed by the model
-            truncated_lengths = [
-                min(self.max_position_embeddings, length + 2) for length in self.lengths
-            ]
-
-        # Calculate average sequence length
-        avg_seq_length = sum(truncated_lengths) // len(truncated_lengths)
-
-        # Estimate average number of sequences per batch
-        seqs_per_batch = self.max_tokens_per_batch // avg_seq_length
-
-        # Estimate total number of batches
-        if self.drop_last:
-            # If dropping last incomplete batch
-            return len(truncated_lengths) // seqs_per_batch
-        else:
-            # If keeping last incomplete batch, ensure at least 1 batch
-            return max(1, len(truncated_lengths) // seqs_per_batch)
+        epoch = self.sampler.epoch
+        if self._length_cache is None or self._length_cache[0] != epoch:
+            self._length_cache = (epoch, sum(1 for _ in self.__iter__()))
+        return self._length_cache[1]
