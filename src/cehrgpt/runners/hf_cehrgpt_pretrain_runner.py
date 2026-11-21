@@ -23,8 +23,8 @@ from cehrbert.runners.runner_util import (
     get_meds_extension_path,
 )
 from datasets import Dataset, DatasetDict, IterableDatasetDict, load_from_disk
-from transformers import EarlyStoppingCallback, Trainer, set_seed
-from transformers.trainer_utils import is_main_process
+from transformers import EarlyStoppingCallback, Trainer, TrainerCallback, set_seed
+from transformers.trainer_utils import IntervalStrategy, is_main_process
 from transformers.utils import logging
 
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_pretraining_dataset
@@ -68,6 +68,25 @@ class CustomEarlyStoppingCallback(EarlyStoppingCallback):
             self.early_stopping_patience_counter = 0
         else:
             self.early_stopping_patience_counter += 1
+
+
+class StopAtStepCallback(TrainerCallback):
+    """
+    Evaluates, saves and stops at a step without shortening the learning rate schedule.
+
+    A short run is then the start of the full run, so short runs of different
+    hyperparameters rank them as the full runs would.
+    """
+
+    def __init__(self, stop_at_step: int):
+        self.stop_at_step = stop_at_step
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step >= self.stop_at_step:
+            control.should_evaluate = args.eval_strategy != IntervalStrategy.NO
+            control.should_save = True
+            control.should_training_stop = True
+        return control
 
 
 def tokenizer_exists(tokenizer_name_or_path: str) -> bool:
@@ -742,6 +761,8 @@ def main():
         callbacks.append(
             InstabilityProbe(every=cehrgpt_args.instability_probe_every)
         )
+    if cehrgpt_args.stop_at_step > 0:
+        callbacks.append(StopAtStepCallback(cehrgpt_args.stop_at_step))
     if cehrgpt_args.profile_gpu_steps > 0:
         callbacks.append(
             GpuProfileCallback(

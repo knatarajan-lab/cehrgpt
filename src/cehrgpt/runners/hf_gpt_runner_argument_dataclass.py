@@ -78,6 +78,14 @@ class CehrGPTArguments:
         default=25,
         metadata={"help": "Step interval for InstabilityProbe logging"},
     )
+    stop_at_step: int = dataclasses.field(
+        default=0,
+        metadata={
+            "help": "Evaluate, save a checkpoint and stop training at this step, keeping the "
+            "learning rate schedule of the full run (num_train_epochs or max_steps). Training "
+            "resumed from that checkpoint with a larger value continues the same run. 0 disables it."
+        },
+    )
     resid_pdrop: Optional[float] = dataclasses.field(
         default=0.1,
         metadata={
@@ -351,6 +359,14 @@ class CehrGPTArguments:
             "help": "Linear probing only: number of worker processes per GPU in --gpu_ids "
             "(or on the single GPU given). More than one worker keeps a GPU busy while the "
             "others are on the CPU, at the cost of one model copy per worker."
+        },
+    )
+    cohort_chunk_num_persons: int = dataclasses.field(
+        default=20000,
+        metadata={
+            "help": "Linear probing with tokenized_full_dataset_path: the cohort sequences are sliced and "
+            "saved this many persons at a time, so that only one chunk's cache files are on disk next "
+            "to the saved slice."
         },
     )
     shard_dataset_path: Optional[str] = dataclasses.field(

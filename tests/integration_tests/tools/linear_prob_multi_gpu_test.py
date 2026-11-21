@@ -149,11 +149,14 @@ class LinearProbMultiWorkerIntegrationTest(unittest.TestCase):
         sharded_dir = os.path.join(self.temp_dir, "sharded")
         self._run_single_worker(single_dir)
 
+        # the workers take their shards out of the saved dataset by row index
+        saved = os.path.join(self.temp_dir, "processed_for_shards")
+        self.processed.save_to_disk(saved)
         argv = self.base_argv + ["--output_dir", sharded_dir, "--gpu_ids", "0,1"]
         with mock.patch.object(sys, "argv", argv), mock.patch.object(
             cf,
-            "prepare_processed_dataset",
-            lambda *a, **k: (self.processed, None, self.model_folder),
+            "_load_or_create_prepared_dataset",
+            lambda *a, **k: (load_from_disk(saved), None, self.model_folder, saved),
         ):
             code = cf.run_on_multiple_gpus(
                 cf.parse_runner_args()[0],

@@ -453,10 +453,13 @@ def get_cehrgpt_output_folder(args, cehrgpt_tokenizer) -> str:
         folder_name = (
             f"{folder_name}_repetition_penalty_{int(args.repetition_penalty * 10000)}"
         )
-    if args.num_beams > 1:
-        folder_name = f"{folder_name}_num_beams_{int(args.num_beams)}"
-    if args.num_beam_groups > 1:
-        folder_name = f"{folder_name}_num_beam_groups_{int(args.num_beam_groups)}"
+    # Beam search is an option of sequence generation only, time-to-event prediction has none
+    num_beams = getattr(args, "num_beams", 1)
+    num_beam_groups = getattr(args, "num_beam_groups", 1)
+    if num_beams > 1:
+        folder_name = f"{folder_name}_num_beams_{int(num_beams)}"
+    if num_beam_groups > 1:
+        folder_name = f"{folder_name}_num_beam_groups_{int(num_beam_groups)}"
     if args.epsilon_cutoff > 0.0:
         folder_name = (
             f"{folder_name}_epsilon_cutoff_{int(args.epsilon_cutoff * 100000)}"

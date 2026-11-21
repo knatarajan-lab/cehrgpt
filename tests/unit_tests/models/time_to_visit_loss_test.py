@@ -169,6 +169,74 @@ class TestTimeToVisitLoss(unittest.TestCase):
         self.assertTrue(all_grads_finite(model))
 
 
+class TestTimeLossConvention(unittest.TestCase):
+    """The time losses are summed over their positions and divided by the labelled tokens."""
+
+    TIME_TOKEN_VOCAB_SIZE = 16
+
+    def setUp(self):
+        torch.manual_seed(0)
+
+    def test_time_to_visit_loss_is_the_sum_per_token(self):
+        model = CEHRGPT2LMHeadModel(build_config()).eval()
+        batch = make_batch()
+        captured = {}
+        real_forward = model.tte_head.forward
+
+        def capture(x):
+            captured["params"] = real_forward(x)
+            return captured["params"]
+
+        with torch.no_grad(), mock.patch.object(
+            model.tte_head, "forward", side_effect=capture
+        ):
+            loss = model(**batch).time_to_visit_loss
+        lam, k = (p[:, :-1, 0] for p in captured["params"])
+        targets = batch["time_to_visits"][:, 1:]
+        mask = targets >= 0
+        nll = -torch.distributions.Gamma(k[mask], lam[mask]).log_prob(
+            targets[mask].clamp(min=1e-3) + 1e-6
+        )
+        num_tokens = (batch["labels"][:, 1:] != -100).sum()
+        torch.testing.assert_close(loss, nll.sum() / num_tokens)
+
+    def test_time_token_loss_is_the_sum_per_token(self):
+        config = build_config(
+            n_embd=48,
+            use_sub_time_tokenization=True,
+            time_token_vocab_size=self.TIME_TOKEN_VOCAB_SIZE,
+        )
+        model = CEHRGPT2LMHeadModel(config).eval()
+        batch = make_batch()
+        time_token_indicators = torch.zeros(2, SEQ_LEN, dtype=torch.bool)
+        time_token_indicators[0, [2, 6]] = True
+        time_token_indicators[1, [4]] = True
+        batch["time_token_indicators"] = time_token_indicators
+        batch["sub_time_tokens"] = torch.randint(
+            0, self.TIME_TOKEN_VOCAB_SIZE, (2, SEQ_LEN, 3)
+        )
+        captured = {}
+        real_forward = model.time_token_lm_head.forward
+
+        def capture(x):
+            captured["logits"] = real_forward(x)
+            return captured["logits"]
+
+        with torch.no_grad(), mock.patch.object(
+            model.time_token_lm_head, "forward", side_effect=capture
+        ):
+            loss = model(**batch).time_token_loss
+        mask = time_token_indicators[:, 1:]
+        # The year, month and day losses of every time token, summed
+        nll = torch.nn.functional.cross_entropy(
+            captured["logits"][:, :-1][mask].reshape(-1, self.TIME_TOKEN_VOCAB_SIZE),
+            batch["sub_time_tokens"][:, 1:][mask].reshape(-1),
+            reduction="sum",
+        )
+        num_tokens = (batch["labels"][:, 1:] != -100).sum()
+        torch.testing.assert_close(loss, nll / num_tokens)
+
+
 class TestNonFiniteLossGuard(unittest.TestCase):
     """The guard must turn a non-finite Gamma loss into 0.0 without poisoning the step."""
 
