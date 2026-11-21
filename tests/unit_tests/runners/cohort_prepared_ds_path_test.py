@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 
@@ -70,6 +71,59 @@ class TestCohortPreparedDsPath(unittest.TestCase):
             ),
             generate_cohort_prepared_ds_path(data_args, model_args, cehrgpt_args),
         )
+
+    def test_the_spelling_of_the_folders_does_not_change_the_name(self):
+        expected = generate_cohort_prepared_ds_path(*arguments(730))
+        for cohort_folder, tokenizer in (
+            ("/data/cohorts/AMI/", "/data/tokenizer"),
+            ("/data/cohorts//AMI", "/data/tokenizer"),
+            ("/data/cohorts/AMI", "/data/tokenizer/"),
+            ("/data/cohorts/./AMI/", "/data//tokenizer/"),
+        ):
+            data_args, model_args, cehrgpt_args = arguments(730)
+            data_args.cohort_folder = cohort_folder
+            model_args.tokenizer_name_or_path = tokenizer
+            with self.subTest(cohort_folder=cohort_folder, tokenizer=tokenizer):
+                self.assertEqual(
+                    expected,
+                    generate_cohort_prepared_ds_path(data_args, model_args, cehrgpt_args),
+                )
+            # the arguments of the caller are left as they were
+            self.assertEqual(tokenizer, model_args.tokenizer_name_or_path)
+        other = arguments(730)
+        other[0].cohort_folder = "/data/cohorts/CLL/"
+        self.assertNotEqual(expected, generate_cohort_prepared_ds_path(*other))
+
+    def test_a_cache_named_after_the_paths_as_typed_is_still_found(self):
+        with tempfile.TemporaryDirectory() as prepared:
+            def spelled(cohort_folder):
+                data_args, model_args, cehrgpt_args = arguments(730)
+                data_args.dataset_prepared_path = prepared
+                data_args.cohort_folder = cohort_folder
+                return data_args, model_args, cehrgpt_args
+
+            new = generate_cohort_prepared_ds_path(*spelled("/data/cohorts/AMI"))
+            data_args, model_args, _ = spelled("/data/cohorts//AMI")
+            # the name an earlier version gave the cache of this spelling
+            old = generate_prepared_ds_path(
+                data_args, model_args, data_folder=data_args.cohort_folder
+            )
+            old = old.with_name(old.name + new.name[len(old.name):])
+            self.assertNotEqual(new, old)
+            self.assertEqual(new, generate_cohort_prepared_ds_path(*spelled("/data/cohorts//AMI")))
+
+            # a run that stopped while saving left a folder without its index: it is not used
+            old.mkdir()
+            (old / "train").mkdir()
+            self.assertEqual(new, generate_cohort_prepared_ds_path(*spelled("/data/cohorts//AMI")))
+            # a complete one is, for the spelling it was made with only
+            (old / "dataset_dict.json").write_text("{}")
+            self.assertEqual(old, generate_cohort_prepared_ds_path(*spelled("/data/cohorts//AMI")))
+            self.assertEqual(new, generate_cohort_prepared_ds_path(*spelled("/data/cohorts/AMI")))
+            # and a complete cache under the new name wins
+            new.mkdir()
+            (new / "dataset_dict.json").write_text("{}")
+            self.assertEqual(new, generate_cohort_prepared_ds_path(*spelled("/data/cohorts//AMI")))
 
 
 if __name__ == "__main__":

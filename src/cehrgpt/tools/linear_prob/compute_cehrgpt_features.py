@@ -39,6 +39,7 @@ from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.data_utils import (
     extract_cohort_sequences,
     generate_cohort_prepared_ds_path,
+    is_complete_prepared_dataset,
     is_cohort_sequence_chunks,
     load_cohort_sequence_chunks,
     prepare_finetune_dataset,
@@ -104,11 +105,6 @@ def load_prepared_dataset(prepared_ds_path: Union[str, Path]) -> DatasetDict:
     return load_from_disk(str(prepared_ds_path))
 
 
-def _is_complete_prepared_dataset(prepared_ds_path: Path) -> bool:
-    # save_to_disk of a DatasetDict writes dataset_dict.json, the chunked save writes its list of chunks last
-    return is_cohort_sequence_chunks(prepared_ds_path) or (prepared_ds_path / "dataset_dict.json").exists()
-
-
 def _load_or_create_prepared_dataset(
     cehrgpt_args,
     data_args,
@@ -132,7 +128,7 @@ def _load_or_create_prepared_dataset(
         LOG.info("Refreshing prepared dataset: removing cache at %s", prepared_ds_path)
         shutil.rmtree(prepared_ds_path)
 
-    if any(prepared_ds_path.glob("*")) and not _is_complete_prepared_dataset(prepared_ds_path):
+    if any(prepared_ds_path.glob("*")) and not is_complete_prepared_dataset(prepared_ds_path):
         LOG.warning("Removing the prepared dataset of an interrupted run at %s", prepared_ds_path)
         shutil.rmtree(prepared_ds_path)
 

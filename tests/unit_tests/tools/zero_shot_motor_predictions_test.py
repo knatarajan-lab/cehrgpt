@@ -595,6 +595,46 @@ class EndToEndTest(unittest.TestCase):
         ))["outcome"]["supervised_baseline"]
         self.assertLess(limited["num_train_rows"], 200)
 
+    def combined_copy(self, folder, target, seed):
+        """The features of a folder with a random local half after every vector: [global | local]."""
+        rng = np.random.RandomState(seed)
+        os.makedirs(os.path.join(self.tmp, target), exist_ok=True)
+        for name in os.listdir(folder):
+            frame = pd.read_parquet(os.path.join(folder, name))
+            frame["features"] = [
+                np.concatenate([np.asarray(v, dtype=np.float32), 5 * rng.randn(N_EMBD).astype(np.float32)])
+                for v in frame["features"]
+            ]
+            frame.to_parquet(os.path.join(self.tmp, target, name))
+        return os.path.join(self.tmp, target)
+
+    def test_combined_features_give_the_results_of_their_global_half(self):
+        train, _ = self.features(n=400, folder="train_global", seed=1, signal=True)
+        path, _ = self.features(n=200, folder="eval_global", seed=2, signal=True)
+        results = {}
+        for kind, (features, train_features) in {
+            "global": (path, train),
+            "combined": (self.combined_copy(path, "eval_combined", 3), self.combined_copy(train, "train_combined", 4)),
+        }.items():
+            out = os.path.join(self.tmp, f"halves_{kind}")
+            metrics = zs.run(zs.create_arg_parser().parse_args(
+                ["--model_path", self.model_dir, "--features_folder", features, "--output_dir", out,
+                 "--outcome_concepts", self.codes[0], "--baseline_train_features", train_features]
+            ))
+            scores = pd.read_parquet(os.path.join(out, "outcome_scores.parquet")).sort_values("subject_id")
+            results[kind] = (metrics, scores.reset_index(drop=True))
+        (global_metrics, global_scores), (combined_metrics, combined_scores) = results["global"], results["combined"]
+        self.assertEqual(global_metrics["feature_width"], N_EMBD)
+        self.assertEqual(global_metrics["features_used"], "global")
+        self.assertEqual(combined_metrics["feature_width"], 2 * N_EMBD)
+        self.assertIn("first half", combined_metrics["features_used"])
+        # the local half changes nothing: not the head's probabilities and not the baseline
+        pd.testing.assert_frame_equal(global_scores, combined_scores)
+        self.assertEqual(global_metrics["outcome"]["zero_shot"], combined_metrics["outcome"]["zero_shot"])
+        self.assertEqual(
+            global_metrics["outcome"]["supervised_baseline"], combined_metrics["outcome"]["supervised_baseline"]
+        )
+
     def test_descendants_are_covered_through_the_tasks_below_a_concept(self):
         c = self.codes
         ancestors_of = zs.tokenizer_ancestors(self.tokenizer)
@@ -824,8 +864,8 @@ class EndToEndTest(unittest.TestCase):
         pd.read_parquet(os.path.join(path, "a.parquet")).drop(columns=["boolean_value"]).to_parquet(os.path.join(unlabeled, "u.parquet"))
         with self.assertRaisesRegex(ValueError, "label column"):
             zs.run(parse(["--model_path", self.model_dir, "--features_folder", unlabeled, "--output_dir", out, "--outcome_concepts", self.codes[0]]))
-        wide, _ = self.features(dim=2 * N_EMBD, folder="wide")
-        with self.assertRaisesRegex(ValueError, "disable_combine_global_local"):
+        wide, _ = self.features(dim=3 * N_EMBD, folder="wide")
+        with self.assertRaisesRegex(ValueError, "neither the model's hidden size"):
             zs.run(parse(["--model_path", self.model_dir, "--features_folder", wide, "--output_dir", out, "--concepts", self.codes[0]]))
         with self.assertRaises(FileNotFoundError):
             zs.run(parse(["--model_path", self.model_dir, "--features_folder", out + "_nothing", "--output_dir", out, "--concepts", self.codes[0]]))
