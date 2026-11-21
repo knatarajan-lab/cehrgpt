@@ -21,7 +21,10 @@ The head has no information about how long ago the last event was, which is why 
 input (default 0: the prediction time is the time of the last event).
 
 Only the MOTOR tasks can be asked about. A task that stands for an ontology ancestor also
-covers its descendants, because that is how its training labels were built.
+covers its descendants, because that is how its training labels were built. So an outcome
+concept that is a MOTOR task is used as it is, and its descendants are not added to it. An
+outcome concept that is not a task is predicted through the highest tasks below it, which
+needs the ontology (ontology.pickle in the tokenizer folder, or --concept_ancestor).
 
 Binary classification: the outcome of a cohort is one or more MOTOR tasks and a window. The
 probability that the outcome happens is compared with the cohort label (AUROC, AUPRC, Brier,
@@ -31,9 +34,10 @@ what the pretrained head gives without any training. With several concepts the p
 (safer when one concept contains another).
 
 The outcome can also be given by one of the task files of the time to event prediction
-(src/cehrgpt/time_to_event/config/*.yaml) with --task_config: its outcome_events,
-include_descendants and prediction window are used as they are, so the same file defines the
-task for the generative and for the zero-shot prediction. A window that has no end
+(src/cehrgpt/time_to_event/config/*.yaml) with --task_config: its outcome_events and
+prediction window are used as they are, so the same file defines the task for the generative
+and for the zero-shot prediction. Its include_descendants is not read: the descendants are
+covered as described above whatever it says. A window that has no end
 (prediction_window_end: -1) needs --open_window_days, and a limit on the future visits
 (future_visit_end) cannot be expressed with MOTOR and is refused unless --ignore_visit_limits.
 
@@ -258,8 +262,8 @@ def resolve_tasks(
     if missing:
         raise ValueError(
             f"Not MOTOR tasks: {missing[:10]}. Only the tasks the model was pretrained on can be "
-            "asked about; list them with --list_tasks (and --search to filter by name). For an "
-            "outcome, --expand_descendants asks about a concept through the tasks at or below it."
+            "asked about; list them with --list_tasks (and --search to filter by name). An "
+            "outcome concept (--outcome_concepts) that is not a task is predicted through the tasks below it."
         )
     return [(tokenizer.get_motor_token_id(c), c, names.get(c, "")) for c in concepts]
 
@@ -438,15 +442,18 @@ def ancestors_from_table(path: str, task_codes: Sequence[str]):
     return lambda code: cache.get(str(code), frozenset({str(code)}))
 
 
-def explain_uncovered(tokenizer: CehrGptTokenizer, concept: str, expanded: bool) -> str:
+def explain_uncovered(tokenizer: CehrGptTokenizer, concept: str, has_ontology: bool) -> str:
     """Why no MOTOR task covers a concept, for the warning."""
+    if not has_ontology:
+        return (
+            "not a MOTOR task, and the tasks below it cannot be found without an ontology "
+            "(ontology.pickle in the tokenizer folder, or an OMOP table with --concept_ancestor)"
+        )
     if concept not in tokenizer.get_vocab():
         return (
             "not in the tokenizer vocabulary, so the model never saw it as an event"
         )
-    if expanded:
-        return "in the vocabulary, but no MOTOR task is this concept or one of its descendants"
-    return "in the vocabulary, but not a MOTOR task (--expand_descendants covers it through the tasks below it)"
+    return "in the vocabulary, but no MOTOR task is this concept or one of its descendants"
 
 
 def tokenizer_ancestors(tokenizer: CehrGptTokenizer):
@@ -454,8 +461,8 @@ def tokenizer_ancestors(tokenizer: CehrGptTokenizer):
     ontology = tokenizer._ontology
     if ontology is None:
         raise ValueError(
-            "--expand_descendants needs the ontology (ontology.pickle) in the tokenizer folder, "
-            "and this tokenizer has none; pass an OMOP concept_ancestor table with --concept_ancestor"
+            "The tokenizer folder has no ontology (ontology.pickle); pass an OMOP concept_ancestor "
+            "table with --concept_ancestor"
         )
     cache: Dict[str, frozenset] = {}
 
@@ -594,11 +601,10 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
         # what is given on the command line wins over the file
         if args.outcome_concepts is None and not args.outcome_concepts_file:
             args.outcome_concepts = task.outcome_events
-        args.expand_descendants = args.expand_descendants or task.include_descendants
         args.outcome_window = args.outcome_window or task.window
         LOG.info(
-            "Task %s from %s: outcome %s, descendants %s, window %s days",
-            task_name, args.task_config, task.outcome_events, args.expand_descendants, args.outcome_window,
+            "Task %s from %s: outcome %s, window %s days",
+            task_name, args.task_config, task.outcome_events, args.outcome_window,
         )
     outcome_input = list(args.outcome_concepts or [])
     if args.outcome_concepts_file:
@@ -609,17 +615,25 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
     uncovered: Dict[str, str] = {}
     if outcome:
         task_codes = sorted(tokenizer._motor_time_to_event_codes)
-        if args.expand_descendants:
-            ancestors_of = (
-                ancestors_from_table(args.concept_ancestor, task_codes)
-                if args.concept_ancestor else tokenizer_ancestors(tokenizer)
-            )
-            resolved = {c: expand_to_tasks([c], task_codes, ancestors_of) for c in outcome}
-            covered = [c for c in outcome if resolved[c]]
-            outcome_resolution = {c: resolved[c] for c in covered}
+        # None without an ontology: then only the concepts that are tasks themselves can be predicted
+        if args.concept_ancestor:
+            ancestors_of = ancestors_from_table(args.concept_ancestor, task_codes)
+        elif tokenizer._ontology is not None:
+            ancestors_of = tokenizer_ancestors(tokenizer)
         else:
-            covered = [c for c in outcome if tokenizer.is_motor_time_to_event_code(c)]
-        uncovered = {c: explain_uncovered(tokenizer, c, args.expand_descendants) for c in outcome if c not in covered}
+            ancestors_of = None
+
+        def tasks_of(concept: str) -> List[str]:
+            # A task already counts the events of its descendants, so it is used as it is. A concept
+            # that is not a task is predicted through the highest tasks below it.
+            if tokenizer.is_motor_time_to_event_code(concept):
+                return [concept]
+            return expand_to_tasks([concept], task_codes, ancestors_of) if ancestors_of else []
+
+        resolved = {c: tasks_of(c) for c in outcome}
+        covered = [c for c in outcome if resolved[c]]
+        outcome_resolution = {c: resolved[c] for c in covered}
+        uncovered = {c: explain_uncovered(tokenizer, c, ancestors_of is not None) for c in outcome if c not in covered}
         if uncovered:
             if not covered:
                 raise ValueError(
@@ -632,15 +646,17 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
                 "%s, so it misses the events of the removed ones: %s",
                 len(uncovered), len(outcome), len(covered), uncovered,
             )
-        if args.expand_descendants:
+        outcome = list(dict.fromkeys(task for c in covered for task in resolved[c]))
+        if ancestors_of:
             # across the whole set, again only the highest tasks: one concept's task may contain another's
-            outcome = expand_to_tasks(covered, task_codes, ancestors_of)
-            LOG.info(
-                "The outcome concepts %s (with descendants) are covered by %s MOTOR task(s): %s",
-                covered, len(outcome), [(c, names.get(c, "")) for c in outcome],
-            )
-        else:
-            outcome = covered
+            outcome = [
+                task for task in outcome
+                if not any(other != task and other in ancestors_of(task) for other in outcome)
+            ]
+        LOG.info(
+            "The outcome concepts %s are covered by %s MOTOR task(s): %s",
+            covered, len(outcome), [(c, names.get(c, "")) for c in outcome],
+        )
     concepts = list(args.concepts or [])
     if args.concepts_file:
         with open(args.concepts_file) as f:
@@ -780,13 +796,12 @@ def create_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gap_days", type=float, default=0.0, help="Days between the last event and the prediction time, for every patient")
     parser.add_argument("--gap_days_column", default=None, help="A column with the gap per patient (overrides --gap_days)")
     parser.add_argument("--label_column", default="boolean_value", help="A column with the observed outcome, written next to the predictions and used by --outcome_concepts")
-    parser.add_argument("--task_config", default=None, help="A task file of the time to event prediction (src/cehrgpt/time_to_event/config/*.yaml): its outcome_events, include_descendants and prediction window define the outcome. --outcome_concepts, --expand_descendants and --outcome_window given here win over the file")
+    parser.add_argument("--task_config", default=None, help="A task file of the time to event prediction (src/cehrgpt/time_to_event/config/*.yaml): its outcome_events and prediction window define the outcome (include_descendants is not read). --outcome_concepts and --outcome_window given here win over the file")
     parser.add_argument("--open_window_days", type=float, default=None, help="With --task_config: the end of the window when the file has none (prediction_window_end: -1)")
     parser.add_argument("--ignore_visit_limits", action="store_true", help="With --task_config: accept future_visit_start/future_visit_end and use the time window alone")
-    parser.add_argument("--concept_ancestor", default=None, help="OMOP concept_ancestor table (parquet), as in the time to event prediction, to find the descendants instead of the tokenizer's ontology")
-    parser.add_argument("--outcome_concepts", nargs="+", default=None, help="MOTOR task(s) that define the binary outcome of the cohort; the label column is the truth")
+    parser.add_argument("--concept_ancestor", default=None, help="OMOP concept_ancestor table (parquet), as in the time to event prediction, to find the tasks below an outcome concept that is not a task itself, instead of the tokenizer's ontology")
+    parser.add_argument("--outcome_concepts", nargs="+", default=None, help="Concept(s) that define the binary outcome of the cohort; the label column is the truth. A concept that is a MOTOR task is used as it is (it covers its descendants); one that is not is predicted through the highest tasks below it")
     parser.add_argument("--outcome_concepts_file", default=None, help="A file with one outcome concept id per line (a concept set)")
-    parser.add_argument("--expand_descendants", action="store_true", help="Treat each outcome concept as the concept and all its descendants: it is covered by the MOTOR tasks at or below it (only the highest ones are used). Needs the ontology in the tokenizer folder")
     parser.add_argument("--outcome_window", default=None, help='The cohort horizon, e.g. "30" or "30-90" (default: the first of --windows)')
     parser.add_argument("--combine", choices=["independent_or", "max", "sampled"], default="independent_or", help="How the probabilities of several outcome concepts become the probability of any of them. sampled draws every task as an independent yes/no over --num_trials trials and adds up the events: it estimates the same value as independent_or, with sampling noise")
     parser.add_argument("--num_trials", type=int, default=100, help="With --combine sampled: the number of trials")

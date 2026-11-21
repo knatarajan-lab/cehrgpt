@@ -527,7 +527,8 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(metrics["outcome"]["window_days"], "60-120")
 
     def test_several_outcome_concepts_are_combined(self):
-        concepts = [self.codes[0], self.codes[1]]
+        # tasks that are not below one another: a task below another one of the outcome is dropped
+        concepts = [self.codes[0], self.codes[5]]
         both, out_both, _ = self.run_cli("--outcome_concepts", *concepts, "--windows", "90")
         biggest, out_max, _ = self.run_cli("--outcome_concepts", *concepts, "--windows", "90", "--combine", "max", out="out_max")
         self.assertEqual(both["outcome"]["combine"], "independent_or")
@@ -542,7 +543,7 @@ class EndToEndTest(unittest.TestCase):
         self.assertTrue((combined["probability"] >= wide.max(axis=1) - 1e-7).all())
 
     def test_sampled_combination_from_the_command_line(self):
-        concepts = [self.codes[0], self.codes[1], self.codes[2]]
+        concepts = [self.codes[0], self.codes[5], self.codes[6]]
         metrics, output, _ = self.run_cli(
             "--outcome_concepts", *concepts, "--windows", "365", "--combine", "sampled",
             "--num_trials", "200", "--seed", "3", out="sampled",
@@ -599,10 +600,10 @@ class EndToEndTest(unittest.TestCase):
         ancestors_of = zs.tokenizer_ancestors(self.tokenizer)
         self.assertEqual(ancestors_of(c[2]), {c[2], c[1], c[0], "999001"})
         # a concept that is a task covers its descendants itself
-        metrics, _, _ = self.run_cli("--outcome_concepts", c[0], "--expand_descendants", out="expand_task")
+        metrics, _, _ = self.run_cli("--outcome_concepts", c[0], out="expand_task")
         self.assertEqual(metrics["outcome"]["concepts"], [c[0]])
         # "999001" is not a task: its highest tasks are c0 (with c1, c2, c3 below it) and c5
-        metrics, output, _ = self.run_cli("--outcome_concepts", "999001", "--expand_descendants", out="expand_broad")
+        metrics, output, _ = self.run_cli("--outcome_concepts", "999001", out="expand_broad")
         outcome = metrics["outcome"]
         self.assertEqual(set(outcome["concepts"]), {c[0], c[5]})
         self.assertEqual(outcome["outcome_input"], ["999001"])
@@ -615,7 +616,7 @@ class EndToEndTest(unittest.TestCase):
         path, _ = self.features()
         args = zs.create_arg_parser().parse_args(
             ["--model_path", self.model_dir, "--features_folder", path, "--output_dir", os.path.join(self.tmp, "from_file"),
-             "--outcome_concepts_file", listing, "--expand_descendants"]
+             "--outcome_concepts_file", listing]
         )
         self.assertEqual(set(zs.run(args)["outcome"]["concepts"]), {c[0], c[5]})
 
@@ -641,9 +642,10 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(metrics["outcome"]["zero_shot"], direct["outcome"]["zero_shot"])
         self.assertIsNone(direct["task_name"])
 
-    def test_the_file_can_include_descendants_and_the_command_line_wins(self):
+    def test_a_concept_of_the_file_that_is_not_a_task_is_covered_and_the_command_line_wins(self):
         c = self.codes
-        task = self.write_task(outcome_events=["999001"], include_descendants=True, prediction_window_end=45)
+        # include_descendants is not read: a concept that is not a task is covered through the tasks below it
+        task = self.write_task(outcome_events=["999001"], include_descendants=False, prediction_window_end=45)
         path, _ = self.features()
         base = ["--model_path", self.model_dir, "--features_folder", path, "--task_config", task]
         parse = zs.create_arg_parser().parse_args
@@ -693,7 +695,7 @@ class EndToEndTest(unittest.TestCase):
         os.remove(os.path.join(bare, "ontology.pickle"))
         path, _ = self.features()
         base = ["--model_path", self.model_dir, "--tokenizer_path", bare, "--features_folder", path,
-                "--outcome_concepts", str(broad), "--expand_descendants"]
+                "--outcome_concepts", str(broad)]
         parse = zs.create_arg_parser().parse_args
         with self.assertRaisesRegex(ValueError, "concept_ancestor"):
             zs.run(parse(base + ["--output_dir", os.path.join(self.tmp, "nt")]))
@@ -708,27 +710,24 @@ class EndToEndTest(unittest.TestCase):
         c = self.codes
         in_vocabulary_concept = self.not_task_but_in_vocabulary()
         path, _ = self.features()
-        for expand in (False, True):
-            with self.subTest(expand=expand):
-                args = zs.create_arg_parser().parse_args(
-                    ["--model_path", self.model_dir, "--features_folder", path,
-                     "--output_dir", os.path.join(self.tmp, f"removed_{expand}"),
-                     "--outcome_concepts", c[0], "123456789", in_vocabulary_concept, c[1]]
-                    + (["--expand_descendants"] if expand else [])
-                )
-                with self.assertLogs("cehrgpt.tools.zero_shot_motor_predictions", level="WARNING") as logs:
-                    metrics = zs.run(args)
-                outcome = metrics["outcome"]
-                # the run goes on with the concepts that have a task ...
-                self.assertEqual(set(outcome["concepts"]), {c[0]} if expand else {c[0], c[1]})  # c1 is below c0
-                # ... and says which ones were left out, and why
-                self.assertEqual(set(outcome["removed_concepts"]), {"123456789", in_vocabulary_concept})
-                self.assertIn("not in the tokenizer vocabulary", outcome["removed_concepts"]["123456789"])
-                self.assertIn("in the vocabulary, but", outcome["removed_concepts"][in_vocabulary_concept])
-                warning = "\n".join(logs.output)
-                self.assertIn("Removed 2 of 4 outcome concepts", warning)
-                self.assertIn("123456789", warning)
-                self.assertIn(in_vocabulary_concept, warning)
+        args = zs.create_arg_parser().parse_args(
+            ["--model_path", self.model_dir, "--features_folder", path,
+             "--output_dir", os.path.join(self.tmp, "removed"),
+             "--outcome_concepts", c[0], "123456789", in_vocabulary_concept, c[1]]
+        )
+        with self.assertLogs("cehrgpt.tools.zero_shot_motor_predictions", level="WARNING") as logs:
+            metrics = zs.run(args)
+        outcome = metrics["outcome"]
+        # the run goes on with the concepts that have a task; c1 is below c0, which already counts it ...
+        self.assertEqual(set(outcome["concepts"]), {c[0]})
+        # ... and says which ones were left out, and why
+        self.assertEqual(set(outcome["removed_concepts"]), {"123456789", in_vocabulary_concept})
+        self.assertIn("not in the tokenizer vocabulary", outcome["removed_concepts"]["123456789"])
+        self.assertIn("in the vocabulary, but", outcome["removed_concepts"][in_vocabulary_concept])
+        warning = "\n".join(logs.output)
+        self.assertIn("Removed 2 of 4 outcome concepts", warning)
+        self.assertIn("123456789", warning)
+        self.assertIn(in_vocabulary_concept, warning)
 
     def test_nothing_is_removed_when_every_concept_has_a_task(self):
         metrics, _, _ = self.run_cli("--outcome_concepts", self.codes[0], self.codes[1], out="nothing_removed")
@@ -736,30 +735,34 @@ class EndToEndTest(unittest.TestCase):
 
     def test_a_set_where_nothing_has_a_task_cannot_be_predicted(self):
         path, _ = self.features()
-        for expand in (False, True):
-            with self.subTest(expand=expand):
-                args = zs.create_arg_parser().parse_args(
-                    ["--model_path", self.model_dir, "--features_folder", path,
-                     "--output_dir", os.path.join(self.tmp, f"err_expand_{expand}"),
-                     "--outcome_concepts", "123456789", "987654321"] + (["--expand_descendants"] if expand else [])
-                )
-                with self.assertRaisesRegex(ValueError, "None of the outcome concepts can be predicted") as error:
-                    zs.run(args)
-                self.assertIn("123456789", str(error.exception))
-                self.assertIn("987654321", str(error.exception))
+        args = zs.create_arg_parser().parse_args(
+            ["--model_path", self.model_dir, "--features_folder", path,
+             "--output_dir", os.path.join(self.tmp, "err_nothing"),
+             "--outcome_concepts", "123456789", "987654321"]
+        )
+        with self.assertRaisesRegex(ValueError, "None of the outcome concepts can be predicted") as error:
+            zs.run(args)
+        self.assertIn("123456789", str(error.exception))
+        self.assertIn("987654321", str(error.exception))
 
-    def test_expanding_needs_an_ontology(self):
-        no_ontology = os.path.join(self.tmp, "tok_without_ontology")
+    def test_only_a_concept_that_is_not_a_task_needs_an_ontology(self):
+        c = self.codes
         tokenizer_copy = os.path.join(self.tmp, "tok_copy")
         self.tokenizer.save_pretrained(tokenizer_copy)
         os.remove(os.path.join(tokenizer_copy, "ontology.pickle"))
         path, _ = self.features()
-        args = zs.create_arg_parser().parse_args(
-            ["--model_path", self.model_dir, "--tokenizer_path", tokenizer_copy, "--features_folder", path,
-             "--output_dir", no_ontology, "--outcome_concepts", self.codes[0], "--expand_descendants"]
-        )
-        with self.assertRaisesRegex(ValueError, "ontology"):
-            zs.run(args)
+        base = ["--model_path", self.model_dir, "--tokenizer_path", tokenizer_copy, "--features_folder", path]
+        parse = zs.create_arg_parser().parse_args
+        # tasks are used as they are; without an ontology a task below another one cannot be told and stays
+        outcome = zs.run(parse(base + ["--output_dir", os.path.join(self.tmp, "no_ontology_tasks"),
+                                       "--outcome_concepts", c[0], c[1]]))["outcome"]
+        self.assertEqual(outcome["concepts"], [c[0], c[1]])
+        # a concept that is not a task is left out, and the reason names what is missing
+        with self.assertLogs("cehrgpt.tools.zero_shot_motor_predictions", level="WARNING"):
+            outcome = zs.run(parse(base + ["--output_dir", os.path.join(self.tmp, "no_ontology_mixed"),
+                                           "--outcome_concepts", c[0], "999001"]))["outcome"]
+        self.assertEqual(outcome["concepts"], [c[0]])
+        self.assertIn("ontology", outcome["removed_concepts"]["999001"])
 
     def test_the_brier_score_is_read_against_the_prevalence(self):
         labels = np.array([0, 0, 0, 1])
@@ -814,7 +817,7 @@ class EndToEndTest(unittest.TestCase):
             zs.run(parse(base + ["--concepts", "123456789"]))
         with self.assertRaisesRegex(ValueError, "Give the concepts"):
             zs.run(parse(base))
-        with self.assertRaisesRegex(ValueError, "--expand_descendants"):
+        with self.assertRaisesRegex(ValueError, "--outcome_concepts"):
             zs.run(parse(base + ["--concepts", "123456789"]))
         unlabeled = os.path.join(self.tmp, "unlabeled")
         os.makedirs(unlabeled)
