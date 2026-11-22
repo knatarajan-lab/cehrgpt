@@ -37,6 +37,7 @@ class PredictionConcordanceTest(unittest.TestCase):
         )
         self.assertEqual(result["num_intersection"], 200)
         self.assertEqual(result["num_labels_that_differ"], 0)
+        self.assertEqual(result["num_positive_in_reference_only"], 0)
         self.assertAlmostEqual(result["spearman"], 1.0)
         self.assertAlmostEqual(result["spearman_cases"], 1.0)
         self.assertEqual(result["share_of_reference_top_10pct_in_candidate_top_10pct"], 1.0)
@@ -51,6 +52,14 @@ class PredictionConcordanceTest(unittest.TestCase):
         self.assertEqual(exact["num_intersection"], 0)
         by_date = concordance(*(read_predictions(p, "date") for p in paths))
         self.assertEqual(by_date["num_intersection"], 400)
+
+    def test_times_on_the_day_before_match_the_nearest(self):
+        write(self.folder / "ref.parquet", slice(None), self.risk, hours=-5)
+        write(self.folder / "cand.parquet", slice(100, 200), self.risk)
+        paths = self.folder / "ref.parquet", self.folder / "cand.parquet"
+        result = concordance(*(read_predictions(p) for p in paths), nearest=True)
+        self.assertEqual(result["num_intersection"], 100)
+        self.assertAlmostEqual(result["spearman"], 1.0)
 
 
 if __name__ == "__main__":

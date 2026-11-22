@@ -41,16 +41,34 @@ def read_predictions(path: str, match_on: str = "exact") -> pl.DataFrame:
     )
 
 
-def concordance(reference: pl.DataFrame, candidate: pl.DataFrame) -> dict:
-    matched = reference.join(candidate, on=KEY, suffix="_candidate").sort(KEY)
+def concordance(reference: pl.DataFrame, candidate: pl.DataFrame, nearest: bool = False) -> dict:
+    if nearest:
+        # each candidate sample with the reference sample of the subject closest in time, a day at most
+        matched = (
+            candidate.rename({"probability": "probability_candidate", "label": "label_candidate"})
+            .sort("prediction_time")
+            .join_asof(
+                reference.sort("prediction_time"),
+                on="prediction_time",
+                by="subject_id",
+                strategy="nearest",
+                tolerance="1d",
+            )
+            .drop_nulls("probability")
+        )
+    else:
+        matched = reference.join(candidate, on=KEY, suffix="_candidate").sort(KEY)
     ref = matched["probability"].to_numpy()
     cand = matched["probability_candidate"].to_numpy()
     label = matched["label"].to_numpy()
+    candidate_label = matched["label_candidate"].to_numpy()
     result = {
         "num_reference": reference.height,
         "num_candidate": candidate.height,
         "num_intersection": matched.height,
-        "num_labels_that_differ": int((label != matched["label_candidate"].to_numpy()).sum()),
+        "num_labels_that_differ": int((label != candidate_label).sum()),
+        "num_positive_in_reference_only": int(((label == 1) & (candidate_label == 0)).sum()),
+        "num_positive_in_candidate_only": int(((label == 0) & (candidate_label == 1)).sum()),
     }
     if matched.height < 2 or len(np.unique(label)) < 2:
         return result
@@ -82,6 +100,7 @@ def main(args: argparse.Namespace) -> dict:
     result = concordance(
         read_predictions(args.reference, args.match_on),
         read_predictions(args.candidate, args.match_on),
+        nearest=args.match_on == "nearest",
     )
     print(json.dumps(result, indent=2))
     if args.output_file:
@@ -96,9 +115,9 @@ def create_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output_file")
     parser.add_argument(
         "--match_on",
-        choices=["exact", "date"],
+        choices=["exact", "date", "nearest"],
         default="exact",
-        help="date: match on the day when the prediction times differ within the day",
+        help="date: the same day; nearest: the closest prediction time of the subject within a day",
     )
     return parser
 
