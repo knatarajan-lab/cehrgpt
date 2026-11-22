@@ -52,6 +52,14 @@ usage() {
     echo "  --force_attn_implementation=IMPL  Force the attention implementation: eager, sdpa or"
     echo "                                 flash_attention_2 (optional; default: flash_attention_2 for"
     echo "                                 gpt2 when installed, sdpa for qwen2)"
+    echo "  --attention_rollout_max_samples=NUM  After the feature extraction of a cohort, also write the"
+    echo "                                 attention rollout of NUM samples of every split (or 'all'): the"
+    echo "                                 importance of every input token for the global features, in"
+    echo "                                 <cohort>/<model_name>/attention_rollout_global/. A separate pass"
+    echo "                                 with eager attention and no sample packing, on the first GPU of"
+    echo "                                 --gpu_ids (optional; default: no attention rollout)"
+    echo "  --attention_rollout_batch_size=NUM  Samples per batch of the attention rollout (default: 1)."
+    echo "                                 Eager attention takes (heads, length, length) per sample and layer"
     echo "  --observation_window=NUM       Observation window in days (optional, default: None)"
     echo "  --allow_missing_tokenized_persons  Skip cohort persons that are missing from the tokenized"
     echo "                                 dataset (with a warning) instead of failing; only used with"
@@ -83,6 +91,8 @@ OBSERVATION_WINDOW=""
 TOKENIZER_PATH=""
 PREPROCESSING_BATCH_SIZE="1000"
 ALLOW_MISSING_TOKENIZED_PERSONS="false"
+ATTENTION_ROLLOUT_MAX_SAMPLES=""
+ATTENTION_ROLLOUT_BATCH_SIZE="1"
 
 # Parse command line arguments
 for arg in "$@"; do
@@ -101,6 +111,12 @@ for arg in "$@"; do
             ;;
         --observation_window=*)
             OBSERVATION_WINDOW="${arg#*=}"
+            ;;
+        --attention_rollout_max_samples=*)
+            ATTENTION_ROLLOUT_MAX_SAMPLES="${arg#*=}"
+            ;;
+        --attention_rollout_batch_size=*)
+            ATTENTION_ROLLOUT_BATCH_SIZE="${arg#*=}"
             ;;
         --model_path=*)
             MODEL_PATH="${arg#*=}"
@@ -395,6 +411,8 @@ log "  --refresh_processed_dataset=$REFRESH_PROCESSED_DATASET"
 log "  --is_data_in_meds=$IS_DATA_IN_MEDS"
 log "  --observation_window=$OBSERVATION_WINDOW"
 log "  --allow_missing_tokenized_persons=$ALLOW_MISSING_TOKENIZED_PERSONS"
+log "  --attention_rollout_max_samples=${ATTENTION_ROLLOUT_MAX_SAMPLES:-none}"
+log "  --attention_rollout_batch_size=$ATTENTION_ROLLOUT_BATCH_SIZE"
 
 # Find valid cohorts and write to a temp file
 TEMP_COHORT_LIST="$LOG_DIR/cohort_list_${TIMESTAMP}.txt"
@@ -570,6 +588,28 @@ while read -r cohort_name; do
         if [ $feature_extraction_status -ne 0 ]; then
             log "ERROR: Feature extraction failed for $cohort_name. Check $cohort_log for details."
             continue
+        fi
+
+        # Step 1b: attention rollout, on the dataset the feature extraction prepared. The same
+        # arguments on another module: it ignores sample packing and the attention
+        # implementation, uses the first GPU of --gpu_ids, and the batch size given last wins.
+        # A failure does not stop the training of the cohort.
+        if [ -n "$ATTENTION_ROLLOUT_MAX_SAMPLES" ]; then
+            if [ -f "$output_dir/attention_rollout_global/attention_rollout_info.json" ]; then
+                log "Skipping the attention rollout for $cohort_name: it exists in $output_dir/attention_rollout_global"
+            else
+                ROLLOUT_CMD=$(printf '%s' "$FEATURE_CMD" | sed 's/cehrgpt\.tools\.linear_prob\.compute_cehrgpt_features/cehrgpt.tools.linear_prob.compute_attention_rollout/')
+                ROLLOUT_CMD="$ROLLOUT_CMD --per_device_eval_batch_size \"$ATTENTION_ROLLOUT_BATCH_SIZE\""
+                if [ "$ATTENTION_ROLLOUT_MAX_SAMPLES" != "all" ]; then
+                    ROLLOUT_CMD="$ROLLOUT_CMD --attention_rollout_max_samples \"$ATTENTION_ROLLOUT_MAX_SAMPLES\""
+                fi
+                log "Starting attention rollout for $cohort_name..."
+                log "Command: $ROLLOUT_CMD"
+                eval "$ROLLOUT_CMD >> \"$cohort_log\" 2>&1"
+                if [ $? -ne 0 ]; then
+                    log "ERROR: Attention rollout failed for $cohort_name. Check $cohort_log for details."
+                fi
+            fi
         fi
     fi
 

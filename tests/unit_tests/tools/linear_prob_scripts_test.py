@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -313,3 +314,70 @@ class SkipFeatureExtractionTest(unittest.TestCase):
         )
         self.assertNotEqual(missing_output.returncode, 0)
         self.assertIn("--output_dir is required", missing_output.stdout)
+
+
+class AttentionRolloutStepTest(unittest.TestCase):
+    """run_linear_prob.sh --attention_rollout_max_samples runs the rollout after the extraction."""
+
+    setUp = SkipFeatureExtractionTest.setUp
+    calls = SkipFeatureExtractionTest.calls
+
+    def run_script(self, *args):
+        base = self.root / "cohorts"
+        for split in ("train", "test"):
+            (base / "readmission" / split).mkdir(parents=True, exist_ok=True)
+        for folder in ("prepared", "model"):
+            (self.root / folder).mkdir(exist_ok=True)
+        return subprocess.run(
+            [
+                "sh", str(LINEAR_PROB), f"--base_dir={base}", f"--output_dir={self.out}",
+                f"--dataset_prepared_path={self.root / 'prepared'}", f"--model_path={self.root / 'model'}",
+                "--preprocessing_workers=1", "--batch_size=32", "--model_name=my_model", *args,
+            ],
+            capture_output=True, text=True, env=self.env,
+        )
+
+    def test_the_rollout_runs_between_the_extraction_and_the_training(self):
+        result = self.run_script(
+            "--attention_rollout_max_samples=50", "--attention_rollout_batch_size=2", "--gpu_ids=1"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        modules = [c.split()[2].rsplit(".", 1)[-1] for c in self.calls() if c.startswith("-u -m")]
+        self.assertEqual(
+            modules, ["compute_cehrgpt_features", "compute_attention_rollout", "train_with_cehrgpt_features"]
+        )
+        extraction = next(c for c in self.calls() if "compute_cehrgpt_features" in c)
+        rollout = next(c for c in self.calls() if "compute_attention_rollout" in c)
+        # The arguments of the extraction, then the batch size of the rollout, which wins
+        self.assertTrue(
+            rollout.endswith("--per_device_eval_batch_size 2 --attention_rollout_max_samples 50"), rollout
+        )
+        self.assertEqual(
+            rollout.replace("compute_attention_rollout", "compute_cehrgpt_features").split(
+                " --per_device_eval_batch_size 2"
+            )[0],
+            extraction,
+        )
+        self.assertIn("--gpu_ids 1", rollout)
+
+    def test_all_samples_and_no_rollout_by_default(self):
+        result = self.run_script("--attention_rollout_max_samples=all")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rollout = next(c for c in self.calls() if "compute_attention_rollout" in c)
+        self.assertTrue(rollout.endswith("--per_device_eval_batch_size 1"), rollout)
+        self.log.unlink()
+        for path in (self.out / "readmission" / "my_model").glob("logistic*"):
+            shutil.rmtree(path)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(any("compute_attention_rollout" in c for c in self.calls()))
+        self.assertTrue(any("compute_cehrgpt_features" in c for c in self.calls()))
+
+    def test_an_existing_rollout_is_not_computed_again(self):
+        folder = self.out / "readmission" / "my_model" / "attention_rollout_global"
+        folder.mkdir(parents=True)
+        (folder / "attention_rollout_info.json").write_text("{}")
+        result = self.run_script("--attention_rollout_max_samples=50")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(any("compute_attention_rollout" in c for c in self.calls()))
+        self.assertIn("Skipping the attention rollout", result.stdout)

@@ -419,6 +419,51 @@ class CehrGPTArguments:
             "(train_with_cehrgpt_features --feature_sets). Without it only the global features are saved"
         },
     )
+    attention_rollout_target: Literal["global", "local"] = dataclasses.field(
+        default="global",
+        metadata={
+            "help": "compute_attention_rollout: the representation to explain. global is the state "
+            "of the linear probing module (the first half of the saved features), local the state "
+            "of the last decoder layer at the last token (the second half)"
+        },
+    )
+    attention_rollout_max_samples: Optional[int] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "compute_attention_rollout: stop after this many samples of every split "
+            "(all of them by default). The eager attention it needs is slow on long sequences"
+        },
+    )
+    attention_rollout_residual_weight: float = dataclasses.field(
+        default=0.5,
+        metadata={
+            "help": "compute_attention_rollout: the share of the residual connection in a layer, "
+            "0.5 in the attention rollout paper"
+        },
+    )
+    attention_rollout_probe_layer_weighting: Literal["rollout", "uniform"] = dataclasses.field(
+        default="rollout",
+        metadata={
+            "help": "compute_attention_rollout: how the blocks of the linear probing module are "
+            "weighted. rollout discounts a block by the residual weight for every block after it, "
+            "uniform counts every block the same"
+        },
+    )
+    attention_rollout_subject_id: Optional[int] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "compute_attention_rollout: explain the samples of this subject_id only, one "
+            "table of tokens per sample under samples/, instead of the cohort"
+        },
+    )
+    attention_rollout_prediction_time: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "compute_attention_rollout: with --attention_rollout_subject_id, the "
+            "prediction time of the sample to explain, as a date (every sample of that day) or "
+            "a date and time (YYYY-MM-DD HH:MM:SS). Every sample of the subject by default"
+        },
+    )
     add_random_token: Optional[bool] = dataclasses.field(
         default=False,
         metadata={
