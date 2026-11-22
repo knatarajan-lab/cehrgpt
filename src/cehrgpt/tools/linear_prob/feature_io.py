@@ -35,7 +35,14 @@ class AsyncParquetWriter:
         self._reap(block=False)
         while len(self._pending) >= self._max_pending:
             self._reap(block=True)
-        self._pending.add(self._pool.submit(df.to_parquet, path))
+        self._pending.add(self._pool.submit(self._write, df, path))
+
+    @staticmethod
+    def _write(df: pd.DataFrame, path: Path) -> None:
+        # A process killed while writing leaves the hidden temporary file, not half a parquet file
+        temporary = path.with_name(f".{path.name}.tmp")
+        df.to_parquet(temporary)
+        temporary.replace(path)
 
     def flush(self) -> None:
         while self._pending:

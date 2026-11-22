@@ -101,14 +101,19 @@ def select_samples(
 ) -> DatasetDict:
     """The samples of the subjects, then a random max_samples of every split, in the stored order."""
     selected = {}
+    missing = set(subject_ids or [])
     for split, dataset in splits.items():
         if subject_ids:
-            dataset = dataset.select(np.flatnonzero(np.isin(dataset["person_id"], subject_ids)))
+            person_ids = dataset["person_id"]
+            missing -= set(person_ids)
+            dataset = dataset.select(np.flatnonzero(np.isin(person_ids, subject_ids)))
         if max_samples:
             # The start of a seeded shuffle: a later run with more samples extends the same set
             shuffled = np.random.default_rng(seed).permutation(len(dataset))
             dataset = dataset.select(np.sort(shuffled[:max_samples]))
         selected[split] = dataset
+    if missing:
+        raise ValueError(f"No sample of the subjects {sorted(missing)} in the cohort")
     return DatasetDict(selected)
 
 
@@ -158,10 +163,6 @@ def main():
     target = cehrgpt_args.attention_rollout_target
     output_folder = Path(training_args.output_dir) / f"attention_rollout_{target}"
     info_file = output_folder / "attention_rollout_info.json"
-    # A run adds to the samples that are saved, so they must come from the same model
-    model_path = os.path.abspath(os.path.expanduser(model_args.model_name_or_path))
-    if info_file.exists() and json.loads(info_file.read_text())["model_name_or_path"] != model_path:
-        raise ValueError(f"{output_folder} holds the rollout of another model")
 
     cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(model_args.tokenizer_name_or_path)
     # Only the eager attention computes the attention weights
@@ -201,6 +202,21 @@ def main():
         include_demographics=cehrgpt_args.include_demographics,
         add_linear_prob_token=cehrgpt_args.add_random_token,
     )
+    num_probe_layers = (
+        len(cehrgpt_model.linear_prob.linear_prob)
+        if target == "global" and cehrgpt_model.linear_prob is not None
+        else 0
+    )
+    info = {
+        "target": target,
+        "model_name_or_path": os.path.abspath(os.path.expanduser(model_args.model_name_or_path)),
+        "max_length": data_collator.max_length,
+        "num_decoder_layers": len(cehrgpt_model.cehrgpt.h),
+        "num_probe_layers": num_probe_layers,
+    }
+    # A run adds to the samples that are saved, so they must come from the same model and length
+    if info_file.exists() and not info.items() <= json.loads(info_file.read_text()).items():
+        raise ValueError(f"{output_folder} holds the rollout of other settings than {info}")
 
     splits = DatasetDict(
         {
@@ -217,16 +233,17 @@ def main():
         cehrgpt_args.attention_rollout_max_samples,
         training_args.seed,
     )
-    if not sum(len(dataset) for dataset in splits.values()):
-        raise ValueError("No sample of the cohort is selected")
+    # What this run selected, saved or not: the summary of a cohort run is over these
+    selected = {
+        split: set(zip(dataset["person_id"], map(int, dataset["index_date"])))
+        for split, dataset in splits.items()
+    }
     saved_files = os.path.join("*", "*.parquet")
     splits = select_rows(splits, rows_without_features(splits, str(output_folder), saved_files))
 
-    num_probe_layers = (
-        len(cehrgpt_model.linear_prob.linear_prob)
-        if target == "global" and cehrgpt_model.linear_prob is not None
-        else 0
-    )
+    output_folder.mkdir(parents=True, exist_ok=True)
+    if not info_file.exists():
+        info_file.write_text(json.dumps(info, indent=2))
     num_samples = {}
     for split, dataset in splits.items():
         split_folder = output_folder / split
@@ -241,23 +258,20 @@ def main():
             pin_memory=training_args.dataloader_pin_memory,
         )
         write_rollout(cehrgpt_model, cehrgpt_tokenizer, data_loader, target, num_probe_layers, split_folder)
-        # Over every saved sample of the split, whichever run wrote it
+        # The samples of some subjects are no summary of a cohort: the one that is there is left
+        if cehrgpt_args.attention_rollout_subject_id:
+            continue
         aggregator = ConceptImportanceAggregator()
         for file in glob.glob(str(split_folder / "*.parquet")):
             for row in pd.read_parquet(file).itertuples():
-                aggregator.add(row.concept_ids, row.importance, row.baseline_importance, row.boolean_value)
+                if (row.subject_id, int(row.prediction_time_posix)) in selected[split]:
+                    aggregator.add(row.concept_ids, row.importance, row.baseline_importance, row.boolean_value)
         aggregator.to_frame().to_csv(output_folder / f"{split}_concept_importance.csv", index=False)
         num_samples[split] = aggregator.num_samples
 
-    info = {
-        "target": target,
-        "model_name_or_path": model_path,
-        "num_decoder_layers": len(cehrgpt_model.cehrgpt.h),
-        "num_probe_layers": num_probe_layers,
-        "num_samples": num_samples,
-    }
-    info_file.write_text(json.dumps(info, indent=2))
-    LOG.info("The attention rollout is in %s: %s", output_folder, info)
+    if not cehrgpt_args.attention_rollout_subject_id:
+        info_file.write_text(json.dumps({**info, "num_samples": num_samples}, indent=2))
+    LOG.info("The attention rollout is in %s", output_folder)
 
 
 if __name__ == "__main__":
