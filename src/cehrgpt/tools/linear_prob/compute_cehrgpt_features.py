@@ -205,7 +205,7 @@ def _load_or_create_prepared_dataset(
 def rows_without_features(
     processed_dataset: DatasetDict,
     output_dir: str,
-    pattern: str = os.path.join("*", "features", "*.parquet"),
+    pattern: str = os.path.join("features_with_label", "*_features", "*.parquet"),
 ) -> Optional[Dict[str, List[int]]]:
     """
     The rows of every split that have no features in output_dir yet, or None when none has.
@@ -329,7 +329,8 @@ def load_shard(shard_path: str) -> DatasetDict:
         "train": train_set.shard(plan["num_shards"], plan["index"], contiguous=False),
         "test": test_set.shard(plan["num_shards"], plan["index"], contiguous=False),
     }
-    return DatasetDict({k: v for k, v in splits.items() if len(v) > 0})
+    # Empty splits are kept: on a resume a split may be done, and main() expects both
+    return DatasetDict(splits)
 
 
 def run_on_multiple_gpus(
