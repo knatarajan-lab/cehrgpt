@@ -4,6 +4,7 @@ import unittest
 import torch
 
 from cehrgpt.tools.linear_prob import attention_rollout as ar
+from cehrgpt.tools.linear_prob import compute_attention_rollout as tool
 from tests.unit_tests.models.motor_tte_loss_test import build_model
 
 
@@ -64,6 +65,23 @@ class AttentionRolloutTest(unittest.TestCase):
         # The first probe block reads R_1 at the last token: [0.25, 0.75], weight 0.25 / 0.75
         # The second reads [0.5, 0.5] @ R_2 = [0.7, 0.3], weight 0.5 / 0.75
         torch.testing.assert_close(scores, torch.tensor([[0.55, 0.45]]))
+
+    def test_concept_importance_aggregator(self):
+        aggregator = tool.ConceptImportanceAggregator()
+        aggregator.add(["a", "b", "a"], [0.2, 0.5, 0.3], [0.5, 0.25, 0.25], label=True)
+        aggregator.add(["b", "c"], [0.4, 0.6], [0.5, 0.5], label=False)
+        frame = aggregator.to_frame().set_index("concept_id")
+        self.assertEqual(frame.index.tolist(), ["b", "c", "a"])
+        self.assertEqual(frame["num_samples"].tolist(), [2, 1, 1])
+        self.assertAlmostEqual(frame["mean_importance"].sum(), 1.0)
+        self.assertAlmostEqual(frame.loc["a", "mean_importance"], 0.25)
+        self.assertAlmostEqual(frame.loc["a", "mean_importance_when_present"], 0.5)
+        self.assertAlmostEqual(frame.loc["a", "mean_baseline_when_present"], 0.75)
+        self.assertAlmostEqual(frame.loc["a", "lift"], 0.5 / 0.75)
+        self.assertAlmostEqual(frame.loc["b", "lift"], 0.9 / 0.75)
+        self.assertAlmostEqual(frame.loc["b", "mean_importance_positive"], 0.5)
+        self.assertAlmostEqual(frame.loc["b", "mean_importance_negative"], 0.4)
+        self.assertAlmostEqual(frame.loc["c", "mean_importance_positive"], 0.0)
 
     def test_model_rollout(self):
         batch = padded_batch()

@@ -203,14 +203,16 @@ def _load_or_create_prepared_dataset(
 
 
 def rows_without_features(
-    processed_dataset: DatasetDict, output_dir: str
+    processed_dataset: DatasetDict,
+    output_dir: str,
+    pattern: str = os.path.join("*", "features", "*.parquet"),
 ) -> Optional[Dict[str, List[int]]]:
     """
     The rows of every split that have no features in output_dir yet, or None when none has.
 
     A run that was interrupted wrote the features of some rows already: they are not extracted again.
     """
-    feature_files = glob.glob(os.path.join(output_dir, "*", "features", "*.parquet"))
+    feature_files = glob.glob(os.path.join(output_dir, pattern))
     if not feature_files:
         return None
     existing_features = pd.concat(
