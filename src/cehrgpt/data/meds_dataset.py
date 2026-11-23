@@ -355,8 +355,8 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
     if not blocks:
         return daily_blocks
     blocks.extend(daily_blocks)
-    if daily_blocks:
-        blocks.sort(key=lambda block: block.block_start_time)
+    # merge_patient_blocks looks only forward; the visit ids come in the order of their first event, not their start
+    blocks.sort(key=lambda block: block.block_start_time)
     return merge_patient_blocks(patient, blocks)
 
 
