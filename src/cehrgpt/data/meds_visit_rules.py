@@ -111,15 +111,6 @@ class VisitRules:
             raise VisitRulesError(f"max_stay_gap_days ({source}) must be a number of days above 0, got {gap!r}")
         return cls(text_events=text_events, max_stay_gap_days=float(gap), source=source, **lists)
 
-    def to_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {}
-        for key in PATTERN_LISTS:
-            result[key] = list(getattr(self, key))
-        if self.text_events:
-            result["text_events"] = [dataclasses.asdict(rule) for rule in self.text_events]
-        result["max_stay_gap_days"] = self.max_stay_gap_days
-        return result
-
     def pretty(self) -> str:
         """The rules as lines to read, one pattern per line, for the log."""
         lines = [f"Visit rules from {self.source or 'the code'}:"]
@@ -226,9 +217,3 @@ class YamlDrivenConversion(MedsToCehrBertConversion):
             )
             for rule in self.rules.text_events
         ]
-
-
-def build_conversion(rules: VisitRules, default_visit_id: int = 1, **kwargs) -> MedsToCehrBertConversion:
-    """Build the generic conversion from YAML; no dataset-specific conversion class is used."""
-    kwargs.pop("disconnect_problem_list_events", None)
-    return YamlDrivenConversion(rules, default_visit_id=default_visit_id, **kwargs)

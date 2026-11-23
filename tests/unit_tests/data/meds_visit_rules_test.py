@@ -15,7 +15,7 @@ from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
 from cehrgpt.data.meds_dataset import convert_one_patient
-from cehrgpt.data.meds_visit_rules import VisitRules, YamlDrivenConversion, build_conversion, resolve_visit_rules
+from cehrgpt.data.meds_visit_rules import VisitRules, YamlDrivenConversion, resolve_visit_rules
 
 
 def converter():
@@ -116,7 +116,7 @@ BACK_TO_BACK_STAYS_EVENTS = DEMOGRAPHICS + [
 
 class OpenVisitTokensTest(unittest.TestCase):
     def test_a_visit_open_at_the_prediction_time_has_no_visit_end_or_discharge_token(self):
-        conversion = build_conversion(VisitRules.from_dict(dict(admission_events=["ADMIT//"])))
+        conversion = YamlDrivenConversion(VisitRules.from_dict(dict(admission_events=["ADMIT//"])))
 
         def raw_event(code, time):
             return types.SimpleNamespace(

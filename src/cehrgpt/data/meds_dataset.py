@@ -40,7 +40,6 @@ from transformers.utils import logging
 from cehrgpt.data.meds_visit_rules import (
     VisitRules,
     YamlDrivenConversion,
-    build_conversion,
     resolve_visit_rules,
 )
 
@@ -93,7 +92,7 @@ UNKNOWN_VISIT_CONCEPT_ID = "Visit/0"
 
 
 @functools.lru_cache(maxsize=None)
-def _matcher(rules: Tuple[str, ...]):
+def _matcher(*rules: str):
     """A function that tells whether a code matches one of the rules (re.match, as the blocks do), once per code."""
     if not rules:
         return lambda code: False
@@ -109,10 +108,6 @@ def _matcher(rules: Tuple[str, ...]):
     return matches
 
 
-def _any_of(rules):
-    return _matcher(tuple(rules))
-
-
 class VisitBlock(PatientBlock):
     """
     A block of events, with the visit type unknown unless the events say it, and with the codes matched fast.
@@ -125,8 +120,11 @@ class VisitBlock(PatientBlock):
     Here the rules of a kind are one expression, and a code is matched once. The first event that matches is the same.
     """
 
+    # a stay of the rules that is still open at the prediction time
+    is_incomplete = False
+
     def _first_match(self, rules):
-        matches = _any_of(rules)
+        matches = _matcher(*rules)
         for event in self.events:
             if matches(event.code):
                 return event.code, event.time
@@ -142,7 +140,7 @@ class VisitBlock(PatientBlock):
         return self._first_match(self.conversion.get_discharge_matching_rules())
 
     def _infer_visit_type(self):
-        is_other_visit = _any_of(self.conversion.get_other_visit_matching_rules())
+        is_other_visit = _matcher(*self.conversion.get_other_visit_matching_rules())
         for event in self.events:
             if is_other_visit(event.code):
                 return event.code, event.time
@@ -159,8 +157,8 @@ def _split_days_at_discharges(days_of_events, conversion):
     with the discharge and the admission at the same time) within that day. The events from the ED or admission event
     on, and those after the discharge, go in a block of their own.
     """
-    discharge = _any_of(conversion.get_discharge_matching_rules())
-    starts = _any_of(conversion.get_ed_admission_matching_rules() + conversion.get_admission_matching_rules())
+    discharge = _matcher(*conversion.get_discharge_matching_rules())
+    starts = _matcher(*conversion.get_ed_admission_matching_rules(), *conversion.get_admission_matching_rules())
 
     # the same few codes repeat in a day, and each is matched once
     @functools.lru_cache(maxsize=None)
@@ -185,24 +183,8 @@ def _split_days_at_discharges(days_of_events, conversion):
         yield part
 
 
-def _build_patient_blocks(patient, events, conversion, prediction_time):
-    """
-    Build the visits of a patient: the visit ids that the events carry, then the rules for the events that have none.
-
-    1. Visit ids. The events with a visit id make one block per id. An event more than a day before the start or after
-       the end of its block is taken out of it: the time of an event is the ground truth.
-    2. Events without a visit id (and the ones taken out) join the block whose dates contain their date.
-    3. Rules. The events that are still alone are put in one block per day, and the blocks are joined into stays by the
-       ED, admission and discharge patterns: an ED block followed by an admission within 24 hours begins a stay, a
-       discharge closes it, and a block that starts within 12 hours after a discharge stays with it. A stay that
-       never gets a discharge (before the next admission, or before the record ends) ends where its events stop:
-       after ``max_stay_gap_days`` without one. It stays open only if the prediction time is that close to its last
-       event. A day without such events is a visit of its own, of the unknown type Visit/0 unless its events say
-       otherwise.
-
-    A dataset with visit ids is built by 1 and 2. A dataset without any, such as MIMIC-IV, is built by 3. A dataset
-    with some of both gets both. The blocks of a visit that contain each other are merged when there are visit ids.
-    """
+def _visit_id_blocks(events, conversion):
+    """Steps 1 and 2: the blocks of the visit ids, and the events still without a block, by date."""
     events_by_visit = collections.defaultdict(list)
     unlinked_events = []
     for event in events:
@@ -237,6 +219,102 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
                 block.events.extend(unlinked_by_date.pop(event_date))
                 block.events.sort(key=lambda event: (event.time, event.code))
                 break
+    return blocks_by_visit, unlinked_by_date
+
+
+def _hours_between(blocks, earlier, later):
+    return (blocks[later].min_time - blocks[earlier].max_time).total_seconds() / 3600
+
+
+def _end_of_events(blocks, start, last, max_gap_hours):
+    """The last block, up to last, that follows the start without a gap of more than max_stay_gap_days."""
+    end = start
+    while end < last and _hours_between(blocks, end, end + 1) <= max_gap_hours:
+        end += 1
+    return end
+
+
+def _find_stays(blocks, max_gap_hours, prediction_time):
+    """Step 3: the (start, end, through_ed, incomplete) of each stay that the daily blocks make."""
+    stays = []
+    start = ed_index = None
+    through_ed = False
+    for index, block in enumerate(blocks):
+        if block.has_ed_admission and start is None:
+            ed_index = index
+        if block.has_admission:
+            if ed_index is not None and (ed_index == index or _hours_between(blocks, ed_index, index) <= 24):
+                # the ED visit leads to this admission and the stay starts with it
+                start, through_ed = ed_index, True
+            else:
+                # an ED visit more than 24 hours before stays a visit of its own; the stay starts at the admission
+                if start is not None:
+                    # the stay before had no discharge: it ends where its events stop
+                    stays.append((start, _end_of_events(blocks, start, index - 1, max_gap_hours), through_ed, False))
+                start, through_ed = index, False
+            ed_index = None
+
+        if block.has_discharge:
+            if start is not None:
+                stays.append((start, index, through_ed, False))
+            start = ed_index = None
+            through_ed = False
+
+    if start is not None:
+        # no discharge until the end of the record
+        last = len(blocks) - 1
+        end = _end_of_events(blocks, start, last, max_gap_hours)
+        incomplete = (
+            end == last
+            and prediction_time is not None
+            and (prediction_time - blocks[last].max_time).total_seconds() / 3600 <= max_gap_hours
+        )
+        stays.append((start, end, through_ed, incomplete))
+    return stays
+
+
+def _label_stays(blocks, stays):
+    """Give the blocks of each stay its visit id and type, and the block within 12 hours after its discharge."""
+    for start, end, through_ed, incomplete in stays:
+        visit_id = blocks[start].visit_id
+        visit_type = DEFAULT_ED_TO_INPATIENT_CONCEPT_ID if through_ed else DEFAULT_INPATIENT_CONCEPT_ID
+        for block in blocks[start : end + 1]:
+            block.visit_id = visit_id
+            block.visit_type = visit_type
+            block.is_incomplete = incomplete
+
+        if end + 1 < len(blocks):
+            next_block = blocks[end + 1]
+            hours_after_discharge = _hours_between(blocks, end, end + 1)
+            if hours_after_discharge < 0:
+                raise ValueError(
+                    f"next block starts at {next_block.min_time}, before discharge at {blocks[end].max_time}"
+                )
+            # a block that starts a stay of its own (an ED visit or an admission) is not the tail of this one
+            if hours_after_discharge <= 12 and not next_block.has_ed_or_hospital_admission:
+                next_block.visit_id = visit_id
+                next_block.visit_type = visit_type
+
+
+def _build_patient_blocks(patient, events, conversion, prediction_time):
+    """
+    Build the visits of a patient: the visit ids that the events carry, then the rules for the events that have none.
+
+    1. Visit ids. The events with a visit id make one block per id. An event more than a day before the start or after
+       the end of its block is taken out of it: the time of an event is the ground truth.
+    2. Events without a visit id (and the ones taken out) join the block whose dates contain their date.
+    3. Rules. The events that are still alone are put in one block per day, and the blocks are joined into stays by the
+       ED, admission and discharge patterns: an ED block followed by an admission within 24 hours begins a stay, a
+       discharge closes it, and a block that starts within 12 hours after a discharge stays with it. A stay that
+       never gets a discharge (before the next admission, or before the record ends) ends where its events stop:
+       after ``max_stay_gap_days`` without one. It stays open only if the prediction time is that close to its last
+       event. A day without such events is a visit of its own, of the unknown type Visit/0 unless its events say
+       otherwise.
+
+    A dataset with visit ids is built by 1 and 2. A dataset without any, such as MIMIC-IV, is built by 3. A dataset
+    with some of both gets both. The blocks of a visit that contain each other are merged when there are visit ids.
+    """
+    blocks_by_visit, unlinked_by_date = _visit_id_blocks(events, conversion)
 
     # 3. what is left is one block per day, joined into stays by the rules; a new block never takes the id of a visit
     next_visit_id = max([*blocks_by_visit, conversion.default_visit_id - 1]) + 1
@@ -244,95 +322,8 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
         VisitBlock(daily_events, next_visit_id + offset, conversion)
         for offset, daily_events in enumerate(_split_days_at_discharges(unlinked_by_date.values(), conversion))
     ]
-    admission_discharge_pairs = []
-    stays_through_the_ed = set()  # the (admission, discharge) pairs whose stay began in the ED
-    incomplete_pairs = set()
     max_gap_hours = conversion.rules.max_stay_gap_days * 24
-
-    def hours_between(earlier, later):
-        return (daily_blocks[later].min_time - daily_blocks[earlier].max_time).total_seconds() / 3600
-
-    def end_of_events(start, last):
-        """The last block, up to last, that follows the start without a gap of more than max_stay_gap_days."""
-        end = start
-        while end < last and hours_between(end, end + 1) <= max_gap_hours:
-            end += 1
-        return end
-
-    active_ed_index = None
-    active_admission_index = None
-    active_stay_through_the_ed = False
-    for index, block in enumerate(daily_blocks):
-        if block.has_ed_admission and active_admission_index is None:
-            active_ed_index = index
-        if block.has_admission:
-            if active_ed_index is not None and (
-                active_ed_index == index or hours_between(active_ed_index, index) <= 24
-            ):
-                # the ED visit leads to this admission and the stay starts with it
-                active_admission_index = active_ed_index
-                active_stay_through_the_ed = True
-            else:
-                # an ED visit more than 24 hours before stays a visit of its own; the stay starts at the admission
-                if active_admission_index is not None:
-                    # the stay before had no discharge: it ends where its events stop
-                    pair = (active_admission_index, end_of_events(active_admission_index, index - 1))
-                    admission_discharge_pairs.append(pair)
-                    if active_stay_through_the_ed:
-                        stays_through_the_ed.add(pair)
-                active_admission_index = index
-                active_stay_through_the_ed = False
-            active_ed_index = None
-
-        if block.has_discharge:
-            if active_admission_index is not None:
-                admission_discharge_pairs.append((active_admission_index, index))
-                if active_stay_through_the_ed:
-                    stays_through_the_ed.add((active_admission_index, index))
-            active_admission_index = None
-            active_stay_through_the_ed = False
-            active_ed_index = None
-
-    if active_admission_index is not None:
-        # no discharge until the end of the record
-        last_index = len(daily_blocks) - 1
-        pair = (active_admission_index, end_of_events(active_admission_index, last_index))
-        admission_discharge_pairs.append(pair)
-        if active_stay_through_the_ed:
-            stays_through_the_ed.add(pair)
-        hours_to_prediction = (
-            (prediction_time - daily_blocks[last_index].max_time).total_seconds() / 3600
-            if prediction_time is not None
-            else None
-        )
-        if pair[1] == last_index and hours_to_prediction is not None and hours_to_prediction <= max_gap_hours:
-            incomplete_pairs.add(pair)
-
-    for admission_index, discharge_index in admission_discharge_pairs:
-        visit_id = daily_blocks[admission_index].visit_id
-        visit_type = (
-            DEFAULT_ED_TO_INPATIENT_CONCEPT_ID
-            if (admission_index, discharge_index) in stays_through_the_ed
-            else DEFAULT_INPATIENT_CONCEPT_ID
-        )
-        for index in range(admission_index, discharge_index + 1):
-            daily_blocks[index].visit_id = visit_id
-            daily_blocks[index].visit_type = visit_type
-            daily_blocks[index].is_incomplete = (admission_index, discharge_index) in incomplete_pairs
-
-        next_index = discharge_index + 1
-        if next_index < len(daily_blocks):
-            next_block = daily_blocks[next_index]
-            discharge_block = daily_blocks[discharge_index]
-            hours_after_discharge = (next_block.min_time - discharge_block.max_time).total_seconds() / 3600
-            if hours_after_discharge < 0:
-                raise ValueError(
-                    f"next block starts at {next_block.min_time}, before discharge at {discharge_block.max_time}"
-                )
-            # a block that starts a stay of its own (an ED visit or an admission) is not the tail of this one
-            if hours_after_discharge <= 12 and not next_block.has_ed_or_hospital_admission:
-                next_block.visit_id = visit_id
-                next_block.visit_type = visit_type
+    _label_stays(daily_blocks, _find_stays(daily_blocks, max_gap_hours, prediction_time))
 
     # the visits of the visit ids and the ones of the rules, in time; contained visits are merged
     blocks = list(blocks_by_visit.values())
@@ -366,7 +357,7 @@ def convert_one_patient(
     visits = []
     for blocks in blocks_by_visit.values():
         is_inpatient_or_ed = any(block.has_ed_or_hospital_admission for block in blocks)
-        is_incomplete = any(getattr(block, "is_incomplete", False) for block in blocks)
+        is_incomplete = any(block.is_incomplete for block in blocks)
         discharge_facility = (
             next(filter(None, (block.discharged_to for block in blocks)), None) if is_inpatient_or_ed else None
         )
@@ -419,7 +410,7 @@ def _meds_to_cehrgpt_generator(
     rules: VisitRules,
     meds_exclude_tables: Optional[List[str]] = None,
 ) -> CehrBertPatient:
-    conversion = build_conversion(
+    conversion = YamlDrivenConversion(
         rules,
         default_visit_id=default_visit_id,
         meds_exclude_tables=meds_exclude_tables,
@@ -538,47 +529,6 @@ def _create_cehrgpt_data_from_meds(
     return dataset
 
 
-def create_dataset_from_meds_reader(
-    data_args: DataTrainingArguments,
-    rules: VisitRules,
-    default_visit_id: int = 1,
-    dataset_mappings: Optional[List[DatasetMapping]] = None,
-    cache_file_collector: Optional[CacheFileCollector] = None,
-) -> DatasetDict:
-
-    LOG.info("%s", rules.pretty())
-    LOG.info("The att_function_type: %s", data_args.att_function_type)
-    LOG.info("The inpatient_att_function_type: %s", data_args.inpatient_att_function_type)
-    LOG.info("The include_auxiliary_token: %s", data_args.include_auxiliary_token)
-    LOG.info("The include_demographic_prompt: %s", data_args.include_demographic_prompt)
-    LOG.info("The meds_exclude_tables: %s", "\n".join(data_args.meds_exclude_tables))
-    train_dataset = _create_cehrgpt_data_from_meds(
-        data_args=data_args,
-        rules=rules,
-        split="train",
-        default_visit_id=default_visit_id,
-        dataset_mappings=dataset_mappings,
-        cache_file_collector=cache_file_collector,
-    )
-    tuning_dataset = _create_cehrgpt_data_from_meds(
-        data_args=data_args,
-        rules=rules,
-        split="tuning",
-        default_visit_id=default_visit_id,
-        dataset_mappings=dataset_mappings,
-        cache_file_collector=cache_file_collector,
-    )
-    held_out_dataset = _create_cehrgpt_data_from_meds(
-        data_args=data_args,
-        rules=rules,
-        split="held_out",
-        default_visit_id=default_visit_id,
-        dataset_mappings=dataset_mappings,
-        cache_file_collector=cache_file_collector,
-    )
-    return DatasetDict({"train": train_dataset, "validation": tuning_dataset, "test": held_out_dataset})
-
-
 def create_meds_dataset(
     data_args: DataTrainingArguments,
     rules_file: Optional[str] = None,
@@ -593,10 +543,23 @@ def create_meds_dataset(
     on top. Nothing is read from the metadata of the dataset.
     """
     rules = resolve_visit_rules(rules_file)
-    return create_dataset_from_meds_reader(
-        data_args=data_args,
-        rules=rules,
-        default_visit_id=default_visit_id,
-        dataset_mappings=dataset_mappings,
-        cache_file_collector=cache_file_collector,
+    LOG.info("%s", rules.pretty())
+    LOG.info("The att_function_type: %s", data_args.att_function_type)
+    LOG.info("The inpatient_att_function_type: %s", data_args.inpatient_att_function_type)
+    LOG.info("The include_auxiliary_token: %s", data_args.include_auxiliary_token)
+    LOG.info("The include_demographic_prompt: %s", data_args.include_demographic_prompt)
+    LOG.info("The meds_exclude_tables: %s", "\n".join(data_args.meds_exclude_tables))
+    meds_splits = {"train": "train", "validation": "tuning", "test": "held_out"}
+    return DatasetDict(
+        {
+            name: _create_cehrgpt_data_from_meds(
+                data_args=data_args,
+                rules=rules,
+                split=split,
+                default_visit_id=default_visit_id,
+                dataset_mappings=dataset_mappings,
+                cache_file_collector=cache_file_collector,
+            )
+            for name, split in meds_splits.items()
+        }
     )
