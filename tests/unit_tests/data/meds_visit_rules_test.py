@@ -12,8 +12,9 @@ import meds_reader
 import polars as pl
 import yaml
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
+from dateutil.relativedelta import relativedelta
 
-from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
+from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping, _age_in_years
 from cehrgpt.data.meds_dataset import convert_one_patient
 from cehrgpt.data.meds_visit_rules import VisitRules, YamlDrivenConversion, resolve_visit_rules
 
@@ -206,6 +207,16 @@ class StayBoundariesTest(unittest.TestCase):
         self.assertEqual(self.visits(self.no_discharge, cutoff_day=16), [("Visit/IP", 10, 12)])
         # with a longer gap the stay reaches the event of day 100
         self.assertEqual(self.visits(self.no_discharge, max_stay_gap_days=100), [("Visit/IP", 10, 100)])
+
+
+class AgeInYearsTest(unittest.TestCase):
+    def test_it_agrees_with_relativedelta(self):
+        births = [dt.datetime(2000, 2, 29, 13), dt.datetime(1980, 5, 17, 8, 30), dt.datetime(1999, 12, 31, 23, 59, 59)]
+        for birth in births:
+            for days in (-3000, -1, 0, 1, 364, 365, 366, 6574, 6575, 6576, 29000):
+                for seconds in (-1, 0, 1, 43200):
+                    later = birth + dt.timedelta(days=days, seconds=seconds)
+                    self.assertEqual(_age_in_years(later, birth), relativedelta(later, birth).years, (birth, later))
 
 
 if __name__ == "__main__":
