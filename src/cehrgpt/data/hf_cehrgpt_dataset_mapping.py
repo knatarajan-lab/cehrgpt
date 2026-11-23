@@ -3,7 +3,7 @@ import functools
 import hashlib
 import pickle
 from collections import defaultdict
-from typing import Any, Dict, Generator, List, Optional, Union
+from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -95,6 +95,15 @@ class DatasetMappingDecorator(DatasetMapping):
 
     def transform(self, record: Dict[str, Any]) -> Union[Dict[str, Any], Series]:
         raise NotImplemented("Must be implemented")
+
+
+def _event_values(event: Dict[str, Any]) -> Tuple[Optional[float], Optional[str]]:
+    """Numeric and text value of a MEDS event; NaN (from pandas) and empty text count as no value."""
+    numeric_value = event.get("numeric_value", None)
+    if numeric_value is not None and pd.isna(numeric_value):
+        numeric_value = None
+    text_value = event.get("text_value") or None
+    return numeric_value, text_value
 
 
 class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
@@ -274,8 +283,7 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                     continue
 
                 # If numeric_value exists, this is a concept/value tuple, we indicate this using a concept_value_mask
-                numeric_value = e.get("numeric_value", None)
-                text_value = e.get("text_value", None)
+                numeric_value, text_value = _event_values(e)
                 # The unit might be populated with a None value
                 unit = e.get("unit", NA) if e.get("unit", NA) else NA
                 concept_value_mask = int(
