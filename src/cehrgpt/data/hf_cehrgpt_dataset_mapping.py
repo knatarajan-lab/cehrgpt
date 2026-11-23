@@ -9,9 +9,6 @@ import numpy as np
 import pandas as pd
 from cehrbert.data_generators.hf_data_generator import UNKNOWN_VALUE
 from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import (
-    ED_VISIT_TYPE_CODES,
-    INPATIENT_VISIT_TYPE_CODES,
-    INPATIENT_VISIT_TYPES,
     DatasetMapping,
     VisitObject,
     get_value,
@@ -113,6 +110,14 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
         )
         self._include_demographic_prompt = data_args.include_demographic_prompt
         self._include_inpatient_hour_token = include_inpatient_hour_token
+
+    @staticmethod
+    def convert_visit_columnar_to_python(visits: Dict[str, List[Any]]) -> List[VisitObject]:
+        """Keep the YAML-derived inpatient/ED classification when converting a columnar dataset row."""
+        python_visits = DatasetMapping.convert_visit_columnar_to_python(visits)
+        for visit, is_inpatient_or_ed in zip(python_visits, visits["is_inpatient_or_ed"]):
+            visit.is_inpatient_or_ed = is_inpatient_or_ed
+        return python_visits
 
     """
     This mapping function converts the MED (https://github.com/Medical-Event-Data-Standard/meds/tree/main) extension
@@ -220,11 +225,7 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
 
             # We assume the first measurement to be the visit type of the current visit
             visit_type = get_value(visit, "visit_type")
-            is_er_or_inpatient = (
-                visit_type in INPATIENT_VISIT_TYPES
-                or visit_type in INPATIENT_VISIT_TYPE_CODES
-                or visit_type in ED_VISIT_TYPE_CODES
-            )
+            is_er_or_inpatient = get_value(visit, "is_inpatient_or_ed")
 
             # Add artificial time tokens to the patient timeline if timedelta exists
             if datetime_cursor is not None:
@@ -287,11 +288,11 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                 is_numeric_type = int(numeric_value is not None)
                 code = replace_escape_chars(e["code"])
 
-                # Create the event identity
+                # Create the event identity, with the value: only a repeat is skipped
                 event_identity = (
-                    (event_time, code, text_value, unit)
+                    (event_time, code, text_value, unit, numeric_value)
                     if is_er_or_inpatient
-                    else (event_time.date(), code, text_value, unit)
+                    else (event_time.date(), code, text_value, unit, numeric_value)
                 )
 
                 # Add a medical token to the patient timeline
@@ -356,13 +357,16 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                     if is_er_or_inpatient and visit_end_datetime is not None:
                         datetime_cursor = min(datetime_cursor, visit_end_datetime)
 
+            # A visit that is still active at the prediction cutoff remains open: no discharge and no [VE]
+            visit_is_closed = visit_end_datetime is not None or record.get("index_date", None) is None
+
             # For inpatient or ER visits, we want to discharge_facility to the end of the visit
             if is_er_or_inpatient:
                 # If visit_end_datetime is populated for the inpatient visit, we update the datetime_cursor
                 if visit_end_datetime is not None:
                     datetime_cursor = visit_end_datetime
 
-                if self._include_auxiliary_token:
+                if self._include_auxiliary_token and visit_is_closed:
                     # Reuse the age and date calculated for the last event in the patient timeline for the discharge
                     # facility event
                     discharge_facility = get_value(visit, "discharge_facility")
@@ -381,13 +385,13 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                         age=relativedelta(datetime_cursor, birth_datetime).years,
                     )
 
-            # Reuse the age and date calculated for the last event in the patient timeline
-            self._update_cehrgpt_record(
-                cehrgpt_record,
-                code="[VE]",
-                time=datetime_cursor,
-                age=relativedelta(datetime_cursor, birth_datetime).years,
-            )
+            if visit_is_closed:
+                self._update_cehrgpt_record(
+                    cehrgpt_record,
+                    code="[VE]",
+                    time=datetime_cursor,
+                    age=relativedelta(datetime_cursor, birth_datetime).years,
+                )
 
         # Generate the orders of the concepts that the cehrbert dataset mapping function expects
         cehrgpt_record["orders"] = list(

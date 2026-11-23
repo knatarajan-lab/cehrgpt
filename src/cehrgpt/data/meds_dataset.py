@@ -1,0 +1,590 @@
+# Adapted from cehrbert.data_generators.hf_data_generator.meds_utils (MIT License, same copyright holder as cehrgpt).
+"""
+Read a MEDS dataset (a meds_reader database) as patients with visits, by the visit rules of the dataset.
+
+CEHR-GPT uses one generic visit builder whose matching rules come from cehrgpt.data.meds_visit_rules: the annotated OMOP
+and MIMIC defaults, and a YAML file of the user for a dataset that codes its visits differently.
+"""
+
+import collections
+import functools
+import os
+import re
+from datetime import datetime, timedelta
+from typing import List, Optional, Tuple
+
+import meds_reader
+import numpy as np
+import pandas as pd
+from cehrbert.data_generators.hf_data_generator import (
+    DEFAULT_ED_TO_INPATIENT_CONCEPT_ID,
+    DEFAULT_INPATIENT_CONCEPT_ID,
+    UNKNOWN_VALUE,
+)
+from cehrbert.data_generators.hf_data_generator.cache_util import CacheFileCollector
+from cehrbert.data_generators.hf_data_generator.hf_dataset import apply_cehrbert_dataset_mapping
+from cehrbert.data_generators.hf_data_generator.hf_dataset_mapping import DatasetMapping
+from cehrbert.data_generators.hf_data_generator.meds_utils import get_subject_split
+from cehrbert.data_generators.hf_data_generator.patient_block import (
+    PatientBlock,
+    PatientDemographics,
+    is_visit_table,
+    merge_patient_blocks,
+)
+from cehrbert.med_extension.schema_extension import CehrBertPatient, Event, Visit
+from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
+from datasets import Dataset, DatasetDict, Features, Sequence, Value
+from meds.schema import birth_code
+from transformers.utils import logging
+
+from cehrgpt.data.meds_visit_rules import (
+    VisitRules,
+    YamlDrivenConversion,
+    resolve_visit_rules,
+)
+
+LOG = logging.get_logger("transformers")
+
+
+def generate_demographics_and_patient_blocks(
+    patient: meds_reader.Subject,
+    conversion: YamlDrivenConversion,
+    prediction_time: datetime = None,
+    observation_window: int = None,
+):
+    """Build visit boundaries directly from a patient's events and the YAML matching rules."""
+    birth_datetime = None
+    race = None
+    gender = None
+    ethnicity = None
+    clinical_events = []
+    observation_start = (
+        prediction_time - timedelta(days=observation_window) if prediction_time and observation_window else None
+    )
+
+    for event in patient.events:
+        event_code = event.code.upper()
+        if event_code.startswith(birth_code):
+            birth_datetime = event.time
+        elif event_code.startswith("RACE"):
+            race = event.code
+        elif event_code.startswith("GENDER"):
+            gender = event.code
+        elif event_code.startswith("ETHNICITY"):
+            ethnicity = event.code
+        elif event.time is not None:
+            if prediction_time is not None and event.time > prediction_time:
+                break
+            if observation_start is None or event.time >= observation_start:
+                clinical_events.append(event)
+
+    demographics = PatientDemographics(
+        birth_datetime=birth_datetime,
+        race=race,
+        gender=gender,
+        ethnicity=ethnicity,
+    )
+    patient_blocks = _build_patient_blocks(patient, clinical_events, conversion, prediction_time)
+    return demographics, patient_blocks
+
+
+UNKNOWN_VISIT_CONCEPT_ID = "Visit/0"
+
+
+@functools.lru_cache(maxsize=None)
+def _matcher(*rules: str):
+    """A function that tells whether a code matches one of the rules (re.match, as the blocks do), once per code."""
+    if not rules:
+        return lambda code: False
+    pattern = re.compile("|".join(f"(?:{rule})" for rule in rules))
+    matched = {}
+
+    def matches(code):
+        result = matched.get(code)
+        if result is None:
+            result = matched[code] = pattern.match(code) is not None
+        return result
+
+    return matches
+
+
+class VisitBlock(PatientBlock):
+    """
+    A block of events, with the visit type unknown unless the events say it, and with the codes matched fast.
+
+    PatientBlock calls a block that has no visit, ED or admission event an outpatient visit. That is a guess: such a
+    block is a day of labs or diagnoses, and nothing in it says where the patient was. It is the unknown visit
+    (Visit/0 of OMOP) instead. A visit event that has the code of an outpatient visit still gives Visit/OP.
+
+    PatientBlock matches each event against each rule as text on each call, which is most of the time of a conversion.
+    Here the rules of a kind are one expression, and a code is matched once. The first event that matches is the same.
+    """
+
+    # a stay of the rules that is still open at the prediction time
+    is_incomplete = False
+
+    def _first_match(self, rules):
+        matches = _matcher(*rules)
+        for event in self.events:
+            if matches(event.code):
+                return event.code, event.time
+        return None, None
+
+    def _find_ed_admission(self):
+        return self._first_match(self.conversion.get_ed_admission_matching_rules())
+
+    def _find_admission(self):
+        return self._first_match(self.conversion.get_admission_matching_rules())
+
+    def _find_discharge_facility(self):
+        return self._first_match(self.conversion.get_discharge_matching_rules())
+
+    def _infer_visit_type(self):
+        is_other_visit = _matcher(*self.conversion.get_other_visit_matching_rules())
+        for event in self.events:
+            if is_other_visit(event.code):
+                return event.code, event.time
+            if is_visit_table(getattr(event, "table", None)):
+                return event.code, event.time
+        return UNKNOWN_VISIT_CONCEPT_ID, self._infer_block_start_time()
+
+    def _convert_event(self, event):
+        """Read the numbers of a text event with their decimals; PatientBlock keeps only whole numbers (isnumeric)."""
+        text_value = getattr(event, "text_value", None)
+        rule = None
+        if getattr(event, "numeric_value", None) is None and text_value is not None:
+            rule = self.conversion.get_text_event_to_numeric_events_rule(event.code)
+        found = re.search(rule.parsing_pattern, text_value) if rule else None
+        if not found or len(found.groups()) != len(rule.mapped_event_labels):
+            return super()._convert_event(event)
+        return [
+            Event(
+                code=label,
+                time=event.time,
+                numeric_value=float(value),
+                text_value=text_value,
+                unit=getattr(event, "unit", None),
+                properties={"visit_id": self.visit_id, "table": getattr(event, "table", "meds")},
+            )
+            for label, value in zip(rule.mapped_event_labels, found.groups())
+            if value is not None and value.replace(".", "", 1).isdigit()
+        ]
+
+
+def _split_days_at_discharges(days_of_events, conversion):
+    """
+    Cut a day where a stay ends and another begins, so that the discharge is not in the block of the next stay.
+
+    A block is one day, but a patient can be discharged and be back (or be moved from observation to an inpatient stay,
+    with the discharge and the admission at the same time) within that day. The events from the ED or admission event
+    on, and those after the discharge, go in a block of their own.
+    """
+    discharge = _matcher(*conversion.get_discharge_matching_rules())
+    starts = _matcher(*conversion.get_ed_admission_matching_rules(), *conversion.get_admission_matching_rules())
+
+    # the same few codes repeat in a day, and each is matched once
+    @functools.lru_cache(maxsize=None)
+    def kind(code):
+        if discharge(code):
+            return "discharge"
+        return "start" if starts(code) else "other"
+
+    for events in days_of_events:
+        # at the same time the discharge comes first: it is the end of the stay that the admission follows
+        events = sorted(events, key=lambda event: (event.time, kind(event.code) != "discharge", event.code))
+        part = []
+        discharged = False
+        for event in events:
+            event_kind = kind(event.code)
+            if discharged and event_kind == "start":
+                yield part
+                part = []
+                discharged = False
+            part.append(event)
+            discharged = discharged or event_kind == "discharge"
+        yield part
+
+
+def _visit_id_blocks(events, conversion):
+    """Steps 1 and 2: the blocks of the visit ids, and the events still without a block, by date."""
+    events_by_visit = collections.defaultdict(list)
+    unlinked_events = []
+    for event in events:
+        visit_id = getattr(event, "visit_id", None)
+        if visit_id:
+            events_by_visit[visit_id].append(event)
+        else:
+            unlinked_events.append(event)
+
+    # 1. the blocks of the visit ids
+    blocks_by_visit = {}
+    for visit_id, visit_events in events_by_visit.items():
+        block = VisitBlock(visit_events, visit_id, conversion)
+        events_inside_boundary = []
+        for event in block.events:
+            before_start = (block.block_start_time - event.time).days > 1
+            after_end = block.block_end_time and (event.time - block.block_end_time).days > 1
+            if before_start or after_end:
+                unlinked_events.append(event)
+            else:
+                events_inside_boundary.append(event)
+        block.events = events_inside_boundary
+        blocks_by_visit[visit_id] = block
+
+    # 2. the events without a visit join the block that their date is in
+    unlinked_by_date = collections.defaultdict(list)
+    for event in sorted(unlinked_events, key=lambda event: event.time):
+        unlinked_by_date[event.time.date()].append(event)
+    for event_date in list(unlinked_by_date):
+        for block in blocks_by_visit.values():
+            if block.get_visit_start_datetime().date() <= event_date <= block.get_visit_end_datetime().date():
+                block.events.extend(unlinked_by_date.pop(event_date))
+                block.events.sort(key=lambda event: (event.time, event.code))
+                break
+    return blocks_by_visit, unlinked_by_date
+
+
+def _hours_between(blocks, earlier, later):
+    return (blocks[later].min_time - blocks[earlier].max_time).total_seconds() / 3600
+
+
+def _end_of_events(blocks, start, last, max_gap_hours):
+    """The last block, up to last, that follows the start without a gap of more than max_stay_gap_days."""
+    end = start
+    while end < last and _hours_between(blocks, end, end + 1) <= max_gap_hours:
+        end += 1
+    return end
+
+
+def _find_stays(blocks, max_gap_hours, prediction_time):
+    """Step 3: the (start, end, through_ed, incomplete) of each stay that the daily blocks make."""
+    stays = []
+    start = ed_index = None
+    through_ed = False
+    for index, block in enumerate(blocks):
+        if block.has_ed_admission and start is None:
+            ed_index = index
+        if block.has_admission:
+            if ed_index is not None and (ed_index == index or _hours_between(blocks, ed_index, index) <= 24):
+                # the ED visit leads to this admission and the stay starts with it
+                start, through_ed = ed_index, True
+            else:
+                # an ED visit more than 24 hours before stays a visit of its own; the stay starts at the admission
+                if start is not None:
+                    # the stay before had no discharge: it ends where its events stop
+                    stays.append((start, _end_of_events(blocks, start, index - 1, max_gap_hours), through_ed, False))
+                start, through_ed = index, False
+            ed_index = None
+
+        if block.has_discharge:
+            if start is not None:
+                stays.append((start, index, through_ed, False))
+            start = ed_index = None
+            through_ed = False
+
+    if start is not None:
+        # no discharge until the end of the record
+        last = len(blocks) - 1
+        end = _end_of_events(blocks, start, last, max_gap_hours)
+        incomplete = (
+            end == last
+            and prediction_time is not None
+            and (prediction_time - blocks[last].max_time).total_seconds() / 3600 <= max_gap_hours
+        )
+        stays.append((start, end, through_ed, incomplete))
+    return stays
+
+
+def _label_stays(blocks, stays):
+    """Give the blocks of each stay its visit id and type, and the block within 12 hours after its discharge."""
+    for start, end, through_ed, incomplete in stays:
+        visit_id = blocks[start].visit_id
+        visit_type = DEFAULT_ED_TO_INPATIENT_CONCEPT_ID if through_ed else DEFAULT_INPATIENT_CONCEPT_ID
+        for block in blocks[start : end + 1]:
+            block.visit_id = visit_id
+            block.visit_type = visit_type
+            block.is_incomplete = incomplete
+
+        if end + 1 < len(blocks):
+            next_block = blocks[end + 1]
+            hours_after_discharge = _hours_between(blocks, end, end + 1)
+            if hours_after_discharge < 0:
+                raise ValueError(
+                    f"next block starts at {next_block.min_time}, before discharge at {blocks[end].max_time}"
+                )
+            # a block that starts a stay of its own (an ED visit or an admission) is not the tail of this one
+            if hours_after_discharge <= 12 and not next_block.has_ed_or_hospital_admission:
+                next_block.visit_id = visit_id
+                next_block.visit_type = visit_type
+
+
+def _build_patient_blocks(patient, events, conversion, prediction_time):
+    """
+    Build the visits of a patient: the visit ids that the events carry, then the rules for the events that have none.
+
+    1. Visit ids. The events with a visit id make one block per id. An event more than a day before the start or after
+       the end of its block is taken out of it: the time of an event is the ground truth.
+    2. Events without a visit id (and the ones taken out) join the block whose dates contain their date.
+    3. Rules. The events that are still alone are put in one block per day, and the blocks are joined into stays by the
+       ED, admission and discharge patterns: an ED block followed by an admission within 24 hours begins a stay, a
+       discharge closes it, and a block that starts within 12 hours after a discharge stays with it. A stay that
+       never gets a discharge (before the next admission, or before the record ends) ends where its events stop:
+       after ``max_stay_gap_days`` without one. It stays open only if the prediction time is that close to its last
+       event. A day without such events is a visit of its own, of the unknown type Visit/0 unless its events say
+       otherwise. A block starts at its first event, so that a stay starts at the ED arrival before its admission.
+
+    A dataset with visit ids is built by 1 and 2. A dataset without any, such as MIMIC-IV, is built by 3. A dataset
+    with some of both gets both. The blocks of a visit that contain each other are merged when there are visit ids.
+    """
+    blocks_by_visit, unlinked_by_date = _visit_id_blocks(events, conversion)
+
+    # 3. what is left is one block per day, joined into stays by the rules; a new block never takes the id of a visit
+    next_visit_id = max([*blocks_by_visit, conversion.default_visit_id - 1]) + 1
+    daily_blocks = [
+        VisitBlock(daily_events, next_visit_id + offset, conversion)
+        for offset, daily_events in enumerate(_split_days_at_discharges(unlinked_by_date.values(), conversion))
+    ]
+    for block in daily_blocks:
+        # PatientBlock starts a block at its admission, after the ED events of the same day
+        block.block_start_time = block.min_time
+    max_gap_hours = conversion.rules.max_stay_gap_days * 24
+    _label_stays(daily_blocks, _find_stays(daily_blocks, max_gap_hours, prediction_time))
+
+    # the visits of the visit ids and the ones of the rules, in time; contained visits are merged
+    blocks = list(blocks_by_visit.values())
+    if not blocks:
+        return daily_blocks
+    blocks.extend(daily_blocks)
+    # merge_patient_blocks looks only forward; the visit ids come in the order of their first event, not their start
+    blocks.sort(key=lambda block: block.block_start_time)
+    return merge_patient_blocks(patient, blocks)
+
+
+def convert_one_patient(
+    patient: meds_reader.Subject,
+    conversion: YamlDrivenConversion,
+    prediction_time: datetime = None,
+    observation_window: int = None,
+    label=None,
+) -> CehrBertPatient:
+    """Convert one patient with the visit ids of the events and the event rules declared in YAML."""
+    demographics, patient_blocks = generate_demographics_and_patient_blocks(
+        patient=patient,
+        conversion=conversion,
+        prediction_time=prediction_time,
+        observation_window=observation_window,
+    )
+
+    blocks_by_visit = collections.defaultdict(list)
+    for patient_block in patient_blocks:
+        blocks_by_visit[patient_block.visit_id].append(patient_block)
+
+    visits = []
+    for blocks in blocks_by_visit.values():
+        is_inpatient_or_ed = any(block.has_ed_or_hospital_admission for block in blocks)
+        is_incomplete = any(block.is_incomplete for block in blocks)
+        discharge_facility = (
+            next(filter(None, (block.discharged_to for block in blocks)), None) if is_inpatient_or_ed else None
+        )
+        events = []
+        for block in blocks:
+            events.extend(block.get_meds_events())
+        visit_end_datetime = max(block.get_visit_end_datetime() for block in blocks)
+        if prediction_time is not None and visit_end_datetime > prediction_time:
+            # the end and the discharge are after the prediction time: the visit is still active, and how it
+            # ends is not known
+            is_incomplete = True
+            discharge_facility = None
+        visits.append(
+            Visit(
+                visit_type=blocks[0].visit_type,
+                visit_start_datetime=min(block.get_visit_start_datetime() for block in blocks),
+                visit_end_datetime=None if is_incomplete else visit_end_datetime,
+                discharge_facility=discharge_facility or UNKNOWN_VALUE,
+                events=events,
+                is_inpatient_or_ed=is_inpatient_or_ed,
+            )
+        )
+
+    age_at_index = -1
+    if prediction_time is not None and demographics.birth_datetime is not None:
+        age_at_index = prediction_time.year - demographics.birth_datetime.year
+        if (prediction_time.month, prediction_time.day) < (
+            demographics.birth_datetime.month,
+            demographics.birth_datetime.day,
+        ):
+            age_at_index -= 1
+
+    return CehrBertPatient(
+        patient_id=patient.subject_id,
+        birth_datetime=demographics.birth_datetime,
+        visits=visits,
+        race=demographics.race or UNKNOWN_VALUE,
+        gender=demographics.gender or UNKNOWN_VALUE,
+        ethnicity=demographics.ethnicity or UNKNOWN_VALUE,
+        index_date=prediction_time,
+        age_at_index=age_at_index,
+        label=label,
+    )
+
+
+def _meds_to_cehrgpt_generator(
+    shards: List[Tuple[np.ndarray, np.ndarray, np.ndarray]],
+    path_to_db: str,
+    default_visit_id: int,
+    rules: VisitRules,
+    meds_exclude_tables: Optional[List[str]] = None,
+) -> CehrBertPatient:
+    conversion = YamlDrivenConversion(
+        rules,
+        default_visit_id=default_visit_id,
+        meds_exclude_tables=meds_exclude_tables,
+    )
+    with meds_reader.SubjectDatabase(path_to_db) as patient_database:
+        for shard in shards:
+            for patient_id, prediction_time, observation_window, label in shard:
+                patient = patient_database[patient_id]
+                converted_patient = convert_one_patient(
+                    patient, conversion, prediction_time, observation_window, label
+                )
+                # there are patients whose birthdate is none
+                visits = converted_patient["visits"]
+                if converted_patient["birth_datetime"] is None:
+                    LOG.warning("patient_id: %s does not have a valid birth_datetime, therefore skipped", patient_id)
+                elif visits is None or len(visits) == 0:
+                    LOG.debug("patient_id: %s does not have visits, therefore skipped", patient_id)
+                else:
+                    yield converted_patient
+
+
+def _create_cehrgpt_data_from_meds(
+    data_args: DataTrainingArguments,
+    rules: VisitRules,
+    split: str,
+    default_visit_id: int = 1,
+    dataset_mappings: Optional[List[DatasetMapping]] = None,
+    cache_file_collector: Optional[CacheFileCollector] = None,
+):
+    assert split in ["held_out", "train", "tuning"]
+    batches = []
+    if data_args.cohort_folder:
+        # Load the entire cohort
+        cohort = pd.read_parquet(os.path.expanduser(data_args.cohort_folder))
+        patient_split = get_subject_split(os.path.expanduser(data_args.data_folder))
+        subject_ids = patient_split[split]
+        cohort_split = cohort[cohort.subject_id.isin(subject_ids)]
+        for cohort_row in cohort_split.itertuples():
+            subject_id = cohort_row.subject_id
+            prediction_time = cohort_row.prediction_time
+            label = int(cohort_row.boolean_value)
+            batches.append((subject_id, prediction_time, data_args.observation_window, label))
+    else:
+        patient_split = get_subject_split(os.path.expanduser(data_args.data_folder))
+        for subject_id in patient_split[split]:
+            batches.append((subject_id, None, None, None))
+
+    features = Features(
+        {
+            "patient_id": Value(dtype="int32"),
+            "birth_datetime": Value(dtype="timestamp[us]"),  # Use timestamp with microsecond precision
+            "gender": Value(dtype="string"),
+            "race": Value(dtype="string"),
+            "ethnicity": Value(dtype="string"),
+            "index_date": Value(dtype="timestamp[us]"),
+            "age_at_index": Value(dtype="int16"),
+            "label": Value(dtype="float32"),  # Using float to accommodate both int and float labels
+            "visits": Sequence(
+                feature={
+                    "visit_type": Value(dtype="string"),
+                    "visit_start_datetime": Value(dtype="timestamp[us]"),
+                    "visit_end_datetime": Value(dtype="timestamp[us]"),
+                    "discharge_facility": Value(dtype="string"),
+                    "is_inpatient_or_ed": Value(dtype="bool"),
+                    "events": Sequence(
+                        feature={
+                            "time": Value(dtype="timestamp[us]"),
+                            "code": Value(dtype="string"),
+                            "text_value": Value(dtype="string"),
+                            "numeric_value": Value(dtype="float32"),
+                            "unit": Value(dtype="string"),
+                            "properties": {
+                                "visit_id": Value(dtype="int32"),
+                                "table": Value(dtype="string"),
+                            },
+                        }
+                    ),
+                }
+            ),
+        }
+    )
+
+    split_batches = np.array_split(np.asarray(batches), data_args.preprocessing_num_workers)
+    batch_func = functools.partial(
+        _meds_to_cehrgpt_generator,
+        path_to_db=os.path.expanduser(data_args.data_folder),
+        default_visit_id=default_visit_id,
+        rules=rules,
+        meds_exclude_tables=data_args.meds_exclude_tables,
+    )
+    dataset = Dataset.from_generator(
+        batch_func,
+        gen_kwargs={
+            "shards": split_batches,
+        },
+        num_proc=(data_args.preprocessing_num_workers if not data_args.streaming else None),
+        writer_batch_size=data_args.preprocessing_batch_size,
+        streaming=data_args.streaming,
+        features=features,
+    )
+    # These cached files need to be deleted manually
+    if cache_file_collector:
+        cache_file_collector.add_cache_files(dataset)
+
+    if dataset_mappings:
+        for dataset_mapping in dataset_mappings:
+            # Convert the CehrBertPatient to CehrBert data inputs
+            dataset = apply_cehrbert_dataset_mapping(
+                dataset,
+                dataset_mapping,
+                num_proc=data_args.preprocessing_num_workers,
+                batch_size=data_args.preprocessing_batch_size,
+                streaming=data_args.streaming,
+                cache_file_collector=cache_file_collector,
+            )
+    return dataset
+
+
+def create_meds_dataset(
+    data_args: DataTrainingArguments,
+    rules_file: Optional[str] = None,
+    default_visit_id: int = 1,
+    dataset_mappings: Optional[List[DatasetMapping]] = None,
+    cache_file_collector: Optional[CacheFileCollector] = None,
+) -> DatasetDict:
+    """
+    The train, validation and test patients of the MEDS dataset in data_args.data_folder, with the mappings applied.
+
+    The visits are made from the standard OMOP and MIMIC defaults, with the yaml file of the user (rules_file) applied
+    on top. Nothing is read from the metadata of the dataset.
+    """
+    rules = resolve_visit_rules(rules_file)
+    LOG.info("%s", rules.pretty())
+    LOG.info("The att_function_type: %s", data_args.att_function_type)
+    LOG.info("The inpatient_att_function_type: %s", data_args.inpatient_att_function_type)
+    LOG.info("The include_auxiliary_token: %s", data_args.include_auxiliary_token)
+    LOG.info("The include_demographic_prompt: %s", data_args.include_demographic_prompt)
+    LOG.info("The meds_exclude_tables: %s", "\n".join(data_args.meds_exclude_tables))
+    meds_splits = {"train": "train", "validation": "tuning", "test": "held_out"}
+    return DatasetDict(
+        {
+            name: _create_cehrgpt_data_from_meds(
+                data_args=data_args,
+                rules=rules,
+                split=split,
+                default_visit_id=default_visit_id,
+                dataset_mappings=dataset_mappings,
+                cache_file_collector=cache_file_collector,
+            )
+            for name, split in meds_splits.items()
+        }
+    )
