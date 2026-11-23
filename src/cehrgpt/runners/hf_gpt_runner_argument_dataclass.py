@@ -435,6 +435,26 @@ class CehrGPTArguments:
             "(train_with_cehrgpt_features --feature_sets). Without it only the global features are saved"
         },
     )
+    attention_rollout_target: Literal["global", "local"] = dataclasses.field(
+        default="global",
+        metadata={
+            "help": "compute_attention_rollout: the representation to explain. global is the state "
+            "of the linear probing module, local the state of the last decoder layer at the last token"
+        },
+    )
+    attention_rollout_max_samples: Optional[int] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "compute_attention_rollout: a random sample of this many samples of every split "
+            "(all of them by default). The eager attention it needs is slow on long sequences"
+        },
+    )
+    attention_rollout_subject_id: Optional[List[int]] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "compute_attention_rollout: explain every sample of these subject ids only"
+        },
+    )
     add_random_token: Optional[bool] = dataclasses.field(
         default=False,
         metadata={

@@ -39,6 +39,7 @@ from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.data_utils import (
     extract_cohort_sequences,
     generate_cohort_prepared_ds_path,
+    is_complete_prepared_dataset,
     is_cohort_sequence_chunks,
     load_cohort_sequence_chunks,
     prepare_finetune_dataset,
@@ -118,11 +119,6 @@ def load_prepared_dataset(prepared_ds_path: Union[str, Path]) -> DatasetDict:
     return load_from_disk(str(prepared_ds_path))
 
 
-def _is_complete_prepared_dataset(prepared_ds_path: Path) -> bool:
-    # save_to_disk of a DatasetDict writes dataset_dict.json, the chunked save writes its list of chunks last
-    return is_cohort_sequence_chunks(prepared_ds_path) or (prepared_ds_path / "dataset_dict.json").exists()
-
-
 def _load_or_create_prepared_dataset(
     cehrgpt_args,
     data_args,
@@ -146,7 +142,7 @@ def _load_or_create_prepared_dataset(
         LOG.info("Refreshing prepared dataset: removing cache at %s", prepared_ds_path)
         shutil.rmtree(prepared_ds_path)
 
-    if any(prepared_ds_path.glob("*")) and not _is_complete_prepared_dataset(prepared_ds_path):
+    if any(prepared_ds_path.glob("*")) and not is_complete_prepared_dataset(prepared_ds_path):
         LOG.warning("Removing the prepared dataset of an interrupted run at %s", prepared_ds_path)
         shutil.rmtree(prepared_ds_path)
 
@@ -221,14 +217,16 @@ def _load_or_create_prepared_dataset(
 
 
 def rows_without_features(
-    processed_dataset: DatasetDict, output_dir: str
+    processed_dataset: DatasetDict,
+    output_dir: str,
+    pattern: str = os.path.join("features_with_label", "*_features", "*.parquet"),
 ) -> Optional[Dict[str, List[int]]]:
     """
     The rows of every split that have no features in output_dir yet, or None when none has.
 
     A run that was interrupted wrote the features of some rows already: they are not extracted again.
     """
-    feature_files = glob.glob(os.path.join(output_dir, "*", "features", "*.parquet"))
+    feature_files = glob.glob(os.path.join(output_dir, pattern))
     if not feature_files:
         return None
     existing_features = pd.concat(
@@ -345,7 +343,8 @@ def load_shard(shard_path: str) -> DatasetDict:
         "train": train_set.shard(plan["num_shards"], plan["index"], contiguous=False),
         "test": test_set.shard(plan["num_shards"], plan["index"], contiguous=False),
     }
-    return DatasetDict({k: v for k, v in splits.items() if len(v) > 0})
+    # Empty splits are kept: on a resume a split may be done, and main() expects both
+    return DatasetDict(splits)
 
 
 def run_on_multiple_gpus(

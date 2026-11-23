@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import os
@@ -347,21 +348,17 @@ def create_dataset_splits(
     return train_set, validation_set, test_set
 
 
-def generate_cohort_prepared_ds_path(
+def _cohort_prepared_ds_name(
     data_args: DataTrainingArguments,
     model_args,
     cehrgpt_args: CehrGPTArguments,
+    cohort_folder: str,
+    tokenizer_path: str,
 ) -> Path:
-    """
-    The folder a prepared cohort dataset is cached in.
-
-    generate_prepared_ds_path names it after the cohort folder, the tokenizer and the split
-    settings. A cohort sliced out of the full tokenized dataset (extract_cohort_sequences) is
-    also cut to the observation window, so the window and the dataset it was sliced from are
-    added to the name. Without them a run with another window loads the sequences of the first.
-    """
+    named_model_args = copy.copy(model_args)
+    named_model_args.tokenizer_name_or_path = tokenizer_path
     prepared_ds_path = generate_prepared_ds_path(
-        data_args, model_args, data_folder=data_args.cohort_folder
+        data_args, named_model_args, data_folder=cohort_folder
     )
     if cehrgpt_args.tokenized_full_dataset_path is None:
         return prepared_ds_path
@@ -375,6 +372,59 @@ def generate_cohort_prepared_ds_path(
     return prepared_ds_path.with_name(
         f"{prepared_ds_path.name}_obs{window_name}_{full_dataset_hash}"
     )
+
+
+def is_complete_prepared_dataset(prepared_ds_path: Union[str, Path]) -> bool:
+    """Whether a prepared dataset was saved to the end: a run that stopped while saving leaves a folder without these."""
+    # save_to_disk of a DatasetDict writes dataset_dict.json, the chunked save writes its list of chunks last
+    prepared_ds_path = Path(prepared_ds_path)
+    return is_cohort_sequence_chunks(prepared_ds_path) or (
+        prepared_ds_path / "dataset_dict.json"
+    ).exists()
+
+
+def generate_cohort_prepared_ds_path(
+    data_args: DataTrainingArguments,
+    model_args,
+    cehrgpt_args: CehrGPTArguments,
+) -> Path:
+    """
+    The folder a prepared cohort dataset is cached in.
+
+    generate_prepared_ds_path names it after the cohort folder, the tokenizer and the split
+    settings. A cohort sliced out of the full tokenized dataset (extract_cohort_sequences) is
+    also cut to the observation window, so the window and the dataset it was sliced from are
+    added to the name. Without them a run with another window loads the sequences of the first.
+
+    The name does not depend on how the cohort folder and the tokenizer folder are spelled:
+    /cohorts/AMI, /cohorts/AMI/ and /cohorts//AMI are the same folder and share a cache (the
+    paths are made absolute and normalized before they are hashed). A cache that an earlier
+    version named after the paths as they were typed is still found: when there is no cache
+    under the new name and a complete one under the old name, the old one is used.
+    """
+    cohort_folder = data_args.cohort_folder or data_args.data_folder
+    tokenizer_path = model_args.tokenizer_name_or_path
+    prepared_ds_path = _cohort_prepared_ds_name(
+        data_args,
+        model_args,
+        cehrgpt_args,
+        os.path.abspath(os.path.expanduser(cohort_folder)),
+        os.path.abspath(os.path.expanduser(tokenizer_path)),
+    )
+    as_typed = _cohort_prepared_ds_name(
+        data_args, model_args, cehrgpt_args, cohort_folder, tokenizer_path
+    )
+    if (
+        as_typed != prepared_ds_path
+        and not is_complete_prepared_dataset(prepared_ds_path)
+        and is_complete_prepared_dataset(as_typed)
+    ):
+        LOG.info(
+            "Using the prepared dataset at %s, which was named after the paths as they were typed",
+            as_typed,
+        )
+        return as_typed
+    return prepared_ds_path
 
 
 def extract_cohort_sequences(

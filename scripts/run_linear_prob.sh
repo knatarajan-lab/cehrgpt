@@ -38,6 +38,9 @@ usage() {
     echo "                                 Global and local need the features combined (the default). The"
     echo "                                 concatenated features are written to <cohort>/<model_name>/logistic/,"
     echo "                                 the others to logistic_global/ and logistic_local/ next to it"
+    echo "  --local_block_scales=LIST      Also train the blockwise model (logistic_blockwise/) on combined features: the"
+    echo "                                 local features are tried at each of these scales, comma separated"
+    echo "                                 (default: 0,0.25,0.5,1; none to turn it off)"
     echo "  --add_random_token             Enable adding random token (disabled by default)"
     echo "  --preprocessing_batch_size=NUM Batch size for dataset preprocessing (optional, default: 1000)"
     echo "  --refresh_processed_dataset    Delete and rebuild the cached prepared dataset (disabled by default)"
@@ -74,6 +77,7 @@ TORCH_TYPE="bfloat16"
 DISABLE_SAMPLE_PACKING="false"
 DISABLE_COMBINE_GLOBAL_LOCAL="false"
 FEATURE_SETS=""
+LOCAL_BLOCK_SCALES="0,0.25,0.5,1"
 SKIP_FEATURE_EXTRACTION="false"
 ADD_RANDOM_TOKEN="false"
 REFRESH_PROCESSED_DATASET="false"
@@ -143,6 +147,9 @@ for arg in "$@"; do
             ;;
         --feature_sets=*)
             FEATURE_SETS="${arg#*=}"
+            ;;
+        --local_block_scales=*)
+            LOCAL_BLOCK_SCALES="${arg#*=}"
             ;;
         --add_random_token)
             ADD_RANDOM_TOKEN="true"
@@ -301,6 +308,8 @@ fi
 
 # The feature sets, as the words that train_with_cehrgpt_features takes
 FEATURE_SETS_ARGS=$(echo "$FEATURE_SETS" | tr ',' ' ')
+LOCAL_BLOCK_SCALES_ARGS=$(echo "$LOCAL_BLOCK_SCALES" | tr ',' ' ')
+[ "$LOCAL_BLOCK_SCALES" = "none" ] && LOCAL_BLOCK_SCALES_ARGS=""
 for feature_set in $FEATURE_SETS_ARGS; do
     case "$feature_set" in
         all|concatenated|global|local) ;;
@@ -324,6 +333,10 @@ required_result_dirs() {
     combined="false"
     if [ -f "$info" ] && grep -q '"local"' "$info"; then
         combined="true"
+    fi
+    # the blockwise model needs the combined features
+    if [ -n "$LOCAL_BLOCK_SCALES_ARGS" ] && [ "$combined" = "true" ]; then
+        echo "logistic_blockwise"
     fi
     if [ -z "$FEATURE_SETS_ARGS" ] || [ "$FEATURE_SETS_ARGS" = "all" ]; then
         echo "logistic"
@@ -389,6 +402,7 @@ log "  --report_to=$REPORT_TO"
 log "  --disable_sample_packing=$DISABLE_SAMPLE_PACKING"
 log "  --disable_combine_global_local=$DISABLE_COMBINE_GLOBAL_LOCAL"
 log "  --feature_sets=${FEATURE_SETS:-all}"
+log "  --local_block_scales=$LOCAL_BLOCK_SCALES"
 log "  --add_random_token=$ADD_RANDOM_TOKEN"
 log "  --preprocessing_batch_size=$PREPROCESSING_BATCH_SIZE"
 log "  --refresh_processed_dataset=$REFRESH_PROCESSED_DATASET"
@@ -574,15 +588,19 @@ while read -r cohort_name; do
     fi
 
     # Step 2: Model training
+    BLOCKWISE_ARGS=""
+    if required_result_dirs "$output_dir" | grep -q logistic_blockwise; then
+        BLOCKWISE_ARGS="--local_block_scales $LOCAL_BLOCK_SCALES_ARGS"
+    fi
     log "Starting model training for $cohort_name..."
-    log "Command: python -u -m cehrgpt.tools.linear_prob.train_with_cehrgpt_features --features_data_dir $output_dir --output_dir $output_dir --report_to $REPORT_TO --feature_sets ${FEATURE_SETS_ARGS:-all}"
+    log "Command: python -u -m cehrgpt.tools.linear_prob.train_with_cehrgpt_features --features_data_dir $output_dir --output_dir $output_dir --report_to $REPORT_TO --feature_sets ${FEATURE_SETS_ARGS:-all} $BLOCKWISE_ARGS"
 
-    # shellcheck disable=SC2086 -- the feature sets are separate words
+    # shellcheck disable=SC2086 -- the feature sets and the scales are separate words
     python -u -m cehrgpt.tools.linear_prob.train_with_cehrgpt_features \
         --features_data_dir "$output_dir" \
         --output_dir "$output_dir" \
         --report_to "$REPORT_TO" \
-        --feature_sets ${FEATURE_SETS_ARGS:-all} \
+        --feature_sets ${FEATURE_SETS_ARGS:-all} $BLOCKWISE_ARGS \
         >> "$cohort_log" 2>&1
 
     model_training_status=$?

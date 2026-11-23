@@ -4,11 +4,12 @@ Zero-shot predictions from the pretrained MOTOR head: the probability that a con
 trained on top.
 
 The head reads the linear probing hidden state of the last token, which is what the linear
-probing feature extraction already writes (extract the features with
---disable_combine_global_local so that only that state, not the last-token state of the base
-model, is in the vector). So this tool does not run the transformer: it loads only the weights
-of the MOTOR head from the checkpoint, applies them to the features, and turns the hazards into
-probabilities.
+probing feature extraction already writes: the whole vector when the features were extracted
+with --disable_combine_global_local, and the first half of it when the global and the local
+states were saved combined ([global | local], twice the hidden size, the default of the
+extraction). The local half, the last-token state of the base model, is not used. So this tool
+does not run the transformer: it loads only the weights of the MOTOR head from the checkpoint,
+applies them to the features, and turns the hazards into probabilities.
 
 The head models a piecewise-exponential hazard. For a task, the hazard in time bin p is
 2 ** logit[p] events per day (the convention of the training loss), the bins are
@@ -21,7 +22,10 @@ The head has no information about how long ago the last event was, which is why 
 input (default 0: the prediction time is the time of the last event).
 
 Only the MOTOR tasks can be asked about. A task that stands for an ontology ancestor also
-covers its descendants, because that is how its training labels were built.
+covers its descendants, because that is how its training labels were built. So an outcome
+concept that is a MOTOR task is used as it is, and its descendants are not added to it. An
+outcome concept that is not a task is predicted through the highest tasks below it, which
+needs the ontology (ontology.pickle in the tokenizer folder, or --concept_ancestor).
 
 Binary classification: the outcome of a cohort is one or more MOTOR tasks and a window. The
 probability that the outcome happens is compared with the cohort label (AUROC, AUPRC, Brier,
@@ -31,9 +35,10 @@ what the pretrained head gives without any training. With several concepts the p
 (safer when one concept contains another).
 
 The outcome can also be given by one of the task files of the time to event prediction
-(src/cehrgpt/time_to_event/config/*.yaml) with --task_config: its outcome_events,
-include_descendants and prediction window are used as they are, so the same file defines the
-task for the generative and for the zero-shot prediction. A window that has no end
+(src/cehrgpt/time_to_event/config/*.yaml) with --task_config: its outcome_events and
+prediction window are used as they are, so the same file defines the task for the generative
+and for the zero-shot prediction. Its include_descendants is not read: the descendants are
+covered as described above whatever it says. A window that has no end
 (prediction_window_end: -1) needs --open_window_days, and a limit on the future visits
 (future_visit_end) cannot be expressed with MOTOR and is refused unless --ignore_visit_limits.
 
@@ -258,8 +263,8 @@ def resolve_tasks(
     if missing:
         raise ValueError(
             f"Not MOTOR tasks: {missing[:10]}. Only the tasks the model was pretrained on can be "
-            "asked about; list them with --list_tasks (and --search to filter by name). For an "
-            "outcome, --expand_descendants asks about a concept through the tasks at or below it."
+            "asked about; list them with --list_tasks (and --search to filter by name). An "
+            "outcome concept (--outcome_concepts) that is not a task is predicted through the tasks below it."
         )
     return [(tokenizer.get_motor_token_id(c), c, names.get(c, "")) for c in concepts]
 
@@ -438,15 +443,18 @@ def ancestors_from_table(path: str, task_codes: Sequence[str]):
     return lambda code: cache.get(str(code), frozenset({str(code)}))
 
 
-def explain_uncovered(tokenizer: CehrGptTokenizer, concept: str, expanded: bool) -> str:
+def explain_uncovered(tokenizer: CehrGptTokenizer, concept: str, has_ontology: bool) -> str:
     """Why no MOTOR task covers a concept, for the warning."""
+    if not has_ontology:
+        return (
+            "not a MOTOR task, and the tasks below it cannot be found without an ontology "
+            "(ontology.pickle in the tokenizer folder, or an OMOP table with --concept_ancestor)"
+        )
     if concept not in tokenizer.get_vocab():
         return (
             "not in the tokenizer vocabulary, so the model never saw it as an event"
         )
-    if expanded:
-        return "in the vocabulary, but no MOTOR task is this concept or one of its descendants"
-    return "in the vocabulary, but not a MOTOR task (--expand_descendants covers it through the tasks below it)"
+    return "in the vocabulary, but no MOTOR task is this concept or one of its descendants"
 
 
 def tokenizer_ancestors(tokenizer: CehrGptTokenizer):
@@ -454,8 +462,8 @@ def tokenizer_ancestors(tokenizer: CehrGptTokenizer):
     ontology = tokenizer._ontology
     if ontology is None:
         raise ValueError(
-            "--expand_descendants needs the ontology (ontology.pickle) in the tokenizer folder, "
-            "and this tokenizer has none; pass an OMOP concept_ancestor table with --concept_ancestor"
+            "The tokenizer folder has no ontology (ontology.pickle); pass an OMOP concept_ancestor "
+            "table with --concept_ancestor"
         )
     cache: Dict[str, frozenset] = {}
 
@@ -520,10 +528,34 @@ def combine_probabilities(
     return -np.expm1(np.log1p(-np.clip(probabilities, 0.0, 1.0 - 1e-12)).sum(axis=1))
 
 
+def global_features(features: np.ndarray, hidden_size: int) -> np.ndarray:
+    """
+    The linear probing state, which is what the MOTOR head reads, out of the saved feature vectors.
+
+    The extraction saves that state alone (the hidden size) or followed by the last-token state of
+    the base model ([global | local], twice the hidden size, see write_feature_info); the first
+    half is then the one the head was trained on.
+    """
+    width = features.shape[1]
+    if width == hidden_size:
+        return features
+    if width == 2 * hidden_size:
+        return features[:, :hidden_size]
+    raise ValueError(
+        f"The features are {width}-dimensional, which is neither the model's hidden size {hidden_size} "
+        f"(the global state alone) nor twice it (the global and the local states combined). Were they "
+        "extracted with another model?"
+    )
+
+
 def load_features_and_labels(
-    folder: str, label_column: str, max_rows: int = 0, seed: int = 0
+    folder: str, label_column: str, max_rows: int = 0, seed: int = 0, hidden_size: Optional[int] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """The feature vectors and labels of a folder, as a random sample of at most max_rows rows."""
+    """
+    The feature vectors and labels of a folder, as a random sample of at most max_rows rows.
+
+    With hidden_size, only the global state of every vector (see global_features).
+    """
     files = sorted(glob.glob(os.path.join(os.path.expanduser(folder), "**", "*.parquet"), recursive=True))
     if not files:
         raise FileNotFoundError(f"No parquet files under {folder}")
@@ -535,7 +567,8 @@ def load_features_and_labels(
         if label_column not in batch:
             raise ValueError(f"The training features have no column {label_column!r}")
         keep = rng.rand(len(batch["features"])) < fraction if fraction < 1.0 else np.ones(len(batch["features"]), bool)
-        features.append(batch["features"][keep])
+        kept = batch["features"][keep]
+        features.append(global_features(kept, hidden_size) if hidden_size else kept)
         labels.append(batch[label_column][keep])
     return np.concatenate(features), np.concatenate(labels).astype(int)
 
@@ -547,18 +580,20 @@ def supervised_baseline(
     eval_labels: np.ndarray,
     max_rows: int = 200_000,
     seed: int = 0,
+    hidden_size: Optional[int] = None,
 ) -> Dict[str, object]:
     """
     A logistic regression on the same features, trained on another folder, for comparison.
 
     A quick baseline (standardised features, default regularisation), not the tuned linear
-    probing pipeline.
+    probing pipeline. With hidden_size, the training vectors are cut to their global state, which
+    is what eval_features hold, so the baseline sees what the head sees.
     """
     from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
 
-    features, labels = load_features_and_labels(train_folder, label_column, max_rows, seed)
+    features, labels = load_features_and_labels(train_folder, label_column, max_rows, seed, hidden_size)
     if features.shape[1] != eval_features.shape[1]:
         raise ValueError("The training and the evaluation features have different widths")
     if labels.min() == labels.max():
@@ -594,11 +629,10 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
         # what is given on the command line wins over the file
         if args.outcome_concepts is None and not args.outcome_concepts_file:
             args.outcome_concepts = task.outcome_events
-        args.expand_descendants = args.expand_descendants or task.include_descendants
         args.outcome_window = args.outcome_window or task.window
         LOG.info(
-            "Task %s from %s: outcome %s, descendants %s, window %s days",
-            task_name, args.task_config, task.outcome_events, args.expand_descendants, args.outcome_window,
+            "Task %s from %s: outcome %s, window %s days",
+            task_name, args.task_config, task.outcome_events, args.outcome_window,
         )
     outcome_input = list(args.outcome_concepts or [])
     if args.outcome_concepts_file:
@@ -609,17 +643,25 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
     uncovered: Dict[str, str] = {}
     if outcome:
         task_codes = sorted(tokenizer._motor_time_to_event_codes)
-        if args.expand_descendants:
-            ancestors_of = (
-                ancestors_from_table(args.concept_ancestor, task_codes)
-                if args.concept_ancestor else tokenizer_ancestors(tokenizer)
-            )
-            resolved = {c: expand_to_tasks([c], task_codes, ancestors_of) for c in outcome}
-            covered = [c for c in outcome if resolved[c]]
-            outcome_resolution = {c: resolved[c] for c in covered}
+        # None without an ontology: then only the concepts that are tasks themselves can be predicted
+        if args.concept_ancestor:
+            ancestors_of = ancestors_from_table(args.concept_ancestor, task_codes)
+        elif tokenizer._ontology is not None:
+            ancestors_of = tokenizer_ancestors(tokenizer)
         else:
-            covered = [c for c in outcome if tokenizer.is_motor_time_to_event_code(c)]
-        uncovered = {c: explain_uncovered(tokenizer, c, args.expand_descendants) for c in outcome if c not in covered}
+            ancestors_of = None
+
+        def tasks_of(concept: str) -> List[str]:
+            # A task already counts the events of its descendants, so it is used as it is. A concept
+            # that is not a task is predicted through the highest tasks below it.
+            if tokenizer.is_motor_time_to_event_code(concept):
+                return [concept]
+            return expand_to_tasks([concept], task_codes, ancestors_of) if ancestors_of else []
+
+        resolved = {c: tasks_of(c) for c in outcome}
+        covered = [c for c in outcome if resolved[c]]
+        outcome_resolution = {c: resolved[c] for c in covered}
+        uncovered = {c: explain_uncovered(tokenizer, c, ancestors_of is not None) for c in outcome if c not in covered}
         if uncovered:
             if not covered:
                 raise ValueError(
@@ -632,15 +674,17 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
                 "%s, so it misses the events of the removed ones: %s",
                 len(uncovered), len(outcome), len(covered), uncovered,
             )
-        if args.expand_descendants:
+        outcome = list(dict.fromkeys(task for c in covered for task in resolved[c]))
+        if ancestors_of:
             # across the whole set, again only the highest tasks: one concept's task may contain another's
-            outcome = expand_to_tasks(covered, task_codes, ancestors_of)
-            LOG.info(
-                "The outcome concepts %s (with descendants) are covered by %s MOTOR task(s): %s",
-                covered, len(outcome), [(c, names.get(c, "")) for c in outcome],
-            )
-        else:
-            outcome = covered
+            outcome = [
+                task for task in outcome
+                if not any(other != task and other in ancestors_of(task) for other in outcome)
+            ]
+        LOG.info(
+            "The outcome concepts %s are covered by %s MOTOR task(s): %s",
+            covered, len(outcome), [(c, names.get(c, "")) for c in outcome],
+        )
     concepts = list(args.concepts or [])
     if args.concepts_file:
         with open(args.concepts_file) as f:
@@ -667,14 +711,16 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
     outcome_times: List[np.ndarray] = []
     outcome_features: List[np.ndarray] = []
     total = 0
+    saved_width = None
     for batch in iter_feature_batches(args.features_folder, args.batch_size, extra):
-        features = batch["features"]
-        if features.shape[1] != config.n_embd:
-            raise ValueError(
-                f"The features are {features.shape[1]}-dimensional but the model's hidden size is "
-                f"{config.n_embd}. If they are twice as wide, they were extracted with the global and "
-                "local states combined; re-run the extraction with --disable_combine_global_local."
-            )
+        if saved_width is None:
+            saved_width = int(batch["features"].shape[1])
+            if saved_width == 2 * config.n_embd:
+                LOG.info(
+                    "The features are %s wide, the global and the local states combined: the first %s "
+                    "(the global state) are used", saved_width, config.n_embd,
+                )
+        features = global_features(batch["features"], config.n_embd)
         gap = torch.from_numpy(np.array(batch[args.gap_days_column], dtype=np.float32)) if args.gap_days_column else None
         if gap is None and args.gap_days:
             gap = torch.full((features.shape[0],), float(args.gap_days))
@@ -721,6 +767,13 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
         "concepts": concepts,
         "windows": [window_name(w) for w in windows],
         "model_path": args.model_path,
+        # the head reads the global state: the whole vector, or the first half of combined features
+        "feature_width": saved_width,
+        "features_used": (
+            "global (the first half of the combined features)"
+            if saved_width == 2 * config.n_embd
+            else "global"
+        ),
     }
     if outcome:
         probabilities_of_outcome = np.concatenate(outcome_probabilities)
@@ -760,6 +813,7 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
             outcome_metrics["supervised_baseline"] = supervised_baseline(
                 args.baseline_train_features, args.label_column,
                 np.concatenate(outcome_features), labels_of_outcome, args.baseline_max_rows,
+                hidden_size=config.n_embd,
             )
         metrics["outcome"] = outcome_metrics
     with open(os.path.join(args.output_dir, "metrics.json"), "w") as f:
@@ -772,7 +826,7 @@ def create_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model_path", required=True, help="Pretrained CEHR-GPT folder with a MOTOR head")
     parser.add_argument("--tokenizer_path", default=None, help="Tokenizer folder (default: model_path)")
-    parser.add_argument("--features_folder", help="Output of compute_cehrgpt_features (parquet with subject_id, prediction_time_posix, features); extracted with --disable_combine_global_local")
+    parser.add_argument("--features_folder", help="Output of compute_cehrgpt_features (parquet with subject_id, prediction_time_posix, features). Features with the global and the local states combined are accepted: the global half is used")
     parser.add_argument("--output_dir", help="Where predictions.parquet and metrics.json are written")
     parser.add_argument("--concepts", nargs="+", help="Concept ids of the MOTOR tasks to predict")
     parser.add_argument("--concepts_file", help="A file with one concept id per line")
@@ -780,18 +834,17 @@ def create_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gap_days", type=float, default=0.0, help="Days between the last event and the prediction time, for every patient")
     parser.add_argument("--gap_days_column", default=None, help="A column with the gap per patient (overrides --gap_days)")
     parser.add_argument("--label_column", default="boolean_value", help="A column with the observed outcome, written next to the predictions and used by --outcome_concepts")
-    parser.add_argument("--task_config", default=None, help="A task file of the time to event prediction (src/cehrgpt/time_to_event/config/*.yaml): its outcome_events, include_descendants and prediction window define the outcome. --outcome_concepts, --expand_descendants and --outcome_window given here win over the file")
+    parser.add_argument("--task_config", default=None, help="A task file of the time to event prediction (src/cehrgpt/time_to_event/config/*.yaml): its outcome_events and prediction window define the outcome (include_descendants is not read). --outcome_concepts and --outcome_window given here win over the file")
     parser.add_argument("--open_window_days", type=float, default=None, help="With --task_config: the end of the window when the file has none (prediction_window_end: -1)")
     parser.add_argument("--ignore_visit_limits", action="store_true", help="With --task_config: accept future_visit_start/future_visit_end and use the time window alone")
-    parser.add_argument("--concept_ancestor", default=None, help="OMOP concept_ancestor table (parquet), as in the time to event prediction, to find the descendants instead of the tokenizer's ontology")
-    parser.add_argument("--outcome_concepts", nargs="+", default=None, help="MOTOR task(s) that define the binary outcome of the cohort; the label column is the truth")
+    parser.add_argument("--concept_ancestor", default=None, help="OMOP concept_ancestor table (parquet), as in the time to event prediction, to find the tasks below an outcome concept that is not a task itself, instead of the tokenizer's ontology")
+    parser.add_argument("--outcome_concepts", nargs="+", default=None, help="Concept(s) that define the binary outcome of the cohort; the label column is the truth. A concept that is a MOTOR task is used as it is (it covers its descendants); one that is not is predicted through the highest tasks below it")
     parser.add_argument("--outcome_concepts_file", default=None, help="A file with one outcome concept id per line (a concept set)")
-    parser.add_argument("--expand_descendants", action="store_true", help="Treat each outcome concept as the concept and all its descendants: it is covered by the MOTOR tasks at or below it (only the highest ones are used). Needs the ontology in the tokenizer folder")
     parser.add_argument("--outcome_window", default=None, help='The cohort horizon, e.g. "30" or "30-90" (default: the first of --windows)')
     parser.add_argument("--combine", choices=["independent_or", "max", "sampled"], default="independent_or", help="How the probabilities of several outcome concepts become the probability of any of them. sampled draws every task as an independent yes/no over --num_trials trials and adds up the events: it estimates the same value as independent_or, with sampling noise")
     parser.add_argument("--num_trials", type=int, default=100, help="With --combine sampled: the number of trials")
     parser.add_argument("--seed", type=int, default=0, help="With --combine sampled: the random seed")
-    parser.add_argument("--baseline_train_features", default=None, help="Features of the training split: a logistic regression is fitted on them and evaluated on the same rows, to compare with the zero-shot result")
+    parser.add_argument("--baseline_train_features", default=None, help="Features of the training split: a logistic regression is fitted on their global state (what the head reads) and evaluated on the same rows, to compare with the zero-shot result")
     parser.add_argument("--baseline_max_rows", type=int, default=200_000, help="Rows of the training features used by the baseline")
     parser.add_argument("--batch_size", type=int, default=4096)
     parser.add_argument("--device", default=None)
