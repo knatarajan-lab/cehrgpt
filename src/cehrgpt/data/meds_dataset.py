@@ -331,7 +331,7 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
        never gets a discharge (before the next admission, or before the record ends) ends where its events stop:
        after ``max_stay_gap_days`` without one. It stays open only if the prediction time is that close to its last
        event. A day without such events is a visit of its own, of the unknown type Visit/0 unless its events say
-       otherwise.
+       otherwise. A block starts at its first event, so that a stay starts at the ED arrival before its admission.
 
     A dataset with visit ids is built by 1 and 2. A dataset without any, such as MIMIC-IV, is built by 3. A dataset
     with some of both gets both. The blocks of a visit that contain each other are merged when there are visit ids.
@@ -344,6 +344,9 @@ def _build_patient_blocks(patient, events, conversion, prediction_time):
         VisitBlock(daily_events, next_visit_id + offset, conversion)
         for offset, daily_events in enumerate(_split_days_at_discharges(unlinked_by_date.values(), conversion))
     ]
+    for block in daily_blocks:
+        # PatientBlock starts a block at its admission, after the ED events of the same day
+        block.block_start_time = block.min_time
     max_gap_hours = conversion.rules.max_stay_gap_days * 24
     _label_stays(daily_blocks, _find_stays(daily_blocks, max_gap_hours, prediction_time))
 
