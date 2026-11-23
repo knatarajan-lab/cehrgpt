@@ -94,7 +94,7 @@ def test_rows_without_features(tmp_path):
         }
     )
     assert cf.rows_without_features(processed, str(tmp_path)) is None
-    features = tmp_path / "features_with_label" / "features"
+    features = tmp_path / "features_with_label" / "train_features"
     features.mkdir(parents=True)
     import pandas as pd
 
