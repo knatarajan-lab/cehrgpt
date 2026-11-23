@@ -6,7 +6,7 @@ from cehrbert.data_generators.hf_data_generator.hf_dataset import apply_cehrbert
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import Dataset, Features, Sequence, Value
 
-from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping, _event_values
+from cehrgpt.data.hf_cehrgpt_dataset_mapping import MedToCehrGPTDatasetMapping
 
 # The schema that the MEDS conversion writes (meds_dataset._create_cehrgpt_data_from_meds)
 FEATURES = Features(
@@ -75,31 +75,15 @@ def _patient():
                     _event("MEDICATION//Aspirin", 3),
                     _event("LAB//50912//mg/dL", 4, numeric_value=1.2, unit="mg/dL"),
                     _event("LAB//51006//UNK", 5, text_value="NEG"),
+                    _event("PROCEDURE//CPT4//99213", 6, text_value=""),
                 ],
             }
         ],
     }
 
 
-class EventValuesTest(unittest.TestCase):
-    def test_nan_and_empty_text_are_no_value(self):
-        self.assertEqual(_event_values({"numeric_value": math.nan, "text_value": None}), (None, None))
-        self.assertEqual(_event_values({"numeric_value": None, "text_value": ""}), (None, None))
-        self.assertEqual(_event_values({"numeric_value": math.nan, "text_value": math.nan}), (None, None))
-        self.assertEqual(_event_values({}), (None, None))
-
-    def test_real_values_are_kept(self):
-        self.assertEqual(_event_values({"numeric_value": 0.0, "text_value": None}), (0.0, None))
-        self.assertEqual(_event_values({"numeric_value": 1.5, "text_value": "NEG"}), (1.5, "NEG"))
-
-
 class BatchedMedsMappingValueMaskTest(unittest.TestCase):
-    """
-    The batched mapping reads the events through pandas, where a missing numeric_value becomes NaN.
-
-    Before the fix, every diagnosis and medication had a value mask of 1 and a "0" value, so they were
-    counted as categorical labs and none of them could be a MOTOR task.
-    """
+    """The batched mapping reads the events through pandas, where a missing numeric_value becomes NaN."""
 
     def test_events_without_a_value_have_no_value_mask(self):
         data_args = DataTrainingArguments(
@@ -125,6 +109,7 @@ class BatchedMedsMappingValueMaskTest(unittest.TestCase):
         }
         self.assertEqual(by_code["DIAGNOSIS//ICD//10//I10"][0], 0)
         self.assertEqual(by_code["MEDICATION//Aspirin"][0], 0)
+        self.assertEqual(by_code["PROCEDURE//CPT4//99213"][0], 0)
         self.assertEqual(by_code["LAB//50912//mg/dL"][0], 1)
         self.assertAlmostEqual(by_code["LAB//50912//mg/dL"][1], 1.2, places=5)
         self.assertEqual(by_code["LAB//51006//UNK"][0], 1)

@@ -101,20 +101,11 @@ class DatasetMappingDecorator(DatasetMapping):
 
 
 def _event_values(event: Dict[str, Any]) -> Tuple[Optional[float], Optional[str]]:
-    """
-    The numeric and the text value of a MEDS event, None when the event has none.
-
-    The batched mapping reads the events through pandas, where a missing float32 numeric_value
-    becomes NaN rather than None. Taking NaN (or an empty text) for a value would give every
-    diagnosis, procedure and medication a value: a value mask of 1, a "0" categorical value in the
-    lab statistics, and no MOTOR task, since the codes with lab statistics are excluded from MOTOR.
-    """
+    """Numeric and text value of a MEDS event; NaN (from pandas) and empty text count as no value."""
     numeric_value = event.get("numeric_value", None)
     if numeric_value is not None and pd.isna(numeric_value):
         numeric_value = None
-    text_value = event.get("text_value", None)
-    if not isinstance(text_value, str) or not text_value:
-        text_value = None
+    text_value = event.get("text_value") or None
     return numeric_value, text_value
 
 
