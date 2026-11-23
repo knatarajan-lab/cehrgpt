@@ -31,7 +31,7 @@ from cehrbert.data_generators.hf_data_generator.patient_block import (
     is_visit_table,
     merge_patient_blocks,
 )
-from cehrbert.med_extension.schema_extension import CehrBertPatient, Visit
+from cehrbert.med_extension.schema_extension import CehrBertPatient, Event, Visit
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from datasets import Dataset, DatasetDict, Features, Sequence, Value
 from meds.schema import birth_code
@@ -147,6 +147,28 @@ class VisitBlock(PatientBlock):
             if is_visit_table(getattr(event, "table", None)):
                 return event.code, event.time
         return UNKNOWN_VISIT_CONCEPT_ID, self._infer_block_start_time()
+
+    def _convert_event(self, event):
+        """Read the numbers of a text event with their decimals; PatientBlock keeps only whole numbers (isnumeric)."""
+        text_value = getattr(event, "text_value", None)
+        rule = None
+        if getattr(event, "numeric_value", None) is None and text_value is not None:
+            rule = self.conversion.get_text_event_to_numeric_events_rule(event.code)
+        found = re.search(rule.parsing_pattern, text_value) if rule else None
+        if not found or len(found.groups()) != len(rule.mapped_event_labels):
+            return super()._convert_event(event)
+        return [
+            Event(
+                code=label,
+                time=event.time,
+                numeric_value=float(value),
+                text_value=text_value,
+                unit=getattr(event, "unit", None),
+                properties={"visit_id": self.visit_id, "table": getattr(event, "table", "meds")},
+            )
+            for label, value in zip(rule.mapped_event_labels, found.groups())
+            if value is not None and value.replace(".", "", 1).isdigit()
+        ]
 
 
 def _split_days_at_discharges(days_of_events, conversion):

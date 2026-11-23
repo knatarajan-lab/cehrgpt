@@ -68,15 +68,15 @@ text_events:
   - Systolic Blood Pressure Standing (3 mins) # MIMIC-IV MEDS derived concept
   - Diastolic Blood Pressure Standing (3 mins) # MIMIC-IV MEDS derived concept
 - code: Weight (Lbs) # MIMIC-IV MEDS (MEDS_transforms)
-  pattern: (\d+)
+  pattern: (\d+(?:\.\d+)?) # with the decimals
   labels:
   - Weight (Lbs) # MIMIC-IV MEDS derived concept
 - code: Height (Inches) # MIMIC-IV MEDS (MEDS_transforms)
-  pattern: (\d+)
+  pattern: (\d+(?:\.\d+)?) # with the decimals
   labels:
   - Height (Inches) # MIMIC-IV MEDS derived concept
 - code: BMI (kg/m2) # MIMIC-IV MEDS (MEDS_transforms)
-  pattern: (\d+)
+  pattern: (\d+(?:\.\d+)?) # with the decimals
   labels:
   - BMI (kg/m2) # MIMIC-IV MEDS derived concept
 - code: LAB//50827//UNK # MIMIC-IV MEDS (MEDS_transforms)
