@@ -68,33 +68,6 @@ def convert_date_to_posix_time(index_date: Union[datetime.date, int, float]) -> 
     return index_date
 
 
-def average_values_within_hour(events) -> List[Dict[str, Any]]:
-    """
-    Merge the numeric values of a code (and unit) in the same clock hour into one event.
-
-    The merged event has the mean of the values and takes the place and time of the
-    first; the events without a numeric value are kept as they are.
-    """
-    merged, values = [], defaultdict(list)
-    first_index = {}
-    for event in events:
-        numeric_value = event.get("numeric_value", None)
-        if not event["time"] or numeric_value is None:
-            merged.append(event)
-            continue
-        hour = event["time"].replace(minute=0, second=0, microsecond=0)
-        key = (hour, event["code"], event.get("unit", None))
-        if key not in first_index:
-            first_index[key] = len(merged)
-            merged.append(event)
-        values[key].append(numeric_value)
-    for key, index in first_index.items():
-        if len(values[key]) > 1:
-            mean = sum(values[key]) / len(values[key])
-            merged[index] = dict(merged[index], numeric_value=mean)
-    return merged
-
-
 class DatasetMappingDecorator(DatasetMapping):
 
     def batch_transform(
@@ -241,7 +214,6 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
             has_events, events = has_events_and_get_events(events)
             if not has_events:
                 continue
-            events = average_values_within_hour(events)
 
             visit_start_datetime: datetime.datetime = get_value(
                 visit, "visit_start_datetime"
@@ -316,11 +288,11 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                 is_numeric_type = int(numeric_value is not None)
                 code = replace_escape_chars(e["code"])
 
-                # Create the event identity
+                # Create the event identity, with the value: only a repeat is skipped
                 event_identity = (
-                    (event_time, code, text_value, unit)
+                    (event_time, code, text_value, unit, numeric_value)
                     if is_er_or_inpatient
-                    else (event_time.date(), code, text_value, unit)
+                    else (event_time.date(), code, text_value, unit, numeric_value)
                 )
 
                 # Add a medical token to the patient timeline
@@ -360,11 +332,7 @@ class MedToCehrGPTDatasetMapping(DatasetMappingDecorator):
                                 age=relativedelta(event_time, birth_datetime).years,
                             )
 
-                # a numeric value is one per hour already, and the values of other hours are kept
-                if (
-                    e.get("numeric_value", None) is None
-                    and event_identity in existing_duplicate_events
-                ):
+                if event_identity in existing_duplicate_events:
                     continue
 
                 self._update_cehrgpt_record(
