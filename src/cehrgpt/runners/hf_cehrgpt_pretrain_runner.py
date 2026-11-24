@@ -280,6 +280,7 @@ def load_and_create_model(
             motor_task_prevalence_rates=tokenizer.get_motor_task_prevalence_rates(),
             motor_max_log2_cumulative_hazard=cehrgpt_args.motor_max_log2_cumulative_hazard,
             linear_prob_n_layer=cehrgpt_args.linear_prob_n_layer,
+            motor_head_on_decoder=cehrgpt_args.motor_head_on_decoder,
             ve_token_id=tokenizer.ve_token_id,
             vs_token_id=tokenizer.vs_token_id,
             att_token_ids=tokenizer.att_token_ids,
@@ -687,6 +688,21 @@ def main():
                 model.config,
                 "linear_prob_n_layer",
                 cehrgpt_args.linear_prob_n_layer,
+            )
+        # A MOTOR head built below (new, or a new vocab size) follows the flag;
+        # a loaded head's weights fix where it sits
+        motor_tte_vocab_size = cehrgpt_tokenizer.motor_tte_vocab_size
+        if motor_tte_vocab_size and (
+            model.motor_tte is None
+            or model.config.motor_tte_vocab_size != motor_tte_vocab_size
+        ):
+            model.config.motor_head_on_decoder = cehrgpt_args.motor_head_on_decoder
+        elif model.config.motor_head_on_decoder != cehrgpt_args.motor_head_on_decoder:
+            LOG.warning(
+                "motor_head_on_decoder=%s was requested but the loaded model has %s; "
+                "keeping the loaded model's setting",
+                cehrgpt_args.motor_head_on_decoder,
+                model.config.motor_head_on_decoder,
             )
         if getattr(model.config, "motor_time_bins", None) is None:
             setattr(

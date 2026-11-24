@@ -1647,7 +1647,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         if self.config.include_ttv_prediction:
             self.tte_head = self.tte_head.to(self.cehrgpt.first_device)
         if self.config.include_motor_time_to_event:
-            self.linear_prob.parallelize(self.device_map)
+            if self.linear_prob is not None:
+                self.linear_prob.parallelize(self.device_map)
             self.motor_tte = self.motor_tte.to(self.cehrgpt.first_device)
         self.model_parallel = True
 
@@ -1664,8 +1665,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         if self.config.include_ttv_prediction:
             self.tte_head = self.tte_head.to("cpu")
         if self.config.include_motor_time_to_event:
-            self.linear_prob.deparallelize()
-            self.linear_prob = self.linear_prob.to("cpu")
+            if self.linear_prob is not None:
+                self.linear_prob.deparallelize()
+                self.linear_prob = self.linear_prob.to("cpu")
             self.motor_tte = self.motor_tte.to("cpu")
         self.model_parallel = False
         torch.cuda.empty_cache()
@@ -1712,7 +1714,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
     def update_attn_bias(self, max_position_embeddings: int):
         self.cehrgpt.update_attn_bias(max_position_embeddings)
-        self.linear_prob.update_attn_bias(max_position_embeddings)
+        if self.linear_prob is not None:
+            self.linear_prob.update_attn_bias(max_position_embeddings)
 
     def update_motor_tte_vocab_size(
         self, motor_tte_vocab_size: Optional[int] = None
@@ -1739,7 +1742,9 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             self.config.motor_time_bins, dtype=torch.float32
         )
         self._motor_time_bins_on_device = None
-        self.linear_prob = LinearProbModule(self.config)
+        self.linear_prob = (
+            None if self.config.motor_head_on_decoder else LinearProbModule(self.config)
+        )
         self.motor_tte = MotorTaskHead(
             input_dim=self.config.n_embd,
             motor_tte_vocab_size=self.config.motor_tte_vocab_size,
@@ -2011,9 +2016,13 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
+        motor_head_on_decoder = self.config.motor_head_on_decoder
+        # The cross-attention stack needs every layer's hidden states; the decoder-head
+        # ablation needs nothing beyond the final hidden state
         compute_motor_features = (
             self.config.include_motor_time_to_event
             and output_motor_features is not False
+            and not motor_head_on_decoder
         )
 
         transformer_outputs = self.cehrgpt(
@@ -2115,6 +2124,10 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 linear_prob_encoder_mask,
             )
 
+        motor_hidden_states = (
+            hidden_states if motor_head_on_decoder else linear_prob_hidden_states
+        )
+
         loss = None
         token_loss = None
         time_token_loss = None
@@ -2200,7 +2213,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
 
             if (
                 self.config.include_motor_time_to_event
-                and linear_prob_hidden_states is not None
+                and motor_hidden_states is not None
                 and motor_row_indices is not None
                 and motor_col_indices is not None
                 and motor_values is not None
@@ -2209,7 +2222,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 and motor_end_index is not None
             ):
                 motor_tte_loss = self.motor_nll_loss(
-                    hidden_states=linear_prob_hidden_states,
+                    hidden_states=motor_hidden_states,
                     motor_row_indices=motor_row_indices,
                     motor_col_indices=motor_col_indices,
                     motor_values=motor_values,
