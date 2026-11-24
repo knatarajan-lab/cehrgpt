@@ -106,7 +106,7 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
         # accelerate gives batch i to process i % num_processes and cannot even out batches without a fixed size,
         # so repeat the first batches until every process gets the same number
         remainder = len(batches) % self.num_batches_multiple_of
-        if batches and remainder:
+        if remainder:
             batches += [batches[i % len(batches)] for i in range(self.num_batches_multiple_of - remainder)]
         return iter(batches)
 
@@ -161,13 +161,7 @@ class SamplePackingBatchSampler(Sampler[List[int]]):
             yield batch
 
     def __len__(self) -> int:
-        """
-        The number of batches that __iter__ yields in the current epoch.
-
-        The batches depend only on the lengths, the seed and the epoch, so they are counted exactly by packing them.
-        An estimate from the average length was off by over 10%, which gave the trainer a wrong number of steps per
-        epoch and a wrong learning-rate schedule, and the distributed trainer needs the real number of batches.
-        """
+        """The number of batches that __iter__ yields in the current epoch, counted exactly by packing them."""
         epoch = self.sampler.epoch
         if self._length_cache is None or self._length_cache[0] != epoch:
             self._length_cache = (epoch, sum(1 for _ in self.__iter__()))

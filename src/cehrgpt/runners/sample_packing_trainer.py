@@ -229,9 +229,7 @@ class SamplePackingTrainer(CehrGptTrainer):
             max_position_embeddings=self.max_position_embeddings,
             drop_last=self.args.dataloader_drop_last,
             seed=self.args.seed,
-            # accelerator.prepare shards the batches across the processes (BatchSamplerShard), so the sampler
-            # must yield the same global batches on every rank. Sharding here as well gave each rank half of
-            # its own half of the data, and ranks with unequal batch counts that hung at the end of an epoch.
+            # accelerate shards the batches; every rank must yield the same global batches
             num_replicas=1,
             rank=0,
             num_batches_multiple_of=self.accelerator.num_processes,
@@ -313,9 +311,8 @@ class SamplePackingTrainer(CehrGptTrainer):
             max_position_embeddings=self.max_position_embeddings,
             drop_last=self.args.dataloader_drop_last,
             seed=self.args.seed,
-            # accelerator.prepare shards the batches across the processes (BatchSamplerShard), so the sampler
-            # must yield the same global batches on every rank. Sharding here as well gave each rank half of
-            # its own half of the data, and ranks with unequal batch counts that hung at the end of an epoch.
+            # accelerate shards the batches; every rank must yield the same global batches.
+            # The few repeated batches that pad them to a multiple of the processes count twice in the eval loss.
             num_replicas=1,
             rank=0,
             num_batches_multiple_of=self.accelerator.num_processes,

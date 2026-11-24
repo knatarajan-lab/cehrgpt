@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+from accelerate.data_loader import BatchSamplerShard
 from transformers import Trainer, TrainerControl
 
 from cehrgpt.data.sample_packing_sampler import SamplePackingBatchSampler
@@ -116,6 +117,32 @@ class SamplePackingBatchSamplerTest(unittest.TestCase):
 
         self.assertEqual(epoch_zero, epoch_seven)
         self.assertEqual(epoch_zero, [[0, 1], [2, 3], [4]])
+
+    def test_every_rank_gets_the_same_number_of_batches(self):
+        # A rank that runs out of batches first leaves the others waiting in the gradient all-reduce forever
+        lengths = [(i * 37) % 396 + 5 for i in range(1001)]
+        for epoch in range(4):
+            shards = []
+            for rank in range(2):
+                # As SamplePackingTrainer builds it: the same global batches on every rank, sharded by accelerate
+                sampler = SamplePackingBatchSampler(
+                    lengths=lengths,
+                    max_tokens_per_batch=1024,
+                    max_position_embeddings=512,
+                    num_replicas=1,
+                    rank=0,
+                    seed=42,
+                    num_batches_multiple_of=2,
+                )
+                sampler.sampler.set_epoch(epoch)
+                shards.append(
+                    BatchSamplerShard(
+                        sampler, num_processes=2, process_index=rank, even_batches=False
+                    )
+                )
+            counts = [len(list(shard)) for shard in shards]
+            self.assertEqual(len(set(counts)), 1, f"epoch {epoch}: {counts}")
+            self.assertEqual([len(shard) for shard in shards], counts)
 
 
 if __name__ == "__main__":
