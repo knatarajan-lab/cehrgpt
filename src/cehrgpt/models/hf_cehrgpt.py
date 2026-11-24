@@ -1641,12 +1641,8 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
             self.config.motor_time_bins, dtype=torch.float32
         )
         self._motor_time_bins_on_device = None
-        # Ablation: with motor_head_on_decoder the MOTOR head reads the decoder's final
-        # hidden state, next to the language-model head, and no cross-attention stack is built
         self.linear_prob = (
-            None
-            if getattr(self.config, "motor_head_on_decoder", False)
-            else LinearProbModule(self.config)
+            None if self.config.motor_head_on_decoder else LinearProbModule(self.config)
         )
         self.motor_tte = MotorTaskHead(
             input_dim=self.config.n_embd,
@@ -1912,7 +1908,7 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
-        motor_head_on_decoder = getattr(self.config, "motor_head_on_decoder", False)
+        motor_head_on_decoder = self.config.motor_head_on_decoder
         # The cross-attention stack needs every layer's hidden states; the decoder-head
         # ablation needs nothing beyond the final hidden state
         compute_motor_features = (
@@ -2020,8 +2016,6 @@ class CEHRGPT2LMHeadModel(CEHRGPTPreTrainedModel):
                 linear_prob_encoder_mask,
             )
 
-        # What the MOTOR head reads: the cross-attention stack's output, or in the
-        # motor_head_on_decoder ablation the same final hidden state the lm_head reads
         motor_hidden_states = (
             hidden_states if motor_head_on_decoder else linear_prob_hidden_states
         )

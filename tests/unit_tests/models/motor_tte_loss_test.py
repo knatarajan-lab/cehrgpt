@@ -160,5 +160,25 @@ class MotorNllLossGuardrailTest(unittest.TestCase):
         self.assertEqual(restored.motor_max_log2_cumulative_hazard, 8.0)
 
 
+class MotorHeadOnDecoderTest(unittest.TestCase):
+    def test_motor_loss_reads_the_final_hidden_state(self):
+        model = build_model(motor_head_on_decoder=True).eval()
+        self.assertIsNone(model.linear_prob)
+        motor_inputs = make_motor_inputs()
+        del motor_inputs["hidden_states"]
+        input_ids = torch.tensor([[2, 3, 5, 10, 11, 5]])
+        output = model(
+            input_ids=input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            labels=input_ids,
+            output_hidden_states=True,
+            **motor_inputs,
+        )
+        expected = model.motor_nll_loss(
+            hidden_states=output.hidden_states[-1], **motor_inputs
+        )
+        torch.testing.assert_close(output.motor_tte_loss, expected)
+
+
 if __name__ == "__main__":
     unittest.main()
