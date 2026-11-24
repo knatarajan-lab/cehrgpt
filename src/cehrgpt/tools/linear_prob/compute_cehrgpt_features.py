@@ -544,10 +544,11 @@ def main():
 
     # Loading demographics
     print("Loading demographics as a dictionary")
-    if cehrgpt_args.tokenized_full_dataset_path is not None:
+    if cehrgpt_args.tokenized_full_dataset_path is not None or data_args.is_data_in_meds:
         # data_folder/test_data_folder may not exist as separate train/test directories in
         # this mode (the train/test split comes from the pre-tokenized dataset instead), so
         # read demographics from cohort_folder, the same source extract_cohort_sequences uses.
+        # With MEDS data, data_folder is the MEDS reader, which is not a parquet folder.
         demographic_dirs = [data_args.cohort_folder]
     else:
         demographic_dirs = [data_args.data_folder, data_args.test_data_folder]
