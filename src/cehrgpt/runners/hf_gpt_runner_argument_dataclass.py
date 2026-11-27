@@ -145,7 +145,7 @@ class CehrGPTArguments:
         metadata={"help": "Include inpatient hour token"},
     )
     include_demographics: Optional[bool] = dataclasses.field(
-        default=False,
+        default=True,
         metadata={
             "help": "A flag to indicate whether we want to always include the demographics for the long sequences that are longer than the model context window."
         },
