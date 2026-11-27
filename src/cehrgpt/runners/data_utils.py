@@ -662,3 +662,10 @@ def load_cohort_sequence_chunks(path: Union[str, Path]) -> DatasetDict:
         split: concatenate_datasets([load_from_disk(str(path / split / name)) for name in names])
         for split, names in chunks.items()
     })
+
+
+def load_prepared_dataset(prepared_ds_path: Union[str, Path]) -> DatasetDict:
+    """The prepared dataset, saved in chunks (a cohort sliced from the tokenized dataset) or at once."""
+    if is_cohort_sequence_chunks(prepared_ds_path):
+        return load_cohort_sequence_chunks(prepared_ds_path)
+    return load_from_disk(str(prepared_ds_path))

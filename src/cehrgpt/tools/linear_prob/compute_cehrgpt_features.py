@@ -40,8 +40,7 @@ from cehrgpt.runners.data_utils import (
     extract_cohort_sequences,
     generate_cohort_prepared_ds_path,
     is_complete_prepared_dataset,
-    is_cohort_sequence_chunks,
-    load_cohort_sequence_chunks,
+    load_prepared_dataset,
     prepare_finetune_dataset,
     save_cohort_sequences_in_chunks,
 )
@@ -96,13 +95,6 @@ def _create_feature_dataset(data_args, training_args, cehrgpt_args, tokenizer, c
         data_args=data_args,
         cache_file_collector=cache_file_collector,
     )
-
-
-def load_prepared_dataset(prepared_ds_path: Union[str, Path]) -> DatasetDict:
-    """The prepared dataset, saved in chunks (a cohort sliced from the tokenized dataset) or at once."""
-    if is_cohort_sequence_chunks(prepared_ds_path):
-        return load_cohort_sequence_chunks(prepared_ds_path)
-    return load_from_disk(str(prepared_ds_path))
 
 
 def _load_or_create_prepared_dataset(
