@@ -534,8 +534,9 @@ while read -r cohort_name; do
             FEATURE_CMD="$FEATURE_CMD --add_random_token"
         fi
 
-        if [ "$INCLUDE_DEMOGRAPHICS" = "true" ]; then
-            FEATURE_CMD="$FEATURE_CMD --include_demographics"
+        # The argument defaults to true, so the disabled case has to be passed explicitly
+        if [ "$INCLUDE_DEMOGRAPHICS" = "false" ]; then
+            FEATURE_CMD="$FEATURE_CMD --include_demographics false"
         fi
 
         # Add tokenized_full_dataset_path if provided, so the cohort sequences are sliced
