@@ -42,8 +42,8 @@ usage() {
     echo "                                 local features are tried at each of these scales, comma separated"
     echo "                                 (default: 0,0.25,0.5,1; none to turn it off)"
     echo "  --add_random_token             Enable adding random token (disabled by default)"
-    echo "  --include_demographics         Keep the demographic prompt when a patient is cut to the context"
-    echo "                                 window (disabled by default: the prompt is dropped)"
+    echo "  --disable_include_demographics Drop the demographic prompt when a patient is cut to the context"
+    echo "                                 window (by default the prompt is kept)"
     echo "  --preprocessing_batch_size=NUM Batch size for dataset preprocessing (optional, default: 1000)"
     echo "  --refresh_processed_dataset    Delete and rebuild the cached prepared dataset (disabled by default)"
     echo "  --is_data_in_meds              Indicate that the data is in MEDS format (disabled by default)"
@@ -82,7 +82,7 @@ FEATURE_SETS=""
 LOCAL_BLOCK_SCALES="0,0.25,0.5,1"
 SKIP_FEATURE_EXTRACTION="false"
 ADD_RANDOM_TOKEN="false"
-INCLUDE_DEMOGRAPHICS="false"
+INCLUDE_DEMOGRAPHICS="true"
 REFRESH_PROCESSED_DATASET="false"
 IS_DATA_IN_MEDS="false"
 TOKENIZED_FULL_DATASET_PATH=""
@@ -157,8 +157,8 @@ for arg in "$@"; do
         --add_random_token)
             ADD_RANDOM_TOKEN="true"
             ;;
-        --include_demographics)
-            INCLUDE_DEMOGRAPHICS="true"
+        --disable_include_demographics)
+            INCLUDE_DEMOGRAPHICS="false"
             ;;
         --preprocessing_batch_size=*)
             PREPROCESSING_BATCH_SIZE="${arg#*=}"
