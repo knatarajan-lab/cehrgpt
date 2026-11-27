@@ -20,7 +20,6 @@ from cehrbert.runners.hf_runner_argument_dataclass import (
 from cehrbert.runners.runner_util import (
     get_last_hf_checkpoint,
 )
-from datasets import load_from_disk
 from peft import LoraConfig, PeftModel, get_peft_model
 from scipy.special import expit as sigmoid
 from torch.utils.data import DataLoader
@@ -55,6 +54,7 @@ from cehrgpt.runners.data_utils import (
     extract_cohort_sequences,
     generate_cohort_prepared_ds_path,
     get_torch_dtype,
+    load_prepared_dataset,
     prepare_finetune_dataset,
 )
 from cehrgpt.runners.gpt_runner_util import (
@@ -307,7 +307,7 @@ def main():
 
     if any(prepared_ds_path.glob("*")):
         LOG.info("Loading prepared dataset from disk at %s...", prepared_ds_path)
-        processed_dataset = load_from_disk(str(prepared_ds_path))
+        processed_dataset = load_prepared_dataset(prepared_ds_path)
         if cehrgpt_args.expand_tokenizer:
             if tokenizer_exists(training_args.output_dir):
                 tokenizer = CehrGptTokenizer.from_pretrained(training_args.output_dir)
@@ -347,7 +347,7 @@ def main():
         )
         tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_name_or_path)
         # Load the dataset from disk again in torch distributed training
-        processed_dataset = load_from_disk(str(prepared_ds_path))
+        processed_dataset = load_prepared_dataset(prepared_ds_path)
 
     # Set seed before initializing model.
     set_seed(training_args.seed)
