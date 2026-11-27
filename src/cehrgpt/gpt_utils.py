@@ -340,7 +340,7 @@ def collect_demographic_prompts_at_visits(patient_history: List[str]):
         start_year = int(start_year.split(":")[1])
         start_age = int(start_age.split(":")[1])
         valid_prompt = True
-    except IndexError | ValueError:
+    except (IndexError, ValueError):
         start_year = 1900
         start_age = 0
         valid_prompt = False
