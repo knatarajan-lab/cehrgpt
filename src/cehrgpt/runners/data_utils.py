@@ -1,16 +1,18 @@
+import copy
+import hashlib
+import json
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Union, Tuple
 
 import numpy as np
 import polars as pl
 import torch
 from cehrbert.data_generators.hf_data_generator.cache_util import CacheFileCollector
-from cehrbert.data_generators.hf_data_generator.meds_utils import (
-    create_dataset_from_meds_reader,
-)
 from cehrbert.runners.hf_runner_argument_dataclass import DataTrainingArguments
 from cehrbert.runners.runner_util import (
+    generate_prepared_ds_path,
     get_meds_extension_path,
     load_parquet_as_dataset,
 )
@@ -19,12 +21,13 @@ from meds import held_out_split, subject_id_field, train_split, tuning_split
 from transformers import TrainingArguments
 from transformers.utils import logging
 
-from cehrgpt.data.cache_cleanup import clean_up_dataset_caches
+from cehrgpt.data.cache_cleanup import clean_up_dataset_caches, remove_dataset_cache_files
 from cehrgpt.data.hf_cehrgpt_dataset_mapping import (
     ExtractTokenizedSequenceDataMapping,
     MedToCehrGPTDatasetMapping,
 )
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
+from cehrgpt.data.meds_dataset import create_meds_dataset
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 
 LOG = logging.get_logger("transformers")
@@ -77,8 +80,9 @@ def prepare_finetune_dataset(
                     )
         except Exception as e:
             LOG.warning(e)
-            dataset = create_dataset_from_meds_reader(
+            dataset = create_meds_dataset(
                 data_args=data_args,
+                rules_file=cehrgpt_args.meds_visit_rules_file,
                 dataset_mappings=[
                     MedToCehrGPTDatasetMapping(
                         data_args=data_args,
@@ -344,11 +348,110 @@ def create_dataset_splits(
     return train_set, validation_set, test_set
 
 
+def _cohort_prepared_ds_name(
+    data_args: DataTrainingArguments,
+    model_args,
+    cehrgpt_args: CehrGPTArguments,
+    cohort_folder: str,
+    tokenizer_path: str,
+) -> Path:
+    named_model_args = copy.copy(model_args)
+    named_model_args.tokenizer_name_or_path = tokenizer_path
+    prepared_ds_path = generate_prepared_ds_path(
+        data_args, named_model_args, data_folder=cohort_folder
+    )
+    if cehrgpt_args.tokenized_full_dataset_path is None:
+        return prepared_ds_path
+    # None, 0 and a negative window all keep the whole history (ExtractTokenizedSequenceDataMapping)
+    window = data_args.observation_window
+    window_name = str(window) if window and window > 0 else "all"
+    full_dataset_path = os.path.abspath(
+        os.path.expanduser(cehrgpt_args.tokenized_full_dataset_path)
+    )
+    full_dataset_hash = hashlib.md5(full_dataset_path.encode("utf-8")).hexdigest()[:8]
+    return prepared_ds_path.with_name(
+        f"{prepared_ds_path.name}_obs{window_name}_{full_dataset_hash}"
+    )
+
+
+def is_complete_prepared_dataset(prepared_ds_path: Union[str, Path]) -> bool:
+    """Whether a prepared dataset was saved to the end: a run that stopped while saving leaves a folder without these."""
+    # save_to_disk of a DatasetDict writes dataset_dict.json, the chunked save writes its list of chunks last
+    prepared_ds_path = Path(prepared_ds_path)
+    return is_cohort_sequence_chunks(prepared_ds_path) or (
+        prepared_ds_path / "dataset_dict.json"
+    ).exists()
+
+
+def generate_cohort_prepared_ds_path(
+    data_args: DataTrainingArguments,
+    model_args,
+    cehrgpt_args: CehrGPTArguments,
+) -> Path:
+    """
+    The folder a prepared cohort dataset is cached in.
+
+    generate_prepared_ds_path names it after the cohort folder, the tokenizer and the split
+    settings. A cohort sliced out of the full tokenized dataset (extract_cohort_sequences) is
+    also cut to the observation window, so the window and the dataset it was sliced from are
+    added to the name. Without them a run with another window loads the sequences of the first.
+
+    The name does not depend on how the cohort folder and the tokenizer folder are spelled:
+    /cohorts/AMI, /cohorts/AMI/ and /cohorts//AMI are the same folder and share a cache (the
+    paths are made absolute and normalized before they are hashed). A cache that an earlier
+    version named after the paths as they were typed is still found: when there is no cache
+    under the new name and a complete one under the old name, the old one is used.
+    """
+    cohort_folder = data_args.cohort_folder or data_args.data_folder
+    tokenizer_path = model_args.tokenizer_name_or_path
+    prepared_ds_path = _cohort_prepared_ds_name(
+        data_args,
+        model_args,
+        cehrgpt_args,
+        os.path.abspath(os.path.expanduser(cohort_folder)),
+        os.path.abspath(os.path.expanduser(tokenizer_path)),
+    )
+    as_typed = _cohort_prepared_ds_name(
+        data_args, model_args, cehrgpt_args, cohort_folder, tokenizer_path
+    )
+    if (
+        as_typed != prepared_ds_path
+        and not is_complete_prepared_dataset(prepared_ds_path)
+        and is_complete_prepared_dataset(as_typed)
+    ):
+        LOG.info(
+            "Using the prepared dataset at %s, which was named after the paths as they were typed",
+            as_typed,
+        )
+        return as_typed
+    return prepared_ds_path
+
+
 def extract_cohort_sequences(
     data_args: DataTrainingArguments,
     cehrgpt_args: CehrGPTArguments,
     tokenizer: Optional[CehrGptTokenizer] = None,
 ) -> DatasetDict:
+    """
+    The cohort sequences sliced out of the tokenized dataset, as cache files next to that dataset.
+
+    See _cohort_persons_and_transform for the steps. save_cohort_sequences_in_chunks writes the same
+    sequences to a folder a chunk of persons at a time, without the cache of the whole cohort.
+    """
+    filtered_tokenized_dataset, transform = _cohort_persons_and_transform(
+        data_args, cehrgpt_args, tokenizer
+    )
+    return DatasetDict({
+        split: _slice_cohort_sequences(ds, transform, data_args)
+        for split, ds in filtered_tokenized_dataset.items()
+    })
+
+
+def _cohort_persons_and_transform(
+    data_args: DataTrainingArguments,
+    cehrgpt_args: CehrGPTArguments,
+    tokenizer: Optional[CehrGptTokenizer] = None,
+) -> Tuple[DatasetDict, ExtractTokenizedSequenceDataMapping]:
     """
     Extracts and processes cohort-specific tokenized sequences from a pre-tokenized dataset,.
 
@@ -361,10 +464,9 @@ def extract_cohort_sequences(
        to include only patients present in the cohort.
     4. Aggregates each person's index date and label into a mapping.
     5. Checks for consistency to ensure all cohort person_ids are present in the tokenized dataset.
-    6. Applies a transformation (`ExtractTokenizedSequenceDataMapping`) to generate
-       observation-window-constrained patient sequences, with recalculated demographic tokens
-       prepended to each extracted slice.
-    7. Caches both the filtered and processed datasets using the provided `cache_file_collector`.
+    6. Builds the transformation (`ExtractTokenizedSequenceDataMapping`) that _slice_cohort_sequences
+       applies to generate observation-window-constrained patient sequences, with recalculated
+       demographic tokens prepended to each extracted slice.
 
     Args:
         data_args (DataTrainingArguments): Configuration parameters for data processing,
@@ -374,8 +476,8 @@ def extract_cohort_sequences(
             tokens (year, age) for the `input_ids` column. If ``None``, the original demographic
             token ids are reused as a fallback.
     Returns:
-        DatasetDict: A Hugging Face `DatasetDict` containing the processed datasets (e.g., train/validation/test),
-                     where each entry includes sequences filtered and truncated by the observation window.
+        The tokenized dataset filtered to the persons of the cohort (per split), and the transformation
+        that slices their sequences at the index dates.
 
     Raises:
         RuntimeError: If any `person_id` in the cohort is missing from the tokenized dataset.
@@ -473,18 +575,97 @@ def extract_cohort_sequences(
     transform = ExtractTokenizedSequenceDataMapping(
         person_index_date_map, data_args.observation_window, tokenizer
     )
-    processed_dataset = DatasetDict({
-        split: ds.map(
-            transform.batch_transform,
-            batched=True,
-            batch_size=data_args.preprocessing_batch_size,
-            # Cap writer_batch_size independently: clinical sequences can be very
-            # long, and matching it to preprocessing_batch_size can exceed the
-            # 2 GB Arrow write limit for large cohorts.
-            writer_batch_size=min(data_args.preprocessing_batch_size, 500),
-            num_proc=_clamp_num_proc(len(ds), data_args.preprocessing_num_workers, data_args.preprocessing_batch_size),
-            remove_columns=ds.column_names,
-        )
-        for split, ds in filtered_tokenized_dataset.items()
+    return filtered_tokenized_dataset, transform
+
+
+def _slice_cohort_sequences(
+    ds: Dataset, transform: ExtractTokenizedSequenceDataMapping, data_args: DataTrainingArguments
+) -> Dataset:
+    """Slice the sequences of the persons of ds at their index dates."""
+    return ds.map(
+        transform.batch_transform,
+        batched=True,
+        batch_size=data_args.preprocessing_batch_size,
+        # Cap writer_batch_size independently: clinical sequences can be very
+        # long, and matching it to preprocessing_batch_size can exceed the
+        # 2 GB Arrow write limit for large cohorts.
+        writer_batch_size=min(data_args.preprocessing_batch_size, 500),
+        num_proc=_clamp_num_proc(len(ds), data_args.preprocessing_num_workers, data_args.preprocessing_batch_size),
+        remove_columns=ds.column_names,
+    )
+
+
+# Written last by save_cohort_sequences_in_chunks: the chunks of every split, in order
+COHORT_CHUNKS_FILE = "cohort_chunks.json"
+
+
+def save_cohort_sequences_in_chunks(
+    data_args: DataTrainingArguments,
+    cehrgpt_args: CehrGPTArguments,
+    tokenizer: Optional[CehrGptTokenizer],
+    output_path: Union[str, Path],
+    num_persons_per_chunk: int,
+) -> Dict[str, List[str]]:
+    """
+    Slice the cohort sequences out of the tokenized dataset and save them a chunk of persons at a time.
+
+    One person gives a sequence per index date, so a slice is several times the size of the persons'
+    sequences: for MIMIC 80 to 130 GB. Sliced at once, the cache files of the slice and the saved copy of
+    it were on disk together. Here every chunk is saved to <output_path>/<split>/chunk_<n> and its cache
+    files removed before the next one is sliced, so the disk holds the saved slice and one chunk's cache.
+    load_cohort_sequence_chunks joins the chunks in order, which gives the rows of extract_cohort_sequences.
+
+    The file COHORT_CHUNKS_FILE is written last; a folder without it is an interrupted run.
+    """
+    if num_persons_per_chunk < 1:
+        raise ValueError(f"num_persons_per_chunk must be >= 1, got {num_persons_per_chunk}")
+    filtered_tokenized_dataset, transform = _cohort_persons_and_transform(
+        data_args, cehrgpt_args, tokenizer
+    )
+    output_path = Path(output_path)
+    chunks: Dict[str, List[str]] = {}
+    for split, ds in filtered_tokenized_dataset.items():
+        split_chunks = []
+        for start in range(0, len(ds), num_persons_per_chunk):
+            persons = ds.select(range(start, min(start + num_persons_per_chunk, len(ds))))
+            sliced = _slice_cohort_sequences(persons, transform, data_args)
+            if len(sliced) > 0:
+                # save_to_disk raises on a dataset without rows
+                name = f"chunk_{len(split_chunks):05d}"
+                sliced.save_to_disk(str(output_path / split / name))
+                split_chunks.append(name)
+            # the persons share the filter's index file with ds, which the next chunk still reads
+            removed = remove_dataset_cache_files(sliced, keep=ds) + remove_dataset_cache_files(persons, keep=ds)
+            LOG.info(
+                "Sliced the %s persons %s to %s of %s into %s sequences, removed %s cache files",
+                split, start, start + len(persons), len(ds), len(sliced), removed,
+            )
+        if split_chunks:
+            chunks[split] = split_chunks
+        # the indices of the persons of the cohort, written by the filter next to the tokenized dataset
+        remove_dataset_cache_files(ds)
+    with open(output_path / COHORT_CHUNKS_FILE, "w") as f:
+        json.dump(chunks, f, indent=2)
+    return chunks
+
+
+def is_cohort_sequence_chunks(path: Union[str, Path]) -> bool:
+    return (Path(path) / COHORT_CHUNKS_FILE).exists()
+
+
+def load_cohort_sequence_chunks(path: Union[str, Path]) -> DatasetDict:
+    """The cohort sequences that save_cohort_sequences_in_chunks saved, a split per list of chunks."""
+    path = Path(path)
+    with open(path / COHORT_CHUNKS_FILE) as f:
+        chunks = json.load(f)
+    return DatasetDict({
+        split: concatenate_datasets([load_from_disk(str(path / split / name)) for name in names])
+        for split, names in chunks.items()
     })
-    return processed_dataset
+
+
+def load_prepared_dataset(prepared_ds_path: Union[str, Path]) -> DatasetDict:
+    """The prepared dataset, saved in chunks (a cohort sliced from the tokenized dataset) or at once."""
+    if is_cohort_sequence_chunks(prepared_ds_path):
+        return load_cohort_sequence_chunks(prepared_ds_path)
+    return load_from_disk(str(prepared_ds_path))

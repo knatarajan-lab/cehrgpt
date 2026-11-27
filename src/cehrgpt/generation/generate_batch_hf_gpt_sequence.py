@@ -329,6 +329,22 @@ def create_arg_parser():
         description="Arguments for generating patient sequences"
     )
     base_arg_parser.add_argument(
+        "--num_beams",
+        dest="num_beams",
+        action="store",
+        default=1,
+        type=int,
+        required=False,
+    )
+    base_arg_parser.add_argument(
+        "--num_beam_groups",
+        dest="num_beam_groups",
+        action="store",
+        default=1,
+        type=int,
+        required=False,
+    )
+    base_arg_parser.add_argument(
         "--num_of_patients",
         dest="num_of_patients",
         action="store",

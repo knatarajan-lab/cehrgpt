@@ -1,4 +1,5 @@
 import glob
+import json
 import os
 import shutil
 import sys
@@ -6,21 +7,23 @@ import uuid
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
-from cehrbert.runners.runner_util import generate_prepared_ds_path
-from datasets import DatasetDict, concatenate_datasets, load_from_disk
+from datasets import Dataset, DatasetDict, concatenate_datasets, load_from_disk
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers.trainer_utils import is_main_process
 from transformers.utils import logging
 
-from cehrgpt.data.cache_cleanup import clean_up_dataset_caches
+from cehrgpt.data.cache_cleanup import (
+    clean_up_dataset_caches,
+    remove_dataset_cache_files,
+)
 from cehrgpt.data.hf_cehrgpt_dataset import create_cehrgpt_finetuning_dataset
 from cehrgpt.data.hf_cehrgpt_dataset_collator import (
     CehrGptDataCollator,
@@ -35,7 +38,11 @@ from cehrgpt.models.special_tokens import LINEAR_PROB_TOKEN, RANDOM_TOKEN
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.data_utils import (
     extract_cohort_sequences,
+    generate_cohort_prepared_ds_path,
+    is_complete_prepared_dataset,
+    load_prepared_dataset,
     prepare_finetune_dataset,
+    save_cohort_sequences_in_chunks,
 )
 from cehrgpt.runners.gpt_runner_util import (
     parse_runner_args,
@@ -90,22 +97,21 @@ def _create_feature_dataset(data_args, training_args, cehrgpt_args, tokenizer, c
     )
 
 
-def prepare_processed_dataset(
+def _load_or_create_prepared_dataset(
     cehrgpt_args,
     data_args,
     model_args,
     training_args,
     cehrgpt_tokenizer: CehrGptTokenizer,
-) -> Tuple[DatasetDict, CehrGptTokenizer, str]:
+) -> Tuple[DatasetDict, CehrGptTokenizer, str, Path]:
     """
-    Load the tokenized cohort dataset from disk, or create it, and drop already extracted rows.
+    Load the tokenized cohort dataset from disk, or create and save it.
 
     Returns the dataset, the tokenizer to use with it (it is reloaded from the output folder
-    when the dataset was prepared earlier with expand_tokenizer), and that tokenizer's path.
+    when the dataset was prepared earlier with expand_tokenizer), that tokenizer's path, and
+    the folder the dataset is saved in.
     """
-    prepared_ds_path = generate_prepared_ds_path(
-        data_args, model_args, data_folder=data_args.cohort_folder
-    )
+    prepared_ds_path = generate_cohort_prepared_ds_path(data_args, model_args, cehrgpt_args)
     cache_file_collector = CacheFileCollector()
     tokenizer_path = model_args.tokenizer_name_or_path
     processed_dataset = None
@@ -114,9 +120,13 @@ def prepare_processed_dataset(
         LOG.info("Refreshing prepared dataset: removing cache at %s", prepared_ds_path)
         shutil.rmtree(prepared_ds_path)
 
+    if any(prepared_ds_path.glob("*")) and not is_complete_prepared_dataset(prepared_ds_path):
+        LOG.warning("Removing the prepared dataset of an interrupted run at %s", prepared_ds_path)
+        shutil.rmtree(prepared_ds_path)
+
     if any(prepared_ds_path.glob("*")):
         LOG.info("Loading prepared dataset from disk at %s...", prepared_ds_path)
-        processed_dataset = load_from_disk(str(prepared_ds_path))
+        processed_dataset = load_prepared_dataset(prepared_ds_path)
         if cehrgpt_args.expand_tokenizer:
             if tokenizer_exists(training_args.output_dir):
                 cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
@@ -136,96 +146,183 @@ def prepare_processed_dataset(
 
     if processed_dataset is None:
         if is_main_process(training_args.local_rank):
-            processed_dataset = _create_feature_dataset(
-                data_args, training_args, cehrgpt_args, cehrgpt_tokenizer, cache_file_collector
-            )
-            if not data_args.streaming:
-                # Drop any splits that ended up empty — save_to_disk raises
-                # SchemaInferenceError when asked to write a zero-example split.
-                empty_splits = [k for k, v in processed_dataset.items() if len(v) == 0]
-                if empty_splits:
-                    LOG.warning("Dropping empty splits before saving: %s", empty_splits)
-                    processed_dataset = DatasetDict(
-                        {k: v for k, v in processed_dataset.items() if len(v) > 0}
-                    )
-                processed_dataset.save_to_disk(prepared_ds_path)
-                stats = clean_up_dataset_caches(processed_dataset, cache_file_collector)
-                LOG.info(
-                    "Clean up the cached files for the cehrgpt feature dataset: %s",
-                    stats,
+            if cehrgpt_args.tokenized_full_dataset_path is not None and not data_args.streaming:
+                # The slice is several times the size of the persons' sequences: slicing and saving it a
+                # chunk of persons at a time keeps the cache of only one chunk on disk next to the saved copy
+                chunks = save_cohort_sequences_in_chunks(
+                    data_args,
+                    cehrgpt_args,
+                    cehrgpt_tokenizer,
+                    prepared_ds_path,
+                    cehrgpt_args.cohort_chunk_num_persons,
                 )
+                LOG.info("Saved the cohort sequences in chunks at %s: %s", prepared_ds_path, chunks)
             else:
-                cache_file_collector.remove_cache_files()
+                processed_dataset = _create_feature_dataset(
+                    data_args, training_args, cehrgpt_args, cehrgpt_tokenizer, cache_file_collector
+                )
+                if not data_args.streaming:
+                    # Drop any splits that ended up empty — save_to_disk raises
+                    # SchemaInferenceError when asked to write a zero-example split.
+                    empty_splits = [k for k, v in processed_dataset.items() if len(v) == 0]
+                    if empty_splits:
+                        LOG.warning("Dropping empty splits before saving: %s", empty_splits)
+                        processed_dataset = DatasetDict(
+                            {k: v for k, v in processed_dataset.items() if len(v) > 0}
+                        )
+                    processed_dataset.save_to_disk(prepared_ds_path)
+                    stats = clean_up_dataset_caches(processed_dataset, cache_file_collector)
+                    # The cache files that hold the dataset itself count as used, so the clean up above
+                    # keeps them. The dataset is loaded again from the saved copy below.
+                    removed = remove_dataset_cache_files(processed_dataset)
+                    LOG.info(
+                        "Clean up the cached files for the cehrgpt feature dataset: %s, "
+                        "and the %s cache files of the dataset itself",
+                        stats,
+                        removed,
+                    )
+                else:
+                    cache_file_collector.remove_cache_files()
 
         # After main-process-only operations, synchronize all processes to ensure consistency
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
 
         # Load the dataset from disk again in torch distributed training
-        processed_dataset = load_from_disk(str(prepared_ds_path))
+        processed_dataset = load_prepared_dataset(prepared_ds_path)
 
-    # Getting the existing features
-    feature_folders = glob.glob(
-        os.path.join(training_args.output_dir, "*", "features", "*.parquet")
+    return processed_dataset, cehrgpt_tokenizer, tokenizer_path, prepared_ds_path
+
+
+def rows_without_features(
+    processed_dataset: DatasetDict,
+    output_dir: str,
+    pattern: str = os.path.join("features_with_label", "*_features", "*.parquet"),
+) -> Optional[Dict[str, List[int]]]:
+    """
+    The rows of every split that have no features in output_dir yet, or None when none has.
+
+    A run that was interrupted wrote the features of some rows already: they are not extracted again.
+    """
+    feature_files = glob.glob(os.path.join(output_dir, pattern))
+    if not feature_files:
+        return None
+    existing_features = pd.concat(
+        [
+            pd.read_parquet(f, columns=["subject_id", "prediction_time_posix"])
+            for f in feature_files
+        ],
+        ignore_index=True,
     )
-    if feature_folders:
-        existing_features = pd.concat(
-            [
-                pd.read_parquet(f, columns=["subject_id", "prediction_time_posix"])
-                for f in feature_folders
-            ],
-            ignore_index=True,
+    extracted = set(
+        zip(
+            existing_features["subject_id"].astype(int),
+            existing_features["prediction_time_posix"].astype(int),
         )
-        subject_prediction_tuples = set(
-            existing_features.apply(
-                lambda row: f"{int(row['subject_id'])}-{int(row['prediction_time_posix'])}",
-                axis=1,
-            ).tolist()
-        )
-        processed_dataset = processed_dataset.filter(
-            lambda _batch: [
-                f"{int(subject)}-{int(time)}" not in subject_prediction_tuples
-                for subject, time in zip(_batch["person_id"], _batch["index_date"])
-            ],
-            num_proc=data_args.preprocessing_num_workers,
-            batch_size=data_args.preprocessing_batch_size,
-            batched=True,
-        )
-        LOG.info(
-            "The datasets after filtering (train: %s, validation: %s, test: %s)",
-            len(processed_dataset["train"]),
-            len(processed_dataset["validation"]),
-            len(processed_dataset["test"]),
-        )
-
-    return processed_dataset, cehrgpt_tokenizer, tokenizer_path
+    )
+    rows = {}
+    for split, dataset in processed_dataset.items():
+        keys = dataset.select_columns(["person_id", "index_date"])
+        rows[split] = [
+            index
+            for index, (person_id, index_date) in enumerate(zip(keys["person_id"], keys["index_date"]))
+            if (int(person_id), int(index_date)) not in extracted
+        ]
+    LOG.info(
+        "The rows without features: %s",
+        {split: f"{len(kept)} of {len(processed_dataset[split])}" for split, kept in rows.items()},
+    )
+    return rows
 
 
-def shard_processed_dataset(
-    processed_dataset: DatasetDict, num_shards: int, shard_root: str
-) -> List[str]:
+def select_rows(processed_dataset: DatasetDict, rows: Optional[Dict[str, List[int]]]) -> DatasetDict:
+    if rows is None:
+        return processed_dataset
+    return DatasetDict({split: ds.select(rows[split]) for split, ds in processed_dataset.items()})
+
+
+def prepare_processed_dataset(
+    cehrgpt_args,
+    data_args,
+    model_args,
+    training_args,
+    cehrgpt_tokenizer: CehrGptTokenizer,
+) -> Tuple[DatasetDict, CehrGptTokenizer, str]:
     """
-    Split train+validation and test into `num_shards` disjoint, round-robin shards.
+    Load the tokenized cohort dataset from disk, or create it, and drop already extracted rows.
 
-    Round-robin (not contiguous) keeps the sequence length distribution of every shard close
-    to the full dataset, which keeps the sample packing batches comparable across workers.
-    Each shard is saved as a DatasetDict with a "train" and a "test" split.
+    Returns the dataset, the tokenizer to use with it (it is reloaded from the output folder
+    when the dataset was prepared earlier with expand_tokenizer), and that tokenizer's path.
     """
+    processed_dataset, cehrgpt_tokenizer, tokenizer_path, _ = _load_or_create_prepared_dataset(
+        cehrgpt_args, data_args, model_args, training_args, cehrgpt_tokenizer
+    )
+    rows = rows_without_features(processed_dataset, training_args.output_dir)
+    return select_rows(processed_dataset, rows), cehrgpt_tokenizer, tokenizer_path
+
+
+def _train_and_test(processed_dataset: DatasetDict) -> Tuple[Dataset, Dataset]:
+    """train+validation, which the features are extracted of together, and test."""
     train_set = concatenate_datasets(
         [processed_dataset[s] for s in ("train", "validation") if s in processed_dataset]
     )
     test_set = processed_dataset["test"] if "test" in processed_dataset else train_set.select([])
+    return train_set, test_set
+
+
+def write_shard_plans(
+    prepared_ds_path: Union[str, Path],
+    rows: Optional[Dict[str, List[int]]],
+    num_shards: int,
+    shard_root: str,
+) -> List[str]:
+    """
+    Plan `num_shards` disjoint, round-robin shards of train+validation and test, one JSON file per shard.
+
+    A shard used to be saved as a copy of its rows, which for a large cohort is as big as the dataset again.
+    The plan names the prepared dataset, the rows to extract (None for all) and the shard, and load_shard
+    takes the shard out of the prepared dataset by row index. Round-robin (not contiguous) keeps the
+    sequence length distribution of every shard close to the full dataset, which keeps the sample packing
+    batches comparable across workers.
+    """
+    os.makedirs(shard_root, exist_ok=True)
     shard_paths = []
     for index in range(num_shards):
-        shard_path = os.path.join(shard_root, f"shard_{index}")
-        splits = {
-            "train": train_set.shard(num_shards, index, contiguous=False),
-            "test": test_set.shard(num_shards, index, contiguous=False),
-        }
-        # save_to_disk raises on a zero-example split
-        DatasetDict({k: v for k, v in splits.items() if len(v) > 0}).save_to_disk(shard_path)
+        shard_path = os.path.join(shard_root, f"shard_{index}.json")
+        with open(shard_path, "w") as f:
+            json.dump(
+                {
+                    "dataset_path": str(prepared_ds_path),
+                    "rows": rows,
+                    "num_shards": num_shards,
+                    "index": index,
+                },
+                f,
+            )
         shard_paths.append(shard_path)
     return shard_paths
+
+
+def load_shard(shard_path: str) -> DatasetDict:
+    """
+    The shard of a worker: a plan of write_shard_plans, or a dataset saved with a train and a test split.
+
+    The rows of a plan's shard are those that were saved in a shard folder before: train+validation and
+    test of the rows to extract, round-robin.
+    """
+    if not shard_path.endswith(".json"):
+        return load_from_disk(shard_path)
+    with open(shard_path) as f:
+        plan = json.load(f)
+    train_set, test_set = _train_and_test(
+        select_rows(load_prepared_dataset(plan["dataset_path"]), plan["rows"])
+    )
+    splits = {
+        "train": train_set.shard(plan["num_shards"], plan["index"], contiguous=False),
+        "test": test_set.shard(plan["num_shards"], plan["index"], contiguous=False),
+    }
+    # Empty splits are kept: on a resume a split may be done, and main() expects both
+    return DatasetDict(splits)
 
 
 def run_on_multiple_gpus(
@@ -235,7 +332,7 @@ def run_on_multiple_gpus(
     Tokenize the dataset once, split it into disjoint shards, and extract each on its own worker.
 
     The dataset is prepared here, without loading the model, so the workers don't race on
-    the datasets cache. Each worker re-runs this module on one shard with CUDA_VISIBLE_DEVICES
+    the datasets cache. Each worker re-runs this module on one shard (write_shard_plans) with CUDA_VISIBLE_DEVICES
     pinned to one GPU. The feature files have unique names, so all workers write into the same
     features_with_label folders.
     """
@@ -245,22 +342,14 @@ def run_on_multiple_gpus(
     for additional_token in [LINEAR_PROB_TOKEN, RANDOM_TOKEN]:
         if additional_token not in cehrgpt_tokenizer.get_vocab():
             cehrgpt_tokenizer.add_tokens(additional_token)
-    processed_dataset, _, tokenizer_path = prepare_processed_dataset(
+    processed_dataset, _, tokenizer_path, prepared_ds_path = _load_or_create_prepared_dataset(
         cehrgpt_args, data_args, model_args, training_args, cehrgpt_tokenizer
     )
+    rows = rows_without_features(processed_dataset, training_args.output_dir)
 
     non_empty_sizes = [
         len(dataset)
-        for dataset in (
-            concatenate_datasets(
-                [
-                    processed_dataset[s]
-                    for s in ("train", "validation")
-                    if s in processed_dataset
-                ]
-            ),
-            processed_dataset["test"] if "test" in processed_dataset else [],
-        )
+        for dataset in _train_and_test(select_rows(processed_dataset, rows))
         if len(dataset) > 0
     ]
     num_workers = max(1, min([len(cuda_devices)] + non_empty_sizes))
@@ -276,7 +365,7 @@ def run_on_multiple_gpus(
     shard_root = os.path.join(training_args.output_dir, "temp", "shards")
     # Shards left over from an interrupted run are stale
     shutil.rmtree(shard_root, ignore_errors=True)
-    shard_paths = shard_processed_dataset(processed_dataset, num_workers, shard_root)
+    shard_paths = write_shard_plans(prepared_ds_path, rows, num_workers, shard_root)
 
     worker_argv = sys.argv[1:]
     for option in ("--gpu_ids", "--workers_per_gpu", "--tokenizer_name_or_path"):
@@ -352,7 +441,7 @@ def main():
             cehrgpt_model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)
 
     if is_shard_worker:
-        processed_dataset = load_from_disk(cehrgpt_args.shard_dataset_path)
+        processed_dataset = load_shard(cehrgpt_args.shard_dataset_path)
     else:
         processed_dataset, cehrgpt_tokenizer, _ = prepare_processed_dataset(
             cehrgpt_args, data_args, model_args, training_args, cehrgpt_tokenizer
@@ -447,10 +536,11 @@ def main():
 
     # Loading demographics
     print("Loading demographics as a dictionary")
-    if cehrgpt_args.tokenized_full_dataset_path is not None:
+    if cehrgpt_args.tokenized_full_dataset_path is not None or data_args.is_data_in_meds:
         # data_folder/test_data_folder may not exist as separate train/test directories in
         # this mode (the train/test split comes from the pre-tokenized dataset instead), so
         # read demographics from cohort_folder, the same source extract_cohort_sequences uses.
+        # With MEDS data, data_folder is the MEDS reader, which is not a parquet folder.
         demographic_dirs = [data_args.cohort_folder]
     else:
         demographic_dirs = [data_args.data_folder, data_args.test_data_folder]

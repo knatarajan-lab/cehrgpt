@@ -26,13 +26,20 @@ def make_processed(with_validation=True):
     return DatasetDict(splits)
 
 
+def save_processed(tmp_path, processed, name="prepared"):
+    path = tmp_path / name
+    processed.save_to_disk(str(path))
+    return path
+
+
 @pytest.mark.parametrize("with_validation", [True, False])
 @pytest.mark.parametrize("num_shards", [1, 2, 3])
 def test_shards_are_disjoint_and_cover_everything(tmp_path, with_validation, num_shards):
     processed = make_processed(with_validation)
-    paths = cf.shard_processed_dataset(processed, num_shards, str(tmp_path))
-    assert [os.path.basename(p) for p in paths] == [f"shard_{i}" for i in range(num_shards)]
-    shards = [load_from_disk(p) for p in paths]
+    prepared = save_processed(tmp_path, processed)
+    paths = cf.write_shard_plans(prepared, None, num_shards, str(tmp_path / "shards"))
+    assert [os.path.basename(p) for p in paths] == [f"shard_{i}.json" for i in range(num_shards)]
+    shards = [cf.load_shard(p) for p in paths]
     for shard in shards:
         assert set(shard.keys()) == {"train", "test"}
 
@@ -46,20 +53,66 @@ def test_shards_are_disjoint_and_cover_everything(tmp_path, with_validation, num
 
 
 def test_shards_are_round_robin_and_balanced(tmp_path):
-    paths = cf.shard_processed_dataset(make_processed(False), 3, str(tmp_path))
-    first = load_from_disk(paths[0])["train"]["person_id"]
+    prepared = save_processed(tmp_path, make_processed(False))
+    paths = cf.write_shard_plans(prepared, None, 3, str(tmp_path / "shards"))
+    first = cf.load_shard(paths[0])["train"]["person_id"]
     assert first == [0, 3, 6, 9]
-    sizes = [len(load_from_disk(p)["train"]) for p in paths]
+    sizes = [len(cf.load_shard(p)["train"]) for p in paths]
     assert max(sizes) - min(sizes) <= 1
+
+
+def test_a_shard_plan_writes_no_copy_of_the_rows(tmp_path):
+    # A shard used to be saved as a copy of its rows: for a large cohort, the dataset again
+    prepared = save_processed(tmp_path, make_processed())
+    shard_root = tmp_path / "shards"
+    cf.write_shard_plans(prepared, None, 2, str(shard_root))
+    assert sorted(os.listdir(shard_root)) == ["shard_0.json", "shard_1.json"]
+
+
+def test_shards_skip_the_rows_that_have_features(tmp_path):
+    processed = make_processed()
+    prepared = save_processed(tmp_path, processed)
+    rows = {"train": [0, 2, 4, 6, 8, 10], "validation": [1], "test": [0, 4]}
+    paths = cf.write_shard_plans(prepared, rows, 2, str(tmp_path / "shards"))
+    shards = [cf.load_shard(p) for p in paths]
+    train_ids = sorted(i for shard in shards for i in shard["train"]["person_id"])
+    test_ids = sorted(i for shard in shards for i in shard["test"]["person_id"])
+    assert train_ids == [0, 2, 4, 6, 8, 10, 501]
+    assert test_ids == [1000, 1004]
+
+
+def test_a_saved_shard_folder_still_loads(tmp_path):
+    shard = save_processed(tmp_path, DatasetDict({"train": make_dataset(3), "test": make_dataset(2)}), "shard")
+    assert len(cf.load_shard(str(shard))["train"]) == 3
+
+
+def test_rows_without_features(tmp_path):
+    processed = DatasetDict(
+        {
+            "train": Dataset.from_dict({"person_id": [1, 1, 2], "index_date": [10, 20, 10]}),
+            "test": Dataset.from_dict({"person_id": [3], "index_date": [30]}),
+        }
+    )
+    assert cf.rows_without_features(processed, str(tmp_path)) is None
+    features = tmp_path / "features_with_label" / "train_features"
+    features.mkdir(parents=True)
+    import pandas as pd
+
+    pd.DataFrame({"subject_id": [1, 3], "prediction_time_posix": [20, 30]}).to_parquet(features / "a.parquet")
+    assert cf.rows_without_features(processed, str(tmp_path)) == {"train": [0, 2], "test": []}
 
 
 @pytest.fixture
 def parent_setup(tmp_path, monkeypatch):
     processed = make_processed()
+    prepared = save_processed(tmp_path, processed)
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    holder = {"processed": processed, "prepared": prepared}
     monkeypatch.setattr(
         cf,
-        "prepare_processed_dataset",
-        lambda *a, **k: (processed, "tokenizer-obj", "/resolved/tokenizer"),
+        "_load_or_create_prepared_dataset",
+        lambda *a, **k: (holder["processed"], "tokenizer-obj", "/resolved/tokenizer", holder["prepared"]),
     )
     tokenizer = mock.MagicMock()
     tokenizer.get_vocab.return_value = {}
@@ -68,7 +121,8 @@ def parent_setup(tmp_path, monkeypatch):
 
     def fake_run_workers(**kwargs):
         calls.update(kwargs)
-        calls["shards_existed"] = all(os.path.isdir(p) for p in kwargs["shard_paths"])
+        calls["shards_existed"] = all(os.path.isfile(p) for p in kwargs["shard_paths"])
+        calls["shards"] = [cf.load_shard(p) for p in kwargs["shard_paths"]]
         n = len(kwargs["shard_paths"])
         return [calls.get("exit_code", 0)] * n, [f"log{i}" for i in range(n)]
 
@@ -84,25 +138,26 @@ def parent_setup(tmp_path, monkeypatch):
             "--tokenizer_name_or_path",
             "/original/tokenizer",
             "--output_dir",
-            str(tmp_path),
+            str(output_dir),
         ],
     )
     args = (
         SimpleNamespace(),
         SimpleNamespace(),
         SimpleNamespace(tokenizer_name_or_path="/original/tokenizer"),
-        SimpleNamespace(output_dir=str(tmp_path), dataloader_num_workers=0),
+        SimpleNamespace(output_dir=str(output_dir), dataloader_num_workers=0),
     )
-    return args, calls, tokenizer, tmp_path
+    return args, calls, tokenizer, output_dir, holder
 
 
 def test_parent_launches_one_worker_per_device_with_clean_argv(parent_setup):
-    args, calls, tokenizer, tmp_path = parent_setup
+    args, calls, tokenizer, output_dir, _ = parent_setup
     assert cf.run_on_multiple_gpus(*args, cuda_devices=["0", "1", "0", "1"]) == 0
     assert calls["module"] == "cehrgpt.tools.linear_prob.compute_cehrgpt_features"
     assert calls["shard_option"] == "--shard_dataset_path"
     assert calls["cuda_devices"] == ["0", "1", "0", "1"]
     assert len(calls["shard_paths"]) == 4 and calls["shards_existed"]
+    assert sum(len(shard["train"]) for shard in calls["shards"]) == 15
     argv = calls["worker_argv"]
     assert "--gpu_ids" not in argv and not any(a.startswith("--workers_per_gpu") for a in argv)
     # the tokenizer the dataset was tokenized with replaces the original one
@@ -113,30 +168,28 @@ def test_parent_launches_one_worker_per_device_with_clean_argv(parent_setup):
         RANDOM_TOKEN,
     ]
     # shards are cleaned up after success
-    assert not (tmp_path / "temp" / "shards").exists()
+    assert not (output_dir / "temp" / "shards").exists()
 
 
 def test_parent_keeps_shards_and_fails_when_a_worker_fails(parent_setup):
-    args, calls, _, tmp_path = parent_setup
+    args, calls, _, output_dir, _ = parent_setup
     calls["exit_code"] = 3
     assert cf.run_on_multiple_gpus(*args, cuda_devices=["0", "1"]) == 1
-    assert (tmp_path / "temp" / "shards" / "shard_0").exists()
+    assert (output_dir / "temp" / "shards" / "shard_0.json").exists()
 
 
-def test_parent_caps_workers_by_dataset_size(parent_setup, monkeypatch):
-    args, calls, _, _ = parent_setup
-    tiny = DatasetDict({"train": make_dataset(2), "validation": make_dataset(0), "test": make_dataset(1)})
-    monkeypatch.setattr(
-        cf, "prepare_processed_dataset", lambda *a, **k: (tiny, None, "/t")
-    )
+def test_parent_caps_workers_by_dataset_size(parent_setup, tmp_path):
+    args, calls, _, _, holder = parent_setup
+    tiny = DatasetDict({"train": make_dataset(2), "test": make_dataset(1)})
+    holder["processed"], holder["prepared"] = tiny, save_processed(tmp_path, tiny, "tiny")
     cf.run_on_multiple_gpus(*args, cuda_devices=["0", "1", "2", "3"])
     assert calls["cuda_devices"] == ["0"]  # 1 test sample -> 1 worker
     assert len(calls["shard_paths"]) == 1
 
 
 def test_parent_discards_stale_shards(parent_setup):
-    args, calls, _, tmp_path = parent_setup
-    stale = tmp_path / "temp" / "shards" / "shard_9"
+    args, calls, _, output_dir, _ = parent_setup
+    stale = output_dir / "temp" / "shards" / "shard_9"
     stale.mkdir(parents=True)
     cf.run_on_multiple_gpus(*args, cuda_devices=["0", "1"])
     assert not stale.exists()

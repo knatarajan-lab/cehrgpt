@@ -195,7 +195,8 @@ class CehrGptDataProcessor(DatasetMapping):
 
         # Slice out the concept ids
         record["concept_ids"] = (
-            (demographic_tokens if demographic_tokens is not None else [])
+            # The prompt of collect_demographic_prompts_at_visits is a tuple
+            (list(demographic_tokens) if demographic_tokens is not None else [])
             + (record["concept_ids"][start_index:end_index])
             + (
                 self.tokenizer.decode([last_token_id], skip_special_tokens=False)

@@ -9,7 +9,6 @@ import numpy as np
 import polars as pl
 import torch
 import torch.distributed as dist
-from cehrbert.runners.runner_util import generate_prepared_ds_path
 from datasets import load_from_disk
 from meds import held_out_split, train_split, tuning_split
 from torch.utils.data import DataLoader
@@ -35,6 +34,7 @@ from cehrgpt.models.hf_cehrgpt import CEHRGPT2LMHeadModel
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.data_utils import (
     extract_cohort_sequences,
+    generate_cohort_prepared_ds_path,
     prepare_finetune_dataset,
 )
 from cehrgpt.runners.gpt_runner_util import (
@@ -213,9 +213,7 @@ def main():
     if not os.path.exists(training_args.output_dir):
         os.makedirs(training_args.output_dir)
 
-    prepared_ds_path = generate_prepared_ds_path(
-        data_args, model_args, data_folder=data_args.cohort_folder
-    )
+    prepared_ds_path = generate_cohort_prepared_ds_path(data_args, model_args, cehrgpt_args)
 
     processed_dataset = None
     if any(prepared_ds_path.glob("*")):

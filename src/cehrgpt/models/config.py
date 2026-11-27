@@ -167,6 +167,7 @@ class CEHRGPTConfig(PretrainedConfig):
         include_motor_time_to_event=True,
         freeze_cehrgpt_generation_model=False,
         linear_prob_n_layer=None,
+        motor_head_on_decoder=False,
         motor_tte_vocab_size=None,
         motor_time_to_event_weight=1.0,
         motor_num_time_pieces=16,
@@ -277,6 +278,9 @@ class CEHRGPTConfig(PretrainedConfig):
             and self.motor_tte_vocab_size > 0
         )
         self.linear_prob_n_layer = linear_prob_n_layer
+        # Ablation: put the MOTOR head on the decoder's final hidden state, next to the
+        # language-model head, instead of on a cross-attention (linear probe) stack
+        self.motor_head_on_decoder = motor_head_on_decoder
         self.freeze_cehrgpt_generation_model = freeze_cehrgpt_generation_model
         if self.include_motor_time_to_event and not ve_token_id:
             raise RuntimeError(

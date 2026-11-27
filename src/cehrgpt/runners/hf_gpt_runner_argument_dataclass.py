@@ -78,6 +78,14 @@ class CehrGPTArguments:
         default=25,
         metadata={"help": "Step interval for InstabilityProbe logging"},
     )
+    stop_at_step: int = dataclasses.field(
+        default=0,
+        metadata={
+            "help": "Evaluate, save a checkpoint and stop training at this step, keeping the "
+            "learning rate schedule of the full run (num_train_epochs or max_steps). Training "
+            "resumed from that checkpoint with a larger value continues the same run. 0 disables it."
+        },
+    )
     resid_pdrop: Optional[float] = dataclasses.field(
         default=0.1,
         metadata={
@@ -137,7 +145,7 @@ class CehrGPTArguments:
         metadata={"help": "Include inpatient hour token"},
     )
     include_demographics: Optional[bool] = dataclasses.field(
-        default=False,
+        default=True,
         metadata={
             "help": "A flag to indicate whether we want to always include the demographics for the long sequences that are longer than the model context window."
         },
@@ -250,6 +258,14 @@ class CehrGPTArguments:
             "help": "The number of feed forward layers for transforming pretrained embeddings to internal embeddings"
         },
     )
+    meds_visit_rules_file: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "A yaml file of your own with the rules that make the visits of a MEDS dataset (which events are a "
+            "visit, an admission, an ED admission and a discharge), applied on top of the packaged defaults "
+            "(src/cehrgpt/data/visit_rules/defaults.yaml). See cehrgpt.data.meds_visit_rules."
+        },
+    )
     meds_repartition: Optional[bool] = dataclasses.field(
         default=False,
         metadata={
@@ -332,6 +348,14 @@ class CehrGPTArguments:
         default=None,
         metadata={"help": "The number of linear prob layers to use."},
     )
+    motor_head_on_decoder: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "Ablation: put the MOTOR head on the decoder's final hidden state, next to "
+            "the language-model head, instead of on the cross-attention linear prob layers. "
+            "linear_prob_n_layer is then unused."
+        },
+    )
     vocab_dir: Optional[str] = dataclasses.field(
         default=None,
         metadata={"help": "The directory where the concept data is stored."},
@@ -351,6 +375,14 @@ class CehrGPTArguments:
             "help": "Linear probing only: number of worker processes per GPU in --gpu_ids "
             "(or on the single GPU given). More than one worker keeps a GPU busy while the "
             "others are on the CPU, at the cost of one model copy per worker."
+        },
+    )
+    cohort_chunk_num_persons: int = dataclasses.field(
+        default=20000,
+        metadata={
+            "help": "Linear probing with tokenized_full_dataset_path: the cohort sequences are sliced and "
+            "saved this many persons at a time, so that only one chunk's cache files are on disk next "
+            "to the saved slice."
         },
     )
     shard_dataset_path: Optional[str] = dataclasses.field(
@@ -409,6 +441,26 @@ class CehrGPTArguments:
             "and local (last token hidden states) features. The saved vector is then [global | local], twice the "
             "hidden size, and the linear probing can train on the global features, the local features or both "
             "(train_with_cehrgpt_features --feature_sets). Without it only the global features are saved"
+        },
+    )
+    attention_rollout_target: Literal["global", "local"] = dataclasses.field(
+        default="global",
+        metadata={
+            "help": "compute_attention_rollout: the representation to explain. global is the state "
+            "of the linear probing module, local the state of the last decoder layer at the last token"
+        },
+    )
+    attention_rollout_max_samples: Optional[int] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "compute_attention_rollout: a random sample of this many samples of every split "
+            "(all of them by default). The eager attention it needs is slow on long sequences"
+        },
+    )
+    attention_rollout_subject_id: Optional[List[int]] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "compute_attention_rollout: explain every sample of these subject ids only"
         },
     )
     add_random_token: Optional[bool] = dataclasses.field(

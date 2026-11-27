@@ -1,4 +1,5 @@
 import glob
+import json
 import os
 import shutil
 import sys
@@ -20,6 +21,7 @@ from cehrgpt.models.pretrained_embeddings import (
     PRETRAINED_EMBEDDING_VECTOR_FILE_NAME,
 )
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import main as train_main
+from cehrgpt.tools.linear_prob import compute_attention_rollout as rollout
 from cehrgpt.tools.linear_prob import compute_cehrgpt_features as cf
 from cehrgpt.tools.linear_prob.feature_io import read_feature_info
 
@@ -149,11 +151,14 @@ class LinearProbMultiWorkerIntegrationTest(unittest.TestCase):
         sharded_dir = os.path.join(self.temp_dir, "sharded")
         self._run_single_worker(single_dir)
 
+        # the workers take their shards out of the saved dataset by row index
+        saved = os.path.join(self.temp_dir, "processed_for_shards")
+        self.processed.save_to_disk(saved)
         argv = self.base_argv + ["--output_dir", sharded_dir, "--gpu_ids", "0,1"]
         with mock.patch.object(sys, "argv", argv), mock.patch.object(
             cf,
-            "prepare_processed_dataset",
-            lambda *a, **k: (self.processed, None, self.model_folder),
+            "_load_or_create_prepared_dataset",
+            lambda *a, **k: (load_from_disk(saved), None, self.model_folder, saved),
         ):
             code = cf.run_on_multiple_gpus(
                 cf.parse_runner_args()[0],
@@ -196,6 +201,61 @@ class LinearProbMultiWorkerIntegrationTest(unittest.TestCase):
         # both workers produced files and the shard folder was cleaned up
         self.assertEqual(len(glob.glob(os.path.join(sharded_dir, "worker_logs", "*.log"))), 2)
         self.assertFalse(os.path.exists(os.path.join(sharded_dir, "temp", "shards")))
+
+    def test_rollout_of_a_cohort(self):
+        output_dir = os.path.join(self.temp_dir, "rollout")
+        argv = self.base_argv + [
+            "--output_dir", output_dir,
+            # Below the 128 of the model: sample packing cuts a patient at the length of the model
+            "--max_position_embeddings", "64",
+            "--sample_packing",
+            "--attention_rollout_max_samples", "6",
+        ]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(
+            rollout,
+            "_load_or_create_prepared_dataset",
+            lambda *a, **k: (self.processed, a[-1], self.model_folder, None),
+        ):
+            # The second run finds every sample saved and adds none
+            for _ in range(2):
+                rollout.main()
+
+        folder = Path(output_dir) / "attention_rollout_global"
+        info = json.loads((folder / "attention_rollout_info.json").read_text())
+        self.assertEqual(info["target"], "global")
+        self.assertEqual(info["num_samples"], {"train": 6, "test": 6})
+        lengths = {
+            (person, date): length
+            for split in self.processed.values()
+            for person, date, length in zip(
+                split["person_id"], split["index_date"], split["num_of_concepts"]
+            )
+        }
+        num_tokens = []
+        for split in ("train", "test"):
+            frame = pd.concat(
+                [pd.read_parquet(f) for f in glob.glob(str(folder / split / "*.parquet"))],
+                ignore_index=True,
+            )
+            self.assertEqual(len(frame), 6)
+            for row in frame.itertuples():
+                self.assertEqual(len(row.concept_ids), len(row.importance))
+                self.assertEqual(len(row.concept_ids), len(row.baseline_importance))
+                # The tokens the model was given for the patient and no padding: the data
+                # processor cuts a history to the context window and can drop its last token
+                length = lengths[(row.subject_id, row.prediction_time_posix)]
+                self.assertLessEqual(len(row.concept_ids), min(length, 128))
+                self.assertGreaterEqual(len(row.concept_ids), min(length, 128) - 2)
+                self.assertTrue((np.asarray(row.importance) >= 0).all())
+                np.testing.assert_allclose(np.sum(row.importance), 1.0, rtol=1e-4)
+                np.testing.assert_allclose(np.sum(row.baseline_importance), 1.0, rtol=1e-4)
+                num_tokens.append(len(row.concept_ids))
+            concepts = pd.read_csv(folder / f"{split}_concept_importance.csv")
+            np.testing.assert_allclose(concepts["mean_importance"].sum(), 1.0, rtol=1e-4)
+            self.assertTrue((concepts["num_samples"] <= 6).all())
+            self.assertFalse(concepts["concept_id"].astype(str).str.fullmatch(r"\d{1,3}").all())
+        # A patient longer than --max_position_embeddings is not cut there
+        self.assertGreater(max(num_tokens), 64)
 
 
 if __name__ == "__main__":

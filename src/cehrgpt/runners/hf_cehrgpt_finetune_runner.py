@@ -18,10 +18,8 @@ from cehrbert.runners.hf_runner_argument_dataclass import (
     ModelArguments,
 )
 from cehrbert.runners.runner_util import (
-    generate_prepared_ds_path,
     get_last_hf_checkpoint,
 )
-from datasets import load_from_disk
 from peft import LoraConfig, PeftModel, get_peft_model
 from scipy.special import expit as sigmoid
 from torch.utils.data import DataLoader
@@ -54,7 +52,9 @@ from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
 from cehrgpt.runners.data_utils import (
     extract_cohort_sequences,
+    generate_cohort_prepared_ds_path,
     get_torch_dtype,
+    load_prepared_dataset,
     prepare_finetune_dataset,
 )
 from cehrgpt.runners.gpt_runner_util import (
@@ -297,9 +297,7 @@ def _create_finetune_dataset(
 def main():
     cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
     tokenizer = load_pretrained_tokenizer(model_args)
-    prepared_ds_path = generate_prepared_ds_path(
-        data_args, model_args, data_folder=data_args.cohort_folder
-    )
+    prepared_ds_path = generate_cohort_prepared_ds_path(data_args, model_args, cehrgpt_args)
     cache_file_collector = CacheFileCollector()
     processed_dataset = None
 
@@ -309,7 +307,7 @@ def main():
 
     if any(prepared_ds_path.glob("*")):
         LOG.info("Loading prepared dataset from disk at %s...", prepared_ds_path)
-        processed_dataset = load_from_disk(str(prepared_ds_path))
+        processed_dataset = load_prepared_dataset(prepared_ds_path)
         if cehrgpt_args.expand_tokenizer:
             if tokenizer_exists(training_args.output_dir):
                 tokenizer = CehrGptTokenizer.from_pretrained(training_args.output_dir)
@@ -349,7 +347,7 @@ def main():
         )
         tokenizer = CehrGptTokenizer.from_pretrained(tokenizer_name_or_path)
         # Load the dataset from disk again in torch distributed training
-        processed_dataset = load_from_disk(str(prepared_ds_path))
+        processed_dataset = load_prepared_dataset(prepared_ds_path)
 
     # Set seed before initializing model.
     set_seed(training_args.seed)
