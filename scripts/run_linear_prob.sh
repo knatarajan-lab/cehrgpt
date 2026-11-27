@@ -42,6 +42,8 @@ usage() {
     echo "                                 local features are tried at each of these scales, comma separated"
     echo "                                 (default: 0,0.25,0.5,1; none to turn it off)"
     echo "  --add_random_token             Enable adding random token (disabled by default)"
+    echo "  --include_demographics         Keep the demographic prompt when a patient is cut to the context"
+    echo "                                 window (disabled by default: the prompt is dropped)"
     echo "  --preprocessing_batch_size=NUM Batch size for dataset preprocessing (optional, default: 1000)"
     echo "  --refresh_processed_dataset    Delete and rebuild the cached prepared dataset (disabled by default)"
     echo "  --is_data_in_meds              Indicate that the data is in MEDS format (disabled by default)"
@@ -80,6 +82,7 @@ FEATURE_SETS=""
 LOCAL_BLOCK_SCALES="0,0.25,0.5,1"
 SKIP_FEATURE_EXTRACTION="false"
 ADD_RANDOM_TOKEN="false"
+INCLUDE_DEMOGRAPHICS="false"
 REFRESH_PROCESSED_DATASET="false"
 IS_DATA_IN_MEDS="false"
 TOKENIZED_FULL_DATASET_PATH=""
@@ -153,6 +156,9 @@ for arg in "$@"; do
             ;;
         --add_random_token)
             ADD_RANDOM_TOKEN="true"
+            ;;
+        --include_demographics)
+            INCLUDE_DEMOGRAPHICS="true"
             ;;
         --preprocessing_batch_size=*)
             PREPROCESSING_BATCH_SIZE="${arg#*=}"
@@ -404,6 +410,7 @@ log "  --disable_combine_global_local=$DISABLE_COMBINE_GLOBAL_LOCAL"
 log "  --feature_sets=${FEATURE_SETS:-all}"
 log "  --local_block_scales=$LOCAL_BLOCK_SCALES"
 log "  --add_random_token=$ADD_RANDOM_TOKEN"
+log "  --include_demographics=$INCLUDE_DEMOGRAPHICS"
 log "  --preprocessing_batch_size=$PREPROCESSING_BATCH_SIZE"
 log "  --refresh_processed_dataset=$REFRESH_PROCESSED_DATASET"
 log "  --is_data_in_meds=$IS_DATA_IN_MEDS"
@@ -525,6 +532,10 @@ while read -r cohort_name; do
 
         if [ "$ADD_RANDOM_TOKEN" = "true" ]; then
             FEATURE_CMD="$FEATURE_CMD --add_random_token"
+        fi
+
+        if [ "$INCLUDE_DEMOGRAPHICS" = "true" ]; then
+            FEATURE_CMD="$FEATURE_CMD --include_demographics"
         fi
 
         # Add tokenized_full_dataset_path if provided, so the cohort sequences are sliced
